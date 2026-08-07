@@ -53,6 +53,7 @@ from core.memory.types import (
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     OperationFailed,
+    RecallPolicy,
 )
 from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE_SECONDS
 
@@ -174,6 +175,25 @@ async def test_capture_receipts_expose_the_pinned_bounded_target(tmp_path: Path)
     assert first.target.session_ref.session_id.startswith("src--")
     assert first.target.target_generation == 0
     assert first.target.target_watermark_ms == 1_000
+
+
+def test_agentic_recall_policy_requires_a_retrieval_budget() -> None:
+    with pytest.raises(ValueError, match="positive budgets"):
+        RecallPolicy(
+            mode="agentic",
+            timeout_seconds=1,
+            max_model_calls=1,
+            cost_budget_tokens=1,
+        )
+
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=10,
+        timeout_seconds=1,
+        max_model_calls=1,
+        cost_budget_tokens=1,
+    )
+    assert policy.max_results == 10
 
 
 async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_path: Path) -> None:
@@ -434,7 +454,9 @@ async def test_processing_breaker_survives_restart_and_half_open_admits_one_capt
 async def test_processing_breaker_alerts_once_and_emits_recovery_edge(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     for source in ("one", "two", "three"):
-        assert await module.capture(_request(source=source)) == CaptureAccepted()
+        assert await module.capture(
+            _request(source=source, session=f"conversation-{source}")
+        ) == CaptureAccepted()
     provider.flush_results.extend(
         [
             FlushRejected("first", "INTERNAL_ERROR", server_fault=True),

@@ -457,6 +457,7 @@ class MemoryStore:
                 provider_session_ref,
                 now=now,
                 first_unflushed_at=now,
+                advance_if_settled=True,
             )
             conn.execute(
                 """
@@ -782,6 +783,8 @@ class MemoryStore:
                     now=now,
                     first_unflushed_at=str(target["first_unflushed_at"]),
                 )
+                if state.flush_state == "manual_required":
+                    continue
                 result = conn.execute(
                     """
                     UPDATE memory_capture_queue
@@ -805,20 +808,19 @@ class MemoryStore:
                 )
                 if result.rowcount:
                     marked += int(result.rowcount)
-                    if state.flush_state != "manual_required":
-                        conn.execute(
-                            """
-                            UPDATE memory_session_flush_state
-                            SET flush_state = 'in_flight',
-                                fence_epoch = fence_epoch + 1,
-                                fence_owner = 'memory-worker',
-                                fence_acquired_at = ?,
-                                due_at = NULL,
-                                updated_at = ?
-                            WHERE provider_session_ref = ?
-                            """,
-                            (now, now, provider_session_ref.serialize()),
-                        )
+                    conn.execute(
+                        """
+                        UPDATE memory_session_flush_state
+                        SET flush_state = 'in_flight',
+                            fence_epoch = fence_epoch + 1,
+                            fence_owner = 'memory-worker',
+                            fence_acquired_at = ?,
+                            due_at = NULL,
+                            updated_at = ?
+                        WHERE provider_session_ref = ?
+                        """,
+                        (now, now, provider_session_ref.serialize()),
+                    )
             return marked
 
     def record_flush_verdict(
@@ -907,7 +909,7 @@ class MemoryStore:
                     first_unflushed_at=None,
                 )
                 watermark_after = state.watermark
-                if status == "extracted":
+                if observation == "succeeded":
                     max_timestamp = conn.execute(
                         """
                         SELECT MAX(provider_timestamp_ms)
@@ -947,14 +949,12 @@ class MemoryStore:
                         "unknown" if observation == "unknown" else None
                     ),
                     request_id=_bounded_opaque_text(request_id),
-                    error_code=_closed_error_or(error_code, "memory_processing_failed")
-                    if error_code is not None and is_memory_error_code(error_code)
-                    else None,
+                    error_code=_bounded_opaque_text(error_code),
                     watermark_before=state.watermark,
                     watermark_after=watermark_after,
                     settled_at=now,
                     confirmed_watermark_ms=(
-                        watermark_after if status == "extracted" else None
+                        watermark_after if observation == "succeeded" else None
                     ),
                     flush_state=("settled" if observation == "succeeded" else None),
                     source="flush",
@@ -1590,10 +1590,10 @@ class MemoryStore:
     def _initialize(self) -> None:
         schema = Path(__file__).with_name("schema.sql")
         with self._connection() as conn:
-            conn.executescript(schema.read_text(encoding="utf-8"))
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > MEMORY_SCHEMA_VERSION:
                 raise OSError("Memory store schema is newer than this Avibe build")
+            conn.executescript(schema.read_text(encoding="utf-8"))
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if version < MEMORY_LEGACY_SCHEMA_VERSION:
@@ -1674,6 +1674,7 @@ class MemoryStore:
         *,
         now: str,
         first_unflushed_at: str | None,
+        advance_if_settled: bool = False,
     ) -> MemorySessionState:
         key = provider_session_ref.serialize()
         row = conn.execute(
@@ -1703,6 +1704,24 @@ class MemoryStore:
                     first_unflushed_at,
                     now,
                 ),
+            )
+        elif (
+            advance_if_settled
+            and first_unflushed_at is not None
+            and row["flush_state"] in {"settled", "settled_with_caveat"}
+        ):
+            conn.execute(
+                """
+                UPDATE memory_session_flush_state
+                SET generation = generation + 1,
+                    first_unflushed_at = ?, flush_state = 'not_due',
+                    due_at = NULL, next_attempt_at = NULL,
+                    fence_epoch = fence_epoch + 1,
+                    fence_owner = NULL, fence_acquired_at = NULL,
+                    updated_at = ?
+                WHERE provider_session_ref = ?
+                """,
+                (first_unflushed_at, now, key),
             )
         elif (
             first_unflushed_at is not None
@@ -1773,7 +1792,7 @@ class MemoryStore:
                 _bounded_opaque_text(record.last_known_state),
                 record.last_observed_outcome,
                 _bounded_opaque_text(record.request_id),
-                record.error_code,
+                _bounded_opaque_text(record.error_code),
                 record.watermark_before,
                 record.watermark_after,
                 _bounded_opaque_text(record.actor),
@@ -1857,6 +1876,23 @@ class MemoryStore:
                     """
                     UPDATE memory_session_flush_state
                     SET flush_state = 'settled', due_at = NULL,
+                        next_attempt_at = NULL, first_unflushed_at = NULL,
+                        watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        watermark_after,
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
+        elif record.operation_kind == "flush" and record.outcome in {"succeeded", "committed"}:
+            if record.source == "migration":
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET flush_state = 'settled', due_at = NULL,
                         next_attempt_at = NULL, watermark = ?, updated_at = ?
                     WHERE provider_session_ref = ? AND generation = ?
                     """,
@@ -1867,16 +1903,35 @@ class MemoryStore:
                         record.generation,
                     ),
                 )
-        elif record.outcome in {"succeeded", "committed"}:
+                return True
+            remaining = conn.execute(
+                """
+                SELECT MIN(created_at)
+                FROM memory_capture_queue
+                WHERE provider_session_ref = ? AND target_generation = ?
+                  AND (
+                      state IN ('pending', 'processing')
+                      OR (
+                          state = 'delivered'
+                          AND COALESCE(flush_observation, 'not_attempted') != 'succeeded'
+                      )
+                  )
+                """,
+                (provider_session_ref.serialize(), record.generation),
+            ).fetchone()[0]
             conn.execute(
                 """
                 UPDATE memory_session_flush_state
-                SET flush_state = 'settled', due_at = NULL,
-                    next_attempt_at = NULL, fence_owner = NULL,
-                    fence_acquired_at = NULL, watermark = ?, updated_at = ?
+                SET generation = generation + 1,
+                    first_unflushed_at = ?, flush_state = 'not_due',
+                    due_at = NULL, next_attempt_at = NULL,
+                    fence_epoch = fence_epoch + 1,
+                    fence_owner = NULL, fence_acquired_at = NULL,
+                    watermark = ?, updated_at = ?
                 WHERE provider_session_ref = ? AND generation = ?
                 """,
                 (
+                    str(remaining) if remaining is not None else None,
                     watermark_after,
                     record.observed_at,
                     provider_session_ref.serialize(),
@@ -2052,17 +2107,8 @@ class MemoryStore:
                     now,
                 ),
             )
-            observations = {
-                str(row["flush_observation"])
-                for row in group
-                if row["flush_observation"] in {"succeeded", "rejected", "unknown", "in_flight"}
-            }
-            for observation in sorted(observations):
-                outcome = (
-                    "manual_required"
-                    if observation in {"unknown", "in_flight"}
-                    else observation
-                )
+            observations: list[tuple[str, str]] = []
+            for observation in {"succeeded", "rejected", "unknown", "in_flight"}:
                 observed_at = max(
                     (
                         str(row["flush_observed_at"] or row["completed_at"] or row["created_at"])
@@ -2070,6 +2116,15 @@ class MemoryStore:
                         if row["flush_observation"] == observation
                     ),
                     default=now,
+                )
+                if any(row["flush_observation"] == observation for row in group):
+                    observations.append((observed_at, observation))
+            observations.sort(key=lambda item: (item[0], item[1]))
+            for observed_at, observation in observations:
+                outcome = (
+                    "manual_required"
+                    if observation in {"unknown", "in_flight"}
+                    else observation
                 )
                 operation_id = "migration-v2-" + hashlib.sha256(
                     f"{key}:{observation}".encode("utf-8")
@@ -2409,9 +2464,7 @@ def _settlement_from_row(row: sqlite3.Row) -> MemorySettlementRecord:
         ),
         request_id=str(row["request_id"]) if row["request_id"] is not None else None,
         error_code=(
-            _closed_error_or(row["error_code"], "memory_processing_failed")
-            if row["error_code"] is not None
-            else None
+            str(row["error_code"]) if row["error_code"] is not None else None
         ),
         watermark_before=(
             int(row["watermark_before"])

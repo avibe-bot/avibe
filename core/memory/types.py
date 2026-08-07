@@ -218,7 +218,7 @@ class MemorySettlementRecord:
     last_known_state: str | None = None
     last_observed_outcome: MemoryObservedOutcome | None = None
     request_id: str | None = None
-    error_code: MemoryErrorCode | None = None
+    error_code: str | None = None
     watermark_before: int | None = None
     watermark_after: int | None = None
     actor: str | None = None
@@ -371,7 +371,12 @@ class RecallPolicy:
                 or not isinstance(value, int)
                 or isinstance(value, bool)
                 or value < 1
-                for value in (self.timeout_seconds, self.max_model_calls, self.cost_budget_tokens)
+                for value in (
+                    self.max_results,
+                    self.timeout_seconds,
+                    self.max_model_calls,
+                    self.cost_budget_tokens,
+                )
             ):
                 raise ValueError("agentic recall requires positive budgets")
         elif any(

@@ -195,6 +195,7 @@ def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None
     assert request.principal_id == "u-" + ("1" * 32)
     assert request.project_id == PROJECT
     assert request.provenance == "user_input"
+    assert request.app == "telegram"
     assert request.text == "/memory status"
     assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
 
@@ -209,6 +210,7 @@ def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     assert request.source_message_id == f"workbench:u-{'2' * 32}:native-1"
     assert request.principal_id == "u-" + ("2" * 32)
     assert request.project_id == PROJECT
+    assert request.app == "avibe"
 
 
 def test_workbench_capture_converts_owned_attachment_without_text(monkeypatch, tmp_path: Path) -> None:

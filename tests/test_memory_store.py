@@ -231,8 +231,8 @@ def test_capture_target_is_pinned_and_settlement_is_per_generation(tmp_path: Pat
 
     state = store.get_session_flush_state(session_ref)
     assert state is not None
-    assert state.generation == 0
-    assert state.flush_state == "settled"
+    assert state.generation == 1
+    assert state.flush_state == "not_due"
     assert state.watermark == accepted.row.provider_timestamp_ms
     settlements = store.list_flush_settlements(session_ref, generation=0)
     assert {record.operation_kind for record in settlements} == {"add", "flush"}
@@ -242,10 +242,63 @@ def test_capture_target_is_pinned_and_settlement_is_per_generation(tmp_path: Pat
         for record in settlements
     )
 
+    next_capture = _enqueue(store, "target-next", occurred_at_ms=2_000)
+    assert next_capture.target_generation == 1
+    assert next_capture.target_watermark_ms == 2_000
+
     duplicate = _enqueue(store, "target", occurred_at_ms=99_000)
     assert duplicate.outcome == "duplicate"
     assert duplicate.target_generation == accepted.target_generation
     assert duplicate.target_watermark_ms == accepted.target_watermark_ms
+
+
+def test_successful_no_extraction_flush_confirms_the_target_watermark(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "no-extraction")
+    assert accepted.row is not None
+    assert accepted.provider_session_ref is not None
+    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.settle(
+        row,
+        Delivered(add_request_id="add-no-extraction", add_status="accumulated"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+
+    assert store.mark_flush_in_flight(row.session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        row.session_id,
+        PROJECT,
+        FlushSucceeded(request_id="flush-no-extraction", status="no_extraction"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    settlement = next(
+        record
+        for record in store.list_flush_settlements(accepted.provider_session_ref)
+        if record.operation_kind == "flush"
+    )
+    assert settlement.flush_state == "settled"
+    assert settlement.confirmed_watermark_ms == accepted.row.provider_timestamp_ms
+
+
+def test_manual_required_fence_blocks_a_later_flush_mark(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _deliver(store, "manual-first", session_ref="manual-session")
+    assert store.mark_flush_in_flight(first, PROJECT) == 1
+    assert store.record_flush_verdict(
+        first,
+        PROJECT,
+        FlushUnknown(reason="timeout"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    second = _deliver(store, "manual-second", session_ref="manual-session")
+    assert store.mark_flush_in_flight(second, PROJECT) == 0
+    second_row = _row_for_source(store, "manual-second")
+    assert second_row is not None
+    assert second_row.flush_observation == "not_attempted"
 
 
 def test_stale_settlement_is_retained_without_mutating_live_state(tmp_path: Path) -> None:
@@ -397,6 +450,76 @@ def test_v1_store_migrates_unknown_rows_conservatively_and_idempotently(tmp_path
     MemoryStore(database)
     assert len(store.list_flush_settlements()) == 2
 
+
+def test_v1_migration_projects_the_latest_flush_verdict_chronologically(tmp_path: Path) -> None:
+    database = _store_path(tmp_path)
+    _create_v1_store(database)
+    principal = "u-11111111111111111111111111111111"
+
+    with sqlite3.connect(database) as conn:
+        conn.execute("DELETE FROM memory_capture_queue")
+        conn.executemany(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, principal_id, project_ref,
+                provenance, payload_text, occurred_at_ms, provider_timestamp_ms,
+                state, attempts, created_at, completed_at, flush_observation,
+                flush_observed_at
+            ) VALUES (?, 0, 'legacy-wire', ?, ?, 'user_input', NULL, ?, ?,
+                      'delivered', 0, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "legacy-success",
+                    principal,
+                    PROJECT,
+                    1_000,
+                    1_000,
+                    "2026-01-01T00:00:00.100Z",
+                    "2026-01-01T00:00:00.200Z",
+                    "succeeded",
+                    "2026-01-01T00:00:00.200Z",
+                ),
+                (
+                    "legacy-rejected",
+                    principal,
+                    PROJECT,
+                    2_000,
+                    2_000,
+                    "2026-01-01T00:00:00.300Z",
+                    "2026-01-01T00:00:00.400Z",
+                    "rejected",
+                    "2026-01-01T00:00:00.400Z",
+                ),
+            ],
+        )
+
+    store = MemoryStore(database)
+    state = store.list_session_flush_states()
+    assert len(state) == 1
+    assert state[0].flush_state == "due"
+    assert [record.outcome for record in store.list_flush_settlements()] == [
+        "succeeded",
+        "rejected",
+    ]
+
+
+def test_newer_memory_schema_is_rejected_before_schema_ddl(tmp_path: Path) -> None:
+    database = _store_path(tmp_path)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE future_marker (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO future_marker VALUES ('untouched')")
+        conn.execute("PRAGMA user_version = 3")
+
+    with pytest.raises(OSError, match="schema is newer"):
+        MemoryStore(database)
+
+    with sqlite3.connect(database) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert tables == {"future_marker"}
+        assert conn.execute("SELECT value FROM future_marker").fetchone()[0] == "untouched"
+
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "one")
@@ -456,6 +579,14 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     assert stats.distill_failed == 1
     assert stats.last_flush_observation == "unknown"
     assert _row_for_source(store, "rejected").flush_error_code == "INTERNAL_ERROR"
+    rejected_settlement = next(
+        record
+        for record in store.list_flush_settlements()
+        if record.provider_session_ref is not None
+        and record.provider_session_ref.session_id == rejected_session
+        and record.operation_kind == "flush"
+    )
+    assert rejected_settlement.error_code == "INTERNAL_ERROR"
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:

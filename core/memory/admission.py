@@ -170,6 +170,7 @@ class CaptureAdmission:
             text=facts.text,
             occurred_at_ms=int(time.time() * 1000),
             attachments=attachments,
+            app=platform,
         )
 
 

@@ -1218,6 +1218,7 @@ def create_app(
                     provenance="agent",
                     text=text,
                     occurred_at_ms=int(time.time() * 1000),
+                    app="agent",
                 )
             )
         except Exception:

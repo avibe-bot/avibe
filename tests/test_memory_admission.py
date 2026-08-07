@@ -138,6 +138,7 @@ def test_admitted_im_turn_becomes_a_namespaced_capture_request() -> None:
     assert request.principal_id == PRINCIPAL
     assert request.project_id == PROJECT
     assert request.provenance == "user_input"
+    assert request.app == "telegram"
     assert request.text == "ordinary text"
     assert request.attachments == ()
     assert request.occurred_at_ms > 0
@@ -148,6 +149,7 @@ def test_workbench_turn_uses_its_own_source_namespace() -> None:
 
     assert isinstance(request, CaptureRequest)
     assert request.source_message_id == f"workbench:{PRINCIPAL}:native-1"
+    assert request.app == "avibe"
 
 
 @pytest.mark.parametrize(
