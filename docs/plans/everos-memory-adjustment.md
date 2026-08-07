@@ -414,7 +414,14 @@ manual_required detected
       case E — confirmed flush not committed:
           restore the generation's flush_state to due (or pre-due if boundary
               must be re-detected);
-          leave add rows in place; release fence; allow retry.
+          leave add rows in place;
+          retain the session fence through the retry; do not release the
+              fence until this generation's flush completes (case D) or an
+              operator enters case F; releasing the fence here would let a
+              worker send newer-generation messages into the same EverOS
+              session before the retry, and the retried `/flush` could then
+              consume both generations and invalidate their watermarks;
+          allow retry only against the same generation's flushed payload.
       case F — inconclusive but stale:
           record operator decision; mark flush_state=settled_with_caveat;
           advance watermark conservatively; release fence;
@@ -712,18 +719,19 @@ acquire maintenance lock
 → quiesce writers under the lock:
     - stop EverOS (no /add, /flush, /search, /status, /clear against the
       active provider root — the active root is offline)
-    - pause capture acceptance at the Avibe sidecar intake (capture
-      requests are rejected with an explicit `maintenance_in_progress`
-      reason, not queued); the durable capture queue is the only home
-      that may continue to receive rows, and it must not be visible to
-      the live root
+    - pause capture acceptance at the Avibe sidecar intake for the entire
+      rotation window (capture requests are rejected with an explicit
+      `maintenance_in_progress` reason, not queued); the durable capture
+      queue must not receive rows during this window, and the live root
+      must not be visible to any caller
     - drain the Avibe outbox: every pre-quiescence capture row has either
       been committed to the legacy root (and is therefore inside the
       snapshot window) or is durably moved to the rotation replay store
       with `pending_rotation_replay` before it is removed from the
-      snapshot-covered outbox; rows that arrive after this point are kept
-      out of the snapshot window and are only delivered once the new
-      sidecar starts
+      snapshot-covered outbox; no row may remain in the snapshot-covered
+      outbox unless it has already been committed to the legacy root, and
+      no row may be added to the snapshot-covered outbox after the
+      snapshot step begins
 → take a restorable snapshot of: Markdown tree, system.db (unprocessed_buffer
     + memcell + md_change_state), ome.db, LanceDB business tables, cluster
     centroids, the current semantic embedding fingerprint, and Avibe outbox
@@ -760,25 +768,25 @@ acquire maintenance lock
     removed from the rotation replay store; the snapshot drops only after
     both projection convergence verifies and the rotation replay store
     has been fully drained or returned to a recoverable state
-
-#### 8.3.1 Rotation Replay Store
-
-The rotation replay store is a separate SQLite database outside `state/memory/memory.sqlite` (`core/memory/store.py:24`), so a snapshot of the durable capture queue never covers quarantined rows. The store lives at `state/memory/rotation_replay.sqlite` and is excluded from the rotation snapshot by the snapshot tool (it does not appear in the file manifest, the checksum pass, or the `sqlite3 backup` walk). It carries the same row identity as `memory_capture_queue` (`source_message_digest`, `principal_id`, `project_ref`, `session_id`, `epoch`, `payload_text`, `payload_attachments`, `provider_timestamp_ms`) plus three rotation-specific columns: `replay_state ∈ {pending_rotation_replay, delivered_pending_rotation_commit, settled}`, the new sidecar's `add_request_id`, and the journal `operation_id` of the rotation that produced it.
-
-Lifecycle:
-
-- A row enters the rotation replay store as part of the fenced quarantine move in §8.3: the replay-store copy is written and verified before the source row is removed from the snapshot-covered outbox. A crash between those steps may leave an idempotent duplicate in the live queue, but must never leave the row only in the database being restored. Replay acknowledgements transition rows to `delivered_pending_rotation_commit` in this store.
-- The rotation replay store is **not** backed up by the rotation snapshot and is **not** wiped by `clear` or `restart` of the live capture queue. A `clear` of the live queue never reaches this store, so quarantined rows survive the operator's `clear` action.
-- On snapshot restoration (post-snapshot failure path), the rotation replay store stays on disk; the next rotation re-reads its `pending_rotation_replay` rows and replays them in original order against whichever sidecar is then live. `delivered_pending_rotation_commit` rows that were committed to a now-rolled-back provider root are demoted to `pending_rotation_replay` with the same `add_request_id` for audit only; the next `/add` re-attempts the delivery against the restored-or-rebuilt root.
-- On rotation success, the rotation tool drains the replay store: rows that committed through the normal success-settlement path are removed, rows that did not commit (rare; only when the success-settlement path itself rejected them) return to `pending_rotation_replay` and stay in the store for the next rotation.
-- The store's own retention invariant is that any row present at boot must be replayed; the boot recovery path reads `pending_rotation_replay` rows from the store and feeds them back into the live capture queue before any new capture is accepted.
-
-This separation is what makes the round-5 claim — "quarantined rows survive snapshot restoration" — actually true. Without a separate store, the same SQLite is both the durable home for the row and the database the snapshot restores over, so restoring the snapshot is indistinguishable from deleting the row.
 ```
 
 Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration. The "old generation stays intact on failure" claim only holds when both (a) EverOS was stopped and capture acceptance paused before snapshotting and (b) the snapshot restore actually completed. An operation journal alone cannot undo already-mutated derived state, and a snapshot taken while EverOS or capture acceptance is still live can omit captures that arrived mid-snapshot.
 
-Until EverOS provides a complete rotation operation, Avibe keeps the embedding-change guard over existing data and must not falsely report a LanceDB-only rebuild as a full migration. The "old generation stays intact on failure" claim only holds when the snapshot restore actually completed; an operation journal alone cannot undo already-mutated derived state.
+#### 8.3.1 Rotation Replay Store
+
+The rotation replay store is a separate SQLite database outside `state/memory/memory.sqlite` (`core/memory/store.py:24`), so a snapshot of the durable capture queue never covers quarantined rows. The store lives at `state/memory/rotation_replay.sqlite` and is excluded from the rotation snapshot by the snapshot tool (it does not appear in the file manifest, the checksum pass, or the `sqlite3 backup` walk). It carries the same row identity as `memory_capture_queue` (`source_message_digest`, `principal_id`, `project_ref`, `session_id`, `epoch`, `payload_text`, `payload_attachments`, `provider_timestamp_ms`) plus four rotation-specific columns: `replay_state ∈ {pending_rotation_replay, delivered_pending_rotation_commit, manual_required, settled}`, the new sidecar's `add_request_id`, the journal `operation_id` of the rotation that produced it, and the audit pointer for any `manual_required` decision.
+
+Lifecycle:
+
+- A row enters the rotation replay store as part of the fenced quarantine move in §8.3: the replay-store copy is written and verified before the source row is removed from the snapshot-covered outbox. A crash between those steps may leave an idempotent duplicate in the live queue, but must never leave the row only in the database being restored. Replay acknowledgements transition rows to `delivered_pending_rotation_commit` in this store.
+- The rotation replay store is **not** backed up by the rotation snapshot by design (the snapshot must not cover it). It is, however, included in the **runtime backup set** under the same consistency fence and SQLite snapshot semantics as `state/memory/memory.sqlite`: the backup tool takes a coordinated snapshot of both SQLite files (WAL flushed, file checksums, sqlite3 backup walk), and a backup that omits `state/memory/rotation_replay.sqlite` is recorded as an incomplete backup and refused as a restore candidate. A backup never includes only one of the two databases; restoring an apparently complete backup that does not also restore the replay store would lose accepted captures that were quarantined at backup time.
+- The rotation replay store is **not** wiped by `restart` of the live capture queue. `clear` of the live queue, however, is a destructive operator action that explicitly removes every Avibe-owned local Memory data (`docs/plans/memory-plugin-system.md:290-305`) and is the only sanctioned path to remove quarantined rows. A fenced `clear` transaction removes rows from both the live capture queue and the rotation replay store atomically: a half-completed `clear` that deleted only the live queue would otherwise let boot recovery replay quarantined rows and recreate memory after the user selected **Clear all**, breaking the deletion guarantee and potentially retaining sensitive conversation content. The fence is the same per-root maintenance lock that powers rotation and the audited `operate` path; rotation rollback and operator `restart` are the only paths that may leave the replay store undeleted.
+- On snapshot restoration (post-snapshot failure path), the rotation replay store stays on disk; the next rotation re-reads its `pending_rotation_replay` rows and replays them in original order against whichever sidecar is then live. `delivered_pending_rotation_commit` rows that were committed to a now-rolled-back provider root are demoted to `pending_rotation_replay` with the same `add_request_id` for audit only; the next `/add` re-attempts the delivery against the restored-or-rebuilt root.
+- A replay `/add` whose response cannot be confirmed (timeout, transport reset, or sidecar accepted-but-silent after the request was sent) is **not** marked `pending_rotation_replay` for retry. §10.1 treats write timeouts as ambiguous outcomes that auto-replay may not silently resolve; replay would risk duplicating an already-accepted memory. Such a row is marked `manual_required` with the audit pointer (the journal `operation_id`, the new sidecar's `add_request_id`, and the timeout evidence), and the rotation replay store is excluded from the live-queue feed. The row stays in the replay store until an audited `manual_required` resolution records operator intent (case rf1 pin a confirmed-acked fingerprint with the same `add_request_id`; case rf2 confirm `not_committed` and demote to `pending_rotation_replay` for the next rotation; case rf3 refuse and dispose). Boot recovery never replays a `manual_required` row.
+- On rotation success, the rotation tool drains the replay store: rows that committed through the normal success-settlement path are removed, rows that did not commit (rare; only when the success-settlement path itself rejected them) return to `pending_rotation_replay` and stay in the store for the next rotation. `manual_required` rows do not return to `pending_rotation_replay` automatically; they wait for the audited resolution.
+- The store's own retention invariant is that any row present at boot must be replayed; the boot recovery path reads `pending_rotation_replay` rows from the store and feeds them back into the live capture queue before any new capture is accepted.
+
+This separation is what makes the round-5 claim — "quarantined rows survive snapshot restoration" — actually true. Without a separate store, the same SQLite is both the durable home for the row and the database the snapshot restores over, so restoring the snapshot is indistinguishable from deleting the row.
 
 ### 8.4 Rotation Entry Point
 
@@ -939,7 +947,7 @@ The current `EverOSPort` still relies heavily on HTTP status; that should be con
 
 ### 10.2 Concurrency Rules
 
-- `add`/`flush` for the same `(app, project, session)` are serial;
+- `add`/`flush` for the same provider session reference (`principal_id`, `epoch`, `project_ref`, `session_id`) are serial; `app` is recorded for diagnostics but does not split the serialization domain;
 - Different sessions may run concurrently;
 - One provider root permits only one EverOS process;
 - `clear`, `rebuild`, `rotation`, and `artifact cutover` are mutually exclusive;
@@ -1017,7 +1025,7 @@ For operator-facing call-detail panels the projection must explicitly redact the
 The same rule applies to the **memcell preview** rendered in the processing-record list. `_memcell_preview` (`core/memory/everos_insight/reader.py:1289-1328`) currently projects raw user text after only secret / path scrubbing, and `memory_admin_log_access` is granted to every verified UI key (`core/internal_server.py:995-1003`), which means a Cloud browser session opening this page can read conversation text that does not belong to that session's principal. The list-read path therefore must satisfy both invariants:
 
 1. **Body-redacted preview.** The list-read view is a body-redacted projection. The recorder may keep `text` / `content` / `tool result text` in its private store, but the row returned to the page must replace any conversation body with the same `[redacted]` marker used by the provider-call detail projection; metadata that is not a conversation body (timestamps, message-id, role, sender-id, item-count, capability tags, provider-call links) stays visible so the row remains usable as a processing record.
-2. **Principal-scoped list reads.** The list endpoint accepts a `principal_id` filter, defaults the filter to the principal derived from the requesting principal's verified UI key, and refuses to render a memcell whose `sender_ids_json` does not contain that principal. The full internal view (un-redacted, all principals) is reachable only through an explicit admin capability that is not granted by `memory_admin_log_access`; the Cloud browser session therefore cannot enumerate memcells belonging to other principals even if it bypasses the redacted projection. The default is derived through the same chain `_memory_read_scope()` already uses: the verified UI key is mapped via `runtime.principal_for_user_key()` (`core/memory/store.py:208`) to the `u-…` derived principal that `sender_ids_json` actually contains, then narrowed by the project scope already resolved for the request. `_verified_memory_ui_user_key()` returns values such as `avibe:local` or `avibe:remote:…` (`core/internal_server.py:943-968`), so a literal default to that string would never match any `sender_ids_json` row; passing the raw UI key through `principal_for_user_key` and keeping the project scope resolves both forms of mismatch and prevents the ownership check from silently rejecting every row in the list.
+2. **Principal-scoped list reads.** The list endpoint accepts a `principal_id` filter, defaults the filter to the principal derived from the requesting principal's verified UI key, and refuses to render a memcell whose `sender_ids_json` does not contain that principal. The full internal view (un-redacted, all principals) is reachable only through an explicit admin capability that is not granted by `memory_admin_log_access`; the Cloud browser session therefore cannot enumerate memcells belonging to other principals even if it bypasses the redacted projection. The default is derived through the same canonical helper that all capture paths already use: `runtime.principal_for_user_key()` (`core/memory/store.py:208`). This single helper is reached from both the UI-side land — `_verified_memory_ui_user_key()` returns `avibe:local` or `avibe:remote:…` (`core/internal_server.py:943-968`) and the list-read path funnels the raw key through `principal_for_user_key` — and the IM-side capture path — `core/memory/admission.py:99` calls `principal_for_user_key(f"{platform}:{user_id}")` for Slack, Discord, Telegram, Feishu, and WeChat facts. Both classes of caller land in the same `u-…` derived principal that `sender_ids_json` actually contains, so the exact-match check passes for both UI and IM memcells. The list-read default then narrows by the project scope already resolved for the request through `_memory_read_scope()`. With this chain, the Cloud browser session that opened the page on behalf of one user sees only that user's memcells, and ordinary IM captures are not silently discarded.
 
 Both invariants are checked at the adapter boundary before any row leaves `core/memory/everos_insight/reader.py`. The page renders body-redacted, principal-scoped rows only; the internal recorder is the only consumer of the full view.
 
@@ -1093,7 +1101,7 @@ This phase does not require EverOS 1.2.3 to be in place. Define and test the Avi
 
 - `unknown` provider outcome → `manual_required`, no auto-replay;
 - Final flush acquires the session fence before drain check;
-- Canonical `(app, project, session)` key, generation, watermark, fence epoch;
+- Canonical provider session reference (`principal_id`, `epoch`, `project_ref`, `session_id`), generation, watermark, fence epoch;
 - Idle / max-age durable `due`, boot recovery, batched backoff;
 - Attachment acceptance, private copy, backup scope;
 - Profile scope (decided user-global), session overlay authorization, freshness semantics;
@@ -1173,7 +1181,7 @@ This phase does not modify EverOS and does not promise receipt/replay capabiliti
 - Multiple messages from a single session can collapse into a natural memory cell;
 - Idle / close / max-age triggers are reliable;
 - Final flush acquires the session fence before checking drain, with the fence held through the flush;
-- Generation uses a uniform `(app, project, session)` key, watermark, and fence epoch;
+- Generation uses a uniform provider session reference (`principal_id`, `epoch`, `project_ref`, `session_id`), watermark, and fence epoch;
 - New messages during an in-flight flush are neither lost nor mixed into the wrong generation;
 - `due`/`unknown` session state persists and resumes in batches after restart;
 - `unknown` without receipt enters `manual_required` and is not auto-replayed;
@@ -1249,7 +1257,7 @@ Product semantics below must be locked before the corresponding implementation p
 | New add during in-flight flush | provider generation; or Avibe session fence | **Avibe session fence**, because EverOS does not currently accept generation IDs | watermark cannot be enforced; settlement may cross generations |
 | Agentic search explicit enable | enabled by default; or explicit opt-in | **Explicit opt-in**, subject to §9.2.2 budgets, see §9.2.1/§9.2.4 | Ordinary call paths are polluted by an expensive capability |
 | Agentic capability gating | fallback on missing capabilities; or `capability-unavailable` | **`capability-unavailable`**, no fallback, see §9.2.4 | Silent regression to `hybrid` hides capability gaps |
-| Agentic `timeout` / `max_model_calls` / `max_results` missing or zero | forward to EverOS default; or fail closed | **fail closed at the adapter**, caller must declare explicitly, see §9.2.2 | Forwarding to provider defaults risks unexpected costly LLM work without an explicit budget |
+| Agentic `timeout` / `max_model_calls` / `max_results` / `cost_budget_tokens` missing or zero | forward to EverOS default; or fail closed | **fail closed at the adapter**, caller must declare each of the four fields explicitly, see §9.2.2 | Forwarding to provider defaults risks unexpected costly LLM work without an explicit budget; treating any one field as optional silently re-opens the same risk |
 | Embedding rotation entry point | CLI command; or Web UI | **Web UI, collapsed + second confirmation**, see §8.4 | CLI entry spreads misuse; UI entry exposed on the main path causes accidental triggers |
 | First-version bounded-wait user action | Yes; or internal only | **Internal only** (§5.2) | Users see no controllable wait in the UI |
 | `manual_required` resolution operator path | none; or audited manual operation | **Audited manual operation** through `operate` (§5.5) | Without it, `manual_required` blocks the session indefinitely or forces a destructive `clear` |
