@@ -22,18 +22,20 @@ OUTCOMES: Final = (
 )
 
 
-def _gap(lane: str, trigger: str, outcome: str) -> tuple[str, str]:
+def _gap(backend: str, lane: str, trigger: str, outcome: str) -> tuple[str, str]:
     return (
         "unproven",
-        f"Probe: admit a real Run through {trigger}, drive the {lane} lane to "
-        f"{outcome}, and assert the exact Run row and definition projection.",
+        f"Probe: admit a real {backend} Run through {trigger}, drive the "
+        f"{lane} lane to {outcome}, and assert the exact Run row and "
+        "definition projection.",
     )
 
 
 RUN_TERMINAL_TRUTH_MATRIX: Final = {
-    (lane, trigger): {
-        outcome: _gap(lane, trigger, outcome) for outcome in OUTCOMES
+    (backend, lane, trigger): {
+        outcome: _gap(backend, lane, trigger, outcome) for outcome in OUTCOMES
     }
+    for backend in BACKENDS
     for lane in LANES
     for trigger in TRIGGERS
 }
@@ -52,25 +54,33 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     for lane in LANES
 }
 
+QUESTION_PROBES: Final = {
+    "Q1": (("unproven", "direct-IM terminal-settlement boundary"),),
+    "Q3": (
+        ("unproven", "mixed-source Turn coalescing"),
+        ("unproven", "Turn-level cancellation cardinality"),
+    ),
+    "Q4": (("unproven", "cross-backend pre-terminal evidence precedence"),),
+    "Q5": (("unproven", "bounded-history crash-window reconciliation"),),
+}
+
+
+def _question(
+    open_verdict: str, probes: tuple[tuple[str, str], ...]
+) -> dict[str, str | tuple[str, ...]]:
+    open_probes = tuple(label for status, label in probes if status == "unproven")
+    return {
+        "verdict": open_verdict if open_probes else "answered",
+        "answer": open_probes,
+    }
+
+
 PR7R_QUESTIONS: Final = {
-    "Q1": {
-        "verdict": "open",
-        "answer": "The durable lane has partial nonterminal evidence; the direct-IM admission boundary does not.",
-    },
-    "Q2": {
-        "verdict": "blocked",
-        "answer": "No backend/lane pair has an end-to-end exact Turn-and-Run progress probe, so a generic inactivity timeout remains blocked.",
-    },
-    "Q3": {
-        "verdict": "open",
-        "answer": "Mixed-source Run coalescing and cancellation policy have not been driven together through real admission.",
-    },
-    "Q4": {
-        "verdict": "open",
-        "answer": "Some Run-scoped pre-terminal facts exist, but no cross-backend Turn-scoped proof is complete.",
-    },
-    "Q5": {
-        "verdict": "open",
-        "answer": "Health is derived, while last-run fields are stored separately; crash-window reconciliation remains unproven.",
-    },
+    question: _question(
+        "blocked" if question == "Q2" else "open",
+        tuple(EXACT_TURN_PROGRESS_SIGNALS.values())
+        if question == "Q2"
+        else QUESTION_PROBES[question],
+    )
+    for question in ("Q1", "Q2", "Q3", "Q4", "Q5")
 }
