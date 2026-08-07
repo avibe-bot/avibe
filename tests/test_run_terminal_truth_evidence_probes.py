@@ -2075,16 +2075,34 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     level out. Part (7) built real IM rows and then read them by handing a
     payload it wrote itself to a PRIVATE helper -- so both ends of the
     derivation were real and the span between them was assumed. Part (7b)
-    drives that span: real admission, real token adoption, real emit-side
-    recorder, real store, and the proof is that the ``agent_runs`` row settles.
+    drives that span, and the proof is that the ``agent_runs`` row settles.
     The pattern this unit keeps rediscovering is that a substitution migrates
     outward under pressure rather than disappearing -- round 9 stubbed the
     store, round 10 built the rows and stubbed the lane, round 12 built the
     lane and stubbed the CALLER. Each time the stub is one layer further from
     the claim and one layer harder to see.
+
+    Round 24 is that same sentence read as a prediction and found true of round
+    23 itself. Round 23 drove admission, adoption, the recorder and the store,
+    and stopped one call short: it invoked the PRIVATE recorder directly, so no
+    backend output ever traversed its own emission or the public dispatcher
+    path, and a backend that stopped forwarding the Turn context or a
+    dispatcher that stopped invoking the recorder would both have left the
+    probe green. Part (7b) now starts where production starts -- at
+    ``BaseAgent.emit_result_message`` -- and substitutes only the IM surface.
+    That is not a fifth layer of the same retreat; it is the end of the chain,
+    because the next thing out is the network. Two properties come free from
+    driving the public path and are asserted because they are unreachable from
+    the recorder: the delivered message id is the PLATFORM's answer rather than
+    a literal, and the runtime turn gate is really consulted and really
+    released.
     """
     from core.message_dispatcher import ConsolidatedMessageDispatcher, _owned_agent_run_ids
-    from modules.agents.base import AGENT_TURN_TOKEN
+    from modules.agents.base import (
+        AGENT_RUNTIME_TURN_KEY,
+        AGENT_RUNTIME_TURN_TOKEN,
+        AGENT_TURN_TOKEN,
+    )
     from modules.agents.claude_agent import ClaudeAgent
 
     # (1) The durable read is keyed by the TURN token, and by nothing else.
@@ -2386,61 +2404,110 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     # session-keyed read would produce and a Turn-keyed one cannot.
     assert durable.accepted_agent_run_ids_for_turn("turn-a") == ["run-a1", "run-a2"]
 
-    # (7b) Round 23. The line above is a READ, not an emit: it hands a payload
-    # this test authored to a PRIVATE derivation helper. That is enough to catch
-    # a helper that stops keying on the token, and it is not enough to catch
-    # anything BETWEEN the two ends -- if admission clobbered the durable
-    # lane's token, or if the emit-side recorder stopped consulting the durable
-    # lookup at all, every assertion above would still pass while direct-IM
-    # Runs silently stopped settling. So the join is driven instead, with no
-    # payload authored here and no stub in the middle:
+    # (7b) The line above is a READ, not an emit: it hands a payload this test
+    # authored to a PRIVATE derivation helper. That is enough to catch a helper
+    # that stops keying on the token, and it is not enough to catch anything
+    # BETWEEN the two ends -- if admission clobbered the durable lane's token,
+    # or if a backend stopped forwarding the Turn context, or if the dispatcher
+    # stopped calling the recorder at all, every assertion above would still
+    # pass while direct-IM Runs silently stopped settling.
+    #
+    # Round 23 drove the middle and stopped one call short, at the private
+    # recorder; round 24's finding is that stopping there leaves the BACKEND's
+    # own emission and the public dispatcher path unproven, which is the same
+    # substitution again one layer further out -- the pattern this row's RULE
+    # already names. So the whole chain is production's now, from the request
+    # that gets admitted to the row that settles:
     #
     #   real ``AgentService.handle_message``   (the layer that stamps IM turns)
     #     -> real ``ClaudeAgent._adopt_pending_turn_token``  (the emit context)
-    #       -> real ``_record_agent_run_terminal_result``   (the emit-side call)
-    #         -> real ``SQLiteBackgroundTaskStore``    (the rows built above).
+    #       -> real ``BaseAgent.emit_result_message``    (the backend's output)
+    #         -> real ``ConsolidatedMessageDispatcher.emit_agent_message``
+    #           -> real ``SQLiteBackgroundTaskStore``  (the rows built above).
     #
-    # The claim under test is the derivation, and a derivation is only proven
-    # by its far end: the ``agent_runs`` row for ``run-im1`` must actually reach
-    # ``succeeded`` carrying this emit's text and message id, having been named
-    # by nothing but the token that travelled the chain.
-    from core.message_output import MessageOutput
+    # What is substituted is the IM SURFACE and nothing else: a client that
+    # accepts a send and returns a platform message id, and the settings lookup
+    # that decides visibility. Those are the boundary this unit is not about.
+    # Everything that carries or consults Turn identity is real, including the
+    # runtime gate -- the ``AgentService`` that admitted the turn is the same
+    # object the dispatcher consults through ``emit_matches_runtime_turn`` and
+    # releases at terminal delivery, so a stale emit context would be DROPPED
+    # here rather than recorded.
+    #
+    # A derivation is proven by its far end: the ``agent_runs`` row for
+    # ``run-im1`` must reach ``succeeded`` carrying this emit's text and the
+    # message id the PLATFORM returned, having been named by nothing but the
+    # token that travelled the chain.
+    from modules.im import MessageContext
 
-    async def _drive_im_admission():
-        service, admitted = _admission_service()
-        request = _im_request("scheduled prompt", runtime_key="ses-im:/w")
-        # The durable lane's own identifier, arriving the way a Harness-started
-        # IM turn arrives: bound at claim time, before admission ever sees it.
-        request.context.platform_specific[AGENT_TURN_TOKEN] = "turn-im"
-        await asyncio.wait_for(service.handle_message("claude", request), timeout=5)
-        service.release_runtime_turn(request.context)
-        return admitted, request
+    class _ProbeIMClient:
+        """The telegram surface: accepts a send, returns a platform id."""
 
-    admitted, im_request = asyncio.run(_drive_im_admission())
-    # Admission preserved the Turn's identity rather than minting over it. This
-    # is HFR-188's third property, re-driven at the point where it is
-    # load-bearing: everything below joins on the token the BACKEND was handed
-    # being the token the ROWS were written under.
-    assert admitted.seen[0][AGENT_TURN_TOKEN] == "turn-im", admitted.seen
+        def __init__(self):
+            self.sent: list[str] = []
 
-    # claude's emit context is reused across turns, so it arrives carrying the
-    # PREVIOUS turn's attribution -- here, the Workbench lane's ``turn-a`` and
-    # its two Runs. Adoption is production's step for making this turn's emit
-    # resolve to this turn's Run, and it is run, not simulated.
-    emit_context = types.SimpleNamespace(
-        platform="telegram",
-        platform_specific={
-            AGENT_TURN_TOKEN: "turn-a",
-            "accepted_agent_run_ids": ["run-a1", "run-a2"],
-        },
-    )
-    adopt(emit_context, types.SimpleNamespace(context=im_request.context))
-    assert emit_context.platform_specific[AGENT_TURN_TOKEN] == "turn-im"
-    # Direct IM puts no Run list on the context, so after adoption the in-context
-    # source is EMPTY and the durable lookup is the only attribution left. That
-    # is what makes the settlement below evidence for the derivation rather than
-    # for a list the test smuggled in.
-    assert _owned_agent_run_ids(emit_context.platform_specific) == []
+        def should_use_thread_for_reply(self):
+            return False
+
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            self.sent.append(text)
+            return "tg-msg-7"
+
+        async def send_message_with_buttons(
+            self, context, text, keyboard, parse_mode=None
+        ):
+            self.sent.append(text)
+            return "tg-msg-7"
+
+    class _ProbeSettings:
+        def _canonicalize_message_type(self, message_type):
+            return message_type
+
+        def is_message_type_hidden(self, settings_key, canonical_type):
+            return False
+
+    class _ProbeController:
+        """The controller seam: routes to the real dispatcher and real manager."""
+
+        def __init__(self, session_turns):
+            self.config = types.SimpleNamespace(
+                platform="telegram", reply_enhancements=False
+            )
+            self.session_handler = types.SimpleNamespace(
+                finalize_scheduled_delivery=lambda context, message_id: None
+            )
+            self.session_turns = session_turns
+            self.agent_service = None
+            self.im_client = _ProbeIMClient()
+
+        def _get_settings_key(self, context):
+            return context.channel_id
+
+        def _get_session_key(self, context):
+            return f"telegram::{context.channel_id}"
+
+        def get_settings_manager_for_context(self, context):
+            return _ProbeSettings()
+
+        def get_im_client_for_context(self, context):
+            return self.im_client
+
+        def mark_turn_complete(self, context):
+            pass
+
+    # ``on_terminal_result`` is a WRITER on this manager and it runs for real
+    # too, ahead of the recorder, so a Turn write that invalidated its own
+    # accepted-Run set would show up here as a Run that never settles.
+    durable.controller = None
+    emit_controller = _ProbeController(durable)
+    emit_dispatcher = ConsolidatedMessageDispatcher(emit_controller)
+    # Production's controller forwards this call to the dispatcher; binding the
+    # real bound method is that forward, not a reimplementation of it.
+    emit_controller.emit_agent_message = emit_dispatcher.emit_agent_message
+
+    emit_agent = object.__new__(ClaudeAgent)
+    emit_agent.controller = emit_controller
+    emit_agent.config = types.SimpleNamespace(show_duration=False)
 
     import core.message_dispatcher as message_dispatcher_module
 
@@ -2454,21 +2521,93 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
         "REAL user state DB instead of tmp_path -- fix the binding before "
         "running this again"
     )
-    message_dispatcher_module.SQLiteBackgroundTaskStore = lambda: _real_store(
-        tmp_path / "state.sqlite"
-    )
-    try:
-        live_dispatcher._record_agent_run_terminal_result(
-            emit_context,
-            "final answer",
-            "msg-im-1",
-            is_error=False,
-            output_semantics=MessageOutput(
-                completes_turn=True, idempotency_key="out-im-1"
-            ),
+
+    async def _drive_im_turn():
+        # One event loop, one turn: the gate the admission takes is the gate the
+        # terminal emit releases, which is only true if both halves run here.
+        service, admitted = _admission_service()
+        emit_controller.agent_service = service
+        request = _im_request("scheduled prompt", runtime_key="ses-im:/w")
+        # The durable lane's own identifier, arriving the way a Harness-started
+        # IM turn arrives: bound at claim time, before admission ever sees it.
+        request.context.platform_specific[AGENT_TURN_TOKEN] = "turn-im"
+        await asyncio.wait_for(service.handle_message("claude", request), timeout=5)
+
+        # claude's emit context is reused across turns, so it arrives carrying
+        # the PREVIOUS turn's attribution -- here the Workbench lane's
+        # ``turn-a`` and its two Runs. Adoption is production's step for making
+        # this turn's emit resolve to this turn's Run, and it is run, not
+        # simulated.
+        emit_context = MessageContext(
+            user_id="u-im",
+            channel_id="tg-1",
+            platform="telegram",
+            platform_specific={
+                AGENT_TURN_TOKEN: "turn-a",
+                "accepted_agent_run_ids": ["run-a1", "run-a2"],
+            },
         )
-    finally:
-        message_dispatcher_module.SQLiteBackgroundTaskStore = _real_store
+        adopt(emit_context, types.SimpleNamespace(context=request.context))
+        # The emit is the CURRENT runtime turn as far as the real gate is
+        # concerned -- so the drop-stale-emit branch above the recorder is
+        # passed on production's own terms rather than by defaulting open.
+        # ``emit_matches_runtime_turn`` FALLS OPEN when either runtime field is
+        # absent, so "it returned True" is worth nothing on its own -- an
+        # adoption that dropped the runtime token would score the same True by
+        # skipping the gate entirely. Both fields are therefore asserted present
+        # first, which is what forces the answer below to be a real gate lookup.
+        gated = {
+            key: emit_context.platform_specific.get(key)
+            for key in (AGENT_RUNTIME_TURN_KEY, AGENT_RUNTIME_TURN_TOKEN)
+        }
+        matched = service.emit_matches_runtime_turn(emit_context)
+
+        message_dispatcher_module.SQLiteBackgroundTaskStore = lambda: _real_store(
+            tmp_path / "state.sqlite"
+        )
+        try:
+            delivered_id = await asyncio.wait_for(
+                emit_agent.emit_result_message(
+                    emit_context, "final answer", subtype="success"
+                ),
+                timeout=5,
+            )
+        finally:
+            message_dispatcher_module.SQLiteBackgroundTaskStore = _real_store
+        # ...and the terminal emit RELEASED that gate, which is the dispatcher's
+        # own end-of-turn step. A probe that stopped short of the public path
+        # could not observe this at all.
+        released = not service.emit_matches_runtime_turn(emit_context)
+        return admitted, emit_context, gated, matched, delivered_id, released
+
+    (
+        admitted, emit_context, gated, matched, delivered_id, released,
+    ) = asyncio.run(_drive_im_turn())
+
+    # Admission preserved the Turn's identity rather than minting over it. This
+    # is HFR-188's third property, re-driven at the point where it is
+    # load-bearing: everything below joins on the token the BACKEND was handed
+    # being the token the ROWS were written under.
+    assert admitted.seen[0][AGENT_TURN_TOKEN] == "turn-im", admitted.seen
+    assert emit_context.platform_specific[AGENT_TURN_TOKEN] == "turn-im"
+    # Direct IM puts no Run list on the context, so after adoption the in-context
+    # source is EMPTY and the durable lookup is the only attribution left. That
+    # is what makes the settlement below evidence for the derivation rather than
+    # for a list the test smuggled in.
+    assert _owned_agent_run_ids(emit_context.platform_specific) == []
+    assert all(gated.values()), (
+        "adoption did not carry both runtime-gate fields onto the emit context, "
+        "so ``emit_matches_runtime_turn`` below took its fall-open branch and "
+        "the gate was never actually consulted: " + repr(gated)
+    )
+    assert matched, "the real runtime gate did not recognise the adopted context"
+    assert released, "the terminal emit did not release the runtime turn"
+    # The output really left the backend and reached the platform, and the id
+    # below is the PLATFORM's answer rather than a string this test chose.
+    assert emit_controller.im_client.sent == ["final answer"], (
+        emit_controller.im_client.sent
+    )
+    assert delivered_id == "tg-msg-7", delivered_id
 
     with engine.begin() as conn:
         settled = (
@@ -2483,12 +2622,15 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
                 )
             ).all()
         )
-    # The far end. A backend emit on the direct-IM lane settled the Run the Turn
-    # actually participated in -- not a Run named by the test, not the Session's
-    # Runs, and not nothing.
+    # The far end. A real backend output, delivered through the public
+    # dispatcher path on the direct-IM lane, settled the Run the Turn actually
+    # participated in -- not a Run named by the test, not the Session's Runs,
+    # and not nothing.
     assert settled["status"] == "succeeded", dict(settled)
     assert settled["result_text"] == "final answer"
-    assert "msg-im-1" in (settled["message_ids_json"] or ""), settled["message_ids_json"]
+    assert delivered_id in (settled["message_ids_json"] or ""), (
+        settled["message_ids_json"]
+    )
     # ...and the Workbench lane's Runs, sitting in the same database and named
     # by the very context this emit STARTED from, are untouched. An adoption
     # that merged instead of replacing is caught earlier, by the empty

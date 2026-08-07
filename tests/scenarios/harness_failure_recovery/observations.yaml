@@ -1570,3 +1570,58 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails six of this unit's fixes
       and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-049
+    area: run-terminal-truth
+    summary: >-
+      Round 24, one finding, accepted, nothing rejected. No new scenario id:
+      it strengthens HFR-197, which this unit already owns, so the span stays
+      HFR-180..211, UNPROVEN_BUDGET stays 168, and no cell's proof kind
+      changes.
+      THE FINDING, round 23's own rule applied to round 23. HFR-197's part (7b)
+      drove admission, adoption, the recorder and the store, and stopped one
+      call short of production's entry point: it invoked the PRIVATE
+      ``_record_agent_run_terminal_result`` directly on an emit context the
+      test had fabricated and then adopted onto. So no Claude, Codex or
+      OpenCode output ever traversed its own emission or the public dispatcher
+      path, and two regressions the Q2 cells depend on stayed invisible -- a
+      backend that stops forwarding the Turn context onto its terminal emit,
+      and a dispatcher that stops invoking the recorder on the visible
+      delivery lane. The probe now starts where production starts: real
+      ``BaseAgent.emit_result_message`` on a real ``ClaudeAgent``, through
+      ``controller.emit_agent_message`` (the delegation
+      ``core/controller.py`` performs) into a real
+      ``ConsolidatedMessageDispatcher``, with the real
+      ``SessionTurnManager``, the real admitting ``AgentService`` behind the
+      runtime turn gate, and the real ``SQLiteBackgroundTaskStore`` on the
+      IM-scoped rows. Only the IM SURFACE is substituted -- a client that
+      accepts a send and returns a platform id, and the settings lookup that
+      decides visibility -- because that is the boundary this unit is not
+      about, and because the next thing further out is the network.
+      Driving the public path also buys two properties the recorder could not
+      reach, and both are asserted: the settled Run carries the message id the
+      PLATFORM returned rather than a literal the test chose, and the runtime
+      turn gate is really consulted and then really released by the terminal
+      emit. The gate assertion is deliberately preceded by a check that BOTH
+      runtime fields are present on the emit context, because
+      ``emit_matches_runtime_turn`` FALLS OPEN when either is missing -- a bare
+      "it returned True" would have scored the same for an adoption that
+      dropped the token and skipped the gate entirely.
+      Counter-checked four ways against production, each restored after:
+      stop invoking the recorder on the visible lane, have the backend emit a
+      context with the Turn token stripped, stop releasing the runtime gate,
+      and stop carrying the runtime token through adoption. Each fails on the
+      assertion that names it.
+      THE DURABLE RULE, a rule about substitution applies FIRST to the round
+      that states it. Round 23 wrote "a stub under pressure migrates outward
+      instead of disappearing", and its own fix was that migration one step
+      further -- private helper instead of private lane. The lesson was true
+      and the commit that recorded it was an instance of what it warned
+      against, because the rule was aimed backward at rounds 9 through 12 and
+      never turned on the diff in hand. Before writing a lesson down, apply it
+      once to the fix you just made, and ask whether the layer you stopped at
+      is the entry point production uses or merely the next one inward.
+      Rejected: nothing. The finding did not ask for a fix to PR7R-F1 or
+      PR7R-F2, which would have been out of scope by the plan's own boundary.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still trails seven of this unit's
+      fixes and is still deliberately untouched (HFR-OBS-028).

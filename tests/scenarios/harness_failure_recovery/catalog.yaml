@@ -2900,18 +2900,23 @@ scenarios:
     # _durable_accepted_agent_run_ids looks Runs up by that context's turn_token.
     # Claude's reused receiver context replaces the list per Turn rather than
     # merging it, so a prior Turn's Runs cannot survive into the next one.
-    # Round 23 closes the last substitution in this row. Both ENDS of that derivation were
-    # real -- rows built by the real claim/bind/materialize path, read by the real manager --
-    # and the span between them was a payload the test wrote itself, handed to a private
-    # helper. Now the span is driven: real AgentService admission on an IM request carrying
-    # the durable lane's token, real _adopt_pending_turn_token onto the reused emit context,
-    # real _record_agent_run_terminal_result against a real store, and the proof is the
-    # agent_runs row reaching succeeded with this emit's text and message id while the other
-    # lane's Runs stay running. RULE: a substitution under pressure MIGRATES outward, it does
-    # not disappear. Round 9 stubbed the store, round 10 built the rows and stubbed the lane,
-    # round 12 built the lane and stubbed the CALLER -- each time one layer further from the
-    # claim and one layer harder to see. Drive the caller production would run, not the helper
-    # it happens to call.
+    # Round 23 drove the span between the two real ENDS of that derivation, which had been a
+    # payload the test wrote itself handed to a private helper. RULE: a substitution under
+    # pressure MIGRATES outward, it does not disappear. Round 9 stubbed the store, round 10
+    # built the rows and stubbed the lane, round 12 built the lane and stubbed the CALLER --
+    # each time one layer further from the claim and one layer harder to see. Drive the caller
+    # production would run, not the helper it happens to call.
+    # Round 24 is that rule turned on the round that wrote it: round 23 called the PRIVATE
+    # recorder directly, so no backend output traversed its own emission or the public
+    # dispatcher path, and a backend that stopped forwarding the Turn context or a dispatcher
+    # that stopped invoking the recorder would both have left this row green. The probe now
+    # starts at BaseAgent.emit_result_message and runs through the real
+    # ConsolidatedMessageDispatcher.emit_agent_message, the real runtime turn gate and the
+    # real store, substituting only the IM surface -- the delivered message id is the
+    # PLATFORM's answer and the gate is really consulted and really released. RULE: a rule
+    # about substitution applies FIRST to the round that states it. Before writing the lesson
+    # down, apply it once more to the fix you just made and check whether the layer you
+    # stopped at is production's entry point or merely the next one inward.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_participating_run_attribution_is_resolved_per_turn_not_per_session
   - id: HFR-198
     name: a cited pytest node id must name a function pytest collects

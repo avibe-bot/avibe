@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-07) — first increment, revised under twenty-three review rounds
+#### PR7R status (2026-08-07) — first increment, revised under twenty-four review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through twenty-three changed how the
+rounds and has held at 168 since; rounds four through twenty-four changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -2207,6 +2207,50 @@ runs, not the helper it happens to call. And when you retract a claim,
 re-derive its condition from production rather than inverting the sentence you
 are retracting: round 20 replaced a false sufficient condition with a false
 necessary one, and cost three rounds.
+
+Round 24 — one finding, **accepted, none rejected**; **no new scenario id**
+(it strengthens HFR-197, which this unit already owns, so the span stays
+`HFR-180…211` and `UNPROVEN_BUDGET` stays 168).
+
+1. **Round 23's own rule, applied to round 23.** Its HFR-197 fix drove
+   admission, adoption, the recorder and the store — and stopped one call
+   short of production's entry point, invoking the *private*
+   `_record_agent_run_terminal_result` on an emit context the test had
+   fabricated and then adopted onto. No Claude, Codex or OpenCode output ever
+   traversed its own emission or the public dispatcher path, so two
+   regressions the Q2 cells rest on stayed invisible: a backend that stops
+   forwarding the Turn context onto its terminal emit, and a dispatcher that
+   stops invoking the recorder on the visible-delivery lane. The probe now
+   starts where production starts — real `BaseAgent.emit_result_message` on a
+   real `ClaudeAgent`, through `controller.emit_agent_message` (the delegation
+   `core/controller.py` performs) into a real
+   `ConsolidatedMessageDispatcher`, with the real `SessionTurnManager`, the
+   real admitting `AgentService` behind the runtime turn gate, and the real
+   `SQLiteBackgroundTaskStore` on the IM-scoped rows. Only the **IM surface**
+   is substituted: a client that accepts a send and returns a platform id, and
+   the settings lookup that decides visibility. That is the boundary this unit
+   is not about, and the next thing further out is the network. Driving the
+   public path also buys two properties the recorder could not reach, and both
+   are asserted — the settled Run carries the message id the **platform**
+   returned rather than a literal the test chose, and the runtime turn gate is
+   really consulted and then really released by the terminal emit. The gate
+   assertion is preceded by a check that *both* runtime fields are present,
+   because `emit_matches_runtime_turn` **falls open** when either is missing
+   and a bare "it returned True" would score the same for an adoption that
+   dropped the token and skipped the gate. Counter-checked four ways against
+   production: stop invoking the recorder on the visible lane, emit a context
+   with the Turn token stripped, stop releasing the runtime gate, stop
+   carrying the runtime token through adoption.
+
+**The durable lesson is that a rule about substitution applies first to the
+round that states it.** Round 23 wrote *"a stub under pressure migrates
+outward instead of disappearing"* and its own fix was that migration one step
+further — private helper instead of private lane. The lesson was true and the
+commit recording it was an instance of what it warned against, because the
+rule was aimed backward at rounds 9 through 12 and never turned on the diff in
+hand. Before writing a lesson down, apply it once to the fix you just made and
+ask whether the layer you stopped at is the entry point production uses or
+merely the next one inward.
 
 Question verdicts:
 
