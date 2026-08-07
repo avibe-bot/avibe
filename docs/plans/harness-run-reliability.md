@@ -1,10 +1,15 @@
 # Harness Run Reliability
 
-Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
-PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
-PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
-evidence-only. PR4's conditional transport-attempt delta (PR4B) opens only if a
-current-master reproducer proves a missing durable fact.**
+Status (2026-08-07): **ARCHIVED — complete through PR4.** PR1, PR2, PR5, PR6,
+#1139's Activity-output settlement closure, PR3 (#1155), and PR4 (#1173) all
+merged. PR7/PR7R is dropped and #1212 is closed; see §7. No further unit opens
+from this plan. PR4B is likewise dropped — it was gated on a current-master
+reproducer that thirty days of production data did not produce.
+
+**The still-binding rules now live in `AGENTS.md` §2 "Harness Run Ownership
+(load-bearing)".** Read that, not this file, before changing a Run, Delivery,
+Turn, or Activity path. This document is retained as the derivation and the
+historical record.
 
 This is the execution plan, not the investigation log. The original detailed
 diagnosis and its review history remain available in Git before `fe821905`.
@@ -22,10 +27,10 @@ numbers or old ownership assumptions.
 | Teardown-interrupted Run settlement | **#1140 merged**; supersedes closed #1131 |
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
-| Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R**, evidence-only; `HFR-180…219` reserved and unoccupied as of 2026-08-06 |
+| Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; PR4B dropped — no reproducer surfaced |
+| Scheduled/watch terminal-time truth and cron liveness | **Closed 2026-08-07 — not reproduced.** See §7 |
 
-The post-plan architecture is load-bearing:
+The post-plan architecture is load-bearing (now also recorded in `AGENTS.md`):
 
 - `message_deliveries` owns submitted input, FIFO position, acceptance,
   attempts, receipts, and retirement.
@@ -654,10 +659,16 @@ CAS remains the only owner for teardown settlement.
 
 ## 4. Required pre-code baseline
 
-Before each remaining PR, write or run a current-master reproducer. Classify the
-old defect as `reproduces`, `fixed by #1134/#1139/#1140`, or `superseded by a
-new owner`. Do not preserve an old prescription merely because the symptom still
-has the same name.
+Historical, and worth keeping for the next plan of this kind. Before each PR,
+write or run a current-master reproducer, and classify the old defect as
+`reproduces`, `fixed by #1134/#1139/#1140`, or `superseded by a new owner`. Do
+not preserve an old prescription merely because the symptom still has the same
+name.
+
+Add a fourth outcome that this plan lacked and needed: **`no evidence of a
+problem`**. Without it, a plan whose root causes are already fixed cannot admit
+that nothing remains, and keeps generating units to prove its own completion
+(§7).
 
 Minimum baseline cases:
 
@@ -681,10 +692,10 @@ Minimum baseline cases:
 
 ## 5. PR3 — Session runtime ownership and activation
 
-**Merged as #1155 (2026-08-04).** Retained as the accepted contract: PR7R and
-any later implementation unit must consume the runtime ownership snapshot,
-activation interlock, and work-supervisor interfaces defined here rather than
-reintroducing side maps or adapter-local reclamation rules.
+**Merged as #1155 (2026-08-04).** Retained as the accepted contract: any later
+work must consume the runtime ownership snapshot, activation interlock, and
+work-supervisor interfaces defined here rather than reintroducing side maps or
+adapter-local reclamation rules.
 
 ### Goal
 
@@ -1046,6 +1057,10 @@ matrix against #1139. If the accepted Message, stable Activity receipt, and
 local-settlement-only marker already close the reproduced window, record that
 evidence and add no state.
 
+Superseded 2026-08-07: PR4B is dropped and this plan is archived. The paragraph
+below states the bar a future PR4B-shaped change would have had to clear; it no
+longer authorizes one.
+
 Only a remaining concrete ambiguity may open a separate PR4B contract review.
 That review must name the missing fact, prove the existing Activity owner cannot
 express it, and keep any attempt metadata inside the existing Activity aggregate
@@ -1172,97 +1187,91 @@ lane cannot block another lane or the controller event loop, lifecycle teardown
 leaves no old-generation worker, and Activity/Delivery/Turn/Run ownership is
 unchanged.
 
-## 7. PR7 — Evidence gate before any new timeout model
+## 7. PR7 — Dropped; claims closed by production evidence
 
-**Open. This is the next unit of work.** PR3 and PR4 removed the serial-drain
-and reclamation causes; whether any terminal-truth or scheduler-liveness defect
-survives them is now an open question that only evidence may answer.
+**Closed 2026-08-07. Not reproduced.** PR3 and PR4 removed the serial-drain and
+reclamation causes. Whether any terminal-truth or scheduler-liveness defect
+survived them was the last open question in this plan. It has now been answered
+against live `agent_runs` / `run_definitions` state rather than by an offline
+matrix, and the answer closes both claims.
 
-Do **not** implement the old PR7 prescription. #1134 added
-`complete_on_return`, durable Delivery ownership, immutable Turn terminal
-evidence, and restart recovery; #1139 added exact Activity output batch receipts,
-Run-union settlement, anti-redelivery evidence, and transport-free local
-settlement retry; #1140 closed teardown-interrupted Run settlement. The previous
-plan guessed at the remaining timeout model before proving which gaps still
-exist. PR7 starts with evidence, not a schema or writer.
+### What was checked
 
-### PR7R — Current-master evidence
+Thirty days of production Runs, plus an all-time check for stuck rows:
 
-PR7R changes tests and the plan only. It must publish one executable matrix for:
+- **No Run has ever been left nonterminal.** All 1551 rows are `succeeded`,
+  `failed`, or `canceled`. Zero rows sit nonterminal past two hours, all-time.
+- **Cron liveness is healthy.** All three enabled cron definitions fired on
+  schedule: `7 9 * * *` at 08-07T01:10Z, `0 11 * * *` at 08-07T03:00Z, and
+  `30 9 * * wed` at 08-05T03:39Z. No silent scheduler death.
+- **Result-less successes are by design.** 6/6 command tasks return no result
+  text because a command task is silent on success; the remainder are `<silent>`
+  agent replies.
 
-- Claude, Codex, and OpenCode;
-- direct IM and durable Workbench execution lanes;
-- scheduler cron fires, one-shot `at` fires, manual CLI/API task runs, and watch
-  Runs;
-- success, failure, result-less termination, user Stop, terminal persistence
-  failure, pending output delivery, and post-delivery local settlement failure.
+The old premature-success claim is therefore **disproven**, not merely unproven:
+Runs stay nonterminal too long, never too short. Per this plan's own rule, a
+disproven claim closes without code.
 
-For every cell, trace the exact durable facts from Run enqueue through request /
-Delivery reservation, Turn start, terminal-result latch, Turn terminal evidence,
-Activity output batch, accepted Message receipt, Run settlement, and definition
-health projection. The matrix must answer these questions with a consuming test,
-not prose inference:
+### What the same data did find
 
-1. Does the Run remain nonterminal until its actual terminal Turn/result or
-   Activity output batch settles it? If yes, close the old premature-success
-   claim with regression evidence instead of adding another writer.
-2. Which observable assistant/tool events can be attributed to the exact Turn
-   and participating Runs? Prove this separately for every backend and both
-   lanes. A backend/lane without an exact signal blocks a generic inactivity
-   timeout; session-wide activity is never an acceptable substitute.
-3. Can scheduler and manual Runs with different source semantics or effective
-   deadlines enter the same Turn? Record the current merge key and every Run in
-   the batch. Cancellation is Turn-level, so no per-Run policy may be specified
-   until this cardinality is explicit.
-4. Which evidence exists before the Turn becomes terminal? A terminal-result
-   latch, durable pending-output fact, accepted Message, or Activity
-   local-settlement-only marker proves that natural completion has started and
-   must outrank a later inactivity decision.
-5. Are `health`, `consecutive_failures`, `recent_failures`, `last_run_at`, and
-   `last_error` already monotonic projections of bounded terminal Run history?
-   Dispatch or Delivery acceptance is never task success.
+18 `failed` Runs in thirty days carry no cause at all — empty `error`, `stderr`,
+`exit_code`, and `result_text`; empty `message_ids_json`, so the user was never
+told; null `callback_status`. `delivery_id` is set, so a Delivery was reserved
+and then silently abandoned. They arrive in batch sweeps:
 
-Exit criterion: the checked-in matrix and tests identify each remaining defect
-and its current owner. PR7R adds no status, timeout field, terminal writer,
-health cursor, or cancellation path.
+```text
+settled_at            n   blank_cause   oldest_created      held
+2026-08-04T12:36:56   7      7/7        08-04T10:05:59     151 min
+2026-08-05T04:29:03   6      6/6        08-05T03:07:04      82 min
+2026-08-04T12:30:16   4      4/4        08-04T11:31:32      59 min
+2026-08-04T05:59:30   3      0/3        08-04T05:52:06       7 min
+```
 
-### After PR7R — close the claim or review the contract
+Watch-Run duration for context: `succeeded` averages 2.0 min (n=840),
+`failed_with_cause` 7.4 min (n=18), `failed_blank` 58.3 min with a 150.9 min max
+(n=18).
 
-PR7R does not authorize implementation. If its executable evidence disproves an
-old claim, close that claim without adding code. For every reproduced defect,
-amend this plan in a separate documentation-only review before opening an
-implementation PR. Do not reserve PR7A / PR7B as implementation units until that
-contract review passes.
+This violates invariant 2 — infrastructure interruption owes a structured cause
+and an actionable notice. The last sweep is the control group: it wrote
+`backend_runtime_exited_before_terminal`. Two settlement paths exist and only
+one records a cause.
 
-The amendment must define one complete model, not another list of local patches:
+**This is an ordinary bug, tracked outside this plan.** It needs no evidence
+gate, no contract amendment, and no new owner — invariant 2 already specifies
+the required behavior. The 58-minute hold before the sweep is the root cause and
+is worth a separate look; writing a cause is triage.
 
-1. Name the durable owner and guarded terminal transition at every phase,
-   including a bare Run before Delivery reservation, each nonterminal Delivery
-   role, a starting or active Turn, terminal-result and pending-output evidence,
-   Activity receipt, and post-delivery local settlement. It must define
-   request/coalescing cleanup and the durable user notice for every terminal
-   cause.
-2. State whether exact-Turn progress must survive restart. If it must, define the
-   persisted owner, timestamp/update CAS, recovery read, and restart-after-progress
-   evidence. If no backend-independent durable signal exists for every backend
-   and lane, do not implement a generic inactivity timeout.
-3. Define one policy owner for coalesced Runs. Either prove all participants have
-   the same snapshotted policy or keep incompatible Runs in separate Turns.
-   Specify natural completion, user Stop, and timeout precedence before adding a
-   timeout writer.
-4. If the model includes a user-configurable task inactivity override, specify
-   its V2 config key, concrete default, normalization, persistence, CLI/API/Web
-   inputs, English and Chinese documentation, and unchanged watch semantics. If
-   those supported surfaces are not part of the implementation, remove the
-   override from the model rather than supporting it only through fixtures.
-5. Reuse the exact Run, Delivery, Turn, Message, and Activity owners already on
-   `master`. Any new state, schema, terminal writer, retry, or replay rule needs
-   evidence that those owners cannot express the reproduced behavior.
+### Why PR7R was dropped
 
-Terminal-truth and scheduler-liveness defects remain separate implementation
-reviews even when PR7R reproduces both. Each implementation PR starts with red
-tests for the approved contract and must not infer missing policy from this
-evidence plan.
+PR7R (#1212, closed) tried to answer these questions by enumerating a
+3 × 2 × 4 × 7 backend/lane/trigger/outcome product and demanding one end-to-end
+probe per cell. It shipped 168 cells all marked `unproven` and reproduced
+nothing. Three lessons, recorded so the shape is not repeated:
+
+1. **The deliverable of an investigation cannot be specified before the
+   investigation runs.** Fixing the dimensions and the answer format in advance
+   only works if the answer is already known.
+2. **Evidence was never priced.** One end-to-end probe requires a scriptable
+   injection seam per backend; OpenCode's poll loop has none. The plan assumed
+   evidence was cheap because implementation had been.
+3. **"Executable, not prose" is a rule for positive claims.** Applied to a
+   negative result it produces a test that asserts its own literals and can
+   never fail for a real reason.
+
+Querying production answered in one sitting what the matrix could not answer in
+a PR. Prefer that order: read live durable state first, and derive probes from
+observed anomalies instead of from a completeness argument.
+
+### Standing constraint (moved, not dropped)
+
+One PR7 obligation outlives the plan and is now recorded in `AGENTS.md`:
+
+> Do not add a generic inactivity timeout unless every backend and lane can
+> attribute observable progress to the exact Turn. Session-wide activity is
+> never an acceptable substitute.
+
+That is a rule, not a gate. It binds continuously and does not require a unit of
+work to keep being true.
 
 ## 8. Order and review boundaries
 
@@ -1276,22 +1285,18 @@ complete: PR3 #1155 runtime ownership + `session_deliveries` supervisor foundati
 complete: PR4 #1173 event-first supervised work lanes
     |
     v
-NEXT: PR7R current-master evidence matrix          (evidence-only)
-    |
-    v
-contract amendment for each reproduced defect      (documentation-only)
-    |
-    v
-separate terminal-truth / scheduler-liveness implementation PRs
+dropped: PR7R evidence matrix (#1212 closed) — claims closed by
+         production data instead; see §7. Plan ends here.
 ```
 
-PR7R is a separate test/documentation review unit. It may close either old claim
-without an implementation PR. A reproduced defect first receives the complete
-contract amendment above; only then may it become a separate implementation
-unit. PR3 and PR4 stayed separate: PR3 defined session ownership/reclamation;
-PR4 replaced serial polling as the normal executor. A PR4B transport-attempt
-change exists only if the current-master reproducer proves a missing durable
-fact and its separate contract review passes.
+PR3 and PR4 stayed separate: PR3 defined session ownership/reclamation; PR4
+replaced serial polling as the normal executor. PR4B was gated on a
+current-master reproducer that never surfaced and is dropped with the rest.
+
+The blank-cause batch sweep found in §7 is tracked as an ordinary bug outside
+this plan. It does not reopen the plan and does not inherit the evidence-gate,
+contract-amendment, or HFR-reservation ceremony below — that ceremony was sized
+for durable-ownership surgery, not for a missing error string.
 
 Implementation ownership is intentionally narrow:
 
@@ -1305,24 +1310,20 @@ Implementation ownership is intentionally narrow:
   bridge use, instrumented post-commit producers, and added lane lifecycle and
   isolation tests. It did not change eviction disposition or durable owner
   schemas.
-- **PR7R** remains evidence-only.
+- **PR7R** was dropped before merge; see §7.
 
 Each lane owns its files and tests; the orchestrator alone resolves shared
 controller/supervisor edits and verifies one consuming test per contract before
 push.
 
 Scenario range status, verified against
-`tests/scenarios/harness_failure_recovery/catalog.yaml` on 2026-08-06:
+`tests/scenarios/harness_failure_recovery/catalog.yaml` on 2026-08-07:
 
 - PR3: `HFR-130…154` — occupied by #1155
 - PR4: `HFR-155…179` — occupied by #1173
-- PR7: `HFR-180…219` — reserved and still unoccupied; usable by PR7R
-
-Check the catalog again immediately before coding. The highest merged ID is
-now `HFR-435`, allocated by unrelated capabilities above this plan's reserved
-blocks. If `HFR-180…219` has been taken by then, allocate a fresh contiguous
-block above the highest merged ID; never reuse a closed branch's overflow
-table.
+- PR7: `HFR-180…219` — **released.** Never occupied; PR7R closed unmerged. Any
+  future work allocates a fresh contiguous block above the highest merged ID
+  rather than reusing this range.
 
 ## 9. Validation and non-goals
 
