@@ -601,7 +601,7 @@ when both directions pass:
 | Anthropic Messages | OpenAI Responses | 200 for single and parallel-stream; round trips passed | Tool ids/arguments, reasoning, stop reasons, SSE ordering, system scope, and tool results passed |
 | OpenAI Responses | Anthropic Messages | 200 for single and parallel-stream; **NO-GO** | Tool and round-trip checks passed, but the requested OpenAI reasoning signal was absent in both first responses |
 | Anthropic Messages | OpenAI Chat Completions | 200 for single and parallel-stream; round trips passed | Tool ids/arguments, reasoning, stop reasons, SSE ordering, system scope, and tool results passed |
-| OpenAI Chat Completions | Anthropic Messages | 200 for single and parallel-stream; **NO-GO** | Tool and round-trip checks passed, but the requested OpenAI reasoning signal was absent in both first responses |
+| OpenAI Chat Completions | Anthropic Messages | 200 for single and parallel-stream; **NO-GO** | After the parser accepted both `reasoning_content` and standard `usage.completion_tokens_details.reasoning_tokens`, the requested reasoning signal was still absent in both first responses |
 
 ### 15. Agentic capability matrix
 
@@ -621,10 +621,14 @@ the agentic state transition.
 | Context length/truncation | Prompt with a tail marker, then increasing prefix sizes | The first rejected/truncated size and error shape are recorded; no silent loss of the tail marker is accepted | Upstream model plus engine request limits; no plugin | Not covered (optional low-cost probe) |
 
 Thinking and reasoning are deliberately treated as a fidelity question. The
-fixture sends both parameter families, but this report does not infer that a
-budget maps to an OpenAI effort level (or vice versa) from field-name
-similarity. CPA's engine-core translation may carry, clamp, or drop a field;
-the target model's own behavior determines whether the result is useful.
+fixture sends both parameter families and accepts either Chat's explicit
+`reasoning_content` or its standard positive
+`usage.completion_tokens_details.reasoning_tokens` signal. The second live run
+still observed no positive signal in either OpenAI -> Anthropic direction.
+This report does not infer that a budget maps to an OpenAI effort level (or vice
+versa) from field-name similarity. CPA's engine-core translation may carry,
+clamp, or drop a field; the target model's own behavior determines whether the
+result is useful.
 
 ### 16. Minimum reproductions for each no-go
 
@@ -673,6 +677,12 @@ source-qualified model ids from the runtime's source prefixes. Run it after
 loading the owner-provided regression environment in the shell; the keys are
 consumed only by the temporary runtime state and child process, never copied
 into the fixture, a committed config, or this document.
+
+The probe also disables environment proxy handlers for loopback requests and
+classifies an exhausted 503 capacity response for any target as blocked; the
+Claude-only fallback model remains limited to the Anthropic target. The second
+live run completed all eight cases through the loopback CPA with HTTP 200 and
+no proxy-boundary failures.
 
 ### 18. M0 conclusion and remaining coverage
 

@@ -48,6 +48,19 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
 
+    def test_chat_usage_reasoning_tokens_count_as_reasoning_signal(self) -> None:
+        turn = probe._parse_chat_document(
+            {
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "tool_calls"}],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 3}},
+            }
+        )
+        self.assertTrue(turn.reasoning_present)
+
+    def test_loopback_opener_has_no_environment_proxy(self) -> None:
+        proxy_handlers = [handler for handler in probe.OPENER.handlers if isinstance(handler, probe.urllib.request.ProxyHandler)]
+        self.assertEqual(proxy_handlers, [])
+
     def test_semantic_checks_reject_missing_reasoning_and_markers(self) -> None:
         first = probe._parse_anthropic_document(
             {"content": [{"type": "tool_use", "id": "id", "name": "lookup_weather", "input": {"city": "Shanghai"}}], "stop_reason": "tool_use"}
@@ -146,6 +159,23 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(projection["checks"]["parsed"])
         self.assertFalse(projection["checks"]["stream_order"])
         self.assertFalse(projection["checks"]["stream_deadline"])
+
+    def test_exhausted_503_is_blocked_for_openai_targets(self) -> None:
+        original_request = probe._request
+        original_retries = probe.MAX_503_RETRIES
+        try:
+            probe.MAX_503_RETRIES = 1
+            probe._request = lambda *args, **kwargs: probe.TransportResult(503, None, [], False, 0)
+            result, _, blocked = probe._request_with_retries(
+                probe.CaseSpec("capacity", "anthropic", "responses", "/v1/messages", False, False),
+                {"model": "src/model"},
+                "src/model",
+            )
+        finally:
+            probe._request = original_request
+            probe.MAX_503_RETRIES = original_retries
+        self.assertEqual(result.status, 503)
+        self.assertTrue(blocked)
 
 
 if __name__ == "__main__":

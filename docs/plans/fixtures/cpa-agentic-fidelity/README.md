@@ -48,8 +48,12 @@ blocked status before network access.
 
 Anthropic thinking uses the minimum valid manual budget (`1024`) with
 `max_tokens` above that budget. OpenAI Responses uses low reasoning effort.
-The probe records whether the requested reasoning signal remains observable;
-it does not infer equivalence from parameter names alone.
+The probe records whether the requested reasoning signal remains observable. For
+Chat, it accepts either explicit `reasoning_content` or a positive standard
+`usage.completion_tokens_details.reasoning_tokens` value; it does not infer
+equivalence from parameter names alone. Loopback requests disable environment
+proxy handlers, and exhausted 503 capacity is reported as blocked for every
+target while the alternate Claude model is tried only for Anthropic targets.
 
 The live evidence in the survey used the owner-provided compatible relay. Direct
 official vendor APIs were not measured. A transient `no available accounts`

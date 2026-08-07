@@ -50,7 +50,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-OPENER = urllib.request.build_opener(_NoRedirectHandler())
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
 
 
 @dataclass
@@ -618,7 +618,25 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
     reasoning_content = message.get("reasoning_content", "") if isinstance(message, dict) else ""
     finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
     continuation = copy.deepcopy(message) if isinstance(message, dict) else {}
-    return Turn("chat", calls, str(content or ""), bool(reasoning_content), finish_reason, continuation, terminal if terminal is not None else finish_reason is not None, event_count, invalid_event_count, errors)
+    return Turn(
+        "chat",
+        calls,
+        str(content or ""),
+        bool(reasoning_content) or _chat_reasoning_usage_present(document),
+        finish_reason,
+        continuation,
+        terminal if terminal is not None else finish_reason is not None,
+        event_count,
+        invalid_event_count,
+        errors,
+    )
+
+
+def _chat_reasoning_usage_present(document: dict[str, Any] | None) -> bool:
+    usage = document.get("usage") if isinstance(document, dict) else None
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    return isinstance(reasoning_tokens, (int, float)) and reasoning_tokens > 0
 
 
 def _parse_chat_stream(result: TransportResult) -> Turn:
@@ -626,8 +644,11 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     reasoning: list[str] = []
     calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
     for item in result.events:
         event = item.get("event", {})
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
         choices = event.get("choices", [])
         if not choices:
             continue
@@ -652,7 +673,10 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     message = {"role": "assistant", "content": "".join(content), "tool_calls": [calls[index] for index in sorted(calls)]}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
-    turn = _parse_chat_document({"choices": [{"message": message, "finish_reason": finish_reason}]}, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or finish_reason is not None)
+    document: dict[str, Any] = {"choices": [{"message": message, "finish_reason": finish_reason}]}
+    if usage is not None:
+        document["usage"] = usage
+    turn = _parse_chat_document(document, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or finish_reason is not None)
     turn.stream_order_ok = result.stream_order_ok
     turn.deadline_expired = result.deadline_expired
     return turn
@@ -728,7 +752,7 @@ def _request_with_retries(spec: CaseSpec, payload: dict[str, Any], model: str) -
                 return result, candidate, False
             if retry + 1 < (MAX_503_RETRIES if candidate_index == 0 else 1):
                 time.sleep(0.5 * (retry + 1))
-    return result, candidate, spec.target_protocol == "anthropic"
+    return result, candidate, result.status == 503
 
 
 def _run_case(spec: CaseSpec) -> dict[str, Any]:
@@ -738,7 +762,7 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
         return {
             "case": spec.name,
             "status": first_result.status,
-            "blocked": "relay Claude pool unavailable",
+            "blocked": "relay Claude pool unavailable" if spec.target_protocol == "anthropic" else "relay upstream capacity unavailable",
             "checks": {},
         }
     first_turn = _parse_turn(spec.client_protocol, first_result, stream=spec.stream)
@@ -752,7 +776,7 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
                 "case": spec.name,
                 "status": first_result.status,
                 "second_status": second_result.status,
-                "blocked": "relay Claude pool unavailable",
+                "blocked": "relay Claude pool unavailable" if spec.target_protocol == "anthropic" else "relay upstream capacity unavailable",
                 "first": first,
                 "checks": first["checks"],
             }
