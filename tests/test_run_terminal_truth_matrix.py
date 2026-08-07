@@ -587,23 +587,37 @@ def _decorator_target(decorator: ast.expr, module_body) -> str | None:
     return _dotted_target(expression, module_body)
 
 
+def _skip_marker(marker: ast.expr, module_body, subject: str) -> bool:
+    target = _decorator_target(marker, module_body)
+    if target in {"pytest.mark.skip", "unittest.skip"}:
+        return True
+    if target not in {"pytest.mark.skipif", "unittest.skipIf"}:
+        return False
+    condition = marker.args[0] if isinstance(marker, ast.Call) and marker.args else None
+    if not isinstance(condition, ast.Constant) or isinstance(condition.value, str):
+        raise AssertionError(f"cannot decide computed skip condition on {subject}")
+    return bool(condition.value)
+
+
 def _unconditionally_skipped(
     node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef, module_body
 ) -> bool:
-    for decorator in node.decorator_list:
-        target = _decorator_target(decorator, module_body)
-        if target in {"pytest.mark.skip", "unittest.skip"}:
-            return True
-        if target not in {"pytest.mark.skipif", "unittest.skipIf"}:
-            continue
-        condition = decorator.args[0] if isinstance(decorator, ast.Call) and decorator.args else None
-        if not isinstance(condition, ast.Constant) or isinstance(condition.value, str):
-            raise AssertionError(
-                f"cannot decide computed skip condition on {node.name!r}"
-            )
-        if bool(condition.value):
-            return True
-    return False
+    return any(
+        _skip_marker(marker, module_body, repr(node.name))
+        for marker in node.decorator_list
+    )
+
+
+def _skipped_module(module_body: list[ast.stmt]) -> bool:
+    binding = _bindings(module_body).get("pytestmark")
+    if binding is None:
+        return False
+    assert isinstance(binding, (ast.Assign, ast.AnnAssign)), (
+        "cannot decide computed module pytestmark"
+    )
+    value = binding.value
+    markers = value.elts if isinstance(value, (ast.List, ast.Tuple, ast.Set)) else [value]
+    return any(_skip_marker(marker, module_body, "module") for marker in markers)
 
 
 def _skipped_class(node: ast.ClassDef, module_body) -> bool:
@@ -648,7 +662,9 @@ def _collected_tests(
 ) -> list[tuple[str, ast.stmt]]:
     """Return executable pytest node suffixes discovered from an AST body."""
     module = body if module_body is None else module_body
-    if module_body is None and _opted_out(_test_flag(body)):
+    if module_body is None and (
+        _opted_out(_test_flag(body)) or _skipped_module(body)
+    ):
         return []
     found: list[tuple[str, ast.stmt]] = []
     for node in _bindings(body).values():
@@ -707,6 +723,9 @@ def _assert_node_exists(node_id: str) -> None:
     assert not _opted_out(_test_flag(module_body)), (
         f"{node_id}: the module sets ``__test__ = False``, so pytest skips the "
         f"whole file and nothing in it runs"
+    )
+    assert not _skipped_module(module_body), (
+        f"{node_id}: a module pytestmark prevents this test from executing"
     )
     for container in containers:
         assert isinstance(container, ast.ClassDef) and _collectible_class(
@@ -1742,6 +1761,18 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         with pytest.raises(AssertionError, match="the module sets"):
             _assert_node_exists(node_id)
 
+    skipped = tmp_path / "tests" / "skipped_module.py"
+    skipped.write_text(
+        "import pytest\n"
+        "pytestmark = [pytest.mark.skip(reason='no evidence runs')]\n"
+        "def test_top(): ...\n",
+        encoding="utf-8",
+    )
+    skipped_rel = Path("tests/skipped_module.py")
+    assert _collected_tests(ast.parse(skipped.read_text(encoding="utf-8")).body) == []
+    with pytest.raises(AssertionError, match="module pytestmark"):
+        _assert_node_exists(f"{skipped_rel}::test_top")
+
     # And the real citations still pass under the tightened rule -- the point of
     # a stricter guard is that the corpus already satisfies it, checked here
     # rather than left to the parametrized cells so a tightening that quietly
@@ -2071,7 +2102,10 @@ def _py_prose_units(source: str) -> list[str]:
                 flush()
                 kind = "comment"
             buffer.append(re.sub(r"^#+\s?", "", token.string.strip()))
-        elif token.type in (tokenize.NL, tokenize.INDENT, tokenize.DEDENT):
+        elif token.type == tokenize.NL:
+            if kind == "comment" and not token.line.strip():
+                flush()
+        elif token.type in (tokenize.INDENT, tokenize.DEDENT):
             continue
         else:
             flush()
@@ -2353,6 +2387,11 @@ def test_no_retracted_phrasing_survives_outside_its_own_retraction(tmp_path):
         f'round 9 wrote "the two {low}" and round 10 retracted it.'
     ]
     assert _unrescued(_prose_units(wrapped_py)) == []
+    separated = _py_prose_units(
+        f'# "the two {low}"\n# still asserted\n\n# round 10 retracted it\n'
+    )
+    assert separated == [f'"the two {low}" still asserted', "round 10 retracted it"]
+    assert _unrescued(separated) == [separated[0]]
 
     # A phrase that matches nothing is a ledger row that enforces nothing, and a
     # renamed subject would turn every row into one silently. Each row must
