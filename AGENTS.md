@@ -36,6 +36,62 @@ Decision checklist before writing code:
 3. **Call path**: is the code called from controller/handlers/common flow?
 4. **Future-proofing**: would a new platform/backend inherit the correct behavior automatically?
 
+### Harness Run Ownership (load-bearing)
+
+Read this before touching any Run, Delivery, Turn, or Activity path. These rules
+were paid for by #1063, #1064, #1072, #1134, #1139, #1140, #1155, and #1173; the
+full derivation lives in `docs/plans/harness-run-reliability.md`.
+
+Durable owners — one per phase, no side maps and no parallel output ledger:
+
+| Owner | Owns |
+|---|---|
+| `message_deliveries` | submitted input, FIFO position, acceptance, attempts, receipts, retirement |
+| `session_turns` | native execution and terminal Turn evidence |
+| `messages` | accepted communication history — **not** a queue |
+| durable Activity snapshots | pending output payload, ordered batch membership, the linked Run union, the stable output receipt identity |
+| `agent_runs` | the Harness projection and the callback/notice anchor |
+
+Invariants every change must preserve:
+
+1. **One durable owner per phase.** Delivery owns input before native
+   acceptance; Turn owns accepted execution; the Activity batch owns pending
+   terminal output; Run reflects the outcome.
+2. **No silent replay after execution starts.** Infrastructure interruption is
+   `failed` with a structured cause and an actionable notice. User Stop is
+   `canceled` and does not generate an infrastructure-failure notice.
+3. **Unstarted work remains retryable.** A bare claim or queued Delivery must not
+   be mislabeled as an interrupted execution.
+4. **Terminal writes are guarded.** A natural terminal result, user Stop, and
+   infrastructure teardown may race; the exact compare-and-set winner controls
+   projections and notices.
+5. **Absence of a receipt is not proof of non-delivery.** Any timeout around an
+   outbound send must use durable delivery evidence before retrying.
+6. **Waiting is not activity.** A real inbound message may establish a session
+   baseline, and every exact Turn start establishes a fresh one even when the
+   work came from a long-idle scheduled/watch queue; after that only observable
+   assistant/tool progress refreshes it. Run inactivity is stricter and re-arms
+   only from its exact owning Turn. A claim, queue wait, gate wait, or unrelated
+   Run in the same session must not keep stuck work alive.
+7. **No turn-duration timeout.** A healthy turn may run for hours. Bounds may
+   apply to inactivity and post-turn delivery, never to productive execution.
+8. **Failures remain visible.** Reconcile paths must use #1072's durable notice
+   path; a terminal row alone is not the exit criterion.
+9. **One output batch has one receipt.** Preserve #1139's stable receipt,
+   persisted ordered Activity membership, complete linked Run union, and
+   transport-free local-settlement retry. Incomplete or conflicting recovered
+   membership fails closed; it never emits a partial batch or invents a second
+   receipt.
+
+Two consequences that are easy to get wrong:
+
+- A batch reconcile path is still bound by rule 2. Sweeping accumulated Runs to
+  `failed` without a structured cause and a user-visible notice violates it even
+  though the terminal row itself looks correct.
+- Do not add a generic inactivity timeout unless every backend and lane can
+  attribute observable progress to the exact Turn. Session-wide activity is
+  never an acceptable substitute (rule 6).
+
 ### Codebase Map
 
 - `main.py` - entry point wiring `config.V2Config` into `core/controller.py`
