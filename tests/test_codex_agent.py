@@ -3662,13 +3662,21 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             created_cmds,
             [
-                ["codex", "--dangerously-bypass-approvals-and-sandbox", "app-server"],
+                [
+                    "codex",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "app-server",
+                    "-c",
+                    "features.memories=false",
+                ],
                 [
                     "codex",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "app-server",
                     "-c",
                     'model_provider="avibe_model_hub"',
+                    "-c",
+                    "features.memories=false",
                 ],
             ],
         )
