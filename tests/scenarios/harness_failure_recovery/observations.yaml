@@ -1693,3 +1693,21 @@ observations:
       Carried forward: HFR-105's ``_assert_node_exists`` in
       ``tests/test_scheduled_tasks.py`` still trails eight of this unit's
       fixes and is still deliberately untouched (HFR-OBS-028).
+  - id: HFR-OBS-051
+    area: run-terminal-truth
+    summary: >-
+      Round 26, three findings, all accepted and none rejected. No new scenario
+      id and no 168-cell budget change. HFR-198 now refuses a computed
+      ``__test__`` assignment out loud instead of silently applying the name
+      rule. HFR-197 is narrowed to the integrated Claude receiver path it
+      drives, and codex/direct_im moves covered -> unproven until a real
+      CodexEventHandler emit carries the accepted Run through the dispatcher.
+      HFR-180 is narrowed to the one production interleaving it reaches: the
+      live turn is unstamped, the live-state probe reads idle, the canonical
+      stop is skipped, and real teardown blocks behind the parked resolver.
+      The separate teardown-marker/classifier run is removed and its eventual
+      result is no longer claimed. Durable rule: narrow at the first un-driven
+      boundary; an honest open cell is evidence, an adjacent green test is not.
+      Carried forward: HFR-105's ``_assert_node_exists`` in
+      ``tests/test_scheduled_tasks.py`` still deliberately trails this unit's
+      resolver changes (HFR-OBS-028).

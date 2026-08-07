@@ -97,22 +97,6 @@ def _no_process_probing(monkeypatch):
     )
 
 
-def _calls_method_named(func, method_name: str) -> bool:
-    """Does ``func``'s body reach ``method_name``?
-
-    Used to join two halves of a production chain that a unit probe drives
-    separately. Without it the join is a comment, and a refactor that moves the
-    call would leave the probe green while the claim it supports stopped being
-    true. Shares ``_first_reference_line``'s resolution so the two helpers
-    cannot disagree about what "calls" means.
-    """
-    try:
-        _first_reference_line(func, method_name)
-    except AssertionError:
-        return False
-    return True
-
-
 def _first_reference_line(func, method_name: str) -> int:
     """Source line where ``func`` first reaches ``method_name``.
 
@@ -154,76 +138,21 @@ def _first_reference_line(func, method_name: str) -> int:
 # ----- HFR-180: PR7R-F1 ----------------------------------------------------
 
 
-class _RealTeardownMarking:
-    """The production teardown/classification methods, on a bare object.
-
-    Bound off ``SessionHandler`` rather than reimplemented: the classification
-    this probe turns on is the real one, TTL and return-code set included.
-    Round 3 added ``_cleanup_session_locked`` to the list. Stamping the marker
-    by hand -- which the probe used to do -- skipped the production guard right
-    above it (``if client is not None or receiver_task is not None``), so the
-    probe was asserting a mark that production makes only conditionally, and
-    would have kept passing if that condition stopped holding for End.
-    """
-
-    _cleanup_session_locked = SessionHandler._cleanup_session_locked
-    _mark_claude_teardown_intentional = (
-        SessionHandler._mark_claude_teardown_intentional
-    )
-    _is_intentional_teardown_signal = SessionHandler._is_intentional_teardown_signal
-    claude_teardown_is_intentional = SessionHandler.claude_teardown_is_intentional
-
-    def __init__(self) -> None:
-        self.claude_sessions: dict = {}
-        self.claude_intentional_teardowns: dict = {}
-        self.receiver_tasks: dict = {}
-        self.tracking_cleared: list[str] = []
-
-    # Collaborators of ``_cleanup_session_locked`` that are not this probe's
-    # subject. Each keeps the production signature so a change to it fails here
-    # rather than silently skipping a step.
-    def _retire_claude_runtime_activation(self, composite_key, client, still_owns):
-        return True
-
-    def _retire_model_hub_process_scope(self, composite_key):
-        return None
-
-    def clear_session_tracking(self, composite_key):
-        self.tracking_cleared.append(composite_key)
-
-    async def _disconnect_client(self, client, composite_key):
-        return None
-
-    def _disconnect_client_after_receiver(self, client, composite_key, task):
-        return None
-
-    async def _stop_receiver_task(self, receiver_task, composite_key=None):
-        return None
-
-    async def _reap_duplicate_resume_processes(self, *args, **kwargs):
-        return None
-
-
-def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
+def test_end_skips_the_canonical_stop_while_a_live_claude_turn_is_unstamped():
     """HFR-180 / PR7R-F1: End skips the canonical stop when the probe is blind.
 
     ``ClaudeAgent.handle_message`` calls ``mark_session_active`` only after
-    ``get_or_create_claude_session`` returns, so a Run whose turn was accepted
-    while that call is still in flight is NOT in ``claude_active_sessions``. On
+    ``get_or_create_claude_session`` returns, so a turn accepted while that call
+    is still in flight is NOT in ``claude_active_sessions``. On
     the direct-IM / agent-run lane there is also no ``session_turns`` entry to
     fall back on -- that projection only exists for the Workbench lane -- so
     ``_resolve_live_state`` has nothing left to read and answers ``idle``.
 
-    End then takes the idle branch straight into ``_end_claude``, and the probe
-    follows the consequence two steps, no further:
-
-    1. ``handle_stop`` never runs. It is the only path that emits ``stopped``
-       -> ``canceled``, so the status Invariant 2 requires for a user Stop is
-       now unreachable for this Run.
-    2. The teardown marks the key intentional, so when the still-live turn dies
-       of the resulting kill signal the REAL classifier calls it service
-       cleanup rather than a backend fault. The Stop is erased from the record
-       a second time.
+    End takes the idle branch instead of ``handle_stop``, the only path that
+    emits ``stopped`` -> ``canceled``. The real teardown then waits behind the
+    parked resolver's generation lock. This probe does not release that
+    resolver, so it does not claim what teardown or the classifier eventually
+    records.
 
     What this does NOT claim is the Run's final status. Reaching it needs an
     IM-scoped Harness Run driven to settlement, which is the probe named in the
@@ -324,6 +253,12 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     about the ROUTE ``end_running_agent`` chose -- which is decided from the
     live state it recomputes, before any End is awaited, and is therefore
     production's own regardless of what the End then does.
+
+    Round 26 stops at that boundary. The same real End task is not released
+    through teardown and classification, so the earlier causal claim about the
+    intentional marker is retracted rather than reconstructed from a separate
+    handler. This scenario covers the blind live-state decision, skipped
+    canonical stop, and blocked teardown only.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -514,8 +449,7 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     )
 
     # End's fixture, sharing the handler's own registries rather than copies.
-    session_handler = _RealTeardownMarking()
-    session_handler.claude_sessions = handler.claude_sessions
+    session_handler = types.SimpleNamespace(claude_sessions=handler.claude_sessions)
     end_runtime_session = _AsyncFlag(result=True)
     controller = types.SimpleNamespace(
         agent_service=types.SimpleNamespace(
@@ -705,47 +639,6 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
         "resolver was parked, so it was never blocked AT THE LOCK -- whatever "
         "the reading above measured, it is not the generation lock"
     )
-
-    # Consequence 2, in two parts: the chain End takes to the marking code, and
-    # then the marking code itself, run for real.
-    #
-    # Part one -- every hop, because the probe cannot execute the SDK teardown
-    # and a partial join is how a chain quietly stops being a chain. The third
-    # hop is the load-bearing one and the one no call-graph check would catch:
-    # ``_cleanup_runtime_session_state`` does not call ``cleanup_session``, it
-    # resolves the NAME off the session handler and calls whatever comes back.
-    assert _calls_method_named(ClaudeAgent.end_runtime_session, "_cleanup_runtime_session")
-    assert _calls_method_named(
-        ClaudeAgent._cleanup_runtime_session, "_cleanup_runtime_session_state"
-    )
-    dispatch = inspect.getsource(ClaudeAgent._cleanup_runtime_session_state)
-    assert 'cleanup_name = "_cleanup_session_locked" if runtime_lock_held else "cleanup_session"' in dispatch
-    assert "cleanup = getattr(self.session_handler, cleanup_name, None)" in dispatch
-    assert _calls_method_named(SessionHandler.cleanup_session, "_cleanup_session_locked")
-    assert _calls_method_named(
-        SessionHandler._cleanup_session_locked, "_mark_claude_teardown_intentional"
-    )
-
-    # Part two -- the real locked body, not a hand-stamped marker. It decides
-    # for itself whether this key earned a teardown record; only a key that
-    # actually held a generation does.
-    assert session_handler.claude_intentional_teardowns == {}
-    asyncio.run(session_handler._cleanup_session_locked("slack_a:/w"))
-    assert "slack_a:/w" in session_handler.claude_intentional_teardowns
-    assert session_handler.claude_sessions == {}, "the live generation was dropped"
-
-    # Now the live turn dies of the teardown's own SIGTERM, and the real
-    # classifier reads it. -15 is in ``CLAUDE_TEARDOWN_RETURNCODES``.
-    client._transport._process.returncode = -15
-    assert (
-        session_handler.claude_teardown_is_intentional(
-            "slack_a:/w",
-            RuntimeError("Claude Code process exited with exit code: -15"),
-            client=client,
-        )
-        is True
-    ), "the user's Stop is now indistinguishable from routine service cleanup"
-
 
 # ----- HFR-181: PR7R-F2 ----------------------------------------------------
 
@@ -1516,8 +1409,8 @@ def test_which_backends_attribute_a_progress_event_to_an_exact_turn():
             "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
         ),
         ("codex", "direct_im"): (
-            "covered",
-            "test_which_backends_attribute_a_progress_event_to_an_exact_turn",
+            "unproven",
+            "settles that exact Run.",
         ),
         ("opencode", "durable_workbench"): (
             "defect",
@@ -2130,8 +2023,8 @@ def test_a_cwd_change_splits_the_gate_key_but_not_the_codex_turn_slot():
     )
 
 
-def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_path):
-    """HFR-197 / Q2: the "and participating Runs" half of the question.
+def test_claude_participating_run_attribution_is_resolved_per_turn(tmp_path):
+    """HFR-197 / Q2: Claude's "and participating Runs" path.
 
     Q2 asks which events can be attributed to the exact Turn AND PARTICIPATING
     RUNS. Every probe before this one answered the first half and none answered
@@ -2140,19 +2033,19 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
 
     They are, however, joined by a mechanism, and the mechanism is what makes
     the second half cheap once the first is settled. Emission-time Run
-    attribution has exactly two sources, both on the emit context that all three
-    backends already carry:
+    attribution has exactly two sources on the emit context:
 
       * ``_owned_agent_run_ids`` reads ``accepted_agent_run_ids`` straight off
         ``context.platform_specific``; and
       * ``_durable_accepted_agent_run_ids`` reads the ``turn_token`` off the
         SAME payload and looks the Runs up per Turn in the delivery store.
 
-    So Run attribution is derived from Turn attribution, per emit. That is the
-    claim, and the point of driving it is that a derivation can be exact at one
+    So Run attribution is derived from Turn attribution, per emit. This probe
+    drives that claim through Claude's real receiver. A derivation can be exact at one
     end and lossy at the other -- if the durable read were keyed by session, or
     if the in-context list survived a Turn change, the Runs would smear across
-    Turns even though the tokens did not.
+    Turns even though the tokens did not. Codex's direct-IM path remains open
+    until its real event handler carries the accepted Run through the dispatcher.
 
     Round 10 supplied the half round 9 faked. Parts (1) through (5) drive the
     dispatcher against a ``_Turns`` stub, which shows that the READER asks per

@@ -210,7 +210,7 @@ _NOT_A_SUCCESS = (
 # PR7R's own reproducers.
 _F1 = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional"
+    "test_end_skips_the_canonical_stop_while_a_live_claude_turn_is_unstamped"
 )
 _F2 = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -234,7 +234,7 @@ _Q2_KEY_SPLIT = (
 )
 _Q2_RUNS = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
-    "test_participating_run_attribution_is_resolved_per_turn_not_per_session"
+    "test_claude_participating_run_attribution_is_resolved_per_turn"
 )
 _Q2_RESTORED = (
     "tests/test_run_terminal_truth_evidence_probes.py::"
@@ -487,12 +487,12 @@ _IM_BY_OUTCOME: Final = {
         "per_backend": {
             "claude": unproven(
                 "PR7R-F1 characterizes the skipped canonical stop and the "
-                "intentional-teardown reclassification, and claims nothing "
+                "real teardown blocking behind the parked resolver, and claims nothing "
                 "about the Run -- the reproducer builds no ``agent_runs`` row. "
                 "Probe: bind an IM-scoped Run to the racing turn and record "
                 "the status it settles to, if any -- "
                 + _F1
-                + " covers End's branch and the misclassification only."
+                + " covers End's branch and live-state misclassification only."
             ),
             "codex": unproven(
                 "PR7R-F2 characterizes the ``ok/ended`` payload synthesized "
@@ -1125,11 +1125,16 @@ EXACT_TURN_PROGRESS_SIGNALS: Final = {
     # per SESSION rather than per Turn -- and that one is unretracted.
     ("codex", "durable_workbench"): covered(_Q2_SIGNALS),
     # The ``turnId`` is on the notification whatever surface asked for the
-    # turn, so the signal half of this cell never depended on the lane. Its RUN
-    # half did, and round 12 drove it: see the note on ``("claude",
-    # "direct_im")`` -- the attribution query filters on state and turn id and
-    # reads no platform, and ``_Q2_RUNS`` now proves that on real IM rows.
-    ("codex", "direct_im"): covered(_Q2_SIGNALS),
+    # turn, so the signal half does not depend on the lane. Round 26 reopens the
+    # RUN half: the integrated HFR-197 path drives Claude's receiver only, while
+    # the Codex probe stops at registry resolution. A Codex handler that drops
+    # ``tracked_request.context`` would therefore leave both probes green.
+    ("codex", "direct_im"): unproven(
+        "Codex notifications carry an exact turnId, but no probe drives a real "
+        "direct-IM Run through CodexEventHandler and the dispatcher. Probe: "
+        "bind an IM-scoped Run, deliver a Codex frame through its real handler, "
+        "and assert the emitted context settles that exact Run."
+    ),
     # OpenCode was read the same wrong way as codex, one round later, and for
     # the same reason: ``_active_requests[base]`` is a LIVENESS map -- one
     # asyncio task per base session -- and reading a lossy projection told us
@@ -1239,8 +1244,9 @@ PR7R_QUESTIONS: Final = {
         ),
         "verdict": "open",
         "answer": (
-            "FOUR of the six cells can, and the two opencode cells are "
-            "defects as of round 17. This answer said ALL SIX for four rounds; "
+            "THREE of the six cells can: codex/direct_im is unproven, and the "
+            "two opencode cells are defects as of round 17. This answer said "
+            "ALL SIX for four rounds; "
             "that wording is retracted and enrolled, and the reason it was "
             "wrong is the same reading error the rest of this answer is a "
             "history of, committed once more. See the closing paragraph -- the "
@@ -1285,13 +1291,17 @@ PR7R_QUESTIONS: Final = {
             "it: this question asks about the exact Turn AND PARTICIPATING "
             "RUNS, every probe asserted Turn tokens, and the verdict was "
             "written as though the conjunction had been checked. It had not "
-            "been. It holds, and the mechanism is a derivation: "
+            "been. It holds for claude on both lanes and codex on the durable "
+            "lane, and the mechanism is a derivation: "
             "``_owned_agent_run_ids`` reads ``accepted_agent_run_ids`` off the "
             "emit context, and ``_durable_accepted_agent_run_ids`` looks Runs "
             "up per ``turn_token`` from that SAME payload, so Run attribution "
-            "is exactly as exact as the Turn -- driven on all three backends, "
-            "including the case that would smear Runs across Turns if claude's "
-            "reused receiver context merged rather than replaced. "
+            "is exactly as exact as the Turn. HFR-197 drives the integrated "
+            "Claude receiver path, including the case that would smear Runs "
+            "across Turns if its reused context merged rather than replaced. "
+            "Codex's direct-IM cell remains open because its probe resolves the "
+            "registry request but never drives ``CodexEventHandler`` through "
+            "the dispatcher with the accepted Run. "
             "The SIXTH correction is a retraction of round 8's. Codex does NOT "
             "discard its signal at ``should_emit_progress``. The key spaces do "
             "differ -- the gate keys on ``BaseAgent.runtime_turn_key``, the "
@@ -1396,13 +1406,12 @@ PR7R_QUESTIONS: Final = {
             "the Deliveries accepted against that Turn -- and it reaches only "
             "participants that HAVE such a Delivery row, which for the "
             "restored OpenCode loop this unit has not established. "
-            "A generic inactivity timeout is therefore UNBLOCKED on the "
-            "attribution question FOR LIVE DISPATCH -- an exact signal exists "
-            "on all three backends and both lanes while the process that "
-            "started the Turn is still up, and the Runs come with it -- and "
-            "its remediation is ONE item, a per-Turn activity timestamp "
-            "instead of a per-session one. Across a restart it is NOT "
-            "unblocked on opencode, and that is a second remediation item. "
+            "A generic inactivity timeout remains BLOCKED on the all-path "
+            "attribution question: Codex's direct-IM Run half is unproven and "
+            "OpenCode loses both Turn and Runs across restart. The live event "
+            "streams still carry exact Turn signals on all backends; once the "
+            "Run and restart gaps close, the remaining live-path remediation "
+            "is a per-Turn activity timestamp instead of a per-session one. "
             "Note claude's attribution "
             "is a FIFO POSITION rather than an id the event carries: exact "
             "under per-key serialization, weaker than codex's ``turnId``, and "
@@ -1585,26 +1594,23 @@ PR7R_QUESTIONS: Final = {
 PR7R_FINDINGS: Final = {
     "PR7R-F1": {
         "title": (
-            "End tears down a live Claude turn without the canonical stop when "
-            "the live-state probe cannot see it yet"
+            "End skips the canonical stop for a live Claude turn the live-state "
+            "probe cannot see yet"
         ),
         "owner": "core/services/running_agents.py::_resolve_live_state",
         "detail": (
             "``handle_message`` calls ``mark_session_active`` only AFTER "
-            "``get_or_create_claude_session`` returns, so a turn that is "
-            "accepted while the CLI is still starting is absent from "
+            "``get_or_create_claude_session`` returns, so a turn accepted "
+            "while warm-session resolution waits on a CLI control request is absent from "
             "``claude_active_sessions``. ``_resolve_live_state`` reports "
-            "``idle`` for it, and End takes the idle branch into "
-            "``_end_claude``. Two things follow, and only the second was "
-            "originally stated correctly. (1) ``handle_stop`` -- the ONLY path "
-            "that emits ``stopped`` -> ``canceled`` -- never runs, so a user "
-            "Stop cannot produce the status Invariant 2 requires for one. "
-            "(2) ``cleanup_session`` marks the key an INTENTIONAL teardown, so "
-            "when the still-live turn dies of the resulting SIGTERM/SIGKILL, "
-            "``claude_teardown_is_intentional`` classifies it as service "
-            "cleanup rather than a fault -- the user's Stop is erased from the "
-            "record twice over. WHICH terminal status the IM Run then receives "
-            "is deliberately NOT claimed here: ``SETTLED_BY_BACKEND_REFRESH`` "
+            "``idle`` for it, and End selects the idle branch instead of "
+            "``handle_stop`` -- the only path that emits ``stopped`` -> "
+            "``canceled``. The real teardown then blocks on the generation lock "
+            "held by the parked resolver; this reproducer does not release that "
+            "resolver and therefore does not claim what teardown or the "
+            "classifier eventually records. WHICH terminal status the IM Run "
+            "receives is also deliberately NOT claimed: "
+            "``SETTLED_BY_BACKEND_REFRESH`` "
             "is emitted by ``SessionTurnManager.release_for_backend_refresh``, "
             "a Workbench-lane path, and no evidence connects it to an IM Run. "
             "The IM lane's ``user_stop`` and ``resultless_termination`` cells "

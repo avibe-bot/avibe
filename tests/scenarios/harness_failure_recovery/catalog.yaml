@@ -2716,7 +2716,7 @@ scenarios:
     backend: shared
     test: tests/test_watches.py::test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop
   - id: HFR-180
-    name: End tears down a live Claude turn and reclassifies it as intentional
+    name: End skips the canonical stop while a live Claude turn is unstamped
     status: covered
     kind: failure
     layer: contract
@@ -2761,7 +2761,11 @@ scenarios:
     # before any End is awaited. RULE: when a probe replaces one double, list the doubles that
     # remain and check whether the report is still quoting one of them. A fixture gets more real
     # in the place under review and stays exactly as fake everywhere else.
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional
+    # Round 26 narrows the row to the integrated fact the probe reaches. The
+    # real teardown blocks behind the parked resolver and the test does not
+    # release that resolver through teardown/classification, so those later
+    # outcomes are deliberately not advertised as covered.
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_end_skips_the_canonical_stop_while_a_live_claude_turn_is_unstamped
   - id: HFR-181
     name: codex End reports ok/ended when the canonical stop never interrupted
     status: covered
@@ -2900,11 +2904,11 @@ scenarios:
     backend: shared
     test: tests/test_run_terminal_truth_matrix.py::test_no_prose_states_a_q2_cell_count_the_table_disagrees_with
   - id: HFR-197
-    name: participating Run attribution is resolved per Turn, not per session
+    name: Claude participating Run attribution is resolved per Turn
     status: covered
     kind: observability
     layer: contract
-    backend: shared
+    backend: claude
     # Emission-time Run attribution has two sources and both hang off the Turn:
     # _owned_agent_run_ids reads accepted_agent_run_ids from the emit context, and
     # _durable_accepted_agent_run_ids looks Runs up by that context's turn_token.
@@ -2935,7 +2939,10 @@ scenarios:
     # result frame to a real ClaudeAgent's real receiver and substitutes only the SDK stream and
     # the IM surface, which are the two ends of the process. RULE: the boundary to stop at is
     # the one where the next thing inward is another PROCESS, not another function.
-    test: tests/test_run_terminal_truth_evidence_probes.py::test_participating_run_attribution_is_resolved_per_turn_not_per_session
+    # Round 26 records the remaining backend boundary: that integrated receiver path is
+    # Claude's. Codex still stops at registry resolution, so its direct-IM Q2 cell is open
+    # until a real CodexEventHandler emit reaches the dispatcher with the accepted Run.
+    test: tests/test_run_terminal_truth_evidence_probes.py::test_claude_participating_run_attribution_is_resolved_per_turn
   - id: HFR-198
     name: a cited pytest node id must name a function pytest collects
     status: covered
@@ -2963,6 +2970,9 @@ scenarios:
     # a runtime lookup means mirroring its ORDER, unless the question you ask of it is
     # order-free -- and say which of the two it is at every site, or the next round copies the
     # fix onto a predicate that did not need it.
+    # Round 26 adds the third answer: a computed/imported ``__test__`` value is
+    # undecidable statically, not absent. Both discovery and citation fail loudly
+    # instead of falling through to a name rule that can accept a skipped node.
     test: tests/test_run_terminal_truth_matrix.py::test_a_node_id_citation_must_name_something_pytest_collects
   - id: HFR-199
     name: no step of the durable reservation path settles the Run

@@ -399,9 +399,10 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
     written in the scope that defines ``test_fn`` -- because pytest reads one
     attribute and does not care which statement set it.
 
-    Only a literal counts. A computed ``__test__`` is not statically knowable,
-    and reporting "no opinion" for it lands on the name rule, which is the
-    conservative side: a false rejection is loud, a false acceptance is silent.
+    Only a literal can be mirrored statically. A computed ``__test__`` is not
+    "no opinion": pytest evaluates it at runtime, so falling through to the
+    name rule can silently accept a node pytest skips. Refuse that undecidable
+    assignment out loud instead.
     """
     for node in body:
         targets = (
@@ -422,7 +423,12 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
                 and attribute_of is not None
                 and _root_name(target) == attribute_of
             )
-            if named and isinstance(node.value, ast.Constant):
+            if named:
+                if not isinstance(node.value, ast.Constant):
+                    subject = attribute_of or "module/class"
+                    raise AssertionError(
+                        f"cannot decide pytest's computed __test__ value for {subject}"
+                    )
                 return bool(node.value.value)
     return None
 
@@ -1572,6 +1578,10 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     flag is set, believe it" -- is wrong twice: a flagged-in class with a
     constructor is still refused, and a flagged-out module takes everything
     inside it down with it.
+
+    Round 26 covers a nonliteral flag. Pytest evaluates it at runtime, so the
+    static guard cannot treat it as absent and accept by name; both readers
+    refuse the undecidable node loudly.
     """
     cited = {
         detail if kind == "covered" else _detail_node(detail)
@@ -1682,6 +1692,18 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     rel = Path("tests/sample_module.py")
 
+    computed = tmp_path / "tests" / "computed_module.py"
+    computed.write_text(
+        "FLAG = False\n"
+        "class TestComputedOptOut:\n"
+        "    __test__ = FLAG\n"
+        "    def test_case(self): ...\n"
+        "def test_computed_muted(): ...\n"
+        "test_computed_muted.__test__ = FLAG\n",
+        encoding="utf-8",
+    )
+    computed_rel = Path("tests/computed_module.py")
+
     # The owner resolver: a class leaf and a method leaf are both legitimate,
     # and it stays indifferent to whether the container is collectible -- an
     # owner is a place to change code, not a thing pytest runs.
@@ -1779,6 +1801,22 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
             AssertionError, match=f"pytest does not collect class '{inherited_out}'"
         ):
             _assert_node_exists(f"{rel}::{inherited_out}::test_case")
+
+    # Round 26: a computed flag is a third answer, not an absent flag. Pytest
+    # evaluates it at runtime; accepting by name would silently advertise a
+    # node that never runs. Both class and function spellings fail loudly.
+    for undecidable in (
+        f"{computed_rel}::TestComputedOptOut::test_case",
+        f"{computed_rel}::test_computed_muted",
+    ):
+        with pytest.raises(
+            AssertionError, match="cannot decide pytest's computed __test__ value"
+        ):
+            _assert_node_exists(undecidable)
+    with pytest.raises(
+        AssertionError, match="cannot decide pytest's computed __test__ value"
+    ):
+        _collected_tests(ast.parse(computed.read_text(encoding="utf-8")).body)
 
     # Round 25: the ORDER the inherited flag is read in, which round 20 left
     # depth-first and round 22 carried across module boundaries unexamined.

@@ -24,7 +24,7 @@ numbers or old ownership assumptions.
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
 | Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
 | Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…211`, `HFR-212…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — every backend/lane keys a progress event by Turn on LIVE dispatch, but OpenCode's restart path rebuilds its emit context and drops the Turn and the accepted Runs, so those two cells are `defect`; the live residual is the per-session activity timestamp. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R in progress**, evidence-only; first increment occupies `HFR-180…211`, `HFR-212…219` still reserved. All 168 matrix cells are `unproven` with named probes: no test on master traces a Run from a trigger's admission through to that Run's terminal settlement. Q2 open — Claude on both lanes and Codex on the durable lane have covered live attribution; Codex/direct-IM lacks an end-to-end backend emit, and OpenCode's restart path drops the Turn and accepted Runs. Q1/Q3/Q4/Q5 open, Q4 Run-scoped and Claude-only, Q5 on the two stored definition fields only; two End-path defects reproduced |
 
 The post-plan architecture is load-bearing:
 
@@ -1396,10 +1396,10 @@ exist. `HFR-188` now drives the real `handle_message` twice on one runtime key
 and asserts the tokens differ (per Turn, not per session) and that a pre-existing
 Workbench token is preserved. Six cells went `covered` at that round and the
 guard forced Q2 to `answered`; round 17 reopens the two opencode ones, so today
-**four cells are `covered`** and **two cells are `open`** and the same guard
+**three cells are `covered`** and **three cells are `open`** and the same guard
 forces Q2 back to `open`. For live dispatch the inactivity timeout is no longer
-blocked on attribution — what is left there is that the activity timestamp is
-per **session**, which is remediation.
+clear on attribution: Codex/direct-IM still lacks an integrated Run emit, and
+the activity timestamp remains per **session**.
 `HFR-191` narrows the companion over-claim: codex's `should_emit_progress` filter
 reads the single `_active_turns[base]` slot, and the runtime gate is held across
 the whole backend call, so one runtime key admits one live turn at a time. Round 8
@@ -2312,6 +2312,23 @@ doubles as findings. When a probe is made real, enumerate what is still
 substituted and check the report against that list — the substitution nobody is
 looking at is the one the conclusion ends up quoting.
 
+Round 26 — three findings, **all accepted, none rejected**; **no new scenario
+id** and no 168-cell budget change.
+
+1. Computed `__test__` assignments are now undecidable rather than absent: the
+   citation/discovery guard fails loudly instead of falling through to a name
+   rule that can advertise a node pytest skips.
+2. `HFR-197` is narrowed to the integrated Claude receiver path it drives.
+   Codex/direct-IM moves `covered` → `unproven` until a real
+   `CodexEventHandler` emit carries the accepted Run through the dispatcher.
+3. `HFR-180` is narrowed to the production fact its one interleaving reaches:
+   the unstamped live turn reads idle, the canonical stop is skipped, and real
+   teardown blocks behind the parked resolver. The separate teardown-marker and
+   classifier run is removed; their eventual result is not claimed.
+
+The durable lesson is to narrow at the first un-driven boundary. A truthful open
+cell is evidence; an adjacent green test is not.
+
 Question verdicts:
 
 1. **Q1 — open, do not close the claim yet.** On the durable Workbench lane,
@@ -2331,10 +2348,10 @@ Question verdicts:
    reservation or backend-acceptance path would leave it green. The
    premature-success claim may be closed once an IM-lane acceptance-boundary probe
    exists — not before.
-2. **Q2 — open. On LIVE dispatch every backend/lane cell keys a progress event
-   by Turn; across a daemon restart OpenCode does not, and that is a defect
-   round 17 reopened both of its cells for.** Everything in the rest of this
-   entry describes live dispatch and still holds; the restart hole is at the end.
+2. **Q2 — open. Claude on both lanes and Codex on the durable lane have covered
+   live attribution; Codex/direct-IM is unproven, and OpenCode loses attribution
+   across restart.** Everything in the rest of this entry describes live
+   dispatch; the Codex evidence boundary and restart hole are at the end.
    Codex's `item/*` notifications carry a
    `turnId` and `_find_request_for_notification` resolves the participating
    Run's request from it through `get_request_for_turn`, a per-turn map.
@@ -2361,8 +2378,10 @@ Question verdicts:
    were settled: Run attribution at emit time is **derived** from Turn
    attribution — `_owned_agent_run_ids` reads `accepted_agent_run_ids` off the
    emit context and `_durable_accepted_agent_run_ids` looks Runs up per
-   `turn_token` — so it is exactly as exact as the Turn, which `HFR-197` drives on
-   all three backends. Retracted in round 9: codex does **not** discard its signal
+   `turn_token` — so it is exactly as exact as the Turn. `HFR-197` drives the
+   integrated Claude receiver path; Codex/direct-IM remains open because no probe
+   drives `CodexEventHandler` through the dispatcher with the accepted Run.
+   Retracted in round 9: codex does **not** discard its Turn signal
    at `should_emit_progress`. That claim was argued three times from the two ends
    of a mechanism without ever running the code between them; `handle_message`
    interrupts the active turn under a base-session lock before starting the next,
@@ -2469,10 +2488,10 @@ Reproduced defects, both on the direct-IM / agent-run lane and both owned by
   `get_or_create_claude_session` returns. A Run accepted while that call is in
   flight reads `idle` and End takes the idle branch, so `handle_stop` — the only
   path that emits `stopped` → `canceled`, which invariant 2 requires for a user
-  Stop — never runs. `cleanup_session` then marks the key an intentional
-  teardown, so when the still-live turn dies of the resulting kill signal
-  `claude_teardown_is_intentional` calls it service cleanup rather than a fault:
-  the Stop is erased from the record twice. Which terminal status the IM Run
+  Stop — never runs. The real teardown then blocks behind the parked resolver's
+  generation lock. The probe does not release that same End task through
+  teardown and classification, so it deliberately makes no claim about the
+  eventual teardown marker or classifier result. Which terminal status the IM Run
   ends with is deliberately not claimed — `SETTLED_BY_BACKEND_REFRESH` is
   emitted by `SessionTurnManager.release_for_backend_refresh` on the Workbench
   lane, and nothing connects it to an IM Run. The earlier draft of this finding
