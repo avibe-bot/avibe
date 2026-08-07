@@ -977,6 +977,23 @@ RETRACTED_PHRASINGS: Final = (
         "per-Run provenance with no id in it and no run-shaped key. Do not "
         "write a total; write the rule and the shape it was derived from.",
     ),
+    # Round 25, and it is the ledger's own rule turned on the round that wrote
+    # it: rounds 23 and 24 replaced a staged fixture with a real interleaving
+    # and then read the fixture's REMAINING double as if it were production.
+    # What a probe substitutes is the one thing its report may not assert.
+    (
+        "end returns ended while the turn is parked",
+        "round 25",
+        "rounds 23-24's reading of HFR-180's own return value. The End they "
+        "ran was an ``_AsyncFlag``; production's ``end_runtime_session`` falls "
+        "through to ``_cleanup_runtime_session`` with no ``runtime_lock_held``, "
+        "so the chain reaches ``cleanup_session``, which re-acquires the "
+        "generation lock the parked resolver is still holding -- HFR-180 now "
+        "drives that real teardown against that real parked resolver and shows "
+        "it never reaches the locked body. Say what the interleaving decides, "
+        "which is the ROUTE: ``end_running_agent`` branches on the live state "
+        "it recomputes, before it awaits any End at all.",
+    ),
     (
         "discarded live signal, not correct filtering",
         "round 9",

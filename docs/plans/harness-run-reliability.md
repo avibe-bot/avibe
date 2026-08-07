@@ -1227,7 +1227,7 @@ Exit criterion: the checked-in matrix and tests identify each remaining defect
 and its current owner. PR7R adds no status, timeout field, terminal writer,
 health cursor, or cancellation path.
 
-#### PR7R status (2026-08-07) — first increment, revised under twenty-four review rounds
+#### PR7R status (2026-08-07) — first increment, revised under twenty-five review rounds
 
 The matrix is `tests/run_terminal_truth_evidence.py`, closed by
 `tests/test_run_terminal_truth_matrix.py` (`HFR-184…187`, `HFR-189…190`,
@@ -1242,7 +1242,7 @@ exact probe that would close them; `UNPROVEN_BUDGET` pins that number so a gap
 cannot widen silently.
 
 The budget moved 28 → 78 → 117 → 168 across the first three adversarial review
-rounds and has held at 168 since; rounds four through twenty-four changed how the
+rounds and has held at 168 since; rounds four through twenty-five changed how the
 findings are demonstrated, three question verdicts, and twenty degenerate
 guards (three of them in round ten, two more in round eleven that were in this
 unit's own new code, two in round twelve that were round eleven's fixes, two in
@@ -2251,6 +2251,66 @@ rule was aimed backward at rounds 9 through 12 and never turned on the diff in
 hand. Before writing a lesson down, apply it once to the fix you just made and
 ask whether the layer you stopped at is the entry point production uses or
 merely the next one inward.
+
+Round 25 — three findings, **all accepted, none rejected**; **no new scenario
+id** (each strengthens a row this unit already owns — `HFR-198`, `HFR-197` and
+`HFR-180` — so the span stays `HFR-180…211` and `UNPROVEN_BUDGET` stays 168).
+
+1. **A runtime lookup was mirrored without its order.** `_resolved_test_flag`
+   walked the bases depth-first and returned the first `__test__` it reached;
+   `getattr` reads the **C3 linearization**. The two diverge the moment two
+   bases share an ancestor, and they diverge in *both* directions — checked
+   against this repo's pytest rather than reasoned. `TestMroOptOut(MroLeft,
+   MroRight)` inherits the flag true through the left base while Python
+   resolves `MroRight`'s `False` first, and pytest collects nothing from it
+   **without a warning**; `TestMroOptIn` is the mirror, dropped by the walk and
+   collected by pytest. Both readers of the predicate — the discovery walk and
+   the citation resolver — could therefore advertise a scenario test that never
+   executes. The resolver now linearizes. `_defines_constructor` deliberately
+   does **not**: it mirrors `hasinit`/`hasnew`, which ask whether *any* class in
+   the MRO supplies the attribute, and an existential over a fixed set cannot
+   depend on visit order. Saying which of the two a site is doing is half the
+   fix — "apply it to the sibling too" is the tempting over-correction, and
+   round 21 already recorded how a justification travels onto a shape it does
+   not fit.
+
+2. **Round 24's rule, turned on round 24.** `HFR-197`'s part (7b) reached the
+   backend's own emitter and still bridged admission to emission by calling
+   `_adopt_pending_turn_token` **by hand**, so a receiver that stopped selecting
+   and adopting the FIFO-matched pending request before emitting would have left
+   the row green. It now drives one terminal frame through a real
+   `ClaudeAgent`'s real `_receive_messages` — real `_pop_pending_request`, real
+   adoption, real `emit_result_message`, real dispatcher, real store —
+   substituting the **SDK stream** and the **IM surface** and nothing else.
+   Those two are *processes*, not functions, which is the first time this
+   boundary has had an argument behind it rather than a preference.
+
+3. **The doubles nobody was reviewing.** `HFR-180`'s parked caller got more real
+   in rounds 21, 22 and 23 while End stayed an `_AsyncFlag`, and each report
+   quoted that flag's payload as production's answer. It is not:
+   `end_runtime_session` passes no `runtime_lock_held`, so
+   `_cleanup_runtime_session` resolves `cleanup_session`, which re-acquires the
+   generation lock the parked resolver is still holding. The probe now runs that
+   real `cleanup_session` against that real parked resolver and asserts it never
+   reaches the locked body, alongside the source fact that makes it the branch
+   production takes. The `ended` payload survives as a statement about the
+   **route** only — and that much is genuinely production's, because
+   `end_running_agent` recomputes the live state and branches on it *before* it
+   awaits any End, so the skipped canonical stop cannot have come from the
+   double.
+
+Counter-checked five ways against production, each restored after: restore the
+depth-first walk (both new cases invert); delete the adopt call in the receiver;
+skip the recorder on the visible lane; drop the runtime gate release; take the
+generation lock out of `cleanup_session`, and separately have
+`end_runtime_session` pass `runtime_lock_held=True`.
+
+**The durable lesson is that a fixture gets more real in the place under review
+and stays exactly as fake everywhere else.** Three rounds running, this unit
+replaced the one double a reviewer pointed at and then read the *remaining*
+doubles as findings. When a probe is made real, enumerate what is still
+substituted and check the report against that list — the substitution nobody is
+looking at is the one the conclusion ends up quoting.
 
 Question verdicts:
 

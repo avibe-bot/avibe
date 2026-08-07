@@ -2751,6 +2751,16 @@ scenarios:
     # replaced it with a false NECESSARY one, which sent three rounds hunting a contender the
     # defect never needed. When you retract a claim, re-derive the condition from production
     # instead of inverting the sentence you are retracting.
+    # Round 25 makes End real too, and it is HFR-197's round-24 rule arriving here one round
+    # late. Rounds 21-23 each moved the PARKED CALLER closer to production and each left End an
+    # _AsyncFlag, then quoted that flag's payload as production's answer. Real End reaches
+    # cleanup_session with no runtime_lock_held, so it re-acquires the generation lock the parked
+    # resolver holds: the probe now runs that real cleanup_session against that real parked
+    # resolver and asserts it never reaches the locked body, and the ended payload is demoted to
+    # a fact about the ROUTE end_running_agent picked -- decided from the recomputed live state
+    # before any End is awaited. RULE: when a probe replaces one double, list the doubles that
+    # remain and check whether the report is still quoting one of them. A fixture gets more real
+    # in the place under review and stays exactly as fake everywhere else.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional
   - id: HFR-181
     name: codex End reports ok/ended when the canonical stop never interrupted
@@ -2917,6 +2927,14 @@ scenarios:
     # about substitution applies FIRST to the round that states it. Before writing the lesson
     # down, apply it once more to the fix you just made and check whether the layer you
     # stopped at is production's entry point or merely the next one inward.
+    # Round 25 answers that check for round 24 and the answer was "merely the next one inward":
+    # emit_result_message is the backend's own emitter, but production does not call it with a
+    # context the caller built -- ClaudeAgent._receive_messages pops the FIFO-matched pending
+    # request and adopts its Turn onto the receiver's OLDER context on the same terminal frame
+    # it then emits, and round 24 performed that adoption by hand. The probe now feeds one
+    # result frame to a real ClaudeAgent's real receiver and substitutes only the SDK stream and
+    # the IM surface, which are the two ends of the process. RULE: the boundary to stop at is
+    # the one where the next thing inward is another PROCESS, not another function.
     test: tests/test_run_terminal_truth_evidence_probes.py::test_participating_run_attribution_is_resolved_per_turn_not_per_session
   - id: HFR-198
     name: a cited pytest node id must name a function pytest collects
@@ -2935,6 +2953,16 @@ scenarios:
     # otherwise, so a row citing it advertises coverage that never runs. Every case is
     # checked against this repo's real pytest, with a control class that has a local
     # base and no constructor, so the rule cannot degenerate into "any subclass".
+    # Round 25 fixes the ORDER of that lookup, which rounds 20 and 22 both left depth-first.
+    # getattr reads the C3 linearization; a left-first walk to the bottom answers a different
+    # class as soon as two bases share an ancestor, and it is wrong in BOTH directions --
+    # TestMroOptOut is accepted while this repo's pytest silently collects nothing from it, and
+    # TestMroOptIn is rejected while pytest collects it. _resolved_test_flag now linearizes;
+    # _defines_constructor deliberately does not, because hasinit/hasnew ask whether ANY
+    # ancestor supplies the attribute and an existential cannot depend on order. RULE: mirroring
+    # a runtime lookup means mirroring its ORDER, unless the question you ask of it is
+    # order-free -- and say which of the two it is at every site, or the next round copies the
+    # fix onto a predicate that did not need it.
     test: tests/test_run_terminal_truth_matrix.py::test_a_node_id_citation_must_name_something_pytest_collects
   - id: HFR-199
     name: no step of the durable reservation path settles the Run

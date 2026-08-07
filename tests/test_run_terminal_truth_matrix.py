@@ -427,9 +427,73 @@ def _test_flag(body: list[ast.stmt], attribute_of: str | None = None) -> bool | 
     return None
 
 
-def _resolved_test_flag(
+def _c3_merge(sequences: list[list[tuple[ast.ClassDef, tuple]]]):
+    """Python's own linearization merge, over ``(class, body)`` pairs.
+
+    Round 25. Written out rather than approximated because the approximation is
+    the finding: a depth-first walk of the bases answers the FIRST flag it
+    reaches, and C3 answers the first flag in linearized order, which is a
+    different class the moment two bases share an ancestor.
+
+    ``None`` means no consistent linearization exists -- the case where Python
+    itself raises ``TypeError`` at class creation, so the module cannot import
+    and pytest collects nothing from it at all.
+
+    Classes are compared by the identity of their ``ClassDef`` node, never by
+    ``(name, id(body))``: ``_base_class`` hands back a FRESH ``tuple(...)`` of
+    the module body on every call, so a body-keyed comparison makes one class
+    look like two and the merge silently degenerates into the depth-first order
+    this function exists to replace. The ``ClassDef`` objects are stable because
+    ``_module_body_of`` caches its parse.
+    """
+    pending = [list(seq) for seq in sequences if seq]
+    order: list[tuple[ast.ClassDef, tuple]] = []
+    while pending:
+        for candidate in pending:
+            head = candidate[0]
+            if not any(id(cls) == id(head[0]) for seq in pending for cls, _ in seq[1:]):
+                break
+        else:
+            return None
+        order.append(head)
+        for seq in pending:
+            if id(seq[0][0]) == id(head[0]):
+                del seq[0]
+        pending = [seq for seq in pending if seq]
+    return order
+
+
+def _linearized_ancestry(
     node: ast.ClassDef, module_body, seen: frozenset = frozenset()
-) -> bool | None:
+):
+    """This class and its readable ancestors, in Python's attribute-lookup order.
+
+    Bases that ``_base_class`` cannot read are skipped here and refused out
+    loud by ``_collectible_class`` -- the round-22 division of labour, kept.
+    ``None`` means the order is undecidable (a cycle, or an inconsistent
+    hierarchy), which is not a shape that survives import.
+    """
+    key = id(node)
+    if key in seen:
+        return None
+    parents = [
+        resolved
+        for resolved in (_base_class(base, module_body) for base in node.bases)
+        if resolved is not None
+    ]
+    lines = []
+    for parent, parent_body in parents:
+        line = _linearized_ancestry(parent, parent_body, seen | {key})
+        if line is None:
+            return None
+        lines.append(line)
+    merged = _c3_merge(lines + [list(parents)])
+    if merged is None:
+        return None
+    return [(node, module_body)] + merged
+
+
+def _resolved_test_flag(node: ast.ClassDef, module_body) -> bool | None:
     """``__test__`` as pytest would READ it -- through the bases, not off the body.
 
     Round 20. ``_test_flag`` reads one class body, and pytest reads an
@@ -451,22 +515,33 @@ def _resolved_test_flag(
     are followed across modules by ``_base_class``, and a base that is still
     unreadable is refused out loud by ``_collectible_class`` instead of being
     reasoned past here.
+
+    Round 25 fixes the ORDER, which rounds 20 and 22 both got wrong in the same
+    way: they walked the bases depth-first and returned the first flag found,
+    while ``getattr`` reads the C3 linearization. The two disagree exactly when
+    two bases share an ancestor -- ``Left(Common)`` and ``Right(Common)`` with
+    the flag set on ``Common`` and overridden on ``Right`` -- because the walk
+    reaches ``Common`` through ``Left`` and never examines ``Right`` at all.
+    Both directions of that disagreement were checked against this repo's
+    pytest, not reasoned: the depth-first answer accepts a class pytest drops
+    in silence, and rejects one pytest collects.
+
+    ``_defines_constructor`` deliberately keeps its depth-first walk. It mirrors
+    ``hasinit``/``hasnew``, which ask whether ANY class in the MRO supplies the
+    attribute -- an existential over the same set of ancestors, so order cannot
+    change the answer and a linearization would buy nothing. The distinction is
+    written down here because "fix the sibling too" is the tempting
+    over-correction, and round 21 already recorded how a justification travels
+    onto a shape it does not fit.
     """
 
-    own = _test_flag(node.body)
-    if own is not None:
-        return own
-    for base in node.bases:
-        resolved = _base_class(base, module_body)
-        if resolved is None:
-            continue
-        parent, parent_body = resolved
-        key = (id(parent_body), parent.name)
-        if key in seen:
-            continue
-        inherited = _resolved_test_flag(parent, parent_body, seen | {key})
-        if inherited is not None:
-            return inherited
+    line = _linearized_ancestry(node, module_body)
+    if line is None:
+        return None
+    for cls, _body in line:
+        own = _test_flag(cls.body)
+        if own is not None:
+            return own
     return None
 
 
@@ -1551,6 +1626,18 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "class TestOverridesBase(MutedBase):\n"
         "    __test__ = True\n"
         "    def test_case(self): ...\n"
+        "class MroLeft(OptedInBase):\n"
+        "    pass\n"
+        "class MroRight(OptedInBase):\n"
+        "    __test__ = False\n"
+        "class TestMroOptOut(MroLeft, MroRight):\n"
+        "    def test_case(self): ...\n"
+        "class MroLeftMuted(MutedBase):\n"
+        "    pass\n"
+        "class MroRightIn(MutedBase):\n"
+        "    __test__ = True\n"
+        "class TestMroOptIn(MroLeftMuted, MroRightIn):\n"
+        "    def test_case(self): ...\n"
         "class CtorBase:\n"
         "    def __init__(self): ...\n"
         "class TestInheritedCtor(CtorBase):\n"
@@ -1693,6 +1780,23 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         ):
             _assert_node_exists(f"{rel}::{inherited_out}::test_case")
 
+    # Round 25: the ORDER the inherited flag is read in, which round 20 left
+    # depth-first and round 22 carried across module boundaries unexamined.
+    # ``getattr`` reads the C3 linearization, and the walk reads the bases
+    # left-first to the bottom, so the two disagree the moment two bases share
+    # an ancestor -- and they disagree in BOTH directions, which is why both are
+    # pinned. ``TestMroOptOut`` reaches ``__test__ = True`` through ``MroLeft``
+    # while Python resolves ``MroRight``'s ``False`` first, and pytest collects
+    # nothing from it -- silently, no warning. ``TestMroOptIn`` is the mirror:
+    # the walk finds ``MutedBase``'s ``False`` through the left base and would
+    # drop a class this repo's pytest does collect, which is the loud direction
+    # but still wrong, and it is the case a one-sided fix would leave standing.
+    _assert_node_exists(f"{rel}::TestMroOptIn::test_case")
+    with pytest.raises(
+        AssertionError, match="pytest does not collect class 'TestMroOptOut'"
+    ):
+        _assert_node_exists(f"{rel}::TestMroOptOut::test_case")
+
     # Round 21: the CONSTRUCTOR reached through a base, which is round 20's
     # finding one attribute over and was left standing by the commit that fixed
     # the flag. pytest refuses a ``Test*`` class that merely inherits
@@ -1733,6 +1837,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "FlaggedIn::test_case",
         "InheritedFlagIn::test_case",
         "TestOverridesBase::test_case",
+        "TestMroOptIn::test_case",
         "TestPlainBase::test_case",
     }, discovered
     for absent in (
@@ -1742,6 +1847,7 @@ def test_a_node_id_citation_must_name_something_pytest_collects(tmp_path, monkey
         "OptOutTests::test_case",
         "TestInheritedOptOut::test_case",
         "TestInheritedTwoDeep::test_case",
+        "TestMroOptOut::test_case",
         "TestFlaggedCtor::test_case",
         "TestInheritedCtor::test_case",
         "TestInheritedCtorTwoDeep::test_case",

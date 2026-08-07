@@ -310,6 +310,20 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     retraction can overshoot: round 20 replaced a false sufficient condition
     with a false NECESSARY one, and three rounds then went looking for a
     contender the defect never needed.
+
+    Round 25 makes the OTHER half real, and it is round 23's own correction
+    read back onto what round 23 left standing. Rounds 21-23 kept moving the
+    parked caller closer to production and left End as an ``_AsyncFlag``, then
+    reported that End's payload as production's answer -- the substituted thing
+    quoted as evidence. It is not: ``end_runtime_session`` reaches
+    ``cleanup_session`` with no ``runtime_lock_held``, so real End re-acquires
+    the generation lock this resolver is holding and gets nowhere while the
+    window is open. So the probe now runs that real ``cleanup_session`` against
+    that real parked resolver and watches it fail to reach the locked body,
+    and the ``ended`` payload is demoted to what it always was, a statement
+    about the ROUTE ``end_running_agent`` chose -- which is decided from the
+    live state it recomputes, before any End is awaited, and is therefore
+    production's own regardless of what the End then does.
     """
     # The race, read off production instead of assumed. ``mark_session_active``
     # is what fills ``claude_active_sessions``; it is called only after
@@ -562,6 +576,37 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
             base_session_id="b1",
         )
 
+        # Round 25, and it is the half the staged End could not show. The
+        # ``_AsyncFlag`` above answers instantly; production's End does not
+        # stop at ``end_runtime_session``. It falls through to
+        # ``_cleanup_runtime_session`` with no ``runtime_lock_held``, which
+        # resolves ``cleanup_session``, which re-acquires the very generation
+        # lock the parked resolver is still holding. So the real teardown is
+        # run HERE, against that same parked resolver, on the handler that
+        # holds the lock -- no double, no staging -- and the observation is
+        # that it does not get through.
+        #
+        # What is observed is ARRIVAL at the locked body, not completion. The
+        # two differ, and only the first is about the lock: a teardown that got
+        # through and then suspended on something inside itself would read as
+        # "not done" too, and would be a different system. Everything up to and
+        # including the lock is real; the body beyond it is run for real
+        # further down, on the fixture that owns the marking registries.
+        reached_locked_body = asyncio.Event()
+
+        async def _record_arrival(*args, **kwargs):
+            reached_locked_body.set()
+
+        handler._cleanup_session_locked = _record_arrival
+        real_teardown = asyncio.create_task(handler.cleanup_session("slack_a:/w"))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        real_teardown_blocked = not real_teardown.done()
+        passed_the_lock = reached_locked_body.is_set()
+        real_teardown.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await real_teardown
+
         # Retire the parked turn. Letting it resume would run it through the
         # rest of ``handle_message`` -- the activity wait, the query, the
         # receiver task -- none of which this probe is about, and all of which
@@ -571,12 +616,12 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
             await turn
         return (
             reached_control_request, parked, unstamped, retained,
-            live_state, result,
+            live_state, result, real_teardown_blocked, passed_the_lock,
         )
 
     (
         reached_control_request, parked, unstamped, retained,
-        live_state, result,
+        live_state, result, real_teardown_blocked, passed_the_lock,
     ) = asyncio.run(_drive_the_interleave())
     assert reached_control_request, (
         "the warm-reuse path never reached the cached client's control "
@@ -607,11 +652,59 @@ def test_end_tears_down_a_live_claude_turn_and_reclassifies_it_as_intentional():
     # right now -- and the probe cannot see it.
     assert live_state == "idle"
 
-    assert result["ok"] is True and result["action"] == "ended"
-    # Consequence 1. The canonical stop -- the ONLY path that emits a
-    # ``stopped`` settlement -- was skipped entirely.
+    # Consequence 1, and round 25 narrows what this interleaving is read as
+    # showing. The claim it demonstrates is the ROUTE: ``end_running_agent``
+    # recomputes the live state server-side and branches on it BEFORE it awaits
+    # any End, so the canonical stop -- the ONLY path that emits a ``stopped``
+    # settlement -- being skipped is production's own decision on production's
+    # own reading, and no stub can have supplied it.
     assert controller.command_handler.handle_stop.called is False
     assert end_runtime_session.called is True
+    # What the route then produces is the DOUBLE's value, and rounds 23 and 24
+    # reported it as production's; the sentence "end returns ended while the
+    # turn is parked" is false and is retracted here. Real End does not return
+    # at this moment at all, which is asserted below rather than argued. The
+    # payload is still checked, because the shape is what the caller turns into
+    # a settlement -- as a fact about the route, not about the runtime.
+    assert result["ok"] is True and result["action"] == "ended", (
+        "the End route no longer reports the payload shape the caller "
+        "translates into a settlement; reread the route, not the outcome"
+    )
+
+    # Consequence 1b, round 25: what production's End actually does in this
+    # window, driven. Two things establish it. First the reachability, off the
+    # source: End's own hop passes no ``runtime_lock_held``, so it takes the
+    # lock-acquiring ``cleanup_session`` branch of the dispatch below and not
+    # the already-locked one -- if it ever starts passing the flag, this whole
+    # observation changes and should fail here.
+    _end_hop = next(
+        node
+        for node in ast.walk(
+            ast.parse(textwrap.dedent(inspect.getsource(ClaudeAgent.end_runtime_session)))
+        )
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_cleanup_runtime_session"
+    )
+    assert not any(kw.arg == "runtime_lock_held" for kw in _end_hop.keywords), (
+        "``end_runtime_session`` now tells the cleanup chain the runtime lock "
+        "is already held, so it no longer re-acquires the generation lock and "
+        "the blocking observation below is no longer production's behaviour"
+    )
+    # And then the behaviour itself: the real ``cleanup_session``, on the real
+    # handler, while that resolver is parked.
+    assert real_teardown_blocked, (
+        "the real teardown ran to completion while an accepted turn was still "
+        "suspended inside session resolution holding the generation lock. "
+        "Either ``cleanup_session`` stopped taking that lock or the resolver "
+        "stopped holding it across its awaits -- either way this observation "
+        "and the End half of PR7R-F1's story need rereading"
+    )
+    assert not passed_the_lock, (
+        "the real teardown reached ``_cleanup_session_locked`` while the "
+        "resolver was parked, so it was never blocked AT THE LOCK -- whatever "
+        "the reading above measured, it is not the generation lock"
+    )
 
     # Consequence 2, in two parts: the chain End takes to the marking code, and
     # then the marking code itself, run for real.
@@ -2102,6 +2195,7 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
         AGENT_RUNTIME_TURN_KEY,
         AGENT_RUNTIME_TURN_TOKEN,
         AGENT_TURN_TOKEN,
+        AgentRequest,
     )
     from modules.agents.claude_agent import ClaudeAgent
 
@@ -2425,14 +2519,31 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     #         -> real ``ConsolidatedMessageDispatcher.emit_agent_message``
     #           -> real ``SQLiteBackgroundTaskStore``  (the rows built above).
     #
-    # What is substituted is the IM SURFACE and nothing else: a client that
+    # Round 25 replaces the FIRST arrow of that chain, which round 24 still
+    # drew by hand: it called ``_adopt_pending_turn_token`` itself and then
+    # called the backend's emit on the context it had just fixed up. Adoption
+    # is not a step the test gets to take -- in production it is the RECEIVER
+    # that pops the FIFO-matched pending request and adopts its token, on the
+    # same terminal frame that then emits, and a receiver that stopped doing
+    # either would have left round 24's probe green. So the frame now enters
+    # where the backend's own input enters:
+    #
+    #   real ``ClaudeAgent._receive_messages`` on a real ``ClaudeAgent``,
+    #     fed one terminal ``ResultMessage`` off a fake SDK stream
+    #       -> real ``_pop_pending_request`` + real ``_adopt_pending_turn_token``
+    #         -> real ``emit_result_message`` -> real dispatcher -> real store.
+    #
+    # What is substituted is the SDK STREAM and the IM SURFACE, and nothing
+    # else: an async iterator that yields one result frame, a client that
     # accepts a send and returns a platform message id, and the settings lookup
-    # that decides visibility. Those are the boundary this unit is not about.
-    # Everything that carries or consults Turn identity is real, including the
-    # runtime gate -- the ``AgentService`` that admitted the turn is the same
-    # object the dispatcher consults through ``emit_matches_runtime_turn`` and
-    # releases at terminal delivery, so a stale emit context would be DROPPED
-    # here rather than recorded.
+    # that decides visibility. Those two are the process boundaries on either
+    # end of this unit -- the CLI on one side, the platform on the other -- and
+    # there is no further layer to retreat to. Everything that carries or
+    # consults Turn identity is real, including the runtime gate: the
+    # ``AgentService`` that admitted the turn is the same object the dispatcher
+    # consults through ``emit_matches_runtime_turn`` and releases at terminal
+    # delivery, so a stale emit context would be DROPPED here rather than
+    # recorded.
     #
     # A derivation is proven by its far end: the ``agent_runs`` row for
     # ``run-im1`` must reach ``succeeded`` carrying this emit's text and the
@@ -2440,24 +2551,47 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     # token that travelled the chain.
     from modules.im import MessageContext
 
+    class _ProbeResultFrame:
+        """One terminal frame, shaped the way the SDK shapes a success."""
+
+        subtype = "success"
+        result = "final answer"
+        duration_ms = 1
+
+    class _ProbeSDKStream:
+        """The CLI boundary: an async iterator that yields that one frame."""
+
+        def receive_messages(self):
+            async def _iterate():
+                yield _ProbeResultFrame()
+
+            return _iterate()
+
     class _ProbeIMClient:
         """The telegram surface: accepts a send, returns a platform id."""
 
+        formatter = None
+
         def __init__(self):
             self.sent: list[str] = []
+            # The id this surface handed back, kept because the receiver
+            # swallows the emit's return value the way production does.
+            self.delivered: str | None = None
 
         def should_use_thread_for_reply(self):
             return False
 
         async def send_message(self, context, text, parse_mode=None, reply_to=None):
             self.sent.append(text)
-            return "tg-msg-7"
+            self.delivered = "tg-msg-7"
+            return self.delivered
 
         async def send_message_with_buttons(
             self, context, text, keyboard, parse_mode=None
         ):
             self.sent.append(text)
-            return "tg-msg-7"
+            self.delivered = "tg-msg-7"
+            return self.delivered
 
     class _ProbeSettings:
         def _canonicalize_message_type(self, message_type):
@@ -2471,14 +2605,24 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
 
         def __init__(self, session_turns):
             self.config = types.SimpleNamespace(
-                platform="telegram", reply_enhancements=False
+                platform="telegram", reply_enhancements=False, show_duration=False
             )
             self.session_handler = types.SimpleNamespace(
-                finalize_scheduled_delivery=lambda context, message_id: None
+                finalize_scheduled_delivery=lambda context, message_id: None,
+                mark_session_idle=lambda composite_key: None,
+                touch_session_activity=lambda composite_key: None,
             )
             self.session_turns = session_turns
             self.agent_service = None
             self.im_client = _ProbeIMClient()
+            # What ``ClaudeAgent.__init__`` reads for itself.
+            self.settings_manager = types.SimpleNamespace(sessions=None)
+            self.session_manager = types.SimpleNamespace()
+            self.receiver_tasks = {}
+            self.claude_sessions = {}
+            self.claude_client = types.SimpleNamespace(
+                _is_skip_message=lambda message: False
+            )
 
         def _get_settings_key(self, context):
             return context.channel_id
@@ -2505,9 +2649,14 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     # real bound method is that forward, not a reimplementation of it.
     emit_controller.emit_agent_message = emit_dispatcher.emit_agent_message
 
-    emit_agent = object.__new__(ClaudeAgent)
-    emit_agent.controller = emit_controller
-    emit_agent.config = types.SimpleNamespace(show_duration=False)
+    # The real constructor, because the receiver reads state the constructor
+    # builds. Only the two frame-shape helpers are stubbed: this fake stream
+    # yields one object rather than an SDK ``ResultMessage``, and nothing here
+    # is about how a native session id is captured.
+    emit_agent = ClaudeAgent(emit_controller)
+    emit_agent._detect_message_type = lambda message: "result"
+    emit_agent._maybe_capture_session_id = lambda *args, **kwargs: None
+    emit_agent._reserved_native_session_id = lambda *args, **kwargs: None
 
     import core.message_dispatcher as message_dispatcher_module
 
@@ -2522,22 +2671,61 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
         "running this again"
     )
 
+    class _GateSpy:
+        """Forwards to the real gate and records what it answered, when asked.
+
+        Not a stub: every call is delegated, and the recorded answer IS the
+        real one. It exists because the gate is consulted from INSIDE the emit
+        now, so there is no moment outside the drive at which the question can
+        be asked and still get the live answer.
+        """
+
+        def __init__(self, service):
+            self._service = service
+            self.asked: list[tuple[dict, bool]] = []
+
+        def emit_matches_runtime_turn(self, context):
+            answer = self._service.emit_matches_runtime_turn(context)
+            self.asked.append((dict(context.platform_specific or {}), answer))
+            return answer
+
+        def __getattr__(self, name):
+            return getattr(self._service, name)
+
     async def _drive_im_turn():
         # One event loop, one turn: the gate the admission takes is the gate the
         # terminal emit releases, which is only true if both halves run here.
         service, admitted = _admission_service()
-        emit_controller.agent_service = service
-        request = _im_request("scheduled prompt", runtime_key="ses-im:/w")
+        gate_spy = _GateSpy(service)
+        emit_controller.agent_service = gate_spy
+        # A REAL ``AgentRequest`` rather than this module's ``_im_request``
+        # namespace, because the receiver hands the matched request straight to
+        # ``emit_result_message``, which reads the turn output off it. Same
+        # direct-IM shape: no Workbench turn token anywhere on its context.
+        request = AgentRequest(
+            context=MessageContext(
+                user_id="u-im",
+                channel_id="tg-1",
+                platform="telegram",
+                platform_specific={},
+            ),
+            message="scheduled prompt",
+            user_message="scheduled prompt",
+            working_path="/w",
+            base_session_id="ses-im",
+            composite_session_id="ses-im:/w",
+            session_key="telegram::tg-1",
+        )
         # The durable lane's own identifier, arriving the way a Harness-started
         # IM turn arrives: bound at claim time, before admission ever sees it.
         request.context.platform_specific[AGENT_TURN_TOKEN] = "turn-im"
         await asyncio.wait_for(service.handle_message("claude", request), timeout=5)
 
-        # claude's emit context is reused across turns, so it arrives carrying
-        # the PREVIOUS turn's attribution -- here the Workbench lane's
-        # ``turn-a`` and its two Runs. Adoption is production's step for making
-        # this turn's emit resolve to this turn's Run, and it is run, not
-        # simulated.
+        # claude's receiver context is reused across turns, so it arrives
+        # carrying the PREVIOUS turn's attribution -- here the Workbench lane's
+        # ``turn-a`` and its two Runs. This is the context the receiver was
+        # started with and the one it will hand to the emit; nothing below
+        # touches it again.
         emit_context = MessageContext(
             user_id="u-im",
             channel_id="tg-1",
@@ -2547,41 +2735,37 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
                 "accepted_agent_run_ids": ["run-a1", "run-a2"],
             },
         )
-        adopt(emit_context, types.SimpleNamespace(context=request.context))
-        # The emit is the CURRENT runtime turn as far as the real gate is
-        # concerned -- so the drop-stale-emit branch above the recorder is
-        # passed on production's own terms rather than by defaulting open.
-        # ``emit_matches_runtime_turn`` FALLS OPEN when either runtime field is
-        # absent, so "it returned True" is worth nothing on its own -- an
-        # adoption that dropped the runtime token would score the same True by
-        # skipping the gate entirely. Both fields are therefore asserted present
-        # first, which is what forces the answer below to be a real gate lookup.
-        gated = {
-            key: emit_context.platform_specific.get(key)
-            for key in (AGENT_RUNTIME_TURN_KEY, AGENT_RUNTIME_TURN_TOKEN)
-        }
-        matched = service.emit_matches_runtime_turn(emit_context)
+        # The turn admission just accepted is the pending request the receiver
+        # will FIFO-match this frame to. Queuing it is the only wiring here;
+        # the selection and the adoption are the receiver's own.
+        emit_agent._pending_requests["ses-im:/w"] = [request]
+        emit_agent.claude_sessions["ses-im:/w"] = _ProbeSDKStream()
 
         message_dispatcher_module.SQLiteBackgroundTaskStore = lambda: _real_store(
             tmp_path / "state.sqlite"
         )
         try:
-            delivered_id = await asyncio.wait_for(
-                emit_agent.emit_result_message(
-                    emit_context, "final answer", subtype="success"
+            await asyncio.wait_for(
+                emit_agent._receive_messages(
+                    emit_agent.claude_sessions["ses-im:/w"],
+                    "ses-im",
+                    "/w",
+                    emit_context,
+                    composite_key="ses-im:/w",
                 ),
                 timeout=5,
             )
+            delivered_id = emit_controller.im_client.delivered
         finally:
             message_dispatcher_module.SQLiteBackgroundTaskStore = _real_store
         # ...and the terminal emit RELEASED that gate, which is the dispatcher's
         # own end-of-turn step. A probe that stopped short of the public path
         # could not observe this at all.
         released = not service.emit_matches_runtime_turn(emit_context)
-        return admitted, emit_context, gated, matched, delivered_id, released
+        return admitted, emit_context, gate_spy.asked, delivered_id, released
 
     (
-        admitted, emit_context, gated, matched, delivered_id, released,
+        admitted, emit_context, gate_asked, delivered_id, released,
     ) = asyncio.run(_drive_im_turn())
 
     # Admission preserved the Turn's identity rather than minting over it. This
@@ -2595,12 +2779,27 @@ def test_participating_run_attribution_is_resolved_per_turn_not_per_session(tmp_
     # is what makes the settlement below evidence for the derivation rather than
     # for a list the test smuggled in.
     assert _owned_agent_run_ids(emit_context.platform_specific) == []
-    assert all(gated.values()), (
-        "adoption did not carry both runtime-gate fields onto the emit context, "
-        "so ``emit_matches_runtime_turn`` below took its fall-open branch and "
-        "the gate was never actually consulted: " + repr(gated)
+    # The gate was consulted DURING the emit, and the answer recorded here is
+    # the real one. ``emit_matches_runtime_turn`` FALLS OPEN when either runtime
+    # field is absent, so "it answered True" is worth nothing on its own -- a
+    # receiver whose adoption dropped the runtime token would score the same
+    # True by skipping the gate entirely. Both fields are therefore checked on
+    # the payload AS ASKED, which is what makes the answer a real gate lookup.
+    assert gate_asked, (
+        "the dispatcher never asked the runtime gate about this emit, so the "
+        "drop-stale-emit branch above the recorder was not exercised at all"
     )
-    assert matched, "the real runtime gate did not recognise the adopted context"
+    _asked_payload, _asked_answer = gate_asked[-1]
+    assert all(
+        _asked_payload.get(key)
+        for key in (AGENT_RUNTIME_TURN_KEY, AGENT_RUNTIME_TURN_TOKEN)
+    ), (
+        "the receiver's adoption did not carry both runtime-gate fields onto "
+        "the emit context, so ``emit_matches_runtime_turn`` took its fall-open "
+        "branch and the gate was never actually consulted: "
+        + repr(_asked_payload)
+    )
+    assert _asked_answer, "the real runtime gate did not recognise the adopted context"
     assert released, "the terminal emit did not release the runtime turn"
     # The output really left the backend and reached the platform, and the id
     # below is the PLATFORM's answer rather than a string this test chose.
