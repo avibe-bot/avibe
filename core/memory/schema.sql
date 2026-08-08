@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
 CREATE INDEX IF NOT EXISTS ix_memory_capture_due
     ON memory_capture_queue (epoch, state, next_retry_at);
 
+CREATE INDEX IF NOT EXISTS ix_memory_capture_session_flush
+    ON memory_capture_queue (
+        epoch, provider_session_ref, flush_generation, state, flush_observation
+    );
+
 -- Version 2 coordination state for the later session flush coordinator.
 CREATE TABLE IF NOT EXISTS memory_session_flush_state (
     provider_session_ref TEXT PRIMARY KEY,

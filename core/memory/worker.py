@@ -206,7 +206,7 @@ class MemoryWorker:
                     await self._open_processing_fault()
                     break
                 if half_open:
-                    if isinstance(result, FlushSucceeded):
+                    if isinstance(result, FlushSucceeded) or half_open_flush_recovered:
                         await self._close_processing_fault()
                     elif _opens_breaker(result):
                         await self._reopen_processing_fault()

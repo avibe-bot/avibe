@@ -113,6 +113,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "memory_flush_settlements",
         }.issubset(tables)
         assert "ix_memory_capture_due" in indexes
+        assert "ix_memory_capture_session_flush" in indexes
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
@@ -326,6 +327,11 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     unknown_state = store.get_session_flush_state(unknown_row.provider_session_ref)
     assert unknown_state is not None
     assert unknown_state.flush_state == "manual_required"
+    unknown_settlement = store.list_flush_settlements(unknown_row.provider_session_ref)[0]
+    assert (unknown_settlement.watermark_after, unknown_settlement.confirmed_watermark_ms) == (
+        unknown_row.provider_timestamp_ms,
+        None,
+    )
 
 
 def test_extracted_add_records_generation_settlement_and_advances_watermark(tmp_path: Path) -> None:
@@ -530,6 +536,36 @@ def test_enqueue_admits_next_generation_while_claims_wait_for_flush(tmp_path: Pa
     claimed = store.claim_due(lease_owner="after-flush", now="2026-01-01T00:00:05.000Z")
     assert claimed is not None
     assert claimed.flush_generation == state.generation
+
+
+def test_flush_acquisition_moves_pending_rows_to_the_next_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _enqueue(store, "first-pending", occurred_at_ms=1_000)
+    second = _enqueue(store, "second-pending", occurred_at_ms=1_001)
+    assert first.row is not None
+    assert second.row is not None
+
+    claimed = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+    assert store.settle(
+        claimed,
+        Delivered(add_request_id="first-add"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+
+    token = _flush_claim(store, claimed.provider_session_ref)
+    pending = _row_for_source(store, "second-pending")
+    assert pending.flush_generation == token.generation + 1
+
+    assert store.record_flush_verdict(
+        token,
+        FlushSucceeded("flush", "extracted"),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    next_claim = store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:03.000Z")
+    assert next_claim is not None
+    assert next_claim.flush_generation == token.generation + 1
 
 
 def test_due_rejected_generation_can_acquire_a_retry_token(tmp_path: Path) -> None:

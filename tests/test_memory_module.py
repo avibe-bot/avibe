@@ -736,6 +736,40 @@ async def test_retryable_flush_rejection_is_backed_off_without_starving_other_se
     assert bad_state.flush_state == "due"
     assert bad_state.next_attempt_at == "2026-01-01T00:00:30.000Z"
     assert provider.flushes == [rows[0].session_id, rows[1].session_id]
+    status = await module.status()
+    assert (status.state, status.error) == ("degraded", "memory_processing_failed")
+
+
+async def test_half_open_due_retry_closes_breaker_before_unrelated_permanent_rejection(
+    tmp_path: Path,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="bad", session="bad")) == CaptureAccepted()
+    assert await module.capture(_request(source="good", session="good")) == CaptureAccepted()
+    provider.flush_results.extend(
+        [
+            FlushRejected("first", "INTERNAL_ERROR", server_fault=True),
+            FlushSucceeded("retry", "extracted"),
+            FlushRejected(
+                "permanent",
+                "INVALID_INPUT",
+                server_fault=False,
+                retryable=False,
+            ),
+        ]
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: current,
+    )
+
+    assert await worker.drain(max_rows=2) == 1
+    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
+    assert await worker.drain(max_rows=2) == 1
+    assert store.ensure_meta().processing_fault_since is None
 
 
 async def test_exhausted_flush_retries_keep_status_degraded(tmp_path: Path) -> None:
@@ -1267,8 +1301,8 @@ async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_
         (
             FlushRejected("rejected", "INVALID_INPUT", server_fault=False),
             "rejected",
-            "ready",
-            None,
+            "degraded",
+            "memory_processing_failed",
         ),
         (
             FlushUnknown("timeout"),

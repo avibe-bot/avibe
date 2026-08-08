@@ -1018,6 +1018,20 @@ class MemoryStore:
             )
             if not result.rowcount:
                 return None
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET flush_generation = ?
+                WHERE epoch = ? AND provider_session_ref = ?
+                  AND state = 'pending' AND flush_generation <= ?
+                """,
+                (
+                    state.generation + 1,
+                    meta.epoch,
+                    provider_session_ref.serialize(),
+                    state.generation,
+                ),
+            )
             fence_epoch = state.fence_epoch + 1
             operation_id = _flush_operation_id(
                 provider_session_ref,
@@ -1198,7 +1212,11 @@ class MemoryStore:
                     request_id=_bounded_opaque_text(request_id),
                     error_code=_bounded_opaque_text(error_code),
                     watermark_before=state.watermark,
-                    watermark_after=watermark if observation == "succeeded" else state.watermark,
+                    watermark_after=(
+                        watermark
+                        if observation in {"succeeded", "unknown"}
+                        else state.watermark
+                    ),
                     confirmed_watermark_ms=watermark if observation == "succeeded" else None,
                     flush_state=(
                         "settled"

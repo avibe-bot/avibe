@@ -355,6 +355,10 @@ class MemoryModule:
         try:
             meta = await self._store_call(self._store.get_meta)
             stats = await self._store_call(self._store.queue_stats)
+            session_states = await self._store_call(
+                self._store.list_session_flush_states,
+                epoch=meta.epoch if meta is not None else None,
+            )
             manual_required_fence = await self._store_call(
                 self._store.has_manual_required_fence
             )
@@ -421,6 +425,13 @@ class MemoryModule:
             )
         if active_error is not None:
             return await self._status("degraded", meta=meta, stats=stats, error=active_error)
+        if any(state.flush_state == "due" for state in session_states):
+            return await self._status(
+                "degraded",
+                meta=meta,
+                stats=stats,
+                error="memory_processing_failed",
+            )
         if stats.pending or stats.processing or stats.awaiting_receipt:
             return await self._status("syncing", meta=meta, stats=stats, error=None)
         return await self._status("ready", meta=meta, stats=stats, error=None)
