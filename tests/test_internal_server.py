@@ -23,7 +23,7 @@ import tempfile
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import httpx
 import pytest
@@ -294,6 +294,74 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     return controller
+
+
+def test_memory_final_flush_delegates_identity_to_controller() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.final_flush_memory_cli_session = AsyncMock(
+        side_effect=lambda session_id, **_kwargs: session_id == "ses-memory"
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            present = await client.post(
+                "/internal/memory/final-flush",
+                json={"session_id": "ses-memory"},
+            )
+            absent = await client.post(
+                "/internal/memory/final-flush",
+                json={"session_id": "ses-absent"},
+            )
+        return present, absent
+
+    present, absent = asyncio.run(_exercise())
+
+    assert present.status_code == 200
+    assert present.json() == {"ok": True, "flushed": True}
+    assert absent.status_code == 200
+    assert absent.json() == {"ok": True, "flushed": False}
+    assert controller.final_flush_memory_cli_session.await_args_list == [
+        call("ses-memory", deadline_seconds=5.0),
+        call("ses-absent", deadline_seconds=5.0),
+    ]
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "extra": True},
+    ],
+)
+def test_memory_final_flush_rejects_invalid_payloads(payload: dict[str, object]) -> None:
+    controller = _build_controller_double()
+    controller.final_flush_memory_cli_session = AsyncMock(return_value=True)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/final-flush", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.final_flush_memory_cli_session.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------

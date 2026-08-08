@@ -245,6 +245,60 @@ def test_final_flush_memory_session_swallows_runtime_failure() -> None:
     assert len(controller.memory_runtime.final_flush_calls) == 1
 
 
+def test_final_flush_memory_cli_session_uses_trusted_stored_scope() -> None:
+    controller = _controller()
+    principal_id = "u-" + ("2" * 32)
+    controller._memory_scopes_by_session = {
+        "ses-workbench": (principal_id, PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    result = asyncio.run(
+        controller.final_flush_memory_cli_session(
+            "ses-workbench",
+            deadline_seconds=4.0,
+        )
+    )
+
+    assert result is True
+    assert controller.memory_runtime.final_flush_calls == [
+        {
+            "principal_id": principal_id,
+            "project_id": PROJECT,
+            "raw_session_id": "ses-workbench",
+            "deadline_seconds": 4.0,
+        }
+    ]
+
+
+def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
+    controller = _controller()
+    controller.memory_runtime.final_flush_error = RuntimeError("provider unavailable")
+    controller._memory_scopes_by_session = {
+        "ses-workbench": ("u-" + ("2" * 32), PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    result = asyncio.run(
+        controller.final_flush_memory_cli_session(
+            "ses-workbench",
+        )
+    )
+
+    assert result is False
+    assert len(controller.memory_runtime.final_flush_calls) == 1
+
+
+def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
+    controller = _controller()
+    controller._memory_scopes_by_session = {}
+
+    result = asyncio.run(controller.final_flush_memory_cli_session("ses-absent"))
+
+    assert result is False
+    assert controller.memory_runtime.final_flush_calls == []
+
+
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     controller = _controller()
     context = _context("avibe", user_id="local")

@@ -940,6 +940,39 @@ def create_app(
             return scope
         return None
 
+    @app.post("/internal/memory/final-flush")
+    async def _memory_final_flush(request: Request) -> Any:
+        """Flush one admitted Workbench session before terminal archive."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        session_id = payload["session_id"].strip()
+        final_flush = getattr(controller, "final_flush_memory_cli_session", None)
+        if not callable(final_flush):
+            return {"ok": True, "flushed": False}
+        try:
+            flushed = await final_flush(
+                session_id,
+                deadline_seconds=5.0,
+            )
+        except Exception:
+            logger.debug(
+                "internal Memory final flush failed for %s",
+                session_id,
+                exc_info=True,
+            )
+            flushed = False
+        return {"ok": True, "flushed": bool(flushed)}
+
     def _verified_memory_ui_user_key(request: Request) -> str | None:
         from core.memory.http_headers import (
             CALLER_SESSION_HEADER,

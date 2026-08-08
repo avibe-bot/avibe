@@ -73,6 +73,9 @@ export const SettingsMemoryPage: React.FC = () => {
     await loadStatus();
     await loadFailures();
   }, [loadFailures, loadStatus]);
+  const reloadRecoveryState = useCallback(async () => {
+    await Promise.all([loadProcessingRecord(), loadMaintenance()]);
+  }, [loadMaintenance, loadProcessingRecord]);
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
@@ -154,9 +157,11 @@ export const SettingsMemoryPage: React.FC = () => {
         void loadMaintenance();
         void loadSettings();
       } else {
+        await reloadRecoveryState();
         showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
       }
     } catch {
+      await reloadRecoveryState();
       showToast(t('memory.processingRecord.clearRecovery.actionFailed'), 'error');
     } finally {
       setRecoveryAction(null);

@@ -550,9 +550,8 @@ class CommandHandlers(BaseHandler):
                     return
             session_key = self._get_session_key(context)
             # ``/new`` is the IM lifecycle boundary with the same trusted raw
-            # anchor used by capture. Workbench archive has no equivalent
-            # persisted Memory identity, so it intentionally does not reuse this
-            # hook. A stalled or failed flush must never block the normal reset.
+            # anchor used by capture. A stalled or failed flush must never block
+            # the normal reset.
             if platform != "telegram" or not hasattr(im_client, "start_new_topic_session"):
                 await self._final_flush_for_new(context, memory_session_anchor)
             sessions = getattr(self.controller, "sessions", None)

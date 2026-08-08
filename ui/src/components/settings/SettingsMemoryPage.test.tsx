@@ -240,6 +240,77 @@ describe('SettingsMemoryPage Processing Record', () => {
     );
   });
 
+  it.each([
+    ['resume', 'resumeMemoryClear', 'non-success', {
+      status: 'ok',
+      data_exists: true,
+      clear_recovery: {
+        operation_id: 'clear-refreshed',
+        state: 'recovery_needed',
+        can_abort: false,
+      },
+    }],
+    ['abort', 'abortMemoryClear', 'rejection', {
+      status: 'ok',
+      data_exists: false,
+      clear_recovery: null,
+    }],
+  ] as const)(
+    'reloads recovery state before clearing the %s action after a %s',
+    async (action, method, outcome, refreshedMaintenance) => {
+      api.getMemoryFailures.mockResolvedValue({
+        status: 'ok',
+        items: [],
+        recovery: {
+          operation_id: 'clear-stale',
+          state: 'recovery_needed',
+          can_abort: true,
+        },
+      });
+      const user = userEvent.setup();
+      renderPage();
+      const actionButton = await screen.findByRole('button', {
+        name: `memory.processingRecord.clearRecovery.${action}`,
+      });
+      await waitFor(() => expect(api.getMemoryMaintenance).toHaveBeenCalledTimes(1));
+
+      let finishFailures: ((value: { status: 'ok'; items: []; recovery: null }) => void) | undefined;
+      let finishMaintenance: ((value: typeof refreshedMaintenance) => void) | undefined;
+      api.getMemoryFailures.mockReturnValueOnce(new Promise((resolve) => { finishFailures = resolve; }));
+      api.getMemoryMaintenance.mockReturnValueOnce(new Promise((resolve) => { finishMaintenance = resolve; }));
+      if (outcome === 'non-success') {
+        api[method].mockResolvedValueOnce({ status: 'failed', error: 'memory_clear_failed' });
+      } else {
+        api[method].mockRejectedValueOnce(new Error('transport failed'));
+      }
+
+      await user.click(actionButton);
+
+      await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(api.getMemoryMaintenance).toHaveBeenCalledTimes(2));
+      expect(api.getMemoryFailures).toHaveBeenCalledTimes(2);
+      expect((actionButton as HTMLButtonElement).disabled).toBe(true);
+      finishFailures?.({ status: 'ok', items: [], recovery: null });
+      finishMaintenance?.(refreshedMaintenance);
+
+      if (outcome === 'non-success') {
+        expect(await screen.findByText('clear-refreshed')).toBeTruthy();
+        expect((screen.getByRole('button', {
+          name: 'memory.processingRecord.clearRecovery.abort',
+        }) as HTMLButtonElement).disabled).toBe(true);
+      } else {
+        await waitFor(() => expect(screen.queryByText('clear-stale')).toBeNull());
+        expect(screen.queryByRole('button', {
+          name: 'memory.processingRecord.clearRecovery.abort',
+        })).toBeNull();
+      }
+
+      const reloadStatusOrder = api.getMemoryStatus.mock.invocationCallOrder[1];
+      const reloadFailuresOrder = api.getMemoryFailures.mock.invocationCallOrder[1];
+      expect(reloadStatusOrder).toBeLessThan(reloadFailuresOrder);
+    },
+  );
+
   it('refreshes and exposes recovery immediately after a failed clear', async () => {
     api.clearMemory.mockResolvedValue({
       status: 'failed',

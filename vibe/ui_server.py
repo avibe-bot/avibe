@@ -7078,6 +7078,21 @@ async def _archive_cancel_turn(session_id: str) -> None:
         logger.debug("archive: cancel in-flight turn failed for %s", session_id, exc_info=True)
 
 
+async def _archive_final_flush_memory(session_id: str) -> None:
+    """Await the controller's bounded Memory flush before terminal archive."""
+
+    from vibe import internal_client
+
+    try:
+        await internal_client.memory_final_flush(session_id)
+    except Exception:
+        logger.debug(
+            "archive: Memory final flush failed for %s",
+            session_id,
+            exc_info=True,
+        )
+
+
 async def _archive_release_vault_scopes(session_id: str, revoked_vault_scopes: list[dict[str, str]]) -> None:
     from vibe import api
 
@@ -7143,6 +7158,9 @@ async def _archive_publish_run_updates(
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
+    An admitted Workbench session gets one bounded, fail-open Memory final
+    flush before the first irreversible archive write.
+
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in
     ``archive_session``. Cancelling an in-flight chat turn lives in the controller
     process, so we fire it best-effort in the BACKGROUND after the commit — the
@@ -7150,9 +7168,22 @@ async def sessions_archive(session_id: str):
     writes into hidden history rather than re-surfacing the session.
     """
     from core.services import sessions as workbench_sessions_service
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+        return _reserved_session_response(
+            RESERVED_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
+    try:
+        with engine.connect() as conn:
+            existing_session = workbench_sessions_service.get_session(conn, session_id)
+    except LookupError as err:
+        return jsonify({"error": str(err)}), 404
+    if existing_session.get("status") != "archived":
+        await _archive_final_flush_memory(session_id)
     try:
         with engine.begin() as conn:
             session = workbench_sessions_service.archive_session(conn, session_id)

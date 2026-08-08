@@ -1586,6 +1586,58 @@ class Controller:
         if principal_id is None or project_id is None:
             return False
 
+        return await self._final_flush_memory_scope(
+            raw_session_id,
+            principal_id,
+            project_id,
+            deadline_seconds=deadline_seconds,
+        )
+
+    async def final_flush_memory_cli_session(
+        self,
+        raw_session_id: str,
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> bool:
+        """Best-effort final flush for a trusted Workbench session ID.
+
+        The controller owns the stored scope and resolves it here; callers must
+        not reconstruct one from a Workbench row or synthesize a
+        ``MessageContext``.
+        """
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            return False
+        scope = self.memory_scope_for_cli_session(raw_session_id)
+        if scope is None:
+            return False
+        return await self._final_flush_memory_scope(
+            raw_session_id,
+            scope[0],
+            scope[1],
+            deadline_seconds=deadline_seconds,
+        )
+
+    async def _final_flush_memory_scope(
+        self,
+        raw_session_id: str,
+        principal_id: str,
+        project_id: str,
+        *,
+        deadline_seconds: float,
+    ) -> bool:
+        """Call the Runtime with one already-admitted canonical scope."""
+
+        from core.memory.store import is_principal_id, is_project_id
+
+        if (
+            not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or not is_principal_id(principal_id)
+            or not is_project_id(project_id)
+        ):
+            return False
+
         runtime = getattr(self, "memory_runtime", None)
         final_flush = getattr(runtime, "final_flush", None)
         if not callable(final_flush):

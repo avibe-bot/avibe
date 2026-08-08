@@ -93,6 +93,117 @@ def test_hfr_283_archive_run_cancellations_wake_runtime_consumers(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("flush_fails", [False, True])
+def test_session_archive_awaits_memory_final_flush_before_mutation(
+    monkeypatch,
+    tmp_path,
+    flush_fails,
+):
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage import workbench_sessions_service
+    from core.services import sessions as sessions_service
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive me",
+        )["id"]
+
+    events: list[str] = []
+
+    async def _final_flush(actual_session_id: str):
+        assert actual_session_id == session_id
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        events.append("flush")
+        if flush_fails:
+            raise internal_client.InternalServerUnavailable("controller unavailable")
+        return {"status_code": 200, "body": {"ok": True, "flushed": True}}
+
+    original_archive = sessions_service.archive_session
+
+    def _archive(conn, actual_session_id):
+        events.append("archive")
+        return original_archive(conn, actual_session_id)
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(internal_client, "memory_final_flush", _final_flush)
+    monkeypatch.setattr(sessions_service, "archive_session", _archive)
+    monkeypatch.setattr(ui_server, "_archive_cancel_turn", _noop)
+
+    client = app.test_client()
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert events == ["flush", "archive"]
+    with engine.connect() as conn:
+        assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+
+
+@pytest.mark.parametrize("session_kind", ["missing", "reserved", "archived"])
+def test_session_archive_preflight_skips_memory_flush_for_ineligible_rows(
+    monkeypatch,
+    tmp_path,
+    session_kind,
+):
+    from unittest.mock import AsyncMock
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    session_id = "ses-missing"
+    with engine.begin() as conn:
+        if session_kind == "reserved":
+            session_id = WORKSPACE_NOTICE_SESSION_ID
+        elif session_kind == "archived":
+            project_dir = tmp_path / "project"
+            project_dir.mkdir()
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session_id = create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
+            archive_session(conn, session_id)
+
+    final_flush = AsyncMock()
+    monkeypatch.setattr(internal_client, "memory_final_flush", final_flush)
+    client = app.test_client()
+
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == {
+        "missing": 404,
+        "reserved": 403,
+        "archived": 200,
+    }[session_kind]
+    final_flush.assert_not_awaited()
+
+
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 
