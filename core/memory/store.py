@@ -193,6 +193,8 @@ class SettleResult:
     state: Literal["delivered", "pending", "dead"] | None = None
     #: Attempts consumed so far; only a MessageFailure spends one.
     attempts: int | None = None
+    #: True when the provider's add acknowledgement already completed extraction.
+    flush_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -399,12 +401,25 @@ class MemoryStore:
             if existing is not None:
                 duplicate = _queue_from_row(existing)
                 duplicate_ref = duplicate.provider_session_ref or _provider_ref_from_queue_row(duplicate)
-                state = self._ensure_session_state_in_connection(
-                    conn,
-                    duplicate_ref,
-                    now=now,
-                    first_unflushed_at=duplicate.created_at,
-                )
+                state_row = conn.execute(
+                    """
+                    SELECT generation FROM memory_session_flush_state
+                    WHERE provider_session_ref = ?
+                    """,
+                    (duplicate_ref.serialize(),),
+                ).fetchone()
+                if state_row is None:
+                    # A row without a pinned target is a legacy repair case. Do
+                    # not recreate an old age boundary for ordinary duplicates.
+                    state = self._ensure_session_state_in_connection(
+                        conn,
+                        duplicate_ref,
+                        now=now,
+                        first_unflushed_at=None,
+                    )
+                    fallback_generation = state.generation
+                else:
+                    fallback_generation = int(state_row["generation"])
                 return EnqueueResult(
                     outcome="duplicate",
                     row=duplicate,
@@ -412,7 +427,7 @@ class MemoryStore:
                     target_generation=(
                         duplicate.target_generation
                         if duplicate.target_generation is not None
-                        else state.generation
+                        else fallback_generation
                     ),
                     target_watermark_ms=(
                         duplicate.target_watermark_ms
@@ -550,6 +565,15 @@ class MemoryStore:
                 WHERE epoch = ?
                   AND state = 'pending'
                   AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM memory_session_flush_state AS session_state
+                      WHERE session_state.principal_id = memory_capture_queue.principal_id
+                        AND session_state.epoch = memory_capture_queue.epoch
+                        AND session_state.project_ref = memory_capture_queue.project_ref
+                        AND session_state.session_id = memory_capture_queue.session_id
+                        AND session_state.flush_state = 'manual_required'
+                  )
                 ORDER BY created_at, source_message_digest
                 LIMIT 1
                 """,
@@ -599,7 +623,11 @@ class MemoryStore:
                 add_request_id=outcome.add_request_id,
                 add_status=outcome.add_status,
             )
-            return SettleResult(settled=settled, state="delivered" if settled else None)
+            return SettleResult(
+                settled=settled,
+                state="delivered" if settled else None,
+                flush_complete=settled and outcome.add_status == "extracted",
+            )
         if isinstance(outcome, SystemOutage):
             settled = self._return_system_failure(
                 row,
@@ -1919,25 +1947,46 @@ class MemoryStore:
                 """,
                 (provider_session_ref.serialize(), record.generation),
             ).fetchone()[0]
-            conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET generation = generation + 1,
-                    first_unflushed_at = ?, flush_state = 'not_due',
-                    due_at = NULL, next_attempt_at = NULL,
-                    fence_epoch = fence_epoch + 1,
-                    fence_owner = NULL, fence_acquired_at = NULL,
-                    watermark = ?, updated_at = ?
-                WHERE provider_session_ref = ? AND generation = ?
-                """,
-                (
-                    str(remaining) if remaining is not None else None,
-                    watermark_after,
-                    record.observed_at,
-                    provider_session_ref.serialize(),
-                    record.generation,
-                ),
-            )
+            if remaining is None:
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET generation = generation + 1,
+                        first_unflushed_at = NULL, flush_state = 'not_due',
+                        due_at = NULL, next_attempt_at = NULL,
+                        fence_epoch = fence_epoch + 1,
+                        fence_owner = NULL, fence_acquired_at = NULL,
+                        watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        watermark_after,
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
+            else:
+                # Keep the receipt's original generation while older rows are
+                # still queued; advancing here would strand their pinned target.
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET first_unflushed_at = ?, flush_state = 'not_due',
+                        due_at = NULL, next_attempt_at = NULL,
+                        fence_epoch = fence_epoch + 1,
+                        fence_owner = NULL, fence_acquired_at = NULL,
+                        watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        str(remaining),
+                        watermark_after,
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
         elif record.outcome in {"not_committed", "rejected"}:
             conn.execute(
                 """

@@ -40,6 +40,9 @@ MemoryFlushState = Literal[
 ]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
 RecallFreshness = Literal["eventual", "bounded", "session_overlay"]
+MAX_RECALL_DECLARATIONS = 3
+MAX_AGENTIC_RECALL_DECLARATIONS = 1
+MAX_NON_AGENTIC_DECLARATION_RESULTS = 64
 MemoryFailureKind = Literal[
     "delivery_abandoned",
     "distillation_rejected",
@@ -268,6 +271,13 @@ class RecallDeclaration:
     def __post_init__(self) -> None:
         if self.mode not in {"keyword", "vector", "hybrid", "agentic"}:
             raise ValueError("invalid recall declaration mode")
+        if not isinstance(self.budget, RecallBudget):
+            raise ValueError("recall declaration requires a RecallBudget")
+        if (
+            self.budget.max_results is not None
+            and self.budget.max_results < self.budget.limit
+        ):
+            raise ValueError("declaration max_results must cover its limit")
         if self.mode != "agentic" and any(
             value is not None
             for value in (
@@ -334,13 +344,12 @@ class RecallPolicy:
             or self.process_timeout_seconds < 1
         ):
             raise ValueError("recall process timeout must be positive")
-        bounded_target = (
-            self.wait_scope,
-            self.target_generation,
-            self.target_watermark_ms,
-        )
         if self.freshness == "bounded":
-            if any(value is None for value in bounded_target):
+            if (
+                not isinstance(self.wait_scope, ProviderSessionRef)
+                or self.target_generation is None
+                or self.target_watermark_ms is None
+            ):
                 raise ValueError("bounded recall requires a complete session target")
             if (
                 self.freshness_timeout_seconds is None
@@ -349,8 +358,19 @@ class RecallPolicy:
                 or self.freshness_timeout_seconds < 1
             ):
                 raise ValueError("bounded recall requires a positive freshness timeout")
-        elif any(value is not None for value in bounded_target):
-            raise ValueError("session target is only valid for bounded recall")
+        elif self.freshness == "session_overlay":
+            if not isinstance(self.wait_scope, ProviderSessionRef):
+                raise ValueError("session overlay recall requires a trusted session scope")
+            if self.target_generation is not None or self.target_watermark_ms is not None:
+                raise ValueError("generation and watermark targets are bounded-only")
+            if self.freshness_timeout_seconds is not None:
+                raise ValueError("freshness timeout is only valid for bounded recall")
+        elif (
+            self.wait_scope is not None
+            or self.target_generation is not None
+            or self.target_watermark_ms is not None
+        ):
+            raise ValueError("session target is only valid for bounded or overlay recall")
         elif self.freshness_timeout_seconds is not None:
             raise ValueError("freshness timeout is only valid for bounded recall")
         if self.target_generation is not None and (
@@ -384,6 +404,49 @@ class RecallPolicy:
             for value in (self.timeout_seconds, self.max_model_calls, self.cost_budget_tokens)
         ):
             raise ValueError("agentic budgets are only valid for agentic recall")
+        if not isinstance(self.declarations, (tuple, list)):
+            raise ValueError("recall declarations must be a sequence")
+        if len(self.declarations) > MAX_RECALL_DECLARATIONS:
+            raise ValueError("recall declaration fan-out exceeded")
+        if any(not isinstance(declaration, RecallDeclaration) for declaration in self.declarations):
+            raise ValueError("recall declarations must contain RecallDeclaration values")
+        agentic_declarations = [
+            declaration
+            for declaration in self.declarations
+            if declaration.mode == "agentic"
+        ]
+        if len(agentic_declarations) > MAX_AGENTIC_RECALL_DECLARATIONS:
+            raise ValueError("recall agentic declaration fan-out exceeded")
+        for declaration in self.declarations:
+            budget = declaration.budget
+            if budget.limit > self.limit:
+                raise ValueError("declaration limit exceeds caller limit")
+            if self.freshness == "bounded":
+                if budget.freshness_timeout_seconds is None:
+                    raise ValueError("bounded declarations require a freshness timeout")
+                if budget.freshness_timeout_seconds > self.freshness_timeout_seconds:
+                    raise ValueError("declaration freshness timeout exceeds caller timeout")
+            elif budget.freshness_timeout_seconds is not None:
+                raise ValueError("declaration freshness timeout is only valid for bounded recall")
+        if (
+            sum(
+                declaration.budget.limit
+                for declaration in self.declarations
+                if declaration.mode != "agentic"
+            )
+            > MAX_NON_AGENTIC_DECLARATION_RESULTS
+        ):
+            raise ValueError("recall declaration result budget exceeded")
+        total_timeout_seconds = (self.freshness_timeout_seconds or 0) + (
+            self.timeout_seconds or 0
+        )
+        total_timeout_seconds += sum(
+            (declaration.budget.freshness_timeout_seconds or 0)
+            + (declaration.budget.timeout_seconds or 0)
+            for declaration in self.declarations
+        )
+        if total_timeout_seconds > self.process_timeout_seconds:
+            raise ValueError("recall declaration budget exceeds process timeout")
 
 
 @dataclass(frozen=True)

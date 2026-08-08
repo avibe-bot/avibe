@@ -14,6 +14,7 @@ import pytest
 
 from config import paths
 from core.memory.everos import (
+    AddAck,
     FakeMemoryProvider,
     FlushRejected,
     FlushSucceeded,
@@ -53,6 +54,9 @@ from core.memory.types import (
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     OperationFailed,
+    ProviderSessionRef,
+    RecallBudget,
+    RecallDeclaration,
     RecallPolicy,
 )
 from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE_SECONDS
@@ -194,6 +198,88 @@ def test_agentic_recall_policy_requires_a_retrieval_budget() -> None:
         cost_budget_tokens=1,
     )
     assert policy.max_results == 10
+
+
+def test_recall_policy_requires_typed_scopes_for_bounded_and_overlay_freshness() -> None:
+    session_ref = ProviderSessionRef(
+        principal_id="u-11111111111111111111111111111111",
+        epoch=0,
+        project_ref=PROJECT,
+        session_id="session",
+    )
+    with pytest.raises(ValueError, match="complete session target"):
+        RecallPolicy(
+            freshness="bounded",
+            wait_scope="not-a-session-ref",
+            target_generation=0,
+            target_watermark_ms=1,
+            freshness_timeout_seconds=1,
+        )
+    with pytest.raises(ValueError, match="trusted session scope"):
+        RecallPolicy(freshness="session_overlay")
+
+    overlay = RecallPolicy(freshness="session_overlay", wait_scope=session_ref)
+    assert overlay.wait_scope == session_ref
+    with pytest.raises(ValueError, match="bounded-only"):
+        RecallPolicy(
+            freshness="session_overlay",
+            wait_scope=session_ref,
+            target_generation=0,
+        )
+    with pytest.raises(ValueError, match="bounded declarations"):
+        RecallPolicy(
+            freshness="bounded",
+            wait_scope=session_ref,
+            target_generation=0,
+            target_watermark_ms=1,
+            freshness_timeout_seconds=5,
+            declarations=(
+                RecallDeclaration(mode="keyword", budget=RecallBudget(limit=1)),
+            ),
+        )
+
+
+def test_recall_policy_bounds_declaration_fanout_and_aggregate_budgets() -> None:
+    with pytest.raises(ValueError, match="declaration limit"):
+        RecallPolicy(
+            limit=10,
+            declarations=(
+                RecallDeclaration(mode="keyword", budget=RecallBudget(limit=11)),
+            ),
+        )
+    with pytest.raises(ValueError, match="fan-out"):
+        RecallPolicy(
+            declarations=tuple(
+                RecallDeclaration(mode="keyword", budget=RecallBudget(limit=1))
+                for _ in range(4)
+            ),
+        )
+    with pytest.raises(ValueError, match="process timeout"):
+        RecallPolicy(
+            process_timeout_seconds=5,
+            declarations=(
+                RecallDeclaration(
+                    mode="agentic",
+                    budget=RecallBudget(
+                        limit=1,
+                        max_results=1,
+                        timeout_seconds=6,
+                        max_model_calls=1,
+                        cost_budget_tokens=1,
+                    ),
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="result budget"):
+        RecallPolicy(
+            limit=64,
+            declarations=(
+                RecallDeclaration(mode="keyword", budget=RecallBudget(limit=33)),
+                RecallDeclaration(mode="vector", budget=RecallBudget(limit=33)),
+            ),
+        )
+    with pytest.raises(ValueError, match="RecallDeclaration"):
+        RecallPolicy(declarations=(object(),))
 
 
 async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_path: Path) -> None:
@@ -384,6 +470,32 @@ async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
     assert provider.flush_projects == [PROJECT]
     assert store.queue_stats().queue_plaintext_bytes == 0
     assert store.ensure_meta().last_success_at is not None
+
+
+async def test_extracted_add_ack_skips_a_redundant_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    receipt = await module.capture(_request(source="already-extracted"))
+    assert isinstance(receipt, CaptureAccepted)
+
+    async def add(_capture) -> AddAck:
+        return AddAck(request_id="add-extracted", status="extracted")
+
+    monkeypatch.setattr(provider, "add", add)
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    assert provider.flushes == []
+    assert receipt.session_ref is not None
+    state = store.get_session_flush_state(receipt.session_ref)
+    assert state is not None
+    assert state.flush_state == "settled"
+    assert any(
+        record.source == "natural_boundary"
+        for record in store.list_flush_settlements(receipt.session_ref)
+    )
 
 
 async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breaker(tmp_path: Path) -> None:

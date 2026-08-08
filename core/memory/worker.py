@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -41,6 +42,12 @@ ProcessingEvent = Callable[
     [Literal["fault", "recovered"], ProcessingFaultKind | None, str, int],
     Awaitable[bool],
 ]
+
+
+@dataclass(frozen=True)
+class _DeliveryResult:
+    settled: bool
+    flush_complete: bool = False
 
 
 class MemoryWorker:
@@ -156,12 +163,17 @@ class MemoryWorker:
                 if row is None:
                     break
                 processed += 1
-                delivered = await self._deliver_row(row)
-                if not delivered:
+                delivery = await self._deliver_row(row)
+                if not delivery.settled:
                     if half_open:
                         await self._reopen_processing_fault()
                         break
                     if self._system_paused:
+                        break
+                    continue
+                if delivery.flush_complete:
+                    if half_open:
+                        await self._close_processing_fault()
                         break
                     continue
 
@@ -222,11 +234,11 @@ class MemoryWorker:
                 return False
         return True
 
-    async def _deliver_row(self, row: QueueRow) -> bool:
+    async def _deliver_row(self, row: QueueRow) -> _DeliveryResult:
         meta = await self._store_call(self._store.get_meta)
         if meta is None or meta.epoch != row.epoch or row.payload_text is None:
             await self._return_system_failure(row, "memory_processing_failed")
-            return False
+            return _DeliveryResult(settled=False)
 
         attachments = decode_capture_attachments(row.payload_attachments)
         if attachments is None:
@@ -235,7 +247,7 @@ class MemoryWorker:
                 "memory_invalid_input",
                 retryable=False,
             )
-            return False
+            return _DeliveryResult(settled=False)
 
         capture = ProviderCapture(
             principal_id=row.principal_id,
@@ -255,23 +267,23 @@ class MemoryWorker:
                 row,
                 "memory_provider_timeout",
             )
-            return False
+            return _DeliveryResult(settled=False)
         except MemoryProviderSystemFailure as failure:
             await self._return_system_failure(
                 row,
                 _provider_error_code(failure, "memory_sidecar_unavailable"),
             )
-            return False
+            return _DeliveryResult(settled=False)
         except MemoryProviderFailure as failure:
             await self._ambiguous_failure_is_system_outage(
                 row,
                 _provider_error_code(failure, "memory_processing_failed"),
                 retryable=failure.retryable,
             )
-            return False
+            return _DeliveryResult(settled=False)
         except Exception:
             await self._ambiguous_failure_is_system_outage(row, "memory_processing_failed")
-            return False
+            return _DeliveryResult(settled=False)
 
         if not isinstance(ack, AddAck):
             ack = AddAck(request_id=None, status=None)
@@ -282,7 +294,10 @@ class MemoryWorker:
             lease_owner=self._boot_id,
             now=self._current_time(),
         )
-        return settled.settled
+        return _DeliveryResult(
+            settled=settled.settled,
+            flush_complete=settled.flush_complete,
+        )
 
     async def _flush_session(self, session_id: str, project_ref: str) -> FlushResult:
         marked = await self._store_call(

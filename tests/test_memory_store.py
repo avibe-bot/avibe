@@ -242,14 +242,75 @@ def test_capture_target_is_pinned_and_settlement_is_per_generation(tmp_path: Pat
         for record in settlements
     )
 
+    before_duplicate = store.get_session_flush_state(session_ref)
+    assert before_duplicate is not None
+    duplicate = _enqueue(store, "target", occurred_at_ms=99_000)
+    after_duplicate = store.get_session_flush_state(session_ref)
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.target_generation == accepted.target_generation
+    assert duplicate.target_watermark_ms == accepted.target_watermark_ms
+    assert after_duplicate == before_duplicate
+
     next_capture = _enqueue(store, "target-next", occurred_at_ms=2_000)
     assert next_capture.target_generation == 1
     assert next_capture.target_watermark_ms == 2_000
 
-    duplicate = _enqueue(store, "target", occurred_at_ms=99_000)
-    assert duplicate.outcome == "duplicate"
-    assert duplicate.target_generation == accepted.target_generation
-    assert duplicate.target_watermark_ms == accepted.target_watermark_ms
+
+def test_successful_flush_defers_generation_rollover_until_remaining_rows_settle(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _enqueue(store, "generation-first")
+    second = _enqueue(store, "generation-second", occurred_at_ms=2_000)
+    assert first.row is not None and second.row is not None
+    assert first.target_generation == second.target_generation == 0
+
+    first_row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert first_row is not None
+    assert store.settle(
+        first_row,
+        Delivered(add_request_id="add-first"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+    assert store.mark_flush_in_flight(first_row.session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        first_row.session_id,
+        PROJECT,
+        FlushSucceeded(request_id="flush-first", status="extracted"),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    state = store.get_session_flush_state(first.provider_session_ref)
+    assert state is not None
+    assert state.generation == 0
+    assert state.first_unflushed_at is not None
+
+    second_row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:03.000Z")
+    assert second_row is not None
+    assert store.settle(
+        second_row,
+        Delivered(add_request_id="add-second"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:04.000Z"),
+    ).settled
+    assert store.mark_flush_in_flight(second_row.session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        second_row.session_id,
+        PROJECT,
+        FlushSucceeded(request_id="flush-second", status="extracted"),
+        now="2026-01-01T00:00:05.000Z",
+    ) == 1
+
+    state = store.get_session_flush_state(first.provider_session_ref)
+    assert state is not None
+    assert state.generation == 1
+    assert state.first_unflushed_at is None
+    assert all(
+        record.generation == 0
+        for record in store.list_flush_settlements(first.provider_session_ref)
+        if record.operation_kind == "flush"
+    )
 
 
 def test_successful_no_extraction_flush_confirms_the_target_watermark(tmp_path: Path) -> None:
@@ -294,11 +355,33 @@ def test_manual_required_fence_blocks_a_later_flush_mark(tmp_path: Path) -> None
         now="2026-01-01T00:00:03.000Z",
     ) == 1
 
-    second = _deliver(store, "manual-second", session_ref="manual-session")
-    assert store.mark_flush_in_flight(second, PROJECT) == 0
-    second_row = _row_for_source(store, "manual-second")
-    assert second_row is not None
-    assert second_row.flush_observation == "not_attempted"
+    assert store.mark_flush_in_flight(first, PROJECT) == 0
+
+
+def test_claim_due_skips_a_manual_required_session(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_ref = _deliver(store, "manual-claim-first", session_ref="manual-claim")
+    assert store.mark_flush_in_flight(session_ref, PROJECT) == 1
+    assert store.record_flush_verdict(
+        session_ref,
+        PROJECT,
+        FlushUnknown(reason="timeout"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    queued = store.enqueue_request(
+        source_message_id="manual-claim-second",
+        session_id="manual-claim",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=2_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert queued.row is not None
+    assert store.claim_due(lease_owner="boot", now="2026-01-01T00:00:04.000Z") is None
+    assert _row_for_source(store, "manual-claim-second").state == "pending"
 
 
 def test_stale_settlement_is_retained_without_mutating_live_state(tmp_path: Path) -> None:
