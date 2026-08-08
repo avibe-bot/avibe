@@ -101,6 +101,16 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored).toEqual([]);
   });
 
+  it('keeps an unresolved explicit reply id unanchored', () => {
+    const placed = placeVaultProvisionRequests(
+      [message('unrelated-reply', '2026-07-30T10:01:00Z')],
+      [request('missing-reply', 'provision', '2026-07-30T10:00:00Z', 'trimmed-reply')],
+    );
+
+    expect(placed.byMessageId).toEqual(new Map());
+    expect(placed.unanchored.map((item) => item.id)).toEqual(['missing-reply']);
+  });
+
   it('anchors legacy requests to the first Agent reply after creation', () => {
     const placed = placeVaultProvisionRequests(
       messages,

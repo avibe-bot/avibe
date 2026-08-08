@@ -151,11 +151,15 @@ export function placeVaultProvisionRequests(
   for (const request of requests) {
     if (vaultRequestType(request) !== 'provision') continue;
 
-    const explicit = request.message_id ? messagesById.get(request.message_id) : undefined;
+    const explicitReplyId = typeof request.message_id === 'string' && request.message_id.trim()
+      ? request.message_id
+      : null;
+    const explicit = explicitReplyId ? messagesById.get(explicitReplyId) : undefined;
     if (explicit && isAgentReply(explicit)) {
       appendRequest(byMessageId, explicit.id, request);
       continue;
     }
+    const explicitReplyUnresolved = Boolean(explicitReplyId && (!explicit || !isAgentReply(explicit)));
 
     const requestTime = timestampOrderTimeMs(request.created_at);
     const sameTurn = agentMessages.find((message) => sameRequestTurn(request, message));
@@ -179,10 +183,12 @@ export function placeVaultProvisionRequests(
     const fromSourceReply = fromSource
       ? inferReplyFromSourceMessage(messages, fromSource, requestTime, sourcePlatform)
       : undefined;
-    const inferred = sameTurn ?? fromSourceReply
-      ?? (sourceUnresolved || Number.isNaN(requestTime) || !windowCoversRequest
-        ? undefined
-        : inferReplyWithinTurn(messages, requestTime));
+    const inferred = explicitReplyUnresolved
+      ? undefined
+      : sameTurn ?? fromSourceReply
+        ?? (sourceUnresolved || Number.isNaN(requestTime) || !windowCoversRequest
+          ? undefined
+          : inferReplyWithinTurn(messages, requestTime));
     if (inferred) appendRequest(byMessageId, inferred.id, request);
     else unanchored.push(request);
   }
