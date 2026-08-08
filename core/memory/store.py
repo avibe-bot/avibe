@@ -37,6 +37,8 @@ TERMINAL_TOMBSTONE_LIMIT = 100_000
 TERMINAL_TOMBSTONE_RETENTION = timedelta(days=90)
 MEMORY_SCHEMA_VERSION = 2
 MEMORY_LEGACY_SCHEMA_VERSION = 1
+MANUAL_FLUSH_RETRY_OWNER = "manual-flush-retry"
+MANUAL_ADD_RETRY_OWNER = "manual-add-retry"
 
 
 def memory_store_path() -> Path:
@@ -573,12 +575,19 @@ class MemoryStore:
                         AND session_state.epoch = memory_capture_queue.epoch
                         AND session_state.project_ref = memory_capture_queue.project_ref
                         AND session_state.session_id = memory_capture_queue.session_id
-                        AND session_state.flush_state = 'manual_required'
+                        AND (
+                            session_state.flush_state = 'manual_required'
+                            OR (
+                                session_state.flush_state = 'due'
+                                AND session_state.fence_owner = ?
+                                AND memory_capture_queue.target_generation = session_state.generation
+                            )
+                        )
                   )
                 ORDER BY created_at, source_message_digest
                 LIMIT 1
                 """,
-                (meta.epoch, now),
+                (meta.epoch, now, MANUAL_FLUSH_RETRY_OWNER),
             ).fetchone()
             if row is None:
                 return None
@@ -818,7 +827,10 @@ class MemoryStore:
                     now=now,
                     first_unflushed_at=str(target["first_unflushed_at"]),
                 )
-                if state.flush_state == "manual_required":
+                if (
+                    state.flush_state == "manual_required"
+                    and state.fence_owner != MANUAL_FLUSH_RETRY_OWNER
+                ):
                     continue
                 result = conn.execute(
                     """
@@ -1094,12 +1106,16 @@ class MemoryStore:
                 return ()
             rows = conn.execute(
                 """
-                SELECT session_id, project_ref, MIN(completed_at) AS first_completed_at
-                FROM memory_capture_queue
-                WHERE epoch = ? AND state = 'delivered'
-                  AND flush_observation = 'not_attempted'
-                GROUP BY session_id, project_ref
-                ORDER BY first_completed_at, session_id, project_ref
+                SELECT queue.session_id, queue.project_ref,
+                       MIN(queue.completed_at) AS first_completed_at
+                FROM memory_capture_queue AS queue
+                JOIN memory_session_flush_state AS session_state
+                  ON session_state.provider_session_ref = queue.provider_session_ref
+                WHERE queue.epoch = ? AND queue.state = 'delivered'
+                  AND queue.flush_observation = 'not_attempted'
+                  AND session_state.flush_state != 'manual_required'
+                GROUP BY queue.session_id, queue.project_ref
+                ORDER BY first_completed_at, queue.session_id, queue.project_ref
                 """,
                 (meta.epoch,),
             ).fetchall()
@@ -1852,27 +1868,37 @@ class MemoryStore:
             now=record.observed_at,
             first_unflushed_at=None,
         )
+        actor = _bounded_opaque_text(record.actor)
+        decision = _bounded_opaque_text(record.decision)
+        evidence_ref = _bounded_opaque_text(record.evidence_ref)
         manual_resolution = (
             record.source == "manual"
             and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
             and state.generation == record.generation
             and state.fence_epoch == record.fence_epoch
+            and actor is not None
+            and decision is not None
+            and evidence_ref is not None
         )
         derived_manual_watermark_ms: int | None = None
         if (
             manual_resolution
-            and record.operation_kind == "flush"
+            and record.operation_kind in {"add", "flush"}
             and record.outcome == "committed"
             and record.confirmed_watermark_ms is None
             and record.watermark_after is None
         ):
+            manual_watermark_state_clause = (
+                "state IN ('pending', 'processing', 'delivered')"
+                if record.operation_kind == "add"
+                else "state = 'delivered'"
+            )
             watermark_row = conn.execute(
-                """
+                f"""
                 SELECT MAX(provider_timestamp_ms)
                 FROM memory_capture_queue
                 WHERE provider_session_ref = ? AND target_generation = ?
-                  AND state = 'delivered'
-                  AND flush_observation IN ('unknown', 'in_flight', 'succeeded')
+                  AND {manual_watermark_state_clause}
                 """,
                 (provider_session_ref.serialize(), record.generation),
             ).fetchone()
@@ -1881,17 +1907,51 @@ class MemoryStore:
                     state.watermark,
                     int(watermark_row[0]),
                 )
-        settlement_watermark_after = (
+        reported_watermark_after = (
             derived_manual_watermark_ms
             if derived_manual_watermark_ms is not None
             else record.watermark_after
         )
-        settlement_confirmed_watermark_ms = (
+        reported_confirmed_watermark_ms = (
             record.confirmed_watermark_ms
             if record.confirmed_watermark_ms is not None
             else derived_manual_watermark_ms
             if derived_manual_watermark_ms is not None
-            else settlement_watermark_after
+            else reported_watermark_after
+        )
+        projection_allowed = (
+            state.generation == record.generation
+            and (
+                record.operation_kind == "add"
+                or state.fence_epoch == record.fence_epoch
+            )
+            and (
+                state.flush_state != "manual_required"
+                or record.outcome in {"unknown", "manual_required"}
+                or manual_resolution
+                # Migration replay is ordered by legacy observation time. A
+                # newer definitive observation must replace an older ambiguity.
+                or record.source == "migration"
+            )
+            and (
+                record.source != "manual"
+                or record.outcome
+                not in {"committed", "not_committed", "settled_with_caveat"}
+                or manual_resolution
+            )
+        )
+        # Preserve a stale provider report as evidence, but do not let its
+        # success markers look authoritative to a bounded-freshness reader.
+        settlement_watermark_after = (
+            reported_watermark_after if projection_allowed else record.watermark_after
+        )
+        settlement_confirmed_watermark_ms = (
+            reported_confirmed_watermark_ms if projection_allowed else None
+        )
+        settlement_flush_state = (
+            (record.flush_state or _settlement_flush_state(record))
+            if projection_allowed
+            else None
         )
         inserted = conn.execute(
             """
@@ -1918,20 +1978,23 @@ class MemoryStore:
                 _bounded_opaque_text(record.error_code),
                 record.watermark_before,
                 settlement_watermark_after,
-                _bounded_opaque_text(record.actor),
-                _bounded_opaque_text(record.decision),
-                _bounded_opaque_text(record.evidence_ref),
+                actor,
+                decision,
+                evidence_ref,
                 record.observed_at,
                 record.settled_at or record.observed_at,
                 (
                     settlement_confirmed_watermark_ms
                 ),
-                record.flush_state or _settlement_flush_state(record),
+                settlement_flush_state,
                 record.source,
             ),
         )
         if inserted.rowcount != 1:
             return False
+
+        if not projection_allowed:
+            return True
 
         if (
             record.operation_kind == "add"
@@ -1947,24 +2010,6 @@ class MemoryStore:
                 (record.observed_at, record.observed_at),
             )
 
-        projection_allowed = (
-            state.generation == record.generation
-            and (
-                record.operation_kind == "add"
-                or state.fence_epoch == record.fence_epoch
-            )
-            and (
-                state.flush_state != "manual_required"
-                or record.outcome in {"unknown", "manual_required"}
-                or manual_resolution
-                # Migration replay is ordered by legacy observation time. A
-                # newer definitive observation must replace an older ambiguity.
-                or record.source == "migration"
-            )
-        )
-        if not projection_allowed:
-            return True
-
         watermark_after = (
             max(
                 state.watermark,
@@ -1978,6 +2023,8 @@ class MemoryStore:
         )
         if manual_resolution and record.operation_kind == "flush":
             self._reconcile_manual_flush_rows_in_connection(conn, record)
+        elif manual_resolution and record.operation_kind == "add":
+            self._reconcile_manual_add_row_in_connection(conn, record)
         if record.outcome in {"unknown", "manual_required"}:
             conn.execute(
                 """
@@ -1998,6 +2045,59 @@ class MemoryStore:
                     record.generation,
                 ),
             )
+        elif manual_resolution and record.operation_kind == "add":
+            if record.outcome == "not_committed":
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET flush_state = 'manual_required', due_at = NULL,
+                        next_attempt_at = NULL, fence_owner = ?,
+                        fence_acquired_at = ?, watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        MANUAL_ADD_RETRY_OWNER,
+                        record.observed_at,
+                        watermark_after,
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
+            elif record.outcome == "committed":
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET flush_state = 'not_due', due_at = NULL,
+                        next_attempt_at = NULL, fence_owner = NULL,
+                        fence_acquired_at = NULL, last_add_ack_at = ?,
+                        watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        record.observed_at,
+                        watermark_after,
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET flush_state = 'settled_with_caveat', due_at = NULL,
+                        next_attempt_at = NULL, fence_owner = NULL,
+                        fence_acquired_at = NULL, watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        watermark_after,
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
         elif record.operation_kind == "add":
             conn.execute(
                 """
@@ -2014,6 +2114,7 @@ class MemoryStore:
                 ),
             )
             if record.source == "natural_boundary" or record.flush_state == "settled":
+                self._reconcile_rejected_rows_in_connection(conn, record)
                 remaining = self._first_unsettled_generation_created_at(
                     conn,
                     provider_session_ref,
@@ -2055,6 +2156,7 @@ class MemoryStore:
                         ),
                     )
         elif record.operation_kind == "flush" and record.outcome in {"succeeded", "committed"}:
+            self._reconcile_rejected_rows_in_connection(conn, record)
             if record.source == "migration":
                 remaining = self._first_unsettled_generation_created_at(
                     conn,
@@ -2145,6 +2247,30 @@ class MemoryStore:
                         record.generation,
                     ),
                 )
+        elif (
+            record.outcome == "not_committed"
+            and manual_resolution
+            and record.operation_kind == "flush"
+        ):
+            conn.execute(
+                """
+                UPDATE memory_session_flush_state
+                SET flush_state = 'due', due_at = ?,
+                    next_attempt_at = ?, fence_owner = ?,
+                    fence_acquired_at = ?, watermark = ?, updated_at = ?
+                WHERE provider_session_ref = ? AND generation = ?
+                """,
+                (
+                    record.observed_at,
+                    record.observed_at,
+                    MANUAL_FLUSH_RETRY_OWNER,
+                    record.observed_at,
+                    watermark_after,
+                    record.observed_at,
+                    provider_session_ref.serialize(),
+                    record.generation,
+                ),
+            )
         elif record.outcome in {"not_committed", "rejected"}:
             conn.execute(
                 """
@@ -2180,6 +2306,117 @@ class MemoryStore:
                 ),
             )
         return True
+
+    def _reconcile_manual_add_row_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        record: MemorySettlementRecord,
+    ) -> None:
+        """Apply an audited add decision to the matching outbox claim."""
+
+        operation_id = record.operation_id
+        digest = operation_id[len("add-") :] if operation_id.startswith("add-") else None
+        if digest is not None and (
+            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            digest = None
+        request_id = _bounded_opaque_text(record.request_id)
+        target = (
+            record.provider_session_ref.serialize(),
+            record.generation,
+            digest,
+            digest,
+            request_id,
+            request_id,
+        )
+        if record.outcome == "not_committed":
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET state = 'pending', next_retry_at = NULL,
+                    lease_owner = NULL, lease_at = NULL, last_error = NULL
+                WHERE provider_session_ref = ? AND target_generation = ?
+                  AND state = 'processing' AND payload_text IS NOT NULL
+                  AND (
+                      (? IS NOT NULL AND source_message_digest = ?)
+                      OR (? IS NOT NULL AND add_request_id = ?)
+                  )
+                """,
+                target,
+            )
+            return
+
+        if record.outcome == "committed":
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET state = 'delivered', payload_text = NULL,
+                    payload_attachments = NULL, next_retry_at = NULL,
+                    lease_owner = NULL, lease_at = NULL, last_error = NULL,
+                    completed_at = COALESCE(completed_at, ?),
+                    add_request_id = COALESCE(?, add_request_id),
+                    flush_observation = COALESCE(flush_observation, 'not_attempted'),
+                    flush_status = NULL, flush_error_code = NULL,
+                    flush_request_id = NULL, flush_observed_at = NULL
+                WHERE provider_session_ref = ? AND target_generation = ?
+                  AND state = 'processing' AND payload_text IS NOT NULL
+                  AND (
+                      (? IS NOT NULL AND source_message_digest = ?)
+                      OR (? IS NOT NULL AND add_request_id = ?)
+                  )
+                """,
+                (record.observed_at, request_id, *target),
+            )
+            return
+
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET state = 'dead', payload_text = NULL, payload_attachments = NULL,
+                next_retry_at = NULL, lease_owner = NULL, lease_at = NULL,
+                last_error = 'memory_processing_failed',
+                completed_at = COALESCE(completed_at, ?),
+                add_request_id = COALESCE(?, add_request_id),
+                flush_status = NULL, flush_error_code = NULL,
+                flush_request_id = NULL, flush_observed_at = NULL
+            WHERE provider_session_ref = ? AND target_generation = ?
+              AND state = 'processing' AND payload_text IS NOT NULL
+              AND (
+                  (? IS NOT NULL AND source_message_digest = ?)
+                  OR (? IS NOT NULL AND add_request_id = ?)
+              )
+            """,
+            (record.observed_at, request_id, *target),
+        )
+
+    def _reconcile_rejected_rows_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        record: MemorySettlementRecord,
+    ) -> None:
+        """Retire rejected receipts covered by a later successful boundary."""
+
+        request_id = (
+            _bounded_opaque_text(record.request_id)
+            if record.operation_kind == "flush"
+            else None
+        )
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET flush_observation = 'succeeded', flush_status = NULL,
+                flush_error_code = NULL, flush_request_id = ?,
+                flush_observed_at = ?
+            WHERE provider_session_ref = ? AND target_generation = ?
+              AND state = 'delivered' AND flush_observation = 'rejected'
+            """,
+            (
+                request_id,
+                record.observed_at,
+                record.provider_session_ref.serialize(),
+                record.generation,
+            ),
+        )
 
     def _reconcile_manual_flush_rows_in_connection(
         self,
@@ -2286,7 +2523,8 @@ class MemoryStore:
             SELECT source_message_digest, provider_session_ref, epoch, session_id,
                    target_generation, target_watermark_ms,
                    principal_id, project_ref, state, created_at, completed_at,
-                   provider_timestamp_ms, flush_observation, flush_observed_at
+                   provider_timestamp_ms, flush_observation, flush_observed_at,
+                   flush_request_id, flush_error_code
             FROM memory_capture_queue
             ORDER BY created_at, source_message_digest
             """
@@ -2342,16 +2580,29 @@ class MemoryStore:
             ]
             now = utc_now_iso()
             observations: list[tuple[str, str]] = []
+            observation_rows: dict[str, sqlite3.Row] = {}
             for observation in {"succeeded", "rejected", "unknown", "in_flight"}:
-                observed_at = max(
-                    (
-                        str(row["flush_observed_at"] or row["completed_at"] or row["created_at"])
-                        for row in group
-                        if row["flush_observation"] == observation
-                    ),
-                    default=now,
-                )
-                if any(row["flush_observation"] == observation for row in group):
+                candidates = [
+                    row for row in group if row["flush_observation"] == observation
+                ]
+                if candidates:
+                    latest_row = max(
+                        candidates,
+                        key=lambda row: (
+                            str(
+                                row["flush_observed_at"]
+                                or row["completed_at"]
+                                or row["created_at"]
+                            ),
+                            str(row["source_message_digest"]),
+                        ),
+                    )
+                    observed_at = str(
+                        latest_row["flush_observed_at"]
+                        or latest_row["completed_at"]
+                        or latest_row["created_at"]
+                    )
+                    observation_rows[observation] = latest_row
                     observations.append((observed_at, observation))
             observations.sort(key=lambda item: (item[0], item[1]))
             latest_observation = observations[-1][1] if observations else None
@@ -2412,6 +2663,7 @@ class MemoryStore:
                 operation_id = "migration-v2-" + hashlib.sha256(
                     f"{key}:{observation}".encode("utf-8")
                 ).hexdigest()[:32]
+                observation_row = observation_rows[observation]
                 settlement = MemorySettlementRecord(
                     provider_session_ref=provider_session_ref,
                     generation=0,
@@ -2422,7 +2674,8 @@ class MemoryStore:
                     observed_at=observed_at,
                     last_known_state=state,
                     last_observed_outcome=observation,  # type: ignore[arg-type]
-                    request_id=None,
+                    request_id=_bounded_opaque_text(observation_row["flush_request_id"]),
+                    error_code=_bounded_opaque_text(observation_row["flush_error_code"]),
                     watermark_before=0,
                     watermark_after=watermark,
                     settled_at=observed_at,

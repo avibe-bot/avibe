@@ -454,14 +454,21 @@ def test_stale_settlement_is_retained_without_mutating_live_state(tmp_path: Path
             fence_epoch=before.fence_epoch + 1,
             operation_id="future-generation",
             operation_kind="flush",
-            outcome="unknown",
+            outcome="succeeded",
             observed_at="2026-01-01T00:00:01.000Z",
+            request_id="future-request",
+            watermark_after=999,
+            confirmed_watermark_ms=999,
+            flush_state="settled",
         )
     ) is True
 
     after = store.get_session_flush_state(accepted.provider_session_ref)
     assert after == before
-    assert len(store.list_flush_settlements(accepted.provider_session_ref)) == 1
+    settlement = store.list_flush_settlements(accepted.provider_session_ref)[0]
+    assert settlement.flush_state is None
+    assert settlement.confirmed_watermark_ms is None
+    assert settlement.watermark_after == 999
 
 
 def _create_v1_store(database: Path) -> None:
@@ -632,6 +639,14 @@ def test_v1_migration_projects_the_latest_flush_verdict_chronologically(tmp_path
                 ),
             ],
         )
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET flush_request_id = 'legacy-reject-request',
+                flush_error_code = 'INTERNAL_ERROR'
+            WHERE source_message_digest = 'legacy-rejected'
+            """
+        )
 
     store = MemoryStore(database)
     state = store.list_session_flush_states()
@@ -641,6 +656,13 @@ def test_v1_migration_projects_the_latest_flush_verdict_chronologically(tmp_path
         "succeeded",
         "rejected",
     ]
+    rejected = next(
+        record
+        for record in store.list_flush_settlements()
+        if record.outcome == "rejected"
+    )
+    assert rejected.request_id == "legacy-reject-request"
+    assert rejected.error_code == "INTERNAL_ERROR"
 
 
 def test_v1_migration_allows_a_newer_definitive_verdict_after_ambiguity(
@@ -908,6 +930,57 @@ def test_matching_manual_resolution_projects_and_automatic_settlement_does_not(
     assert resolved_row.flush_observed_at == "2026-01-01T00:00:04.000Z"
 
 
+def test_manual_resolution_without_audit_evidence_stays_non_authoritative(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_id = _deliver(store, "missing-audit", session_ref="missing-audit-session")
+    provider_session_ref = next(
+        row.provider_session_ref
+        for row in store.list_queue_rows()
+        if row.session_id == session_id
+    )
+    assert provider_session_ref is not None
+    assert store.mark_flush_in_flight(session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        session_id,
+        PROJECT,
+        FlushUnknown(reason="timeout"),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=provider_session_ref,
+            generation=state.generation,
+            fence_epoch=state.fence_epoch,
+            operation_id="missing-audit-resolution",
+            operation_kind="flush",
+            outcome="committed",
+            observed_at="2026-01-01T00:00:03.000Z",
+            watermark_after=999,
+            source="manual",
+        )
+    )
+
+    assert store.get_session_flush_state(provider_session_ref).flush_state == (
+        "manual_required"
+    )
+    settlement = next(
+        record
+        for record in store.list_flush_settlements(provider_session_ref)
+        if record.operation_id == "missing-audit-resolution"
+    )
+    assert settlement.actor is None
+    assert settlement.decision is None
+    assert settlement.evidence_ref is None
+    assert settlement.flush_state is None
+    assert settlement.confirmed_watermark_ms is None
+    assert _row_for_source(store, "missing-audit").flush_observation == "unknown"
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected_observation", "expected_state", "expected_request_id"),
     [
@@ -963,6 +1036,26 @@ def test_manual_flush_resolution_reconciles_unknown_queue_rows(
     state = store.get_session_flush_state(provider_session_ref)
     assert state is not None
     assert state.flush_state == expected_state
+    if outcome == "not_committed":
+        assert state.fence_owner == "manual-flush-retry"
+        queued = store.enqueue_request(
+            source_message_id="manual-reconcile-later",
+            session_id="manual-reconcile-session",
+            principal_id="u-11111111111111111111111111111111",
+            project_ref=PROJECT,
+            provenance="user_input",
+            payload_text="queued payload",
+            occurred_at_ms=2_000,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert queued.row is not None
+        assert queued.target_generation == before.generation
+        assert store.claim_due(
+            lease_owner="boot",
+            now="2026-01-01T00:00:04.000Z",
+        ) is None
+        assert store.mark_flush_in_flight(session_id, PROJECT) == 1
+        assert _row_for_source(store, "manual-reconcile").flush_observation == "in_flight"
     if outcome == "committed":
         settlement = next(
             record
@@ -971,6 +1064,75 @@ def test_manual_flush_resolution_reconciles_unknown_queue_rows(
         )
         assert settlement.confirmed_watermark_ms == 1_000
         assert settlement.watermark_after == 1_000
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_row_state", "expected_flush_state", "expected_owner"),
+    [
+        ("committed", "delivered", "not_due", None),
+        ("not_committed", "pending", "manual_required", "manual-add-retry"),
+        ("settled_with_caveat", "dead", "settled_with_caveat", None),
+    ],
+)
+def test_manual_add_resolution_has_operation_specific_transitions(
+    tmp_path: Path,
+    outcome: str,
+    expected_row_state: str,
+    expected_flush_state: str,
+    expected_owner: str | None,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "manual-add-resolution")
+    assert accepted.row is not None and accepted.provider_session_ref is not None
+    claimed = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+    state_before = store.get_session_flush_state(accepted.provider_session_ref)
+    assert state_before is not None
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=accepted.provider_session_ref,
+            generation=state_before.generation,
+            fence_epoch=state_before.fence_epoch,
+            operation_id="ambiguous-add",
+            operation_kind="add",
+            outcome="unknown",
+            observed_at="2026-01-01T00:00:01.000Z",
+            source="add",
+        )
+    )
+    manual_state = store.get_session_flush_state(accepted.provider_session_ref)
+    assert manual_state is not None
+    assert manual_state.flush_state == "manual_required"
+
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=accepted.provider_session_ref,
+            generation=manual_state.generation,
+            fence_epoch=manual_state.fence_epoch,
+            operation_id=f"add-{claimed.source_message_digest}",
+            operation_kind="add",
+            outcome=outcome,  # type: ignore[arg-type]
+            observed_at="2026-01-01T00:00:02.000Z",
+            request_id="manual-add-request",
+            actor="operator",
+            decision=outcome,
+            evidence_ref="audit-add-resolution",
+            source="manual",
+        )
+    )
+
+    row = _row_for_source(store, "manual-add-resolution")
+    assert row is not None
+    assert row.state == expected_row_state
+    state = store.get_session_flush_state(accepted.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == expected_flush_state
+    assert state.fence_owner == expected_owner
+    if outcome == "committed":
+        assert row.payload_text is None
+        assert state.watermark == 1_000
+    if outcome == "not_committed":
+        assert row.payload_text == "queued payload"
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
@@ -1082,6 +1244,42 @@ def test_terminal_failure_keeps_a_generation_barrier_for_later_settlements(tmp_p
         and record.outcome == "rejected"
         for record in store.list_flush_settlements(failed.provider_session_ref)
     )
+
+
+def test_later_successful_boundary_retires_an_earlier_rejected_receipt(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first_session = _deliver(store, "rejected-before-success", session_ref="rejected-then-success")
+    assert store.mark_flush_in_flight(first_session, PROJECT) == 1
+    assert store.record_flush_verdict(
+        first_session,
+        PROJECT,
+        FlushRejected(
+            request_id="rejected-request",
+            error_code="INTERNAL_ERROR",
+            server_fault=True,
+        ),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    assert _row_for_source(store, "rejected-before-success").flush_observation == "rejected"
+
+    second_session = _deliver(store, "success-after-rejected", session_ref="rejected-then-success")
+    assert second_session == first_session
+    assert store.mark_flush_in_flight(second_session, PROJECT) == 1
+    assert store.record_flush_verdict(
+        second_session,
+        PROJECT,
+        FlushSucceeded(request_id="successful-request", status="extracted"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    assert _row_for_source(store, "rejected-before-success").flush_observation == "succeeded"
+    state = store.get_session_flush_state(
+        _row_for_source(store, "success-after-rejected").provider_session_ref
+    )
+    assert state is not None
+    assert state.generation == 1
 
 
 def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None:
