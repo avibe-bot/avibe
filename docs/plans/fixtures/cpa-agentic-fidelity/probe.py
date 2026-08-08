@@ -499,6 +499,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         encrypted_reasoning: dict[str, str | None] = {}
         message_text: dict[str, str] = {}
         item_types: dict[str, str] = {}
+        item_statuses: dict[str, str | None] = {}
         item_indexes: dict[str, int] = {}
         index_items: dict[int, str] = {}
         content_parts: set[tuple[str, int]] = set()
@@ -548,7 +549,12 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if not response_created or output_started:
                     return False
                 response = event.get("response")
-                if not isinstance(response, dict) or response.get("object") != "response":
+                if (
+                    not isinstance(response, dict)
+                    or response.get("object") != "response"
+                    or response.get("status") != "in_progress"
+                    or response.get("output") != []
+                ):
                     return False
                 if response.get("id") is not None and response.get("id") != response_id:
                     return False
@@ -572,8 +578,12 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 item_type = raw.get("type")
                 if not isinstance(item_type, str) or item_type not in RESPONSES_OUTPUT_ITEM_TYPES:
                     return False
+                opening_status = raw.get("status")
+                if opening_status is not None and opening_status != "in_progress":
+                    return False
                 added.add(item_id)
                 item_types[item_id] = item_type
+                item_statuses[item_id] = opening_status
                 if item_types[item_id] == "function_call":
                     if any(
                         not isinstance(raw.get(field), str) or not raw[field]
@@ -622,7 +632,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         or part_type not in RESPONSES_MESSAGE_PART_TYPES
                     ):
                         return False
-                    if part_type == "output_text" and (
+                    if part_type in RESPONSES_MESSAGE_PART_TYPES and (
                         not isinstance(part.get("text", ""), str) or part.get("text", "")
                     ):
                         return False
@@ -744,6 +754,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if item_id is None or item_id not in added or item_id in closed or output_index is None or item_indexes.get(item_id) != output_index:
                     return False
                 if item_types.get(item_id) == "function_call" and item_id not in argument_done:
+                    return False
+                done_status = raw.get("status")
+                if item_statuses.get(item_id) is not None and done_status != "completed":
+                    return False
+                if done_status is not None and done_status != "completed":
                     return False
                 if item_types.get(item_id) == "message" and any(
                     part_item_id == item_id and content_part_types.get((part_item_id, part_index)) == "output_text" and (part_item_id, part_index) not in message_text_done
@@ -1449,6 +1464,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     reasoning_summary_indexes: dict[str, set[int]] = {}
     reasoning_summary_done: set[tuple[str, int]] = set()
     encrypted_reasoning_by_item: dict[str, str | None] = {}
+    opening_status_by_item: dict[str, str | None] = {}
     status: str | None = None
     args_by_item: dict[str, str] = {}
     argument_fragment_items: set[str] = set()
@@ -1481,7 +1497,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 errors.append("response_start_snapshot_invalid")
         elif event_type == "response.in_progress":
             response = event.get("response")
-            if not isinstance(response, dict) or response.get("object") != "response":
+            if (
+                not isinstance(response, dict)
+                or response.get("object") != "response"
+                or response.get("status") != "in_progress"
+                or response.get("output") != []
+            ):
                 errors.append("response_in_progress_snapshot_invalid")
         elif event_type == "response.output_item.added":
             streamed_output_seen = True
@@ -1493,6 +1514,10 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if key is None:
                 continue
             output[key] = raw
+            opening_status = raw.get("status")
+            if opening_status is not None and opening_status != "in_progress":
+                errors.append("stream_output_item_status_invalid")
+            opening_status_by_item[key] = opening_status
             if raw.get("type") == "function_call":
                 for field in ("call_id", "name"):
                     if not isinstance(raw.get(field), str) or not raw[field]:
@@ -1534,6 +1559,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     snapshot_arguments = raw.get("arguments")
                     if not isinstance(snapshot_arguments, str) or _parse_arguments(snapshot_arguments, expected_wire="json")[1]:
                         errors.append("stream_arguments_snapshot_invalid")
+                done_status = raw.get("status")
+                if opening_status_by_item.get(key) is not None and done_status != "completed":
+                    errors.append("stream_output_item_status_invalid")
+                if done_status is not None and done_status != "completed":
+                    errors.append("stream_output_item_status_invalid")
                 if raw.get("type") == "reasoning" and key in reasoning_by_item:
                     snapshot_reasoning = _reasoning_text(raw.get("summary")) + _reasoning_text(raw.get("content"))
                     if snapshot_reasoning != reasoning_by_item[key]:
@@ -1598,7 +1628,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 continue
             if event_type == "response.content_part.added":
                 content_part_types[(key, content_index)] = part_type
-            if event_type == "response.content_part.added" and part_type == "output_text":
+            if event_type == "response.content_part.added" and part_type in RESPONSES_MESSAGE_PART_TYPES:
                 opening_text = part.get("text", "")
                 if not isinstance(opening_text, str) or opening_text:
                     errors.append("content_part_opening_snapshot_invalid")
@@ -1743,7 +1773,17 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
         message_items = [(key, raw) for key, raw in output.items() if raw.get("type") == "message"]
         if message_items:
             for key, raw in message_items:
-                raw["content"] = [{"type": "output_text", "text": text_by_item.get(key, "")}]
+                part_keys = sorted(
+                    (part_key for part_key in content_part_types if part_key[0] == key),
+                    key=lambda part_key: part_key[1],
+                )
+                if part_keys:
+                    raw["content"] = [
+                        {"type": content_part_types[part_key], "text": text_by_part.get(part_key, "")}
+                        for part_key in part_keys
+                    ]
+                else:
+                    raw["content"] = [{"type": "output_text", "text": text_by_item.get(key, "")}]
         else:
             items.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "".join(text_parts)}]})
     if terminal_response is not None:

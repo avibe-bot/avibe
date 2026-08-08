@@ -48,6 +48,56 @@ def _response_message_stream():
     )
 
 
+def _response_multi_content_stream():
+    message = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "output_text", "text": "first"},
+            {"type": "output_text", "text": "second"},
+        ],
+    }
+    return _responses_wire(
+        {"type": "response.created", "response": {}},
+        {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message", "role": "assistant"}},
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        },
+        {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "first"},
+        {"type": "response.output_text.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "text": "first"},
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "first"},
+        },
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 1,
+            "part": {"type": "output_text", "text": ""},
+        },
+        {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 1, "delta": "second"},
+        {"type": "response.output_text.done", "item_id": "msg_1", "output_index": 0, "content_index": 1, "text": "second"},
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 1,
+            "part": {"type": "output_text", "text": "second"},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": message},
+        {"type": "response.completed", "response": {"status": "completed", "output": [message]}},
+    )
+
+
 def _response_reasoning_stream():
     reasoning = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "thought"}]}
     return _responses_wire(
@@ -1240,23 +1290,20 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", missing_terminal_response))
 
     def test_responses_stream_in_progress_snapshot_requires_object(self) -> None:
-        events = _response_message_stream()
-        events.insert(1, {"kind": "event", "type": "response.in_progress", "event": {"type": "response.in_progress", "response": []}})
-        for index, event in enumerate(events):
-            event["sequence"] = index
-            event["wire_sequence"] = index
-        self.assertFalse(probe._stream_order_ok("responses", events))
-        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
-        self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
-
-        events = _response_message_stream()
-        events.insert(1, {"kind": "event", "type": "response.in_progress", "event": {"type": "response.in_progress", "response": {"object": "other"}}})
-        for index, event in enumerate(events):
-            event["sequence"] = index
-            event["wire_sequence"] = index
-        self.assertFalse(probe._stream_order_ok("responses", events))
-        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
-        self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
+        for response in (
+            [],
+            {"object": "other", "status": "in_progress", "output": []},
+            {"object": "response", "status": "completed", "output": []},
+            {"object": "response", "status": "in_progress", "output": [{"id": "msg_1"}]},
+        ):
+            events = _response_message_stream()
+            events.insert(1, {"kind": "event", "type": "response.in_progress", "event": {"type": "response.in_progress", "response": response}})
+            for index, event in enumerate(events):
+                event["sequence"] = index
+                event["wire_sequence"] = index
+            self.assertFalse(probe._stream_order_ok("responses", events))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+            self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
 
     def test_responses_stream_rejects_invalid_terminal_discriminator(self) -> None:
         events = _response_message_stream()
@@ -1843,6 +1890,27 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("stream_arguments_opening_snapshot_invalid", turn.parse_errors)
 
+    def test_responses_output_item_opening_status_must_be_in_progress(self) -> None:
+        invalid = _response_function_stream()
+        invalid[1]["event"]["item"]["status"] = "failed"
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("stream_output_item_status_invalid", turn.parse_errors)
+
+        valid = _response_function_stream()
+        valid[1]["event"]["item"]["status"] = "in_progress"
+        valid[4]["event"]["item"]["status"] = "completed"
+        valid[-1]["event"]["response"]["output"][0]["status"] = "completed"
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
+        self.assertNotIn("stream_output_item_status_invalid", valid_turn.parse_errors)
+
+        missing_done_status = copy.deepcopy(valid)
+        missing_done_status[4]["event"]["item"].pop("status")
+        self.assertFalse(probe._stream_order_ok("responses", missing_done_status))
+        missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing_done_status, False, 0, False))
+        self.assertIn("stream_output_item_status_invalid", missing_turn.parse_errors)
+
     def test_responses_function_opening_snapshot_requires_identity(self) -> None:
         for field in ("call_id", "name"):
             invalid = _response_function_stream()
@@ -1858,6 +1926,24 @@ class ProbeParserTests(unittest.TestCase):
         self.assertTrue(probe._stream_order_ok("responses", valid))
         self.assertFalse(probe._stream_order_ok("responses", invalid))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
+
+    def test_responses_stream_preserves_multiple_content_parts(self) -> None:
+        events = _response_multi_content_stream()
+        self.assertTrue(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, True))
+        self.assertNotIn("terminal_output_mismatch", turn.parse_errors)
+        self.assertEqual(turn.text, "firstsecond")
+        self.assertEqual(turn.continuation[0]["content"], [{"type": "output_text", "text": "first"}, {"type": "output_text", "text": "second"}])
+
+    def test_responses_text_content_part_opening_text_must_be_empty(self) -> None:
+        events = [
+            {"kind": "event", "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message", "role": "assistant"}}},
+            {"kind": "event", "type": "response.content_part.added", "event": {"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "text", "text": "prefilled"}}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
         self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
 
     def test_responses_stream_rejects_unsupported_content_part_type(self) -> None:

@@ -62,22 +62,24 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun (r27) exercised all eight cases after the current-head
+latest gate-complete rerun (r29) exercised all eight cases after the current-head
 parser fixes: all eight completed both turns with HTTP 200 and no fallback was
-used. Messages-to-Responses single failed both parse gates and its final exact
-tuple while final system scope and tool outputs passed; the parallel case passed
-both parse gates, final system scope, and tool outputs but its exact tuple failed.
-Responses-to-Messages single lacked reasoning and failed its final exact tuple
-and system scope while tool outputs passed; the parallel case also lacked
-reasoning and failed final system scope, tool outputs, and its exact tuple. Both
-Messages-to-Chat cases failed the first and final parse gates with thinking present;
-the single case failed its final exact tuple while system scope and tool outputs
-passed, and the parallel case also failed the stream-order gate after the explicit
-Chat choice-index check while system scope and tool outputs passed.
-Chat-to-Messages single lacked reasoning and failed final system scope but passed
-tool outputs and its exact tuple; the parallel case lacked reasoning, failed both
-parse gates, final system scope, and its exact tuple, and did not preserve tool
-outputs.
+used. Messages-to-Responses single failed its first parse gate with thinking
+present but its final response parsed; its final exact tuple failed while final
+system scope and tool outputs passed. The parallel case passed both parse gates,
+final system scope, and tool outputs but its exact tuple failed.
+Responses-to-Messages single had reasoning absent, passed both parse gates, and
+failed final system scope and exact tuple while tool outputs passed; the parallel
+case also had reasoning absent and failed both parse and stream-order gates, with
+final system scope, tool outputs, and exact tuple all false. Both Messages-to-Chat
+cases failed the first and final parse gates with thinking present; the single case
+failed its final exact tuple while system scope and tool outputs passed, and the
+parallel case failed its first stream-order gate but passed the final stream-order
+gate while system scope and tool outputs passed. Chat-to-Messages single had
+reasoning absent, passed both parse gates, and failed final system scope, tool
+outputs, and exact tuple; the parallel case also had reasoning absent, failed both
+parse gates but passed stream ordering, and failed final system scope, tool outputs,
+and exact tuple.
 
 ## S4 matrix mapping
 
