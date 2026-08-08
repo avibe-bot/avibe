@@ -903,7 +903,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertFalse(agent._terminal_claim_superseded(composite_key, 1))
+        # The init may arrive before client.query() returns and increments the
+        # steering generation. The exact observed fence still owns this result.
+        self.assertFalse(agent._terminal_claim_superseded(composite_key, 0))
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
         self.assertNotIn(composite_key, agent._steering_input_fences)
 
@@ -1098,7 +1100,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.emit_agent_message.assert_any_await(
             context,
-            "assistant",
+            "output",
             "primary work completed",
             parse_mode="markdown",
         )

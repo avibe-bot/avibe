@@ -295,6 +295,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "kind": kind,
                 "id": msg.get("id"),
                 "mtype": mtype,
+                "is_transcript": bool(
+                    spec_for(mtype if isinstance(mtype, str) else "")["transcript"]
+                ),
                 "row_kind": "assistant",
                 "text": msg.get("text") if include_text else None,
                 # The silent marker is a terminal that is INVISIBLE in the transcript,
@@ -467,7 +470,8 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 )
                 pending = []
             turn_start_iso = item["created_at"]
-            last_boundary_id = item["id"]
+            if item["is_transcript"]:
+                last_boundary_id = item["id"]
         elif kind == "terminal":
             if pending:
                 # A silent marker is invisible in the transcript, so its DONE group

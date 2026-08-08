@@ -35,6 +35,7 @@
       "render": "harness"
     },
     "agent_initiated": {
+      "inboxActivity": true,
       "inputAuthors": [
         "harness"
       ],
@@ -46,6 +47,13 @@
       "inboxActivity": true,
       "inputAuthors": ["harness"],
       "render": "annotation"
+    },
+    "output": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inboxPreview": true,
+      "render": "agent"
     },
     "result": {
       "transcript": true,

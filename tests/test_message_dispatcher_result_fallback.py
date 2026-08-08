@@ -948,6 +948,35 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         persist.assert_called_once()
         self.assertEqual(persist.call_args.args[1], "notify")
 
+    async def test_output_is_delivered_and_persisted_without_settling(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        with (
+            mock.patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "msg-output"},
+            ) as persist,
+            mock.patch(
+                "core.message_dispatcher._stream_chunk",
+                new=mock.AsyncMock(),
+            ) as stream,
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "output",
+                "primary answer",
+                output=MessageOutput(completes_turn=False, completes_run=False),
+            )
+
+        self.assertEqual(message_id, "msg-1")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "primary answer", "markdown")])
+        self.assertEqual(persist.call_args.args[1], "output")
+        stream.assert_awaited_once()
+        self.assertEqual(stream.call_args.kwargs["kind"], "output")
+        self.assertFalse(stream.call_args.kwargs["completes_turn"])
+
     async def test_notify_not_persisted_when_send_fails(self):
         class _FailClient(_StubIMClient):
             async def send_message(self, *args, **kwargs):

@@ -1050,7 +1050,11 @@ class ClaudeAgent(BaseAgent):
                 fences.pop(0)
             if not fences:
                 self._steering_input_fences.pop(composite_key, None)
-            return generation_changed or bool(fences)
+            # The sampled generation can still predate the query transport ack:
+            # the receiver observed this exact input's native init while the writer
+            # held the steering lock. Once that exact fence is consumed, ownership
+            # comes from the fence, not from the stale generation sample.
+            return bool(fences)
         buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
 
@@ -1915,7 +1919,7 @@ class ClaudeAgent(BaseAgent):
                             if superseded_result_text:
                                 await self.controller.emit_agent_message(
                                     context,
-                                    "assistant",
+                                    "output",
                                     superseded_result_text,
                                     parse_mode="markdown",
                                 )

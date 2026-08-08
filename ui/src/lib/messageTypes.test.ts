@@ -43,6 +43,7 @@ const CANONICAL_MESSAGE_TYPES = [
   'harness',
   'agent_initiated',
   'annotation',
+  'output',
   'result',
   'notify',
   'error',
@@ -61,6 +62,7 @@ const wasTranscript = (type: string): boolean =>
   type === 'user' ||
   type === 'harness' ||
   type === 'annotation' ||
+  type === 'output' ||
   type === 'result' ||
   type === 'error' ||
   type === 'notify';

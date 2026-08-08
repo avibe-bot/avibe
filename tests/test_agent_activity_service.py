@@ -601,6 +601,77 @@ def test_get_turn_group_unknown_id_returns_none(isolated_state):
 # no terminal at all (cancel/Stop) = interrupted.
 
 
+@pytest.mark.parametrize("ending", ["silent", "interrupted"])
+def test_hidden_agent_started_turn_keeps_transcript_visible_activity_anchor(
+    isolated_state,
+    ending,
+):
+    engine = create_sqlite_engine()
+    sid = f"ses_hidden_start_{ending}"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_previous",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:00Z",
+            text="previous answer",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_hidden",
+            mtype="agent_initiated",
+            author="harness",
+            source="harness",
+            created_at="2026-06-01T10:00:01Z",
+            text="internal continuation",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_hidden",
+            created_at="2026-06-01T10:00:02Z",
+            text="tool",
+        )
+        if ending == "silent":
+            _evt(
+                conn,
+                scope,
+                sid,
+                eid="e_terminal",
+                created_at="2026-06-01T10:00:03Z",
+                text="",
+                event_type="silent_terminal",
+                metadata={"terminal_outcome": "completed"},
+            )
+        else:
+            _msg(
+                conn,
+                scope,
+                sid,
+                mid="m_next",
+                mtype="user",
+                author="user",
+                source="user",
+                created_at="2026-06-01T10:00:03Z",
+                text="next question",
+            )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+
+    assert len(groups) == 1
+    assert groups[0]["anchor_message_id"] == "m_previous"
+    assert groups[0]["anchor_message_id"] != "m_hidden"
+    assert groups[0]["anchor_position"] == "after"
+
+
 def test_silent_completion_marks_turn_done(isolated_state):
     """A reply-less terminal Turn closes activity without a pseudo Message."""
     engine = create_sqlite_engine()

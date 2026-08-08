@@ -253,6 +253,7 @@ _AGENT_TYPE_BY_CANONICAL = {
     # (result-only) don't count it, while it stays in the transcript/inbox.
     "error": "error",
     "notify": "notify",
+    "output": "output",
     "assistant": "assistant",
     "system": "assistant",
 }
