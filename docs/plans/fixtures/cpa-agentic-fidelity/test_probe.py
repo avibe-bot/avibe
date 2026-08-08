@@ -50,6 +50,27 @@ def _response_reasoning_stream():
     )
 
 
+def _response_multi_summary_stream():
+    reasoning = {
+        "id": "rs_1",
+        "type": "reasoning",
+        "summary": [
+            {"type": "summary_text", "text": "first"},
+            {"type": "summary_text", "text": "second"},
+        ],
+    }
+    return _responses_wire(
+        {"type": "response.created", "response": {}},
+        {"type": "response.output_item.added", "output_index": 0, "item": {"id": "rs_1", "type": "reasoning"}},
+        {"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_1", "summary_index": 0, "delta": "first"},
+        {"type": "response.reasoning_summary_text.done", "output_index": 0, "item_id": "rs_1", "summary_index": 0, "text": "first"},
+        {"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_1", "summary_index": 1, "delta": "second"},
+        {"type": "response.reasoning_summary_text.done", "output_index": 0, "item_id": "rs_1", "summary_index": 1, "text": "second"},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {"type": "response.completed", "response": {"status": "completed", "output": [reasoning]}},
+    )
+
+
 def _response_function_stream():
     function_call = {
         "id": "fc_1",
@@ -124,6 +145,21 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_responses_stream(result)
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
+
+    def test_responses_stream_reassembles_multiple_reasoning_summaries(self) -> None:
+        events = _response_multi_summary_stream()
+        self.assertTrue(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertNotIn("stream_text_done_mismatch", turn.parse_errors)
+        self.assertEqual(turn.reasoning_text, "firstsecond")
+
+    def test_responses_stream_rejects_noncontiguous_reasoning_summary_index(self) -> None:
+        events = _response_multi_summary_stream()
+        events[4]["event"]["summary_index"] = 2
+        events[5]["event"]["summary_index"] = 2
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("summary_index_invalid", turn.parse_errors)
 
     def test_responses_stream_rejects_done_argument_snapshot_mismatch(self) -> None:
         result = probe.TransportResult(
@@ -203,8 +239,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_reassembles_tool_fragments(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":'}}]}}]}},
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '"Shanghai"}'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '"Shanghai"}'}}]}}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
@@ -212,8 +248,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_sparse_continuation_type(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '{"city":'}}]}}]}},
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": '"Shanghai"}'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '{"city":'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": '"Shanghai"}'}}]}}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
@@ -221,17 +257,17 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_requires_argument_fragments(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather"}}]}}]}},
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather"}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("stream_arguments_missing", turn.parse_errors)
 
     def test_chat_stream_rejects_tool_call_id_changes(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_2", "function": {}}]}}]}},
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_2", "function": {}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("tool_call_id_changed", turn.parse_errors)
@@ -322,13 +358,41 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_requires_done_sentinel(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))
 
+    def test_chat_stream_done_sentinel_is_not_an_envelope(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}},
+            {"kind": "done", "type": None},
+        ]
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertNotIn("stream_envelope_invalid", turn.parse_errors)
+        self.assertTrue(turn.terminal)
+
+    def test_chat_stream_requires_chunk_discriminator(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}},
+            {"kind": "done", "type": None},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("stream_object_invalid", turn.parse_errors)
+
+    def test_chat_stream_rejects_unhashable_continuation_type(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant", "tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": "{\"city\":\"Shanghai\"}"}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": [], "function": {}}]}, "finish_reason": "tool_calls"}]}},
+            {"kind": "done", "type": None},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("tool_call_type_invalid", turn.parse_errors)
+
     def test_chat_stream_rejects_non_object_tool_fragments(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "type": None, "event": {"choices": [{"delta": {"role": "assistant", "tool_calls": [None]}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant", "tool_calls": [None]}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 1, "type": None},
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))
@@ -337,8 +401,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_indices_to_restart_each_chunk(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
-            {"kind": "event", "sequence": 1, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", events))
@@ -375,7 +439,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_rejects_non_function_tool_type(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "custom", "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "custom", "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("tool_call_type_invalid", turn.parse_errors)
@@ -658,8 +722,8 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "event", "sequence": 1, "event": {"type": "message_stop"}},
         ]
         chat_events = [
-            {"kind": "event", "sequence": 0, "event": {"choices": [{"delta": {"tool_calls": [{"index": None, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
-            {"kind": "event", "sequence": 1, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": None, "id": "call_1", "function": {"name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertFalse(probe._stream_order_ok("anthropic", anthropic_events))
@@ -769,6 +833,17 @@ class ProbeParserTests(unittest.TestCase):
         invalid = [ordered[2], ordered[0], ordered[3], ordered[4]]
         self.assertTrue(probe._stream_order_ok("anthropic", ordered))
         self.assertFalse(probe._stream_order_ok("anthropic", invalid))
+
+    def test_anthropic_stream_rejects_overlapping_content_blocks(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0}},
+            {"kind": "event", "sequence": 2, "type": "content_block_start", "event": {"type": "content_block_start", "index": 1}},
+            {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "sequence": 4, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 1}},
+            {"kind": "event", "sequence": 5, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
 
     def test_anthropic_message_delta_requires_started_closed_message(self) -> None:
         before_start = [
@@ -924,8 +999,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_requires_assistant_role(self) -> None:
         invalid = [
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"role": "user"}}]}},
-            {"kind": "event", "type": None, "event": {"choices": [{"delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "user"}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "stop"}]}},
             {"kind": "done", "type": None},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, invalid, True, 0))
@@ -933,15 +1008,15 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_rejects_malformed_delta(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"choices": [{"index": 0, "delta": None}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": None}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("delta_invalid", turn.parse_errors)
 
     def test_chat_stream_rejects_choice_index_change(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "type": None, "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "a"}}]}},
-            {"kind": "event", "sequence": 1, "type": None, "event": {"choices": [{"index": 1, "delta": {"content": "b"}, "finish_reason": "stop"}]}},
+            {"kind": "event", "sequence": 0, "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "a"}}]}},
+            {"kind": "event", "sequence": 1, "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"index": 1, "delta": {"content": "b"}, "finish_reason": "stop"}]}},
             {"kind": "done", "sequence": 2, "type": None},
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))
@@ -950,13 +1025,13 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_order_rejects_content_after_finish(self) -> None:
         allowed = [
-            {"kind": "event", "sequence": 0, "event": {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
-            {"kind": "event", "sequence": 1, "event": {"choices": [], "usage": {"completion_tokens": 1}}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens": 1}}},
             {"kind": "done", "sequence": 2},
         ]
         invalid = [
             allowed[0],
-            {"kind": "event", "sequence": 1, "event": {"choices": [{"delta": {"content": "late"}}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"content": "late"}}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", allowed))
@@ -1172,8 +1247,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_streamed_chat_content_requires_string_or_null(self) -> None:
         events = [
-            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "content": {"text": probe.SYSTEM_MARKER}}}]}},
-            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": {"text": probe.SYSTEM_MARKER}}}]}},
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
             {"kind": "done"},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, True))
@@ -1291,8 +1366,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_usage_before_finish_is_rejected(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"choices": [], "usage": {"completion_tokens_details": {"reasoning_tokens": 1}}}},
-            {"kind": "event", "sequence": 1, "event": {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens_details": {"reasoning_tokens": 1}}}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))
@@ -1355,8 +1430,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_tool_indexes_must_be_contiguous(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 5, "id": "call_1", "type": "function", "function": {"name": "lookup_weather", "arguments": "{"}}]}}]}},
-            {"kind": "event", "sequence": 1, "event": {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 7, "id": "call_2", "type": "function", "function": {"name": "lookup_time", "arguments": "}"}}]}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 5, "id": "call_1", "type": "function", "function": {"name": "lookup_weather", "arguments": "{"}}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 7, "id": "call_2", "type": "function", "function": {"name": "lookup_time", "arguments": "}"}}]}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))
@@ -1497,7 +1572,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_choices_must_be_a_list(self) -> None:
         for choices in ({}, "invalid"):
-            events = [{"kind": "event", "sequence": 0, "event": {"choices": choices}}]
+            events = [{"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": choices}}]
             self.assertFalse(probe._stream_order_ok("chat", events))
             turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, False, 0, False))
             self.assertIn("choice_invalid", turn.parse_errors)
@@ -1511,6 +1586,19 @@ class ProbeParserTests(unittest.TestCase):
                 document["object"] = object_value
             turn = probe._parse_responses_document(document)
             self.assertIn("response_object_invalid", turn.parse_errors)
+
+    def test_responses_nonstream_rejects_invalid_output_item_types(self) -> None:
+        for item_type in (None, [], {}, "unknown"):
+            item = {"id": "bad_1", "type": item_type}
+            turn = probe._parse_responses_document({"object": "response", "output": [item], "status": "completed"})
+            self.assertIn("output_item_type_invalid", turn.parse_errors)
+
+    def test_responses_nonstream_rejects_invalid_nested_part_types(self) -> None:
+        message = {"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": []}]}
+        reasoning = {"id": "rs_1", "type": "reasoning", "summary": [{"type": {}}]}
+        turn = probe._parse_responses_document({"object": "response", "output": [message, reasoning], "status": "completed"})
+        self.assertIn("message_part_type_invalid", turn.parse_errors)
+        self.assertIn("reasoning_part_type_invalid", turn.parse_errors)
 
     def test_responses_stream_event_type_must_be_a_string(self) -> None:
         for event_type in ([], {}):
@@ -1566,9 +1654,9 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_error_payload_is_not_a_completion(self) -> None:
         events = [
-            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}},
-            {"kind": "event", "type": "error", "event": {"type": "error", "error": {"type": "server_error"}, "choices": []}},
-            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}},
+            {"kind": "event", "type": "error", "event": {"object": "chat.completion.chunk", "type": "error", "error": {"type": "server_error"}, "choices": []}},
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
             {"kind": "done"},
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))

@@ -42,6 +42,7 @@ STOP_REASONS = {
     "responses": {"first": {"completed"}, "final": {"completed"}},
     "chat": {"first": {"tool_calls"}, "final": {"stop"}},
 }
+RESPONSES_OUTPUT_ITEM_TYPES = {"function_call", "message", "reasoning"}
 MAX_503_RETRIES = 3
 
 
@@ -395,6 +396,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             elif event_type == "content_block_start":
                 if not message_started or message_delta_seen:
                     return False
+                if open_blocks:
+                    return False
                 block_index = _stream_index(event.get("index"))
                 if block_index is None:
                     return False
@@ -438,7 +441,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         message_text_started: set[tuple[str, int]] = set()
         message_text_done: set[tuple[str, int]] = set()
         reasoning_text_started: set[str] = set()
-        reasoning_text_done: set[str] = set()
+        reasoning_text_done: set[tuple[str, int]] = set()
+        reasoning_summary_indexes: dict[str, set[int]] = {}
         encrypted_reasoning: dict[str, str | None] = {}
         message_text: dict[str, str] = {}
         item_types: dict[str, str] = {}
@@ -503,8 +507,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 if output_index in index_items:
                     return False
+                item_type = raw.get("type")
+                if not isinstance(item_type, str) or item_type not in RESPONSES_OUTPUT_ITEM_TYPES:
+                    return False
                 added.add(item_id)
-                item_types[item_id] = str(raw.get("type", ""))
+                item_types[item_id] = item_type
                 if item_types[item_id] == "function_call":
                     opening_arguments = raw.get("arguments")
                     if opening_arguments is not None and opening_arguments != "":
@@ -605,7 +612,15 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     message_text_started.add(key)
                     message_text[item_id] = message_text.get(item_id, "") + delta
                 else:
-                    if item_id in reasoning_text_done:
+                    summary_index = _stream_index(event.get("summary_index", 0))
+                    if summary_index is None:
+                        return False
+                    indexes = reasoning_summary_indexes.setdefault(item_id, set())
+                    if summary_index not in indexes and summary_index != len(indexes):
+                        return False
+                    indexes.add(summary_index)
+                    summary_key = (item_id, summary_index)
+                    if summary_key in reasoning_text_done:
                         return False
                     reasoning_text_started.add(item_id)
             elif event_type in {"response.output_text.done", "response.reasoning_summary_text.done"}:
@@ -631,9 +646,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         return False
                     message_text_done.add(key)
                 else:
-                    if item_id not in reasoning_text_started or item_id in reasoning_text_done:
+                    summary_index = _stream_index(event.get("summary_index", 0))
+                    summary_key = (item_id, summary_index if summary_index is not None else -1)
+                    if summary_index is None or item_id not in reasoning_text_started or summary_key in reasoning_text_done:
                         return False
-                    reasoning_text_done.add(item_id)
+                    reasoning_text_done.add(summary_key)
             elif event_type == "response.output_item.done":
                 if not response_started:
                     return False
@@ -659,14 +676,22 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     for part in content:
                         if not isinstance(part, dict):
                             return False
-                        if part.get("type") in {"output_text", "text"}:
+                        part_type = part.get("type")
+                        if not isinstance(part_type, str) or part_type not in {"output_text", "text"}:
+                            return False
+                        if part_type in {"output_text", "text"}:
                             text = part.get("text")
                             if not isinstance(text, str):
                                 return False
                             snapshot_parts.append(text)
                     if "".join(snapshot_parts) != message_text.get(item_id, ""):
                         return False
-                if item_types.get(item_id) == "reasoning" and item_id in reasoning_text_started and item_id not in reasoning_text_done:
+                if item_types.get(item_id) == "reasoning" and any(
+                    summary_item_id == item_id
+                    and (summary_item_id, summary_index) not in reasoning_text_done
+                    for summary_item_id, indexes in reasoning_summary_indexes.items()
+                    for summary_index in indexes
+                ):
                     return False
                 if item_types.get(item_id) == "reasoning":
                     done_encrypted = raw.get("encrypted_content")
@@ -712,6 +737,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         event_type = event.get("type")
         choices = event.get("choices", [])
         usage = event.get("usage")
+        if event.get("object") != "chat.completion.chunk":
+            return False
         if event_type is not None and not isinstance(event_type, str):
             return False
         if not isinstance(choices, list):
@@ -749,6 +776,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     if tool_index != len(seen_tool_indexes):
                         return False
                     seen_tool_indexes.add(tool_index)
+                raw_type = call.get("type")
+                if raw_type is not None and not isinstance(raw_type, str):
+                    return False
                 chunk_last_tool_index = tool_index
             finish_reason = choice.get("finish_reason")
             if finish_reason is not None and not isinstance(finish_reason, str):
@@ -893,6 +923,7 @@ def _reasoning_text_parts(parts: Any) -> list[str]:
         part["text"]
         for part in parts
         if isinstance(part, dict)
+        and isinstance(part.get("type"), str)
         and part.get("type") in {"reasoning_text", "summary_text", "text"}
         and isinstance(part.get("text"), str)
         and part["text"]
@@ -1101,12 +1132,23 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
             errors.append("output_item_invalid")
             continue
         item_type = item.get("type")
+        if not isinstance(item_type, str) or item_type not in RESPONSES_OUTPUT_ITEM_TYPES:
+            errors.append("output_item_type_invalid")
+            continue
         if item_type == "function_call":
             arguments, error = _parse_arguments(item.get("arguments"), expected_wire="json")
             if error:
                 errors.append(error)
             calls.append(ToolCall(_required_identifier(item.get("call_id"), errors), str(item.get("name", "")), arguments))
         elif item_type == "reasoning":
+            for field in ("summary", "content"):
+                parts = item.get(field)
+                if parts is not None and not isinstance(parts, list):
+                    errors.append("reasoning_parts_invalid")
+                elif isinstance(parts, list):
+                    for part in parts:
+                        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                            errors.append("reasoning_part_type_invalid")
             item_parts = [*_reasoning_text_parts(item.get("summary")), *_reasoning_text_parts(item.get("content"))]
             if _reasoning_item_has_signal(item):
                 reasoning = True
@@ -1119,7 +1161,9 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                 errors.append("message_content_invalid")
                 continue
             for part in content:
-                if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                    errors.append("message_part_type_invalid")
+                elif part.get("type") in {"output_text", "text"}:
                     text = part.get("text", "")
                     if not isinstance(text, str):
                         errors.append("message_text_invalid")
@@ -1179,6 +1223,8 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     text_by_item: dict[str, str] = {}
     text_by_part: dict[tuple[str, int], str] = {}
     reasoning_by_item: dict[str, str] = {}
+    reasoning_by_summary: dict[tuple[str, int], str] = {}
+    reasoning_summary_indexes: dict[str, set[int]] = {}
     encrypted_reasoning_by_item: dict[str, str | None] = {}
     status: str | None = None
     args_by_item: dict[str, str] = {}
@@ -1256,14 +1302,20 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 output[key] = copy.deepcopy(raw)
                 if raw.get("type") == "message" and raw.get("role") != "assistant":
                     errors.append("assistant_role_invalid")
-                if raw.get("type") == "message":
+                raw_type = raw.get("type")
+                if not isinstance(raw_type, str) or raw_type not in RESPONSES_OUTPUT_ITEM_TYPES:
+                    errors.append("output_item_type_invalid")
+                    continue
+                if raw_type == "message":
                     content = raw.get("content")
                     if not isinstance(content, list):
                         errors.append("message_content_invalid")
                         continue
                     item_snapshot_parts: list[str] = []
                     for part in content:
-                        if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                            errors.append("message_part_type_invalid")
+                        elif part.get("type") in {"output_text", "text"}:
                             text = part.get("text", "")
                             if not isinstance(text, str):
                                 errors.append("message_text_invalid")
@@ -1337,8 +1389,19 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 if not isinstance(delta, str):
                     errors.append("stream_reasoning_delta_invalid")
                     continue
+                summary_index = _stream_index(event.get("summary_index", 0))
+                if summary_index is None:
+                    errors.append("summary_index_invalid")
+                    continue
+                indexes = reasoning_summary_indexes.setdefault(key, set())
+                if summary_index not in indexes and summary_index != len(indexes):
+                    errors.append("summary_index_invalid")
+                    continue
+                indexes.add(summary_index)
+                summary_key = (key, summary_index)
                 if delta:
                     reasoning_by_item[key] = reasoning_by_item.get(key, "") + delta
+                    reasoning_by_summary[summary_key] = reasoning_by_summary.get(summary_key, "") + delta
             else:
                 delta = event.get("delta")
                 if not isinstance(delta, str):
@@ -1367,7 +1430,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 errors.append("stream_text_done_invalid")
                 continue
             if expected_type == "reasoning":
-                reconstructed_text = reasoning_by_item.get(key, "")
+                summary_index = _stream_index(event.get("summary_index", 0))
+                if summary_index is None:
+                    errors.append("summary_index_invalid")
+                    reconstructed_text = ""
+                else:
+                    reconstructed_text = reasoning_by_summary.get((key, summary_index), "")
             else:
                 content_index = _stream_index(event.get("content_index"))
                 if content_index is None:
@@ -1510,10 +1578,15 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     tool_type_seen: set[int] = set()
     assistant_role_seen = False
     for item in result.events:
+        if item.get("kind") == "done":
+            continue
         event = item.get("event", {})
         event_type = event.get("type")
         if event_type is not None and not isinstance(event_type, str):
             errors.append("stream_event_type_invalid")
+            continue
+        if event.get("object") != "chat.completion.chunk":
+            errors.append("stream_object_invalid")
             continue
         if "error" in event:
             errors.append("stream_failure_event")
@@ -1584,6 +1657,9 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                     errors.append("tool_call_type_invalid")
                     continue
                 tool_type_seen.add(index)
+            elif raw_type is not None and not isinstance(raw_type, str):
+                errors.append("tool_call_type_invalid")
+                continue
             elif raw_type not in {None, "function"}:
                 errors.append("tool_call_type_invalid")
                 continue
