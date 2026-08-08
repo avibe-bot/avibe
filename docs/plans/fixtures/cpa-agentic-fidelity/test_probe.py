@@ -1,3 +1,4 @@
+import copy
 import json
 import unittest
 
@@ -15,7 +16,7 @@ def _response_message_stream():
     message = {"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
     return _responses_wire(
         {"type": "response.created", "response": {}},
-        {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message"}},
+        {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message", "role": "assistant"}},
         {
             "type": "response.content_part.added",
             "item_id": "msg_1",
@@ -46,6 +47,44 @@ def _response_reasoning_stream():
         {"type": "response.reasoning_summary_text.done", "item_id": "rs_1", "output_index": 0, "text": "thought"},
         {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
         {"type": "response.completed", "response": {"status": "completed", "output": [reasoning]}},
+    )
+
+
+def _response_function_stream():
+    function_call = {
+        "id": "fc_1",
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "lookup_weather",
+        "arguments": '{"city":"Shanghai"}',
+    }
+    return _responses_wire(
+        {"type": "response.created", "response": {}},
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup_weather",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": '{"city":"Shanghai"}',
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "arguments": '{"city":"Shanghai"}',
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": function_call},
+        {"type": "response.completed", "response": {"status": "completed", "output": [function_call]}},
     )
 
 
@@ -505,7 +544,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_sse_accepts_cr_only_line_endings(self) -> None:
         payload = (
-            b'\xef\xbb\xbfevent: message_start\rdata: {"type":"message_start"}\r\r'
+            b'\xef\xbb\xbfevent: message_start\rdata: {"type":"message_start","message":'
+            b'{"type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null}}\r\r'
             b'event: message_stop\rdata: {"type":"message_stop"}\r\r'
         )
 
@@ -706,7 +746,21 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_stream_order_rejects_lifecycle_violation(self) -> None:
         ordered = [
-            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start"}},
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": "message_start",
+                "event": {
+                    "type": "message_start",
+                    "message": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                    },
+                },
+            },
             {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0}},
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0}},
             {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
@@ -1367,6 +1421,111 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("stream_text_snapshot_invalid", text_turn.parse_errors)
         self.assertIn("stream_thinking_snapshot_invalid", thinking_turn.parse_errors)
         self.assertIn("stream_signature_snapshot_invalid", thinking_turn.parse_errors)
+
+    def test_responses_function_opening_arguments_must_be_empty(self) -> None:
+        valid = _response_function_stream()
+        invalid = copy.deepcopy(valid)
+        invalid[1]["event"]["item"]["arguments"] = '{"city":"Paris"}'
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("stream_arguments_opening_snapshot_invalid", turn.parse_errors)
+
+    def test_responses_content_part_opening_text_must_be_empty(self) -> None:
+        valid = _response_message_stream()
+        invalid = copy.deepcopy(valid)
+        invalid[2]["event"]["part"]["text"] = "WRONG"
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
+
+    def test_anthropic_message_start_requires_initial_snapshot(self) -> None:
+        valid = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": "message_start",
+                "event": {
+                    "type": "message_start",
+                    "message": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                    },
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": "message_delta",
+                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+            },
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        nonempty_content = copy.deepcopy(valid)
+        nonempty_content[0]["event"]["message"]["content"] = [{"type": "text", "text": "WRONG"}]
+        premature_stop = copy.deepcopy(valid)
+        premature_stop[0]["event"]["message"]["stop_reason"] = "end_turn"
+        self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        self.assertFalse(probe._stream_order_ok("anthropic", nonempty_content))
+        self.assertFalse(probe._stream_order_ok("anthropic", premature_stop))
+        content_turn = probe._parse_anthropic_stream(
+            probe.TransportResult(200, None, nonempty_content, False, 0, False)
+        )
+        stop_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, premature_stop, False, 0, False))
+        self.assertIn("message_start_content_invalid", content_turn.parse_errors)
+        self.assertIn("message_start_terminal_invalid", stop_turn.parse_errors)
+
+    def test_non_string_stop_reasons_are_parse_failures(self) -> None:
+        anthropic = probe._parse_anthropic_document(
+            {"type": "message", "role": "assistant", "content": [], "stop_reason": []}
+        )
+        chat = probe._parse_chat_document(
+            {
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": {}}
+                ]
+            }
+        )
+        self.assertIn("stop_reason_invalid", anthropic.parse_errors)
+        self.assertIn("finish_reason_invalid", chat.parse_errors)
+        self.assertFalse(probe._validate_first(anthropic, (), stream=False)["checks"]["stop_reason"])
+        self.assertFalse(probe._validate_first(chat, (), stream=False)["checks"]["stop_reason"])
+
+    def test_chat_stream_choices_must_be_a_list(self) -> None:
+        for choices in ({}, "invalid"):
+            events = [{"kind": "event", "sequence": 0, "event": {"choices": choices}}]
+            self.assertFalse(probe._stream_order_ok("chat", events))
+            turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, False, 0, False))
+            self.assertIn("choice_invalid", turn.parse_errors)
+
+    def test_responses_nonstream_requires_response_object(self) -> None:
+        valid = probe._parse_responses_document({"object": "response", "output": [], "status": "completed"})
+        self.assertNotIn("response_object_invalid", valid.parse_errors)
+        for object_value in (None, "chat.completion", []):
+            document = {"output": [], "status": "completed"}
+            if object_value is not None:
+                document["object"] = object_value
+            turn = probe._parse_responses_document(document)
+            self.assertIn("response_object_invalid", turn.parse_errors)
+
+    def test_responses_stream_event_type_must_be_a_string(self) -> None:
+        for event_type in ([], {}):
+            events = [
+                {
+                    "kind": "event",
+                    "sequence": 0,
+                    "wire_sequence": 0,
+                    "type": event_type,
+                    "event": {"type": event_type},
+                }
+            ]
+            self.assertFalse(probe._stream_order_ok("responses", events))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+            self.assertIn("stream_event_type_invalid", turn.parse_errors)
 
 
 if __name__ == "__main__":

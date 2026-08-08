@@ -63,14 +63,15 @@ scope; fallback evidence must not be attributed to the primary model. The
 latest gate-complete rerun exercised all eight cases after the current-head
 parser fixes: all eight completed both turns with HTTP 200 and no fallback was
 used. Messages-to-Responses single failed both parse gates while its parallel
-case passed every gate; the single final also failed its tool-output and exact-
-tuple gates. Both Responses-to-Messages first responses lacked reasoning, and
-both final responses failed exact system marker, scope, and call-ID/result-
-tuple gates. Both Messages-to-Chat cases failed the first and final parse gates
-with thinking present, and both final responses failed their exact-tuple gate.
-Both Chat-to-Messages cases lacked reasoning and failed final system marker and
-scope; the parallel case additionally failed both parse gates, while both final
-exact-tuple gates passed.
+case passed its parse and stream gates; both finals failed the exact-tuple gate,
+and the single final also failed tool output plus exact system marker/scope.
+Both Responses-to-Messages first responses lacked reasoning, and both finals
+failed exact system marker/scope and call-ID/result-tuple gates; the single
+final also failed tool output. Both Messages-to-Chat cases failed the first and
+final parse gates with thinking present, and both finals failed their exact-
+tuple gate. Both Chat-to-Messages cases lacked reasoning and failed final system
+marker/scope; the single final failed its exact-tuple gate, while the parallel
+case failed both parse gates and passed the exact-tuple gate.
 
 ## S4 matrix mapping
 
@@ -99,4 +100,8 @@ The closed matrix requires monotonic Responses wire sequence, not a particular
 origin. The measured relay emitted contiguous one-based values. Non-stream
 response media-type enforcement is likewise outside the closed semantic matrix;
 both are recorded as residuals in the survey rather than promoted into probe
-gates.
+gates. Fixture-owned historical manifest resolution, minimal allowlisting of
+the probe child environment, and non-stream inference deadline classification
+are also outside the closed matrix. The current launcher verifies v7.2.95 from
+the product manifest and inherits the caller environment; these limitations are
+explicit residuals rather than semantic success claims.

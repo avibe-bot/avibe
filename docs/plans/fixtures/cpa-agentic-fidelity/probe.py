@@ -379,6 +379,16 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             if event_type == "message_start":
                 if message_started:
                     return False
+                message = event.get("message")
+                if (
+                    not isinstance(message, dict)
+                    or message.get("type") != "message"
+                    or message.get("role") != "assistant"
+                    or message.get("content") != []
+                    or message.get("stop_reason") is not None
+                    or message.get("stop_sequence") is not None
+                ):
+                    return False
                 message_started = True
             elif event_type == "error":
                 return False
@@ -446,7 +456,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
             event = item.get("event", {})
             event_type = event.get("type")
-            if item.get("type") != event_type:
+            if not isinstance(event_type, str) or item.get("type") != event_type:
                 return False
             wire_sequence = item.get("wire_sequence")
             if type(wire_sequence) is not int or wire_sequence < 0 or (
@@ -491,6 +501,10 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 added.add(item_id)
                 item_types[item_id] = str(raw.get("type", ""))
+                if item_types[item_id] == "function_call":
+                    opening_arguments = raw.get("arguments")
+                    if opening_arguments is not None and opening_arguments != "":
+                        return False
                 item_indexes[item_id] = output_index
                 index_items[output_index] = item_id
                 output_started = True
@@ -515,6 +529,10 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if event_type == "response.content_part.added":
                     expected_content_index = sum(part_item_id == item_id for part_item_id, _ in content_parts)
                     if content_index != expected_content_index or key in content_parts or not isinstance(part.get("type"), str):
+                        return False
+                    if part.get("type") == "output_text" and (
+                        not isinstance(part.get("text", ""), str) or part.get("text", "")
+                    ):
                         return False
                     content_parts.add(key)
                     content_part_types[key] = part["type"]
@@ -655,6 +673,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         event = item.get("event", {})
         choices = event.get("choices", [])
         usage = event.get("usage")
+        if not isinstance(choices, list):
+            return False
         if item.get("type") not in {None, event.get("type")}:
             return False
         if terminal is not None:
@@ -687,7 +707,10 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         return False
                     seen_tool_indexes.add(tool_index)
                 chunk_last_tool_index = tool_index
-            if choice.get("finish_reason") is not None:
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                return False
+            if finish_reason is not None:
                 terminal = index
         elif usage is not None:
             if terminal is None or not isinstance(usage, dict):
@@ -893,6 +916,9 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
             else:
                 reasoning = True
     stop_reason = document.get("stop_reason") if isinstance(document, dict) else None
+    if stop_reason is not None and not isinstance(stop_reason, str):
+        errors.append("stop_reason_invalid")
+        stop_reason = None
     turn = Turn("anthropic", calls, "".join(text_parts), reasoning, stop_reason, content, terminal if terminal is not None else stop_reason is not None, event_count, invalid_event_count, errors)
     turn.reasoning_text = "".join(reasoning_parts)
     turn.reasoning_parts = reasoning_parts
@@ -979,6 +1005,10 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 errors.append("message_envelope_invalid")
             else:
                 envelope = {"type": message.get("type"), "role": message.get("role")}
+                if message.get("content") != []:
+                    errors.append("message_start_content_invalid")
+                if message.get("stop_reason") is not None or message.get("stop_sequence") is not None:
+                    errors.append("message_start_terminal_invalid")
         elif event_type == "message_delta":
             delta = event.get("delta")
             if not isinstance(delta, dict):
@@ -1011,6 +1041,8 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
 
 def _parse_responses_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
+    if not isinstance(document, dict) or document.get("object") != "response":
+        errors.append("response_object_invalid")
     output = document.get("output") if isinstance(document, dict) else None
     if not isinstance(output, list):
         errors.append("output_missing")
@@ -1114,6 +1146,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     for item in result.events:
         event = item.get("event", {})
         event_type = event.get("type")
+        if not isinstance(event_type, str):
+            errors.append("stream_event_type_invalid")
+            continue
         if event_type in {"error", "response.failed", "response.incomplete"}:
             errors.append("stream_failure_event")
         elif event_type == "response.output_item.added":
@@ -1126,6 +1161,10 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if key is None:
                 continue
             output[key] = raw
+            if raw.get("type") == "function_call":
+                opening_arguments = raw.get("arguments")
+                if opening_arguments is not None and opening_arguments != "":
+                    errors.append("stream_arguments_opening_snapshot_invalid")
             if raw.get("type") == "message" and raw.get("role") != "assistant":
                 errors.append("assistant_role_invalid")
             if raw.get("type") == "reasoning":
@@ -1184,7 +1223,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if not isinstance(part, dict):
                 errors.append("content_part_invalid")
                 continue
-            if event_type == "response.content_part.done":
+            if event_type == "response.content_part.added" and part.get("type") == "output_text":
+                opening_text = part.get("text", "")
+                if not isinstance(opening_text, str) or opening_text:
+                    errors.append("content_part_opening_snapshot_invalid")
+            elif event_type == "response.content_part.done":
                 part_text = part.get("text")
                 if not isinstance(part_text, str):
                     errors.append("content_part_text_invalid")
@@ -1309,7 +1352,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 if isinstance(item, dict) and item.get("type") == "function_call":
                     errors.append("stream_arguments_missing")
     turn = _parse_responses_document(
-        {"output": items, "status": status},
+        {"object": "response", "output": items, "status": status},
         event_count=len(result.events),
         invalid_event_count=result.invalid_event_count,
         terminal=status == "completed",
@@ -1367,6 +1410,9 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
         errors.append("reasoning_content_invalid")
         reasoning_content = ""
     finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        errors.append("finish_reason_invalid")
+        finish_reason = None
     continuation = copy.deepcopy(message) if isinstance(message, dict) else {}
     turn = Turn(
         "chat",
@@ -1411,6 +1457,9 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             else:
                 usage = event_usage
         choices = event.get("choices", [])
+        if not isinstance(choices, list):
+            errors.append("choice_invalid")
+            continue
         if not choices:
             continue
         if len(choices) != 1 or not isinstance(choices[0], dict):
@@ -1441,8 +1490,11 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                 errors.append("reasoning_content_invalid")
             else:
                 reasoning.append(reasoning_content)
-        if choice.get("finish_reason"):
-            finish_reason = choice["finish_reason"]
+        choice_finish_reason = choice.get("finish_reason")
+        if choice_finish_reason is not None and not isinstance(choice_finish_reason, str):
+            errors.append("finish_reason_invalid")
+        elif choice_finish_reason:
+            finish_reason = choice_finish_reason
         tool_calls = delta.get("tool_calls", [])
         if not isinstance(tool_calls, list):
             errors.append("tool_calls_invalid")
@@ -1524,7 +1576,7 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
     checks = {
         "parsed": not turn.parse_errors and turn.invalid_event_count == 0,
         "terminal": turn.terminal,
-        "stop_reason": turn.stop_reason in STOP_REASONS[turn.protocol]["first"],
+        "stop_reason": isinstance(turn.stop_reason, str) and turn.stop_reason in STOP_REASONS[turn.protocol]["first"],
         "expected_tool_count": len(turn.tool_calls) == len(expected_tools),
         "tool_names": sorted(names) == sorted(expected_tools),
         "tool_ids_unique": bool(ids) and len(ids) == len(set(ids)) and all(ids),
@@ -1555,7 +1607,7 @@ def _validate_second(
     checks = {
         "parsed": not turn.parse_errors and turn.invalid_event_count == 0,
         "terminal": turn.terminal,
-        "stop_reason": turn.stop_reason in STOP_REASONS[turn.protocol]["final"],
+        "stop_reason": isinstance(turn.stop_reason, str) and turn.stop_reason in STOP_REASONS[turn.protocol]["final"],
         "no_followup_tool_calls": not turn.tool_calls,
         "system_marker": _token_present(turn.text, SYSTEM_MARKER),
         "system_scope": _token_present(turn.text, SYSTEM_SCOPE_OK) and not _token_present(turn.text, USER_SCOPE_LEAK),
