@@ -43,8 +43,10 @@ backends are installed only after the user requests one.
   package and verifies its native executable instead of delegating publication
   to an upstream postinstall script.
 - npm installs into a fresh staging prefix below the app-private backend root.
-- Avibe validates the installed package version and a target-native executable
-  before publishing the release.
+- Avibe validates the installed package version, target-native executable, and
+  every native support executable required by that backend before publishing
+  the release. For Codex this includes its code-mode host, packaged ripgrep,
+  shell/sandbox helpers, and package metadata.
 - Publication is an atomic, bounded `current.json` descriptor. Every descriptor
   path is relative and must remain below the backend root.
 - The exact published executable path is persisted in backend configuration.
@@ -68,6 +70,13 @@ desktop launcher supplies these immutable paths to Python:
 The backend root is mutable app data and is separate from the content-addressed
 Runtime root. The Runtime integrity verifier therefore never treats lazy-loaded
 backends as bundled files.
+
+Mutable backend helper directories are derived from the exact configured
+executable and added at that backend's subprocess boundary. They are not added
+to the desktop launcher's process-wide `PATH`, because the launcher starts
+before a backend may be installed or updated. Codex uses the same derived
+environment for its app-server and per-thread shell policy, including Model Hub
+launches, so the packaged ripgrep remains available without a Runtime restart.
 
 The desktop builder installs `claude-agent-sdk` from its pure-Python source
 distribution. Its platform wheels embed Claude Code, so accepting those wheels
@@ -103,6 +112,9 @@ installed SDK contains no bundled Claude executable before packaging.
   updates.
 - Private install and update publish only verified direct native executables;
   command shims such as `.cmd` are never persisted.
+- A freshly installed Codex can resolve its packaged ripgrep in both the
+  app-server and command environment without system ripgrep or a Runtime
+  restart.
 - A failed install cannot replace the active descriptor or configured path.
 - The product Runtime archive contains no Codex, Claude Code, OpenCode, or
   backend-specific ripgrep payload.

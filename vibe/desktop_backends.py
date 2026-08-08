@@ -145,6 +145,10 @@ def resolve_published_desktop_backend(
     candidate = root / executable
     if not _verified_direct_executable(candidate, root=backend_root, require_native=True):
         return None
+    try:
+        _backend_runtime_path_entries(backend, candidate, root=backend_root)
+    except DesktopBackendError:
+        return None
     return str(candidate.resolve(strict=True))
 
 
@@ -167,6 +171,41 @@ def is_desktop_backend_path(
     except (OSError, ValueError):
         return False
     return True
+
+
+def desktop_backend_subprocess_environment(
+    backend: str,
+    executable: str | os.PathLike[str],
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, str] | None:
+    """Return the launch environment required by an app-private backend.
+
+    The desktop shell starts before a backend may be installed, so mutable
+    backend support directories cannot be added to the Runtime's process-wide
+    ``PATH``. Derive them from the exact configured executable at the backend
+    process boundary instead.
+    """
+
+    source = os.environ if base_env is None else base_env
+    root = private_desktop_backends_root(source)
+    if (
+        backend not in BACKEND_SPECS
+        or root is None
+        or not is_desktop_backend_path(executable, source)
+    ):
+        return None
+    backend_root = root / backend
+    candidate = Path(executable).expanduser()
+    if not _verified_direct_executable(candidate, root=backend_root, require_native=True):
+        raise DesktopBackendError(
+            f"Published {backend} executable failed validation.",
+            code="invalid_executable",
+        )
+    runtime_paths = _backend_runtime_path_entries(backend, candidate, root=backend_root)
+    environment = dict(source)
+    if runtime_paths:
+        _prepend_path_entries(environment, runtime_paths)
+    return environment
 
 
 def install_desktop_backend(
@@ -252,11 +291,16 @@ def install_desktop_backend(
         package_dir = staging / "node_modules" / Path(*spec.package_path)
         version = _installed_package_version(package_dir, spec.package)
         executable = _installed_native_executable(backend, spec, staging, package_dir)
+        runtime_paths = _backend_runtime_path_entries(backend, executable, root=staging)
         _verify_backend_executable(
             backend,
             executable,
             root=staging,
-            env=_backend_command_environment(toolchain, base_env),
+            env=_backend_command_environment(
+                toolchain,
+                base_env,
+                runtime_paths=runtime_paths,
+            ),
         )
 
         releases_root = backend_root / "releases"
@@ -352,13 +396,24 @@ def _npm_environment(
 def _backend_command_environment(
     toolchain: DesktopBackendToolchain,
     base_env: Mapping[str, str] | None,
+    *,
+    runtime_paths: tuple[Path, ...] = (),
 ) -> dict[str, str]:
     source = os.environ if base_env is None else base_env
     env = _safe_process_environment(source)
     entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
     node_dir = str(toolchain.node.parent)
     env["PATH"] = os.pathsep.join([node_dir, *(entry for entry in entries if entry != node_dir)])
+    _prepend_path_entries(env, runtime_paths)
     return env
+
+
+def _prepend_path_entries(environment: dict[str, str], paths: tuple[Path, ...]) -> None:
+    entries = [entry for entry in environment.get("PATH", "").split(os.pathsep) if entry]
+    prefixes = [str(path) for path in paths]
+    environment["PATH"] = os.pathsep.join(
+        [*prefixes, *(entry for entry in entries if entry not in prefixes)]
+    )
 
 
 def _safe_process_environment(source: Mapping[str, str]) -> dict[str, str]:
@@ -496,6 +551,49 @@ def _installed_native_executable(
     return executable
 
 
+def _backend_runtime_path_entries(
+    backend: str,
+    executable: Path,
+    *,
+    root: Path,
+) -> tuple[Path, ...]:
+    if backend != "codex":
+        return ()
+
+    windows = os.name == "nt"
+    target_root = executable.parent.parent
+    executable_paths = [
+        target_root
+        / "bin"
+        / ("codex-code-mode-host.exe" if windows else "codex-code-mode-host"),
+        target_root / "codex-path" / ("rg.exe" if windows else "rg"),
+    ]
+    if windows:
+        executable_paths.extend(
+            [
+                target_root / "codex-resources" / "codex-command-runner.exe",
+                target_root / "codex-resources" / "codex-windows-sandbox-setup.exe",
+            ]
+        )
+    else:
+        executable_paths.append(
+            target_root / "codex-resources" / "zsh" / "bin" / "zsh"
+        )
+        if platform.system().lower() == "linux":
+            executable_paths.append(target_root / "codex-resources" / "bwrap")
+
+    package_manifest = target_root / "codex-package.json"
+    if not _verified_direct_regular_file(package_manifest, root=root) or not all(
+        _verified_direct_executable(path, root=root, require_native=True)
+        for path in executable_paths
+    ):
+        raise DesktopBackendError(
+            "Installed Codex package is missing a required native runtime helper.",
+            code="incomplete_backend_runtime",
+        )
+    return (executable_paths[1].parent.resolve(strict=True),)
+
+
 def _verify_backend_executable(
     backend: str,
     executable: Path,
@@ -547,6 +645,23 @@ def _verified_direct_executable(path: Path, *, root: Path, require_native: bool)
         if os.name != "nt" and not os.access(resolved, os.X_OK):
             return False
         return not require_native or _has_native_magic(resolved)
+    except (OSError, ValueError):
+        return False
+
+
+def _verified_direct_regular_file(path: Path, *, root: Path) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+        relative = path.relative_to(root)
+        cursor = root
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                return False
+        return True
     except (OSError, ValueError):
         return False
 

@@ -73,6 +73,28 @@ def _fake_npm_install(
             target_root = staging / "node_modules" / f"opencode-{target_os}-{arch}"
             executable = target_root / "bin" / ("opencode.exe" if os_name == "win32" else "opencode")
         _write_native(executable)
+        if backend == "codex":
+            runtime_root = executable.parent.parent
+            (runtime_root / "codex-package.json").write_text("{}", encoding="utf-8")
+            helpers = [
+                runtime_root
+                / "bin"
+                / ("codex-code-mode-host.exe" if os_name == "win32" else "codex-code-mode-host"),
+                runtime_root / "codex-path" / ("rg.exe" if os_name == "win32" else "rg"),
+            ]
+            if os_name == "win32":
+                helpers.extend(
+                    [
+                        runtime_root / "codex-resources" / "codex-command-runner.exe",
+                        runtime_root / "codex-resources" / "codex-windows-sandbox-setup.exe",
+                    ]
+                )
+            else:
+                helpers.append(runtime_root / "codex-resources" / "zsh" / "bin" / "zsh")
+                if os_name == "linux":
+                    helpers.append(runtime_root / "codex-resources" / "bwrap")
+            for helper in helpers:
+                _write_native(helper)
         if calls is not None:
             calls.append((command, dict(env), cwd))
         return subprocess.CompletedProcess(command, 0, "installed", "")
@@ -118,6 +140,15 @@ def test_install_publishes_verified_native_backend(monkeypatch, tmp_path, backen
     assert install_env["NPM_CONFIG_USERCONFIG"].startswith(install_env["NPM_CONFIG_PREFIX"])
     assert "npm_config_prefix" not in install_env
     assert "NODE_OPTIONS" not in install_env
+    if backend == "codex":
+        runtime_env = desktop_backends.desktop_backend_subprocess_environment(
+            "codex",
+            result.path,
+            env,
+        )
+        assert runtime_env is not None
+        expected_helper_dir = Path(result.path).parent.parent / "codex-path"
+        assert Path(runtime_env["PATH"].split(os.pathsep)[0]) == expected_helper_dir
 
 
 def test_codex_accepts_nested_target_package(monkeypatch, tmp_path):
@@ -136,6 +167,32 @@ def test_codex_accepts_nested_target_package(monkeypatch, tmp_path):
     result = desktop_backends.install_desktop_backend("codex", base_env=env)
 
     assert Path(result.path).name == ("codex.exe" if os.name == "nt" else "codex")
+
+
+def test_codex_rejects_an_incomplete_runtime_before_publication(monkeypatch, tmp_path):
+    env = _desktop_env(tmp_path)
+    complete_install = _fake_npm_install("codex")
+
+    def install_without_ripgrep(command, **kwargs):
+        completed = complete_install(command, **kwargs)
+        staging = Path(command[command.index("--prefix") + 1])
+        ripgrep_name = "rg.exe" if os.name == "nt" else "rg"
+        next(
+            staging.glob(
+                f"node_modules/@openai/codex-*/vendor/*/codex-path/{ripgrep_name}"
+            )
+        ).unlink()
+        return completed
+
+    monkeypatch.setattr(desktop_backends, "_run_command", install_without_ripgrep)
+
+    with pytest.raises(desktop_backends.DesktopBackendError) as raised:
+        desktop_backends.install_desktop_backend("codex", base_env=env)
+
+    assert raised.value.code == "incomplete_backend_runtime"
+    backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "codex"
+    assert not (backend_root / "current.json").exists()
+    assert list(backend_root.glob("releases/*")) == []
 
 
 def test_failed_install_keeps_current_descriptor_and_removes_staging(monkeypatch, tmp_path):
