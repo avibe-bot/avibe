@@ -51,6 +51,7 @@ import {
   isTranscriptWindowDisjoint,
   mergeById,
   insertMessageOrdered,
+  transcriptWindowsOverlap,
 } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
@@ -678,14 +679,29 @@ export const ChatPage: React.FC = () => {
           if (sessionId !== sessionIdRef.current) return;
           const incoming = res.messages.filter(isTranscriptMessage);
           if (incoming.length === 0) return;
-          const combined = mergeById(messagesRef.current, incoming);
-          const placement = placeVaultProvisionRequests(combined, [request]);
+          const existing = messagesRef.current;
+          const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
+          // An around-fetch can land wholly outside the retained live tail. Do
+          // not union those ranges: the missing rows would be rendered as if
+          // they were adjacent. Replace the tail with a historical window,
+          // matching the existing deep-link behavior, so the anchor stays in a
+          // coherent transcript and the user gets an explicit latest reload.
+          const anchorWindow = disjoint ? incoming : mergeById(existing, incoming);
+          const placement = placeVaultProvisionRequests(anchorWindow, [request]);
           if (!placement.byMessageId.size) return;
-          setMessages((previous) => {
-            const merged = mergeById(previous, incoming);
-            if (merged.length <= MAX_RETAINED_MESSAGES) return merged;
-            return followingTailRef.current ? merged.slice(-MAX_RETAINED_MESSAGES) : merged.slice(0, MAX_RETAINED_MESSAGES);
-          });
+          if (disjoint) {
+            const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
+            setMessages(incoming);
+            setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
+          } else {
+            setMessages((previous) => {
+              const merged = mergeById(previous, incoming);
+              if (merged.length <= MAX_RETAINED_MESSAGES) return merged;
+              return followingTailRef.current
+                ? merged.slice(-MAX_RETAINED_MESSAGES)
+                : merged.slice(0, MAX_RETAINED_MESSAGES);
+            });
+          }
           setOlderCursor(res.next_before_id ?? null);
         })
         .catch(() => {

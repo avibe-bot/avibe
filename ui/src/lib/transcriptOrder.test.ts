@@ -7,6 +7,7 @@ import {
   mergeById,
   insertMessageOrdered,
   messageOrderTimeMs,
+  transcriptWindowsOverlap,
   timestampOrderTimeMs,
   transcriptOrderTimeMs,
 } from './transcriptOrder';
@@ -86,6 +87,14 @@ describe('isTranscriptWindowDisjoint', () => {
     );
 
     expect(isTranscriptWindowDisjoint(previousNewest, tailOldest)).toBe(true);
+  });
+});
+
+describe('transcriptWindowsOverlap', () => {
+  it('detects a shared row between fetched windows', () => {
+    expect(transcriptWindowsOverlap([mk('a', t(1)), mk('b', t(2))], [mk('b', t(2)), mk('c', t(3))])).toBe(true);
+    expect(transcriptWindowsOverlap([mk('a', t(1))], [mk('b', t(2))])).toBe(false);
+    expect(transcriptWindowsOverlap([], [mk('b', t(2))])).toBe(false);
   });
 });
 

@@ -60,6 +60,16 @@ export const isTranscriptWindowDisjoint = (
   tailOldest: WorkbenchMessage,
 ): boolean => byCreatedThenId(tailOldest, previousNewest) > 0;
 
+/** Whether two fetched transcript windows share at least one durable row. */
+export const transcriptWindowsOverlap = (
+  left: WorkbenchMessage[],
+  right: WorkbenchMessage[],
+): boolean => {
+  if (left.length === 0 || right.length === 0) return false;
+  const leftIds = new Set(left.map((message) => message.id));
+  return right.some((message) => leftIds.has(message.id));
+};
+
 // Union two row sets, deduped by id and re-sorted into durable order. Used by the
 // BATCH paths (initial snapshot, reconcile, older-page load), so a fast agent
 // result that arrives over /api/events *before* its prompt row still lands in the
