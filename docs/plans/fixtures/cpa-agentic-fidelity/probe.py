@@ -581,6 +581,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 opening_status = raw.get("status")
                 if opening_status is not None and opening_status != "in_progress":
                     return False
+                if item_type == "message" and "content" in raw and raw["content"] != []:
+                    return False
                 added.add(item_id)
                 item_types[item_id] = item_type
                 item_statuses[item_id] = opening_status
@@ -831,6 +833,12 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     for item in terminal_response["output"]
                     if isinstance(item, dict) and (item_id := _stream_item_id(item.get("id"))) is not None
                 }
+                if any(
+                    not isinstance(item, dict)
+                    or (item.get("status") is not None and item.get("status") != "completed")
+                    for item in terminal_response["output"]
+                ):
+                    return False
                 for item_id, item_type in item_types.items():
                     if item_type != "message":
                         continue
@@ -864,7 +872,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or _responses_output_projection(completed_output) != _responses_output_projection(terminal_response["output"])
                 ):
                     return False
-                if terminal_response.get("id") is not None and terminal_response.get("id") != response_id:
+                terminal_id = terminal_response.get("id")
+                if response_id is not None:
+                    if not isinstance(terminal_id, str) or terminal_id != response_id:
+                        return False
+                elif terminal_id is not None and not isinstance(terminal_id, str):
                     return False
                 terminal = index
             elif event_type in {"error", "response.failed", "response.incomplete"}:
@@ -1399,7 +1411,7 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
         if not isinstance(item, dict):
             return None
         item_type = item.get("type")
-        projected: dict[str, Any] = {"id": item.get("id"), "type": item_type}
+        projected: dict[str, Any] = {"id": item.get("id"), "type": item_type, "status": item.get("status")}
         if item_type == "function_call":
             arguments, error = _parse_arguments(item.get("arguments"), expected_wire="json")
             if error:
@@ -1466,6 +1478,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     encrypted_reasoning_by_item: dict[str, str | None] = {}
     opening_status_by_item: dict[str, str | None] = {}
     status: str | None = None
+    response_id: str | None = None
     args_by_item: dict[str, str] = {}
     argument_fragment_items: set[str] = set()
     argument_done_items: set[str] = set()
@@ -1495,6 +1508,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 or response.get("output") != []
             ):
                 errors.append("response_start_snapshot_invalid")
+            if isinstance(response, dict) and response.get("id") is not None:
+                if not isinstance(response.get("id"), str) or not response["id"]:
+                    errors.append("response_id_invalid")
+                else:
+                    response_id = response["id"]
         elif event_type == "response.in_progress":
             response = event.get("response")
             if (
@@ -1518,6 +1536,8 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if opening_status is not None and opening_status != "in_progress":
                 errors.append("stream_output_item_status_invalid")
             opening_status_by_item[key] = opening_status
+            if raw.get("type") == "message" and "content" in raw and raw["content"] != []:
+                errors.append("stream_message_opening_snapshot_invalid")
             if raw.get("type") == "function_call":
                 for field in ("call_id", "name"):
                     if not isinstance(raw.get(field), str) or not raw[field]:
@@ -1753,12 +1773,21 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if isinstance(terminal_output, list):
                 for raw in terminal_output:
                     if (
+                        not isinstance(raw, dict)
+                        or (raw.get("status") is not None and raw.get("status") != "completed")
+                    ):
+                        errors.append("terminal_output_item_status_invalid")
+                    if (
                         isinstance(raw, dict)
                         and raw.get("type") == "reasoning"
                         and raw.get("encrypted_content") is not None
                         and not isinstance(raw.get("encrypted_content"), str)
                     ):
                         errors.append("encrypted_reasoning_snapshot_invalid")
+            if response_id is not None:
+                terminal_id = terminal_response.get("id") if terminal_response else None
+                if not isinstance(terminal_id, str) or terminal_id != response_id:
+                    errors.append("terminal_response_id_invalid")
     items: list[dict[str, Any]] = []
     for key, raw in output.items():
         if raw.get("type") == "function_call":

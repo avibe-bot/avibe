@@ -1911,6 +1911,55 @@ class ProbeParserTests(unittest.TestCase):
         missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing_done_status, False, 0, False))
         self.assertIn("stream_output_item_status_invalid", missing_turn.parse_errors)
 
+    def test_responses_message_opening_content_must_be_absent_or_empty(self) -> None:
+        valid = _response_message_stream()
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        for opening_content in (None, [{"type": "output_text", "text": "prefilled"}], {"unexpected": True}):
+            invalid = copy.deepcopy(valid)
+            invalid[1]["event"]["item"]["content"] = opening_content
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+            self.assertIn("stream_message_opening_snapshot_invalid", turn.parse_errors)
+
+        empty = copy.deepcopy(valid)
+        empty[1]["event"]["item"]["content"] = []
+        self.assertTrue(probe._stream_order_ok("responses", empty))
+
+    def test_responses_stream_rejects_noncompleted_terminal_item_status(self) -> None:
+        valid = _response_function_stream()
+        valid[4]["event"]["item"]["status"] = "completed"
+        valid[-1]["event"]["response"]["output"][0]["status"] = "completed"
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
+        self.assertNotIn("terminal_output_item_status_invalid", valid_turn.parse_errors)
+
+        invalid = copy.deepcopy(valid)
+        invalid[-1]["event"]["response"]["output"][0]["status"] = "failed"
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("terminal_output_item_status_invalid", turn.parse_errors)
+        self.assertIn("terminal_output_mismatch", turn.parse_errors)
+
+    def test_responses_stream_requires_terminal_response_id(self) -> None:
+        valid = _response_message_stream()
+        valid[0]["event"]["response"]["id"] = "resp_1"
+        valid[-1]["event"]["response"]["id"] = "resp_1"
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
+        self.assertNotIn("terminal_response_id_invalid", valid_turn.parse_errors)
+
+        missing = copy.deepcopy(valid)
+        missing[-1]["event"]["response"].pop("id")
+        self.assertFalse(probe._stream_order_ok("responses", missing))
+        missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0, False))
+        self.assertIn("terminal_response_id_invalid", missing_turn.parse_errors)
+
+        mismatched = copy.deepcopy(valid)
+        mismatched[-1]["event"]["response"]["id"] = "resp_2"
+        self.assertFalse(probe._stream_order_ok("responses", mismatched))
+        mismatched_turn = probe._parse_responses_stream(probe.TransportResult(200, None, mismatched, False, 0, False))
+        self.assertIn("terminal_response_id_invalid", mismatched_turn.parse_errors)
+
     def test_responses_function_opening_snapshot_requires_identity(self) -> None:
         for field in ("call_id", "name"):
             invalid = _response_function_stream()
