@@ -1599,7 +1599,7 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_anthropic_document(
             {
                 "content": [
-                    {"type": "thinking", "thinking": "PRIVATE_REASONING"},
+                    {"type": "thinking", "thinking": "PRIVATE_REASONING", "signature": "sig"},
                     {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}},
                     {"type": "text", "text": "PRIVATE_REASONING"},
                 ],
@@ -1608,6 +1608,104 @@ class ProbeParserTests(unittest.TestCase):
         )
         projection = probe._validate_first(turn, ("lookup_weather",), stream=False)
         self.assertFalse(projection["checks"]["reasoning_not_visible"])
+
+    def test_opaque_reasoning_payloads_must_not_be_visible(self) -> None:
+        signature = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "PRIVATE_THOUGHT", "signature": "PRIVATE_SIGNATURE"},
+                    {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}},
+                    {"type": "text", "text": "PRIVATE_SIGNATURE"},
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+        self.assertEqual(signature.reasoning_text, "PRIVATE_THOUGHT")
+        self.assertFalse(
+            probe._validate_first(signature, ("lookup_weather",), stream=False)["checks"]["reasoning_not_visible"]
+        )
+
+        redacted = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "redacted_thinking", "data": "PRIVATE_REDACTED"},
+                    {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}},
+                    {"type": "text", "text": "PRIVATE_REDACTED"},
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+        self.assertFalse(
+            probe._validate_first(redacted, ("lookup_weather",), stream=False)["checks"]["reasoning_not_visible"]
+        )
+
+        encrypted = probe._parse_responses_document(
+            {
+                "object": "response",
+                "output": [
+                    {"id": "rs_1", "type": "reasoning", "encrypted_content": "PRIVATE_ENCRYPTED"},
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "PRIVATE_ENCRYPTED"}],
+                    },
+                    {
+                        "id": "fc_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "lookup_weather",
+                        "arguments": '{"city":"Shanghai"}',
+                    },
+                ],
+                "status": "completed",
+            }
+        )
+        self.assertEqual(encrypted.reasoning_text, "")
+        self.assertFalse(
+            probe._validate_first(encrypted, ("lookup_weather",), stream=False)["checks"]["reasoning_not_visible"]
+        )
+
+        second = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "PRIVATE_SIGNATURE"}],
+                "stop_reason": "end_turn",
+            }
+        )
+        self.assertFalse(
+            probe._validate_second(
+                second,
+                (),
+                stream=False,
+                prior_reasoning_parts=signature.reasoning_parts,
+            )["checks"]["reasoning_not_visible"]
+        )
+
+    def test_first_turn_rejects_premature_tool_output_evidence(self) -> None:
+        for text in (
+            "tool=lookup_weather;call_id=call_1;marker=WEATHER_OK",
+            "WEATHER_OK",
+        ):
+            turn = probe._parse_anthropic_document(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "PRIVATE_THOUGHT", "signature": "sig"},
+                        {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}},
+                        {"type": "text", "text": text},
+                    ],
+                    "stop_reason": "tool_use",
+                }
+            )
+            projection = probe._validate_first(turn, ("lookup_weather",), stream=False)
+            self.assertFalse(projection["checks"]["no_premature_tool_outputs"])
 
     def test_final_reasoning_text_must_not_be_visible(self) -> None:
         turn = probe._parse_responses_document(

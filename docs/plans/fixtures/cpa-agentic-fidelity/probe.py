@@ -1204,6 +1204,7 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
         content = []
     calls: list[ToolCall] = []
     text_parts: list[str] = []
+    reasoning_text_parts: list[str] = []
     reasoning_parts: list[str] = []
     reasoning = False
     for block in content:
@@ -1231,21 +1232,26 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
                 errors.append("thinking_payload_missing")
             else:
                 reasoning = True
+                reasoning_text_parts.append(thinking)
                 reasoning_parts.append(thinking)
-            if not isinstance(block.get("signature"), str) or not block["signature"]:
+            signature = block.get("signature")
+            if not isinstance(signature, str) or not signature:
                 errors.append("thinking_signature_missing")
+            else:
+                reasoning_parts.append(signature)
         elif block_type == "redacted_thinking":
             data = block.get("data")
             if not isinstance(data, str) or not data:
                 errors.append("redacted_thinking_payload_missing")
             else:
                 reasoning = True
+                reasoning_parts.append(data)
     stop_reason = document.get("stop_reason") if isinstance(document, dict) else None
     if stop_reason is not None and not isinstance(stop_reason, str):
         errors.append("stop_reason_invalid")
         stop_reason = None
     turn = Turn("anthropic", calls, "".join(text_parts), reasoning, stop_reason, content, terminal if terminal is not None else stop_reason is not None, event_count, invalid_event_count, errors)
-    turn.reasoning_text = "".join(reasoning_parts)
+    turn.reasoning_text = "".join(reasoning_text_parts)
     turn.reasoning_parts = reasoning_parts
     return turn
 
@@ -1419,6 +1425,7 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
         output = []
     calls: list[ToolCall] = []
     text_parts: list[str] = []
+    reasoning_text_parts: list[str] = []
     reasoning_parts: list[str] = []
     output_item_ids: set[str] = set()
     reasoning = False
@@ -1467,7 +1474,10 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
             item_parts = [*_reasoning_text_parts(item.get("summary")), *_reasoning_text_parts(item.get("content"))]
             if _reasoning_item_has_signal(item):
                 reasoning = True
+                reasoning_text_parts.extend(item_parts)
                 reasoning_parts.extend(item_parts)
+                if isinstance(encrypted, str) and encrypted:
+                    reasoning_parts.append(encrypted)
         elif item_type == "message":
             if item.get("role") != "assistant":
                 errors.append("assistant_role_invalid")
@@ -1489,7 +1499,7 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
         errors.append("status_invalid")
         status = None
     turn = Turn("responses", calls, "".join(text_parts), reasoning, status, output, terminal if terminal is not None else status in {"completed", "incomplete"}, event_count, invalid_event_count, errors)
-    turn.reasoning_text = "".join(reasoning_parts)
+    turn.reasoning_text = "".join(reasoning_text_parts)
     turn.reasoning_parts = reasoning_parts
     return turn
 
@@ -2226,6 +2236,8 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
         "tool_ids_unique": bool(ids) and len(ids) == len(set(ids)) and all(ids),
         "tool_arguments": args_ok,
         "user_scope": not _token_present(turn.text, USER_SCOPE_LEAK),
+        "no_premature_tool_outputs": not _tool_output_tuples(turn.text)
+        and not any(_token_present(turn.text, marker) for marker in TOOL_OUTPUTS.values()),
         "reasoning_present": turn.reasoning_present,
         "reasoning_not_visible": not any(part in turn.text for part in turn.reasoning_parts if part),
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
