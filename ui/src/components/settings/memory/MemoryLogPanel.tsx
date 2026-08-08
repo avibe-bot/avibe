@@ -425,9 +425,13 @@ export const MemoryLogPanel: React.FC<{
   });
 
   const { data: listPage, reload: reloadList } = listRead;
+  const { reload: reloadDetail } = detailRead;
   useEffect(() => {
     void reloadList(null);
   }, [refreshToken, reloadList]);
+  useEffect(() => {
+    if (selected) void reloadDetail(selected);
+  }, [refreshToken, reloadDetail, selected]);
   useEffect(() => {
     if (!listPage) return;
     // The resource hook has already rejected superseded responses. Mirror only
@@ -440,7 +444,6 @@ export const MemoryLogPanel: React.FC<{
 
   const openDetail = (memcellId: string) => {
     setSelected(memcellId);
-    void detailRead.reload(memcellId);
   };
   const selectedDetail = detailRead.data?.entry.memcell_id === selected ? detailRead.data : null;
 

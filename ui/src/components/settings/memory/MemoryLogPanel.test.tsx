@@ -76,9 +76,10 @@ const detailResult = (
   providerCallStatus = 'ok',
   strategyStatus = 'success',
   indexingError: string | null = null,
+  preview = 'Alpha detail',
 ): MemoryLogDetailResult => ({
   status: 'ok',
-  entry: entry('mc-alpha', 'Alpha detail'),
+  entry: entry('mc-alpha', preview),
   capture: { status: 'available', delivery_states: ['delivered'], matched_message_count: 1 },
   steps: [
     { type: 'capture', status: 'delivered' },
@@ -279,6 +280,33 @@ describe('MemoryLogPanel', () => {
     expect(await screen.findByText('Refreshed')).toBeTruthy();
     await waitFor(() => expect(screen.queryByText('Initial')).toBeNull());
     expect(api.getMemoryLog).toHaveBeenCalledTimes(2);
+  });
+
+  it('reloads the selected detail when the merged view refresh token changes', async () => {
+    api.getMemoryLog.mockResolvedValue(listResult([entry('mc-alpha', 'Alpha')]));
+    api.getMemoryLogEntry
+      .mockResolvedValueOnce(detailResult('ok', 'success', null, 'Initial detail'))
+      .mockResolvedValueOnce(detailResult('ok', 'success', null, 'Refreshed detail'));
+    const user = userEvent.setup();
+    const Harness = () => {
+      const [refreshToken, setRefreshToken] = useState(0);
+      return (
+        <>
+          <button type="button" onClick={() => setRefreshToken((value) => value + 1)}>refresh-record</button>
+          <MemoryLogPanel refreshToken={refreshToken} />
+        </>
+      );
+    };
+
+    render(<Harness />);
+    await user.click(await screen.findByText('Alpha'));
+    expect(await screen.findByText('Initial detail')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'refresh-record' }));
+
+    expect(await screen.findByText('Refreshed detail')).toBeTruthy();
+    expect(api.getMemoryLogEntry).toHaveBeenCalledTimes(2);
+    expect(api.getMemoryLogEntry).toHaveBeenLastCalledWith('mc-alpha');
   });
 
   it('drops list and expanded payload state when Clear remounts the log', async () => {

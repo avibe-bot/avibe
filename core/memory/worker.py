@@ -4,25 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from core.memory.attachments import AttachmentPinStore
-from core.memory.coordinator import SessionFlushCoordinator
+from core.memory.coordinator import ProcessingEvent, SessionFlushCoordinator
 from core.memory.everos import MemoryProviderPort
 from core.memory.store import MemoryStore
 
 
 MAX_DRAIN_BATCH_SIZE = 32
 ADD_TIMEOUT_SECONDS = 30.0
-
-ProcessingFaultKind = Literal["credential", "engine"]
-ProcessingEvent = Callable[
-    [Literal["fault", "recovered"], ProcessingFaultKind | None, str, int],
-    Awaitable[bool],
-]
-
 
 class MemoryWorker:
     """Claim add rows; all session ordering and flush state live in the coordinator."""
@@ -41,7 +34,6 @@ class MemoryWorker:
         attachment_store: AttachmentPinStore | None = None,
         **_legacy_options: object,
     ) -> None:
-        del processing_event
         self._store = store
         self._provider = provider
         self._enabled = enabled
@@ -54,6 +46,7 @@ class MemoryWorker:
             now=self._now,
             add_timeout_seconds=ingest_timeout_seconds,
             attachment_store=attachment_store,
+            processing_event=processing_event,
         )
         self._drain_lock = asyncio.Lock()
         self._claims_paused = False
@@ -116,7 +109,11 @@ class MemoryWorker:
             await self._coordinator.run_due()
             processed = 0
             for _ in range(budget):
-                if self._claims_paused or not self._enabled():
+                if (
+                    self._claims_paused
+                    or not self._enabled()
+                    or not self._coordinator.add_claims_available()
+                ):
                     break
                 row = await self._store_call(
                     self._store.claim_due,

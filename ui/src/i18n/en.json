@@ -3637,6 +3637,7 @@
         "kind": {
           "delivery_abandoned": "Delivery abandoned",
           "distillation_rejected": "Distillation rejected",
+          "recorder_degraded": "Recorder degraded",
           "result_unknown": "Result unknown"
         }
       }
@@ -3681,6 +3682,17 @@
         "loadFailed": "Couldn't load Memory anomalies."
       },
       "manualRequiredReadOnly": "Manual review is required. This record is read-only and has no action.",
+      "anomalyState": {
+        "dead": "Dead",
+        "degraded": "Degraded",
+        "manualRequired": "Manual review required",
+        "rejected": "Rejected"
+      },
+      "anomalyOperation": {
+        "add": "Add",
+        "flush": "Flush",
+        "record": "Record"
+      },
       "field": {
         "operation": "Operation",
         "operationId": "Operation ID",

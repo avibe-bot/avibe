@@ -7,7 +7,7 @@ import inspect
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from core.memory.attachments import (
     AttachmentPinError,
@@ -16,8 +16,10 @@ from core.memory.attachments import (
 )
 from core.memory.everos import (
     AddAck,
+    FlushRejected,
     FlushResult,
     FlushRetryable,
+    FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
     MemoryProviderPort,
@@ -41,8 +43,14 @@ MAX_UNFLUSHED_MESSAGES = 100
 ADD_TIMEOUT_SECONDS = 30.0
 FLUSH_TIMEOUT_SECONDS = 300.0
 MAX_CONCURRENT_PROVIDER_WRITES = 4
+SYSTEM_OUTAGE_RETRY_SECONDS = 5.0
 
 AttachmentRelease = Callable[[str], Awaitable[None] | None]
+ProcessingFaultKind = Literal["credential", "engine"]
+ProcessingEvent = Callable[
+    [Literal["fault", "recovered"], ProcessingFaultKind | None, str, int],
+    Awaitable[bool],
+]
 
 
 class SessionFlushCoordinator:
@@ -60,6 +68,7 @@ class SessionFlushCoordinator:
         add_timeout_seconds: float = ADD_TIMEOUT_SECONDS,
         flush_timeout_seconds: float = FLUSH_TIMEOUT_SECONDS,
         max_concurrent_writes: int = MAX_CONCURRENT_PROVIDER_WRITES,
+        processing_event: ProcessingEvent | None = None,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -70,8 +79,11 @@ class SessionFlushCoordinator:
         self._add_timeout_seconds = _positive_timeout(add_timeout_seconds)
         self._flush_timeout_seconds = _positive_timeout(flush_timeout_seconds)
         self._write_slots = asyncio.Semaphore(max(1, int(max_concurrent_writes)))
+        self._processing_event = processing_event
+        self._processing_fault_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
+        self._add_outage_until: datetime | None = None
         self._paused = False
 
     def replace_provider(self, provider: MemoryProviderPort) -> None:
@@ -85,6 +97,16 @@ class SessionFlushCoordinator:
     def resume(self) -> None:
         self._paused = False
 
+    def add_claims_available(self) -> bool:
+        """Keep a proven provider outage from retrying on every drain tick."""
+
+        if self._add_outage_until is None:
+            return True
+        if self._current_time() < self._add_outage_until:
+            return False
+        self._add_outage_until = None
+        return True
+
     async def recover(self, *, lease_owner: str) -> None:
         """Perform the one durable boot recovery pass before new claims."""
 
@@ -93,6 +115,13 @@ class SessionFlushCoordinator:
             lease_owner=lease_owner,
             clock=self._current_time,
         )
+        meta = await self._store_call(self._store.get_meta)
+        if (
+            meta is not None
+            and meta.processing_fault_since is not None
+            and (meta.processing_fault_kind is None or not meta.processing_alert_active)
+        ):
+            await self._classify_processing_fault(meta.processing_fault_since)
         if self._attachment_store is not None:
             referenced, releasing = await self._store_call(
                 self._store.attachment_bundle_sets
@@ -239,7 +268,11 @@ class SessionFlushCoordinator:
     ) -> None:
         key = provider_session_ref.serialize()
         async with self._session_lock(key):
-            if self._paused or not self._enabled():
+            if (
+                self._paused
+                or not self._enabled()
+                or not self.add_claims_available()
+            ):
                 return
             lease = await self._store_call(
                 self._store.acquire_flush,
@@ -339,6 +372,12 @@ class SessionFlushCoordinator:
                     result,
                     now=_iso(self._current_time()),
                 )
+            if isinstance(result, FlushSucceeded):
+                await self._close_processing_fault()
+            elif isinstance(result, FlushUnknown) or (
+                isinstance(result, FlushRejected) and result.server_fault
+            ):
+                await self._open_processing_fault()
 
     async def _deliver_locked(self, row: QueueRow, *, lease_owner: str) -> bool:
         if row.payload_text is None:
@@ -452,6 +491,8 @@ class SessionFlushCoordinator:
         )
         if settled.attachment_release_id is not None:
             await self._release_bundle(settled.attachment_release_id)
+        if settled.settled:
+            await self._close_processing_fault()
         return settled.settled
 
     async def _settle_failure(
@@ -470,6 +511,70 @@ class SessionFlushCoordinator:
         )
         if settled.attachment_release_id is not None:
             await self._release_bundle(settled.attachment_release_id)
+        if settled.settled and isinstance(outcome, SystemOutage):
+            self._add_outage_until = self._current_time() + timedelta(
+                seconds=SYSTEM_OUTAGE_RETRY_SECONDS
+            )
+            if outcome.error == "memory_processing_failed":
+                await self._open_processing_fault()
+
+    async def _open_processing_fault(self) -> None:
+        async with self._processing_fault_lock:
+            occurred_at = _iso(self._current_time())
+            await self._store_call(self._store.open_processing_fault, now=occurred_at)
+            await self._classify_processing_fault_locked(occurred_at)
+
+    async def _classify_processing_fault(self, occurred_at: str) -> None:
+        async with self._processing_fault_lock:
+            await self._classify_processing_fault_locked(occurred_at)
+
+    async def _classify_processing_fault_locked(self, occurred_at: str) -> None:
+        kind: ProcessingFaultKind = (
+            "engine" if await self._provider_processing_healthy() else "credential"
+        )
+        should_alert = await self._store_call(
+            self._store.classify_processing_fault,
+            kind,
+        )
+        if should_alert and await self._emit_processing_event(
+            "fault",
+            kind,
+            occurred_at,
+        ):
+            await self._store_call(self._store.mark_processing_alert_active)
+
+    async def _close_processing_fault(self) -> None:
+        async with self._processing_fault_lock:
+            now = _iso(self._current_time())
+            if await self._store_call(self._store.close_processing_fault, now=now):
+                await self._emit_processing_event("recovered", None, now)
+
+    async def _provider_processing_healthy(self) -> bool:
+        try:
+            return bool(await self._provider.processing_healthy())
+        except Exception:
+            return False
+
+    async def _emit_processing_event(
+        self,
+        event: Literal["fault", "recovered"],
+        kind: ProcessingFaultKind | None,
+        occurred_at: str,
+    ) -> bool:
+        if self._processing_event is None:
+            return True
+        try:
+            stats = await self._store_call(self._store.queue_stats)
+            return bool(
+                await self._processing_event(
+                    event,
+                    kind,
+                    occurred_at,
+                    stats.pending + stats.processing,
+                )
+            )
+        except Exception:
+            return False
 
     async def _release_bundle(self, bundle_id: str) -> None:
         try:

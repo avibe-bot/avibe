@@ -113,12 +113,14 @@ class CommandHandlers(BaseHandler):
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
         return f"{platform}::{self._get_settings_key(context)}"
 
-    def _session_anchor_for_new(self, context: MessageContext) -> str:
+    def _session_anchors_for_new(self, context: MessageContext) -> tuple[str, Optional[str]]:
         session_handler = getattr(self.controller, "session_handler", None)
         getter = getattr(session_handler, "get_base_session_id", None)
         if callable(getter):
             try:
-                return getter(context)
+                canonical_anchor = getter(context)
+                if isinstance(canonical_anchor, str) and canonical_anchor:
+                    return canonical_anchor, canonical_anchor
             except Exception:
                 logger.debug("Failed to resolve session anchor for /new", exc_info=True)
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
@@ -128,9 +130,18 @@ class CommandHandlers(BaseHandler):
             base_id = context.thread_id or context.channel_id or context.user_id
         else:
             if thread_id:
-                return build_thread_session_anchor(platform, context.channel_id, thread_id)
+                return build_thread_session_anchor(platform, context.channel_id, thread_id), None
             base_id = context.message_id or context.channel_id or context.user_id
-        return f"{platform}_{base_id}"
+        return f"{platform}_{base_id}", None
+
+    async def _final_flush_for_new(self, context: MessageContext, session_anchor: Optional[str]) -> None:
+        final_flush = getattr(self.controller, "final_flush_memory_session", None)
+        if not session_anchor or not callable(final_flush):
+            return
+        try:
+            await final_flush(context, session_anchor, deadline_seconds=5.0)
+        except Exception:
+            logger.debug("Memory final flush failed before /new", exc_info=True)
 
     def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
         keys = [session_key]
@@ -527,24 +538,23 @@ class CommandHandlers(BaseHandler):
         try:
             im_client = self._get_im_client(context)
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+            # Resolve the old session before Telegram can create a replacement
+            # topic. The new topic context is not a valid identity for this flush.
+            session_anchor, memory_session_anchor = self._session_anchors_for_new(context)
             if platform == "telegram" and hasattr(im_client, "start_new_topic_session"):
+                await self._final_flush_for_new(context, memory_session_anchor)
                 topic_context = await im_client.start_new_topic_session(context)
                 if topic_context is not None:
                     await im_client.send_message(topic_context, f"🆕 {self._t('command.new.started')}")
                     logger.info("Started new Telegram topic session for user %s", context.user_id)
                     return
             session_key = self._get_session_key(context)
-            session_anchor = self._session_anchor_for_new(context)
             # ``/new`` is the IM lifecycle boundary with the same trusted raw
             # anchor used by capture. Workbench archive has no equivalent
             # persisted Memory identity, so it intentionally does not reuse this
             # hook. A stalled or failed flush must never block the normal reset.
-            final_flush = getattr(self.controller, "final_flush_memory_session", None)
-            if callable(final_flush):
-                try:
-                    await final_flush(context, session_anchor, deadline_seconds=5.0)
-                except Exception:
-                    logger.debug("Memory final flush failed before /new", exc_info=True)
+            if platform != "telegram" or not hasattr(im_client, "start_new_topic_session"):
+                await self._final_flush_for_new(context, memory_session_anchor)
             sessions = getattr(self.controller, "sessions", None)
             clear_base = getattr(sessions, "clear_session_base", None)
             # ``/new`` deletes the session rows that scheduled tasks and watches may

@@ -3637,6 +3637,7 @@
         "kind": {
           "delivery_abandoned": "投递已放弃",
           "distillation_rejected": "提炼被拒绝",
+          "recorder_degraded": "记录器已降级",
           "result_unknown": "处理结果未知"
         }
       }
@@ -3681,6 +3682,17 @@
         "loadFailed": "无法加载记忆异常。"
       },
       "manualRequiredReadOnly": "需要人工检查。此记录只读，不提供操作。",
+      "anomalyState": {
+        "dead": "已放弃",
+        "degraded": "已降级",
+        "manualRequired": "需要人工检查",
+        "rejected": "已拒绝"
+      },
+      "anomalyOperation": {
+        "add": "添加",
+        "flush": "提交批次",
+        "record": "记录"
+      },
       "field": {
         "operation": "操作",
         "operationId": "操作 ID",

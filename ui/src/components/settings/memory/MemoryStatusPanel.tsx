@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -31,6 +32,33 @@ const SOURCE_BADGE_VARIANT: Record<SourceState, BadgeVariant> = {
   stale: 'warning',
   unknown: 'secondary',
   unavailable: 'destructive',
+};
+
+const ANOMALY_LABEL_KEYS = {
+  kind: {
+    delivery_abandoned: 'memory.status.failureLog.kind.delivery_abandoned',
+    distillation_rejected: 'memory.status.failureLog.kind.distillation_rejected',
+    recorder_degraded: 'memory.status.failureLog.kind.recorder_degraded',
+    result_unknown: 'memory.status.failureLog.kind.result_unknown',
+  },
+  state: {
+    dead: 'memory.processingRecord.anomalyState.dead',
+    degraded: 'memory.processingRecord.anomalyState.degraded',
+    manual_required: 'memory.processingRecord.anomalyState.manualRequired',
+    rejected: 'memory.processingRecord.anomalyState.rejected',
+  },
+  operation: {
+    add: 'memory.processingRecord.anomalyOperation.add',
+    flush: 'memory.processingRecord.anomalyOperation.flush',
+    record: 'memory.processingRecord.anomalyOperation.record',
+  },
+} as const;
+
+type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
+
+const anomalyLabel = (t: TFunction, group: AnomalyLabelGroup, value: string): string => {
+  const keys = ANOMALY_LABEL_KEYS[group] as Record<string, string>;
+  return keys[value] ? t(keys[value]) : value;
 };
 
 const formatTimestamp = (value: string | null | undefined): string => {
@@ -113,8 +141,12 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
         <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="break-words text-[12.5px] font-medium text-foreground">{entry.kind}</span>
-            <Badge variant={manualRequired ? 'warning' : 'secondary'}>{entry.state}</Badge>
+            <span className="break-words text-[12.5px] font-medium text-foreground">
+              {anomalyLabel(t, 'kind', entry.kind)}
+            </span>
+            <Badge variant={manualRequired ? 'warning' : 'secondary'}>
+              {anomalyLabel(t, 'state', entry.state)}
+            </Badge>
           </div>
           <div className="mt-1 font-mono text-[10.5px] text-muted">{formatTimestamp(entry.occurred_at)}</div>
           {manualRequired ? (
@@ -123,7 +155,10 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
         </div>
       </div>
       <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2 lg:min-w-[440px]">
-        <Field label={t('memory.processingRecord.field.operation')} value={entry.operation} />
+        <Field
+          label={t('memory.processingRecord.field.operation')}
+          value={anomalyLabel(t, 'operation', entry.operation)}
+        />
         <Field label={t('memory.processingRecord.field.errorCode')} value={entry.error_code ?? '-'} />
         <Field label={t('memory.processingRecord.field.attempts')} value={entry.attempts} />
         <Field label={t('memory.processingRecord.field.generation')} value={entry.generation} />

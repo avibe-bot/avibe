@@ -9,7 +9,11 @@ import pytest
 
 from config import paths
 from core.memory.coordinator import SessionFlushCoordinator
-from core.memory.everos import FakeMemoryProvider
+from core.memory.everos import (
+    FakeMemoryProvider,
+    MemoryProviderFailure,
+    MemoryProviderSystemFailure,
+)
 from core.memory.observations import AddAck, FlushRetryable, FlushSucceeded
 from core.memory.store import MemoryStore
 from core.memory.worker import MemoryWorker
@@ -84,6 +88,115 @@ def test_extracted_add_is_a_natural_boundary_without_flush(tmp_path: Path) -> No
         state = store.get_session_flush_state(row.provider_session_ref)
         assert state is not None
         assert (state.state, state.open_generation, state.unflushed_count) == ("idle", 2, 0)
+
+    asyncio.run(run())
+
+
+def test_system_outage_backs_off_add_claims_between_drain_ticks(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        provider.ingest_failures.extend(
+            [MemoryProviderSystemFailure(), MemoryProviderSystemFailure()]
+        )
+        current = [datetime(2026, 1, 1, tzinfo=UTC)]
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+        )
+        _enqueue(store, "outage")
+
+        assert await worker.drain_once() == 1
+        assert len(provider.ingest_failures) == 1
+        assert await worker.drain_once() == 0
+        assert len(provider.ingest_failures) == 1
+
+        current[0] += timedelta(seconds=5)
+        assert await worker.drain_once() == 1
+        assert len(provider.ingest_failures) == 0
+        row = store.list_queue_rows()[0]
+        assert (row.state, row.attempts) == ("pending", 0)
+
+    asyncio.run(run())
+
+
+def test_system_outage_backs_off_fenced_generation_adds(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        provider.ingest_failures.extend(
+            [MemoryProviderSystemFailure(), MemoryProviderSystemFailure()]
+        )
+        current = [datetime(2026, 1, 1, tzinfo=UTC)]
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+        )
+        row = _enqueue(store, "fenced-outage")
+
+        assert not await coordinator.final_flush(row.provider_session_ref)
+        assert len(provider.ingest_failures) == 1
+        assert not await coordinator.final_flush(row.provider_session_ref)
+        assert len(provider.ingest_failures) == 1
+
+        current[0] += timedelta(seconds=5)
+        assert not await coordinator.final_flush(row.provider_session_ref)
+        assert len(provider.ingest_failures) == 0
+
+    asyncio.run(run())
+
+
+def test_processing_fault_emits_one_fault_and_recovery_edge(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=False)
+        provider.ingest_failures.append(
+            MemoryProviderFailure("memory_processing_failed", retryable=True)
+        )
+        current = [datetime(2026, 1, 1, tzinfo=UTC)]
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            processing_event=record_event,
+        )
+        _enqueue(store, "processing-fault")
+
+        assert await worker.drain_once() == 1
+        opened = store.get_meta()
+        assert opened is not None
+        assert opened.processing_fault_kind == "credential"
+        assert opened.processing_alert_active is True
+        assert [event[:2] for event in events] == [("fault", "credential")]
+        assert events[0][3] == 1
+
+        provider.processing_healthy_flag = True
+        current[0] += timedelta(seconds=5)
+        assert await worker.drain_once() == 1
+        closed = store.get_meta()
+        assert closed is not None
+        assert closed.processing_fault_since is None
+        assert [event[:2] for event in events] == [
+            ("fault", "credential"),
+            ("recovered", None),
+        ]
+        assert events[1][3] == 0
 
     asyncio.run(run())
 

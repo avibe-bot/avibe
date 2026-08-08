@@ -29,7 +29,7 @@ const STATUS: MemoryStatus = {
 };
 
 const MANUAL_FAILURE: MemoryFailureLogEntry = {
-  kind: 'attachment_release',
+  kind: 'result_unknown',
   state: 'manual_required',
   operation: 'flush',
   occurred_at: '2026-08-08T12:01:00Z',
@@ -86,16 +86,35 @@ describe('MemoryStatusPanel', () => {
     );
 
     expect(screen.getByText('health failed')).toBeTruthy();
-    expect(screen.getByText('attachment_release')).toBeTruthy();
+    expect(screen.getByText('memory.status.failureLog.kind.result_unknown')).toBeTruthy();
     expect(screen.getByText('memory.processingRecord.manualRequiredReadOnly')).toBeTruthy();
   });
 
   it('renders manual_required as read-only without recovery commands', () => {
     render(<MemoryStatusPanel {...baseProps} failures={[MANUAL_FAILURE]} />);
 
-    expect(screen.getByText('manual_required')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.anomalyState.manualRequired')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.anomalyOperation.flush')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' })).toBeNull();
+  });
+
+  it('leaves future anomaly enum values as inert fallback text', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        failures={[{
+          ...MANUAL_FAILURE,
+          kind: 'future_kind',
+          state: 'future_state',
+          operation: 'future_operation',
+        }]}
+      />,
+    );
+
+    expect(screen.getByText('future_kind')).toBeTruthy();
+    expect(screen.getByText('future_state')).toBeTruthy();
+    expect(screen.getByText('future_operation')).toBeTruthy();
   });
 
   it('offers distinct resume and abort commands for clear recovery', async () => {
