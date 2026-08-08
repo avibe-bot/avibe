@@ -225,6 +225,27 @@ def test_provision_request_uses_active_turn_as_plain_claude_anchor(vault):
     assert json.loads(stored["requester"])["turn_id"] == turn_id
 
 
+def test_provision_request_does_not_store_derived_delivery_as_reply_anchor(vault, monkeypatch):
+    monkeypatch.setattr(
+        vs,
+        "_active_session_turn_anchor",
+        lambda conn, session_id: ("msg_initial_delivery", "turn_active"),
+    )
+
+    with vault.begin() as conn:
+        request = vs.create_provision_request(
+            conn,
+            "DERIVED_KEY",
+            requester={"source": "agent-cli", "session_id": "ses_active"},
+        )
+        stored = conn.execute(
+            select(vault_requests).where(vault_requests.c.id == request["id"])
+        ).mappings().one()
+
+    assert stored["message_id"] is None
+    assert json.loads(stored["requester"])["turn_id"] == "turn_active"
+
+
 def test_provision_request_rejects_case_only_duplicate_pending_request(vault):
     with vault.begin() as conn:
         pending = vs.create_provision_request(conn, "openAiKey")

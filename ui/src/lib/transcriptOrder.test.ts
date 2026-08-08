@@ -203,6 +203,27 @@ describe('mergeById', () => {
     expect(row.author_id).toBe('def_watch');
   });
 
+  it('merges Vault provenance metadata into an existing live row', () => {
+    const live = {
+      id: 'm1',
+      created_at: t(1),
+      metadata: { source_kind: 'callback', source_actor: 'vault:vrq_1' },
+    } as unknown as WorkbenchMessage;
+    const enriched = {
+      id: 'm1',
+      created_at: t(1),
+      metadata: {
+        source_kind: 'callback',
+        source_actor: 'vault:vrq_1',
+        vault_request_type: 'access',
+        vault_request_status: 'denied',
+      },
+    } as unknown as WorkbenchMessage;
+
+    const [row] = mergeById([live], [enriched]);
+    expect(row.metadata).toEqual(enriched.metadata);
+  });
+
   it('does not overwrite an already-resolved source-session id with a null reconcile', () => {
     const existing = { id: 'm1', created_at: t(1), source_session_id: 'ses_src' } as unknown as WorkbenchMessage;
     const incoming = { id: 'm1', created_at: t(1), source_session_id: null } as unknown as WorkbenchMessage;

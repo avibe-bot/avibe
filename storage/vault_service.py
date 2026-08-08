@@ -2719,8 +2719,7 @@ def create_provision_request(
     session_id = requester_payload.get("session_id") if isinstance(requester_payload, dict) else None
     resolved_message_id = message_id
     if isinstance(requester_payload, dict) and not resolved_message_id:
-        derived_message_id, derived_turn_id = _active_session_turn_anchor(conn, session_id)
-        resolved_message_id = derived_message_id
+        _, derived_turn_id = _active_session_turn_anchor(conn, session_id)
         if derived_turn_id and not str(requester_payload.get("turn_id") or "").strip():
             requester_payload["turn_id"] = derived_turn_id
     card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec, session_id=session_id)

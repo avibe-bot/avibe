@@ -70,6 +70,31 @@ export const transcriptWindowsOverlap = (
   return right.some((message) => leftIds.has(message.id));
 };
 
+const RECONCILE_METADATA_KEYS = [
+  'source_kind',
+  'source_actor',
+  'vault_request_type',
+  'vault_request_status',
+] as const;
+
+function mergeReconcileMetadata(
+  existing: WorkbenchMessage,
+  incoming: WorkbenchMessage,
+): WorkbenchMessage {
+  const existingMetadata = existing.metadata ?? {};
+  const incomingMetadata = incoming.metadata ?? {};
+  const metadata = { ...existingMetadata };
+  let changed = false;
+  for (const key of RECONCILE_METADATA_KEYS) {
+    const value = incomingMetadata[key];
+    if (value !== undefined && value !== null && value !== existingMetadata[key]) {
+      metadata[key] = value;
+      changed = true;
+    }
+  }
+  return changed ? { ...existing, metadata } : existing;
+}
+
 /** Merge a fetched anchor window without trimming away the row it is meant to reveal. */
 export const mergeAnchorWindow = (
   existing: WorkbenchMessage[],
@@ -118,9 +143,13 @@ export const mergeById = (
       inc &&
       ((m.source_session_id == null && inc.source_session_id != null) ||
         (m.author_name == null && inc.author_name != null) ||
-        (m.author_id == null && inc.author_id != null))
+        (m.author_id == null && inc.author_id != null) ||
+        RECONCILE_METADATA_KEYS.some((key) => {
+          const value = inc.metadata?.[key];
+          return value !== undefined && value !== null && value !== m.metadata?.[key];
+        }))
     ) {
-      return {
+      const patchedMessage = {
         ...m,
         ...(m.source_session_id == null && inc.source_session_id != null
           ? {
@@ -132,6 +161,7 @@ export const mergeById = (
         ...(m.author_name == null && inc.author_name != null ? { author_name: inc.author_name } : {}),
         ...(m.author_id == null && inc.author_id != null ? { author_id: inc.author_id } : {}),
       };
+      return mergeReconcileMetadata(patchedMessage, inc);
     }
     return m;
   });
