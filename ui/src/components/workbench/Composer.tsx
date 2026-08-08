@@ -961,6 +961,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
         onError: (error) => {
           session.captureError = error;
+          if (session.realtime) {
+            session.realtimeState = 'failed';
+            session.realtime.abort();
+            activateHttpFallback(session);
+          }
           if (!voiceSessionsById.has(session.sessionId)) {
             voiceSessionsById.set(session.sessionId, session);
           }
