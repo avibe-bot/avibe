@@ -420,6 +420,26 @@ def persist_agent_message(
                     parent_native_message_id=context.thread_id,
                     content=content,
                 )
+                if (
+                    appended_row is None
+                    and native_message_id
+                    and not suppress_delivery
+                    and canonical_type in {"result", "error", "notify"}
+                ):
+                    # The unique row may be local-only history from an earlier
+                    # suppress_delivery attempt. This call occurs after the visible
+                    # result/notify send, so only now may that row become a receipt.
+                    appended_row = messages_service.promote_suppressed_native_message(
+                        conn,
+                        platform=context.platform,
+                        scope_id=scope_id,
+                        session_id=row_session_id,
+                        native_message_id=native_message_id,
+                        message_type=message_type,
+                        text=text,
+                        content=content,
+                        metadata=metadata,
+                    )
                 # Recompute the session's inbox row so the realtime event can patch
                 # the browser without a refetch. avibe-only: the workbench inbox is
                 # scoped to avibe sessions (IM rows persist but aren't shown there).

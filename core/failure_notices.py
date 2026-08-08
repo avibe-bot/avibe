@@ -5,7 +5,12 @@ transitions a run to ``failed`` — lives in ``storage/background.py``. This mod
 owns the POLICY over it, kept separate from the delivery plumbing in
 ``core/scheduled_tasks.py`` so every branch is testable without a controller.
 
-Three lanes, and the asymmetries between them are the whole design:
+Four lanes, and the asymmetries between them are the whole design:
+
+* **Turn fallbacks** report one terminal Agent Turn, not every Harness Run that
+  Turn accepted. The live backend notification is primary; if its delivery cannot
+  be acknowledged, one elected Run owns the durable fallback and all other linked
+  Runs stand down.
 
 * **Failures** of a definition can recur *unboundedly* — every tick produces
   another one — so without a scope the user gets a message per tick forever. They
@@ -381,11 +386,28 @@ def is_binding_change(notice: Optional[dict[str, Any]]) -> bool:
     return notice_kind(notice) == NOTICE_KIND_BINDING_CHANGE
 
 
+def notice_turn_id(notice: Optional[dict[str, Any]]) -> str:
+    """The terminal Turn that owns this failure's user-visible report."""
+
+    return str((notice or {}).get("turn_id") or "").strip()
+
+
+def turn_notification_delivered(notice: Optional[dict[str, Any]]) -> bool:
+    """Whether the Turn's primary backend failure notification was acknowledged."""
+
+    # Legacy Harness contexts predate ``turn_token`` and therefore stamp no Turn id,
+    # but the explicit delivery flag still comes from the live notification's
+    # DeliveryEvidence. Requiring the newer identity discards valid evidence and lets
+    # the durable fallback repeat a notification that was already delivered.
+    return bool((notice or {}).get("turn_notification_delivered"))
+
+
 def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
     """Whether this notice is delivered per-run, outside the failure streak.
 
-    Two lanes qualify, for the SAME reason and not by accident:
+    Three lanes qualify because each carries its own bound:
 
+    * a Turn fallback elects one Run across all definitions linked to that Turn;
     * an interruption hits a run at most once, so per-run notices are self-bounding;
     * a binding change is already scoped by ``SessionBindingChange.signature`` — one
       broken binding, one notification — so it carries its own bound and does not
@@ -399,7 +421,26 @@ def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
     never sent.
     """
 
-    return is_interruption(notice) or is_binding_change(notice)
+    return (
+        is_interruption(notice)
+        or is_binding_change(notice)
+        or bool(notice_turn_id(notice))
+    )
+
+
+def turn_fallback_owner_eligible(run: Any) -> bool:
+    """Whether a Run can own the fallback for one failed terminal Turn."""
+
+    if not isinstance(run, dict) or bool(run.get("cancel_requested")):
+        return False
+    status = str(run.get("status") or "").strip().lower()
+    return status not in {
+        "canceled",
+        "cancelled",
+        "succeeded",
+        "completed",
+        "success",
+    }
 
 
 def decide(
@@ -418,9 +459,11 @@ def decide(
     no streak was read (the bypass lanes below return before it is consulted).
     ``earlier_unsettled`` is an earlier-created execution of the same definition that
     has not settled. ``callback_status`` is the run's effective callback delivery
-    state read FRESH at decision time (``run_callback_state``): a queued callback
-    child remains pending, only a succeeded child is sent, and a terminally failed
-    child releases the notice. ``None`` means the run has no callback.
+    state read FRESH at decision time: a queued callback child remains pending,
+    only a succeeded child is sent, and a terminally failed child releases the
+    notice. For a Turn fallback this is aggregated across every linked Run because
+    one callback carries the shared terminal result. ``None`` means no effective
+    callback exists in the applicable ownership scope.
 
     Facts, not rows. This function used to receive the streak itself and rederive
     "anyone sent?" and "who is canonical?" from it in Python, which is what made the
@@ -429,6 +472,12 @@ def decide(
     are answered where the rows are. The outcomes are unchanged, reason strings
     included.
     """
+
+    # The backend's ordinary failure notification is the primary report for a
+    # terminal Turn. All Runs accepted by that Turn still owe durable notices, but
+    # those notices are fallbacks rather than independent reports.
+    if turn_notification_delivered(notice):
+        return NoticeDecision(ACTION_SKIP, "delivered_by_turn")
 
     # A PENDING CALLBACK IS ALREADY A DELIVERY for the same transition (plan
     # correction, 2026-07-29): a failed run carrying ``callback_session_id`` gets a
@@ -450,6 +499,13 @@ def decide(
             return NoticeDecision(ACTION_DEFER, "callback_pending")
         if callback_status == "sent":
             return NoticeDecision(ACTION_SKIP, "delivered_by_callback")
+
+    turn_id = notice_turn_id(notice)
+    if turn_id:
+        fallback_run_id = str((notice or {}).get("turn_fallback_run_id") or "").strip()
+        if fallback_run_id and fallback_run_id != run_id:
+            return NoticeDecision(ACTION_SKIP, f"turn_fallback_owned:{fallback_run_id}")
+        return NoticeDecision(ACTION_DELIVER, "turn_fallback")
 
     if is_interruption(notice):
         # Per-run, always, with no suppression scope and no deferral: the streak is

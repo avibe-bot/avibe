@@ -963,7 +963,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_presteer_result_stays_visible_without_agent_initiated_turn(self):
-        """HFR-436: queued native steering keeps its user-owned Turn."""
+        """HFR-460: queued native steering keeps its user-owned Turn."""
 
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"

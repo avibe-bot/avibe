@@ -1340,6 +1340,11 @@ export type HarnessDefinitionState = {
   // the window at all. Both age out on their own; neither is acknowledgment state.
   consecutive_failures: number;
   recent_failures: number;
+  // Watches separate waiter health above from the Agent Runs created by events.
+  // Tasks omit these because their execution is already the definition health.
+  processing_health?: HarnessDefinitionHealth | null;
+  processing_consecutive_failures?: number;
+  processing_recent_failures?: number;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {

@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
@@ -1128,7 +1129,7 @@ class ConsolidatedMessageDispatcher:
         self,
         context: MessageContext,
         text: str,
-        message_id: str,
+        message_id: str | None,
         *,
         terminal_status: Optional[str] = None,
     ) -> None:
@@ -1167,8 +1168,69 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
     ) -> None:
-        for run_id in run_ids:
-            get_run = getattr(store, "get_run", None)
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        output_id = str(output_semantics.idempotency_key or "").strip()
+        if not output_id and output_semantics.sequence is not None:
+            output_id = f"sequence:{output_semantics.sequence}"
+        if not output_id and terminal_status:
+            output_id = "terminal"
+        if not output_id:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+            output_id = f"content:{digest}"
+        record_turn_outputs = getattr(store, "record_turn_run_outputs", None)
+        if callable(record_turn_outputs):
+            deferred_run_ids = (
+                [
+                    run_id
+                    for run_id in normalized_run_ids
+                    if terminal_status and self._run_has_blocking_activity(run_id)
+                ]
+                if terminal_status
+                else []
+            )
+            record_turn_outputs(
+                normalized_run_ids,
+                output_id=output_id,
+                text=text,
+                message_id=message_id,
+                sequence=output_semantics.sequence,
+                provenance=provenance,
+                terminal_status=terminal_status,
+                error=terminal_error,
+                deferred_run_ids=deferred_run_ids,
+            )
+            return
+        get_run = getattr(store, "get_run", None)
+        eligible_run_ids = (
+            [
+                run_id
+                for run_id in normalized_run_ids
+                if failure_notices.turn_fallback_owner_eligible(get_run(run_id))
+            ]
+            if callable(get_run)
+            else normalized_run_ids
+        )
+        terminal_provenance = dict(provenance)
+        notification = terminal_provenance.get("turn_failure_notification")
+        if isinstance(notification, dict) and eligible_run_ids:
+            notification = dict(notification)
+            current_owner = str(notification.get("fallback_run_id") or "").strip()
+            if not (
+                current_owner
+                and callable(get_run)
+                and failure_notices.turn_fallback_owner_eligible(
+                    get_run(current_owner)
+                )
+            ):
+                notification["fallback_run_id"] = min(eligible_run_ids)
+            terminal_provenance["turn_failure_notification"] = notification
+        for run_id in normalized_run_ids:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
@@ -1181,24 +1243,23 @@ class ConsolidatedMessageDispatcher:
                     }
                     if terminal_error is not None:
                         defer_kwargs["error"] = terminal_error
+                    deferred_metadata = {
+                        key: value
+                        for key in ("turn_id", "turn_failure_notification")
+                        if (value := terminal_provenance.get(key)) is not None
+                    }
+                    if deferred_metadata:
+                        defer_kwargs["metadata"] = deferred_metadata
                     defer_terminal(run_id, **defer_kwargs)
                 run_terminal_status = None
             record_output = getattr(store, "record_run_output", None)
             if callable(record_output):
-                output_id = str(output_semantics.idempotency_key or "").strip()
-                if not output_id and output_semantics.sequence is not None:
-                    output_id = f"sequence:{output_semantics.sequence}"
-                if not output_id and run_terminal_status:
-                    output_id = "terminal"
-                if not output_id:
-                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
-                    output_id = f"content:{digest}"
                 record_kwargs = {
                     "output_id": output_id,
                     "text": text,
                     "message_id": message_id,
                     "sequence": output_semantics.sequence,
-                    "provenance": provenance,
+                    "provenance": terminal_provenance,
                     "terminal_status": run_terminal_status,
                 }
                 if terminal_error is not None:
@@ -1221,6 +1282,78 @@ class ConsolidatedMessageDispatcher:
                     run_id,
                     **record_kwargs,
                 )
+
+    def _terminal_agent_run_ids(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> list[str]:
+        run_ids: list[str] = []
+        for value in output_semantics.run_ids:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
+        explicit_run_id = str(output_semantics.run_id or "").strip()
+        if explicit_run_id and explicit_run_id not in run_ids:
+            run_ids.append(explicit_run_id)
+        explicit_run_ids = output_semantics.metadata.get("run_ids")
+        if isinstance(explicit_run_ids, list):
+            for value in explicit_run_ids:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+        if not run_ids:
+            run_ids = _owned_agent_run_ids(context.platform_specific or {})
+            for durable_run_id in self._durable_accepted_agent_run_ids(context):
+                if durable_run_id not in run_ids:
+                    run_ids.append(durable_run_id)
+        return run_ids
+
+    def _output_with_turn_fallback_owner(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> MessageOutput:
+        """Elect the fallback before writing the immutable terminal snapshot."""
+
+        notification = output_semantics.metadata.get("turn_failure_notification")
+        if not isinstance(notification, dict):
+            return output_semantics
+        run_ids = self._terminal_agent_run_ids(context, output_semantics)
+        if not run_ids:
+            return output_semantics
+        current_owner = str(notification.get("fallback_run_id") or "").strip()
+        store = None
+        try:
+            store = SQLiteBackgroundTaskStore()
+            eligible = [
+                run_id
+                for run_id in run_ids
+                if failure_notices.turn_fallback_owner_eligible(store.get_run(run_id))
+            ]
+            current_owner_eligible = bool(
+                current_owner
+                and failure_notices.turn_fallback_owner_eligible(
+                    store.get_run(current_owner)
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Failed to elect terminal Turn fallback owner",
+                exc_info=True,
+            )
+            return output_semantics
+        finally:
+            if store is not None:
+                store.close()
+        if not eligible:
+            return output_semantics
+        notification = dict(notification)
+        if not current_owner_eligible:
+            notification["fallback_run_id"] = min(eligible)
+        metadata = dict(output_semantics.metadata)
+        metadata["turn_failure_notification"] = notification
+        return replace(output_semantics, metadata=metadata)
 
     def _run_has_blocking_activity(self, run_id: str) -> bool:
         service = getattr(self.controller, "agent_service", None)
@@ -1376,30 +1509,11 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
     ) -> None:
-        payload = context.platform_specific or {}
         semantics = output_semantics or MessageOutput(completes_turn=True)
         if not semantics.records_run_output:
             return
         require_confirmation = semantics.requires_delivery_for_run_settlement
-        run_ids: list[str] = []
-        for value in semantics.run_ids:
-            run_id = str(value or "").strip()
-            if run_id and run_id not in run_ids:
-                run_ids.append(run_id)
-        explicit_run_id = str(semantics.run_id or "").strip()
-        if explicit_run_id and explicit_run_id not in run_ids:
-            run_ids.append(explicit_run_id)
-        explicit_run_ids = semantics.metadata.get("run_ids")
-        if isinstance(explicit_run_ids, list):
-            for value in explicit_run_ids:
-                run_id = str(value or "").strip()
-                if run_id and run_id not in run_ids:
-                    run_ids.append(run_id)
-        if not run_ids:
-            run_ids = _owned_agent_run_ids(payload)
-            for durable_run_id in self._durable_accepted_agent_run_ids(context):
-                if durable_run_id not in run_ids:
-                    run_ids.append(durable_run_id)
+        run_ids = self._terminal_agent_run_ids(context, semantics)
         if not run_ids:
             return
         terminal_status = None
@@ -1885,6 +1999,11 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
+        if canonical_type == "result" and output_semantics.completes_turn:
+            output_semantics = self._output_with_turn_fallback_owner(
+                context,
+                output_semantics,
+            )
         activity_batch_incomplete = bool(
             output_semantics.requires_delivery_for_run_settlement
             and output_semantics.metadata.get("activity_batch_complete") is False
@@ -2052,7 +2171,18 @@ class ConsolidatedMessageDispatcher:
         # cross-platform history) — persist_agent_message attributes IM rows to
         # this target's scope.
         target_context = self._get_target_context(context)
+        suppresses_outward_delivery = bool(
+            (context.platform_specific or {}).get("suppress_delivery")
+        )
         output_metadata = output_semantics.provenance(context) if output is not None else None
+        if suppresses_outward_delivery:
+            # A background transcript row is local history, not an outward receipt.
+            # Mark that fact durably: a later user-visible fallback keeps the stable
+            # native identity but must send before promoting the row to a receipt.
+            output_metadata = {
+                **(output_metadata or {}),
+                "delivery_suppressed": True,
+            }
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
 
         # For a result, persist the SAME cleaned text the user receives:
@@ -2076,10 +2206,27 @@ class ConsolidatedMessageDispatcher:
             )
         )
         for candidate in native_output_candidates:
-            accepted_message = agent_message_exists(target_context, candidate)
-            if accepted_message:
-                native_output_id = candidate
-                break
+            candidate_message = agent_message_exists(target_context, candidate)
+            if not candidate_message:
+                continue
+            candidate_metadata = (
+                candidate_message.get("metadata")
+                if isinstance(candidate_message, Mapping)
+                else None
+            )
+            if (
+                not suppresses_outward_delivery
+                and isinstance(candidate_metadata, Mapping)
+                and candidate_metadata.get("delivery_suppressed") is True
+            ):
+                logger.info(
+                    "Replaying local-only agent output %s to its outward target",
+                    candidate,
+                )
+                continue
+            accepted_message = candidate_message
+            native_output_id = candidate
+            break
         if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
             accepted_output_semantics = self._output_with_accepted_provenance(
@@ -2099,7 +2246,7 @@ class ConsolidatedMessageDispatcher:
             # re-send, report nothing, and then either walk on to another delivery
             # rung (a duplicate by another route) or exhaust its backoff and
             # dead-letter a notice the user already has.
-            if delivery is not None:
+            if delivery is not None and not suppresses_outward_delivery:
                 delivery.send_returned = True
                 delivery.delivered_id = native_output_id
                 delivery.persisted_row = {
@@ -2187,7 +2334,7 @@ class ConsolidatedMessageDispatcher:
         # and the persisted row is the inbox/transcript source of truth.
         persists_without_delivery = target_context.platform == "avibe"
 
-        if (context.platform_specific or {}).get("suppress_delivery"):
+        if suppresses_outward_delivery:
             try:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
@@ -2225,7 +2372,7 @@ class ConsolidatedMessageDispatcher:
                         metadata=output_metadata,
                         native_message_id=native_output_id,
                     )
-                message_id = (persisted_output or {}).get("id") or (
+                local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
                 terminal_status = None
@@ -2240,7 +2387,7 @@ class ConsolidatedMessageDispatcher:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
                         recorded_text,
-                        message_id,
+                        None,
                         is_error=is_error,
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
@@ -2249,7 +2396,7 @@ class ConsolidatedMessageDispatcher:
                     self._record_suppressed_run_message(
                         context,
                         recorded_text,
-                        message_id,
+                        None,
                         terminal_status=terminal_status,
                     )
                 if mutates_turn_lifecycle:
@@ -2272,7 +2419,7 @@ class ConsolidatedMessageDispatcher:
                             "Suppressed Activity output local settlement is incomplete",
                             delivered=False,
                         )
-                return message_id
+                return local_message_id
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
