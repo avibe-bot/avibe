@@ -43,6 +43,26 @@ STOP_REASONS = {
     "chat": {"first": {"tool_calls"}, "final": {"stop"}},
 }
 RESPONSES_OUTPUT_ITEM_TYPES = {"function_call", "message", "reasoning"}
+RESPONSES_STREAM_EVENT_TYPES = {
+    "error",
+    "response.completed",
+    "response.content_part.added",
+    "response.content_part.done",
+    "response.created",
+    "response.done",
+    "response.failed",
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done",
+    "response.in_progress",
+    "response.incomplete",
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+}
+ANTHROPIC_CONTENT_BLOCK_TYPES = {"redacted_thinking", "text", "thinking", "tool_use"}
 MAX_503_RETRIES = 3
 
 
@@ -463,6 +483,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             event = item.get("event", {})
             event_type = event.get("type")
             if not isinstance(event_type, str) or item.get("type") != event_type:
+                return False
+            if event_type not in RESPONSES_STREAM_EVENT_TYPES:
                 return False
             wire_sequence = item.get("wire_sequence")
             if type(wire_sequence) is not int or wire_sequence < 0 or (
@@ -965,6 +987,9 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
             errors.append("content_block_invalid")
             continue
         block_type = block.get("type")
+        if not isinstance(block_type, str) or block_type not in ANTHROPIC_CONTENT_BLOCK_TYPES:
+            errors.append("content_block_type_invalid")
+            continue
         if block_type == "tool_use":
             arguments, error = _parse_arguments(block.get("input"), expected_wire="object")
             if error:
@@ -1141,6 +1166,9 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                 errors.append(error)
             calls.append(ToolCall(_required_identifier(item.get("call_id"), errors), str(item.get("name", "")), arguments))
         elif item_type == "reasoning":
+            encrypted = item.get("encrypted_content")
+            if encrypted is not None and not isinstance(encrypted, str):
+                errors.append("encrypted_reasoning_invalid")
             for field in ("summary", "content"):
                 parts = item.get(field)
                 if parts is not None and not isinstance(parts, list):
@@ -1239,6 +1267,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
         event_type = event.get("type")
         if not isinstance(event_type, str):
             errors.append("stream_event_type_invalid")
+            continue
+        if event_type not in RESPONSES_STREAM_EVENT_TYPES:
+            errors.append("stream_event_unknown")
             continue
         if event_type in {"error", "response.failed", "response.incomplete"}:
             errors.append("stream_failure_event")

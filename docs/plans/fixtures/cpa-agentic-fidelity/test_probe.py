@@ -457,6 +457,17 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("message_type_invalid", turn.parse_errors)
         self.assertIn("message_role_invalid", turn.parse_errors)
 
+    def test_anthropic_response_rejects_unknown_content_block_types(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "future_block", "payload": "ignored"}],
+                "stop_reason": "end_turn",
+            }
+        )
+        self.assertIn("content_block_type_invalid", turn.parse_errors)
+
     def test_anthropic_stream_requires_message_start_envelope(self) -> None:
         events = [
             {"kind": "event", "type": "message_start", "event": {"type": "message_start", "message": {"type": "error", "role": "user"}}},
@@ -1600,6 +1611,16 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("message_part_type_invalid", turn.parse_errors)
         self.assertIn("reasoning_part_type_invalid", turn.parse_errors)
 
+    def test_responses_nonstream_rejects_invalid_encrypted_reasoning(self) -> None:
+        turn = probe._parse_responses_document(
+            {
+                "object": "response",
+                "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "thought"}], "encrypted_content": []}],
+                "status": "completed",
+            }
+        )
+        self.assertIn("encrypted_reasoning_invalid", turn.parse_errors)
+
     def test_responses_stream_event_type_must_be_a_string(self) -> None:
         for event_type in ([], {}):
             events = [
@@ -1614,6 +1635,16 @@ class ProbeParserTests(unittest.TestCase):
             self.assertFalse(probe._stream_order_ok("responses", events))
             turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
             self.assertIn("stream_event_type_invalid", turn.parse_errors)
+
+    def test_responses_stream_rejects_unknown_event_types(self) -> None:
+        events = _response_message_stream()
+        events.insert(-1, {"kind": "event", "type": "response.future_bogus", "event": {"type": "response.future_bogus"}})
+        for index, item in enumerate(events):
+            item["sequence"] = index
+            item["wire_sequence"] = index
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("stream_event_unknown", turn.parse_errors)
 
     def test_responses_reasoning_encrypted_snapshots_must_match(self) -> None:
         valid = _response_reasoning_stream()
