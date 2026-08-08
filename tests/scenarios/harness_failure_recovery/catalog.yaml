@@ -4050,6 +4050,33 @@ scenarios:
     # Delivery-to-Turn ownership relation. It never searches Run metadata JSON by
     # Turn id as history grows.
     test: tests/test_harness_failure_visibility.py::test_hfr_451_turn_callback_lookup_uses_bounded_ownership
+  - id: HFR-452
+    name: callback children cannot own the Turn fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Owner election uses the same suppression predicate as notice persistence, so
+    # a callback child whose parent already owns a notice cannot silence siblings.
+    test: tests/test_harness_failure_visibility.py::test_hfr_452_callback_children_cannot_own_a_turn_fallback
+  - id: HFR-453
+    name: callback enqueue and parent arming are atomic
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # SQLite exposes the callback child and its parent marker in one commit. A
+    # cancellation cannot open an enqueue-to-stamp window for duplicate fallback.
+    test: tests/test_harness_failure_visibility.py::test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction
+  - id: HFR-454
+    name: delivery evidence follows the routed target platform
+    status: covered
+    kind: routing
+    layer: contract
+    backend: shared
+    # A transport-only id acknowledges a real IM target but never a synthetic Avibe
+    # target, regardless of the source Session platform before delivery_override.
+    test: tests/test_backend_failure.py::BackendFailureTests::test_hfr_454_delivery_only_ack_uses_the_routed_target_platform
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

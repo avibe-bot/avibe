@@ -1767,6 +1767,24 @@ def _decoded_failure_notice_metadata(raw: Any) -> Optional[dict[str, Any]]:
     return decoded if isinstance(decoded, dict) else None
 
 
+def _run_can_own_failure_notice(conn: Any, row: Any) -> bool:
+    """Whether the notice writer can make this Run the durable fallback owner."""
+
+    metadata = _decoded_failure_notice_metadata(row["metadata_json"])
+    if metadata is None:
+        return False
+    existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
+    if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+        return True
+    if str(metadata.get("escalation_run_id") or "").strip():
+        return False
+    return not _callback_parent_owns_failure_notice(
+        conn,
+        source_kind=row["source_kind"],
+        parent_run_id=row["parent_run_id"],
+    )
+
+
 def _merge_owed_failure_notice(
     values: dict[str, Any],
     *,
@@ -3130,6 +3148,47 @@ class SQLiteBackgroundTaskStore:
                 values["agent_name"] = identity["name"]
                 values["agent_backend"] = identity["backend"]
             enqueue_run_in_connection(conn, values)
+
+    def enqueue_callback_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        parent_run_id: str,
+        source_actor: str,
+    ) -> str:
+        """Find-or-enqueue a callback child and arm its parent atomically."""
+
+        values = self._run_values(payload)
+        now = str(values.get("updated_at") or _utc_now_iso())
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            callback_run_id = conn.execute(
+                select(agent_runs.c.id)
+                .where(agent_runs.c.run_type == "agent_run")
+                .where(agent_runs.c.source_kind == "callback")
+                .where(agent_runs.c.parent_run_id == parent_run_id)
+                .where(agent_runs.c.source_actor == source_actor)
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if callback_run_id is None:
+                enqueue_run_in_connection(conn, values)
+                callback_run_id = str(values["id"])
+            parent_update = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == parent_run_id)
+                .values(
+                    callback_status="sent",
+                    callback_error=None,
+                    callback_run_id=callback_run_id,
+                    callback_completed_at=now,
+                    updated_at=now,
+                )
+            )
+            if not parent_update.rowcount:
+                raise ValueError(f"callback parent Run not found: {parent_run_id}")
+            _defer_run_ids_updated_from_connection(conn, [parent_run_id])
+        return str(callback_run_id)
 
     def enqueue_definition_run(
         self,
@@ -4863,10 +4922,7 @@ class SQLiteBackgroundTaskStore:
                 run_id
                 for run_id in normalized_run_ids
                 if failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
-                and _decoded_failure_notice_metadata(
-                    rows[run_id]["metadata_json"]
-                )
-                is not None
+                and _run_can_own_failure_notice(conn, rows[run_id])
             )
             immediate_owner_ids = [
                 run_id for run_id in eligible_run_ids if run_id not in deferred_ids
@@ -5226,10 +5282,7 @@ class SQLiteBackgroundTaskStore:
                         fallback_owner = str(
                             notification.get("fallback_run_id") or ""
                         ).strip()
-                        current_can_own = (
-                            _decoded_failure_notice_metadata(row["metadata_json"])
-                            is not None
-                        )
+                        current_can_own = _run_can_own_failure_notice(conn, row)
                         owner_has_notice = (
                             fallback_owner == run_id and current_can_own
                         )

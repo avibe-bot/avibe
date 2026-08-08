@@ -70,6 +70,14 @@ Terminal output replay is idempotent for status and content but monotonic for
 delivery evidence. A later same-Turn notification acknowledgement upgrades the
 existing owed notice without resetting its attempts, state, or fallback owner, so
 the durable drain cannot repeat a primary notification that succeeded on retry.
+The acknowledgement policy follows the routed target platform, not the originating
+Session platform, when a delivery override redirects the notification.
+
+Fallback ownership uses the complete notice-writability predicate: malformed
+metadata, an owned escalation, and a callback child whose parent already owns the
+notice are all ineligible. Callback child insertion and the parent's armed marker
+commit in one SQLite transaction, so cancellation cannot expose an accepted child
+without the callback evidence that defers or suppresses the fallback.
 
 Waiter health is observed only from completed outcome fields. Starting the first
 cycle does not prove success, so a Watch with no prior exit, finish, or error remains
@@ -147,6 +155,10 @@ does not claim that an event was detected.
   resetting notice progress.
 - `HFR-451`: Turn callback aggregation uses bounded participant ownership and
   indexed Delivery membership instead of scanning Run JSON.
+- `HFR-452`: callback children suppressed by their parent's notice cannot become
+  the Turn fallback owner.
+- `HFR-453`: callback child enqueue and parent arming commit atomically.
+- `HFR-454`: transport-only acknowledgement follows the routed target platform.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

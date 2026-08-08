@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import event, select
 
-from core.scheduled_tasks import TaskExecutionStore
+from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     NOTICE_KIND_BINDING_CHANGE,
     NOTICE_KIND_FAILURE,
@@ -7828,6 +7828,130 @@ def test_hfr_451_turn_callback_lookup_uses_bounded_ownership(
     plan_text = " ".join(str(row[-1]) for row in plan)
     assert "message_deliveries_turn" in plan_text
     assert "sqlite_autoindex_agent_runs_1" in plan_text
+
+
+def test_hfr_452_callback_children_cannot_own_a_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """Owner election applies every suppression used by the notice writer."""
+
+    sqlite, requests = _store(tmp_path)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-callback-parent",
+            request_type="agent_run",
+            message="original callback parent",
+        )
+    )
+    assert requests.claim(parent.id) is not None
+    sqlite.record_run_output(
+        parent.id,
+        output_id="parent-terminal",
+        text="",
+        terminal_status="failed",
+        error="parent failed",
+    )
+    assert sqlite.owed_failure_notice(parent.id) is not None
+
+    callback_child = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-a-callback-child",
+            request_type="agent_run",
+            message="callback child",
+            source_kind="callback",
+            parent_run_id=parent.id,
+        )
+    )
+    sibling = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-b-fallback-owner",
+            request_type="agent_run",
+            message="ordinary sibling",
+        )
+    )
+    assert requests.claim(callback_child.id) is not None
+    assert requests.claim(sibling.id) is not None
+    turn_id = "turn-callback-child-owner"
+
+    sqlite.record_turn_run_outputs(
+        [callback_child.id, sibling.id],
+        output_id="turn-terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": callback_child.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    assert sqlite.owed_failure_notice(callback_child.id) is None
+    assert (
+        sqlite.owed_failure_notice(sibling.id)["turn_fallback_run_id"]
+        == sibling.id
+    )
+
+
+def test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    """A durable callback child is never visible without its parent marker."""
+
+    sqlite, requests = _store(tmp_path)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-atomic-callback-parent",
+            request_type="agent_run",
+            message="parent",
+            callback_session_id="ses-callback-target",
+            callback_status="pending",
+        )
+    )
+    statements: list[str] = []
+    commits: list[int] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" in statement:
+            statements.append(statement.upper())
+
+    def _capture_commit(conn):
+        commits.append(1)
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    event.listen(sqlite.engine, "commit", _capture_commit)
+    try:
+        callback = requests.enqueue_agent_run(
+            message="deliver callback",
+            source_kind="callback",
+            source_actor="run-atomic-callback-parent:terminal:failed",
+            parent_run_id=parent.id,
+            callback_parent_to_arm=parent.id,
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+        event.remove(sqlite.engine, "commit", _capture_commit)
+
+    stored_parent = sqlite.get_run(parent.id)
+    assert stored_parent["callback_status"] == "sent"
+    assert stored_parent["callback_run_id"] == callback.id
+    assert sqlite.get_run(callback.id)["parent_run_id"] == parent.id
+    assert commits == [1]
+    insert_position = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("INSERT INTO AGENT_RUNS")
+    )
+    parent_update_position = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("UPDATE AGENT_RUNS")
+        and "CALLBACK_RUN_ID" in statement
+    )
+    assert insert_position < parent_update_position
 
 
 @pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])

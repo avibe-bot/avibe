@@ -166,6 +166,58 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_hfr_454_delivery_only_ack_uses_the_routed_target_platform(
+        self,
+    ) -> None:
+        """Transport-only ids are evidence according to where the notify was sent."""
+
+        for source, target, expected in (
+            ("avibe", "slack", True),
+            ("slack", "avibe", False),
+        ):
+            with self.subTest(source=source, target=target):
+                request = _request()
+                request.context.platform = source
+                request.context.platform_specific.update(
+                    {
+                        "task_execution_id": f"run-{source}-to-{target}",
+                        "delivery_override": {
+                            "platform": target,
+                            "channel_id": f"channel-{target}",
+                        },
+                    }
+                )
+                emissions = []
+
+                async def emit(_context, message_type, _text, **kwargs):
+                    emissions.append((message_type, kwargs))
+                    evidence = kwargs.get("delivery")
+                    if message_type == "notify" and evidence is not None:
+                        evidence.delivered_id = f"native-{target}-id"
+                        evidence.send_returned = True
+                    return None
+
+                controller = SimpleNamespace(
+                    agent_auth_service=SimpleNamespace(
+                        maybe_emit_auth_recovery_message=AsyncMock(return_value=False)
+                    ),
+                    emit_agent_message=emit,
+                )
+
+                await emit_backend_failure(
+                    controller,
+                    request.context,
+                    "codex",
+                    "stream disconnected",
+                    request=request,
+                )
+
+                notification = emissions[1][1]["output"].metadata[
+                    "turn_failure_notification"
+                ]
+                self.assertEqual(notification["ack_evidence"], "delivery_only")
+                self.assertIs(notification["delivered"], expected)
+
     async def test_auth_recovery_owns_the_only_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(

@@ -280,6 +280,22 @@ async def emit_backend_failure(
     if harness_run_id and live_delivery is None:
         live_delivery = DeliveryEvidence()
 
+    platform_specific = getattr(context, "platform_specific", None) or {}
+    delivery_override = (
+        platform_specific.get("delivery_override")
+        if isinstance(platform_specific, dict)
+        else None
+    )
+    target_platform = str(
+        (
+            delivery_override.get("platform")
+            if isinstance(delivery_override, dict)
+            else None
+        )
+        or getattr(context, "platform", "")
+        or ""
+    ).strip()
+
     def notification_acknowledged() -> bool:
         if live_delivery is None:
             return False
@@ -288,7 +304,7 @@ async def emit_backend_failure(
             return True
         return (
             evidence == ACK_EVIDENCE_DELIVERY_ONLY
-            and str(getattr(context, "platform", "") or "").strip() != "avibe"
+            and target_platform != "avibe"
         )
 
     async def settle_terminal_failure() -> None:
