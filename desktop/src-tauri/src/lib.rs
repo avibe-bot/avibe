@@ -733,6 +733,7 @@ pub fn run() {
                     bundled_runtime_host(
                         app.path().resource_dir()?.join("runtime"),
                         app.path().app_local_data_dir()?.join("runtime"),
+                        app.path().app_local_data_dir()?.join("backends"),
                     )?
                 }
                 #[cfg(not(feature = "bundled-runtime"))]

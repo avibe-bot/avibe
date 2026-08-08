@@ -36,8 +36,8 @@ pub use bootstrap::{
 pub use health::{is_avibe_readiness_body, parse_avibe_readiness_body, HealthProbe, HttpHealthProbe, RuntimeReadiness};
 pub use launcher::{
     vibe_executable_candidates, BundledVibeLauncher, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime,
-    ResolvedRuntimeLauncher, RuntimeLauncher, RuntimeRemovalState, DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV,
-    VIBE_PATH_ENV,
+    ResolvedRuntimeLauncher, RuntimeLauncher, RuntimeRemovalState, DESKTOP_BACKENDS_ROOT_ENV, DESKTOP_NPM_CLI_ENV,
+    DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
 pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
 pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};
@@ -62,12 +62,13 @@ pub fn default_runtime_host() -> Result<RuntimeHost, reqwest::Error> {
 pub fn bundled_runtime_host(
     bundle_dir: std::path::PathBuf,
     install_root: std::path::PathBuf,
+    backend_root: std::path::PathBuf,
 ) -> Result<RuntimeHost, reqwest::Error> {
     let settings = RuntimeHostSettings::from_env();
     let probe = HttpHealthProbe::new(settings.probe_timeout)?;
     Ok(RuntimeHost::new(
         Arc::new(probe),
-        Arc::new(BundledVibeLauncher::new(bundle_dir, install_root)),
+        Arc::new(BundledVibeLauncher::new(bundle_dir, install_root, backend_root)),
         settings,
     ))
 }
