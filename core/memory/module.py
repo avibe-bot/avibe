@@ -355,6 +355,9 @@ class MemoryModule:
         try:
             meta = await self._store_call(self._store.get_meta)
             stats = await self._store_call(self._store.queue_stats)
+            manual_required_fence = await self._store_call(
+                self._store.has_manual_required_fence
+            )
         except Exception:
             return MemoryStatus(state="error", error="memory_store_unavailable")
 
@@ -366,9 +369,6 @@ class MemoryModule:
         # observation supersedes delivery-era errors from older builds, while a
         # later add failure (meta.updated_at > last_flush_at) remains current.
         historical = meta.last_error if meta is not None else None
-        manual_required_fence = await self._store_call(
-            self._store.has_manual_required_fence
-        )
         flush_supersedes_error = bool(
             meta is not None
             and not manual_required_fence

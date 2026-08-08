@@ -15,6 +15,7 @@ from core.memory.everos import (
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
+    MemoryProviderPreSubmissionFailure,
     ProviderAttachment,
     ProviderCapture,
 )
@@ -151,6 +152,20 @@ def test_add_treats_missing_provider_configuration_as_retryable() -> None:
         failure = asyncio.run(run())
 
     assert failure.retryable is True
+
+
+def test_add_connect_timeout_is_classified_as_pre_submission_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timeout", request=request)
+
+    async def run() -> None:
+        with pytest.raises(MemoryProviderPreSubmissionFailure):
+            await EverOSPort(Path("/tmp/everos.sock")).add(
+                ProviderCapture("owner", "session", "capture", 1, PROJECT)
+            )
+
+    with _sidecar_transport(handler):
+        asyncio.run(run())
 
 
 def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None:

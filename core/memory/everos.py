@@ -84,6 +84,13 @@ class MemoryProviderFailure(RuntimeError):
         self.retryable = bool(retryable)
 
 
+class MemoryProviderPreSubmissionFailure(MemoryProviderFailure):
+    """A write could not be submitted, so retrying cannot duplicate it."""
+
+    def __init__(self) -> None:
+        super().__init__("memory_provider_timeout", retryable=True)
+
+
 class MemoryProviderSystemFailure(MemoryProviderFailure):
     """The sidecar or its configured processing dependencies are unavailable."""
 
@@ -271,6 +278,13 @@ class EverOSPort:
                     except MemoryProviderFailure:
                         raw = None
                     status_code = response.status_code
+        except httpx.ConnectTimeout as exc:
+            logger.warning(
+                "EverOS sidecar connect timeout route=%s latency_ms=%s",
+                route,
+                _elapsed_ms(started),
+            )
+            raise MemoryProviderPreSubmissionFailure() from exc
         except httpx.TimeoutException as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc

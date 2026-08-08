@@ -15,6 +15,7 @@ from core.memory.everos import (
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
+    MemoryProviderPreSubmissionFailure,
     MemoryProviderPort,
     MemoryProviderSystemFailure,
     ProviderCapture,
@@ -287,6 +288,13 @@ class MemoryWorker:
             await self._return_system_failure(
                 row,
                 _provider_error_code(failure, "memory_sidecar_unavailable"),
+            )
+            return None
+        except MemoryProviderPreSubmissionFailure as failure:
+            await self._ambiguous_failure_is_system_outage(
+                row,
+                _provider_error_code(failure, "memory_provider_timeout"),
+                retryable=True,
             )
             return None
         except MemoryProviderFailure as failure:

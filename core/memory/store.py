@@ -322,15 +322,15 @@ class MemoryStore:
                 project_ref=project_ref,
                 session_id=session_id_ref,
             )
-            fenced = conn.execute(
+            manual_fence = conn.execute(
                 """
                 SELECT 1 FROM memory_session_flush_state
                 WHERE provider_session_ref = ?
-                  AND flush_state IN ('in_flight', 'manual_required')
+                  AND flush_state = 'manual_required'
                 """,
                 (provider_session_ref.serialize(),),
             ).fetchone()
-            if fenced is not None:
+            if manual_fence is not None:
                 self._record_capture_skip_in_connection(
                     conn,
                     "memory_provider_response_invalid",
@@ -361,6 +361,9 @@ class MemoryStore:
                 provider_session_ref,
                 now=now,
                 first_unflushed_at=now,
+            )
+            flush_generation = session_state.generation + int(
+                session_state.flush_state == "in_flight"
             )
             conn.execute(
                 """
@@ -404,7 +407,7 @@ class MemoryStore:
                     payload_attachments,
                     occurred_at_ms,
                     provider_timestamp_ms,
-                    session_state.generation,
+                    flush_generation,
                     now,
                 ),
             )
@@ -421,7 +424,7 @@ class MemoryStore:
                     payload_text=payload_text,
                     occurred_at_ms=occurred_at_ms,
                     provider_timestamp_ms=provider_timestamp_ms,
-                    flush_generation=session_state.generation,
+                    flush_generation=flush_generation,
                     state="pending",
                     attempts=0,
                     next_retry_at=None,
@@ -1195,6 +1198,12 @@ class MemoryStore:
                         settlement,
                         now=now,
                     )
+                    if retry_exhausted:
+                        self._set_last_error_in_connection(
+                            conn,
+                            "memory_processing_failed",
+                            now,
+                        )
                 else:
                     self._record_settlement_in_connection(conn, settlement)
                     remaining = conn.execute(

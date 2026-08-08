@@ -450,12 +450,12 @@ def test_flush_claim_waits_for_a_processing_add(tmp_path: Path) -> None:
     assert store.get_session_flush_state(provider_session_ref).flush_state == "not_due"
 
 
-def test_enqueue_refuses_admission_while_the_session_flush_is_in_flight(tmp_path: Path) -> None:
+def test_enqueue_admits_next_generation_while_claims_wait_for_flush(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     provider_session_ref = _deliver(store, "in-flight-admission")
-    assert _flush_claim(store, provider_session_ref) is not None
+    token = _flush_claim(store, provider_session_ref)
 
-    blocked = store.enqueue_request(
+    accepted = store.enqueue_request(
         source_message_id="blocked-during-flush",
         session_id="shared-session",
         principal_id=provider_session_ref.principal_id,
@@ -466,8 +466,24 @@ def test_enqueue_refuses_admission_while_the_session_flush_is_in_flight(tmp_path
         max_provider_timestamp_ms=4_102_444_800_000,
     )
 
-    assert blocked.outcome == "manual_required"
-    assert len(store.list_queue_rows()) == 1
+    assert accepted.outcome == "accepted"
+    assert accepted.row is not None
+    assert accepted.row.flush_generation == token.generation + 1
+    assert len(store.list_queue_rows()) == 2
+    assert store.claim_due(lease_owner="blocked", now="2026-01-01T00:00:03.000Z") is None
+
+    assert store.record_flush_verdict(
+        token,
+        FlushSucceeded("flush", "extracted"),
+        now="2026-01-01T00:00:04.000Z",
+    ) == 1
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert state.generation == token.generation + 1
+
+    claimed = store.claim_due(lease_owner="after-flush", now="2026-01-01T00:00:05.000Z")
+    assert claimed is not None
+    assert claimed.flush_generation == state.generation
 
 
 def test_due_rejected_generation_can_acquire_a_retry_token(tmp_path: Path) -> None:
@@ -593,6 +609,7 @@ def test_retryable_flush_rejections_back_off_then_fence_the_session(tmp_path: Pa
         0,
         None,
     )
+    assert store.ensure_meta().last_error == "memory_processing_failed"
     assert len(store.list_flush_settlements(provider_session_ref)) == MAX_FLUSH_RETRY_ATTEMPTS
     assert store.list_due_flush_sessions(now="2026-01-01T00:06:00.000Z") == ()
 

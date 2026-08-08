@@ -20,6 +20,7 @@ from core.memory.everos import (
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
+    MemoryProviderPreSubmissionFailure,
     MemoryProviderSystemFailure,
 )
 from core.memory.module import (
@@ -694,6 +695,37 @@ async def test_retryable_flush_rejection_is_backed_off_without_starving_other_se
     assert bad_state.flush_state == "due"
     assert bad_state.next_attempt_at == "2026-01-01T00:00:30.000Z"
     assert provider.flushes == [rows[0].session_id, rows[1].session_id]
+
+
+async def test_exhausted_flush_retries_keep_status_degraded(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="exhausted")) == CaptureAccepted()
+    provider.flush_results.extend(
+        [
+            FlushRejected("first", "CONFLICT", server_fault=False),
+            FlushRejected("second", "CONFLICT", server_fault=False),
+            FlushRejected("third", "CONFLICT", server_fault=False),
+        ]
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        now=lambda: current,
+        boot_id="exhausted-retry-worker",
+    )
+
+    assert await worker.drain_once() == 1
+    current += timedelta(seconds=31)
+    assert await worker.drain_once() == 0
+    current += timedelta(minutes=2, seconds=1)
+    assert await worker.drain_once() == 0
+
+    status = await module.status()
+    assert status.state == "degraded"
+    assert status.error == "memory_processing_failed"
+    assert store.ensure_meta().last_error == "memory_processing_failed"
 
 
 async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:
@@ -1695,6 +1727,23 @@ async def test_interrupted_clear_rechecks_after_a_transient_store_read_failure(t
     assert store.ensure_meta().clear_in_progress is False
 
 
+async def test_status_reports_store_unavailable_when_fence_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    def fail_fence_lookup() -> bool:
+        raise sqlite3.OperationalError("transient fence read failure")
+
+    monkeypatch.setattr(store, "has_manual_required_fence", fail_fence_lookup)
+
+    status = await module.status()
+
+    assert status.state == "error"
+    assert status.error == "memory_store_unavailable"
+
+
 async def test_disabled_clear_resumes_worker_after_reenable(tmp_path: Path) -> None:
     enabled = {"value": True}
     module, store, _provider = _module(
@@ -1811,6 +1860,40 @@ async def test_healthy_timeout_sets_manual_required_and_blocks_same_session(
     later = store.list_queue_rows()[1]
     assert later.state == "pending"
     assert provider.captures == []
+
+
+async def test_pre_submission_failure_retries_without_raising_a_manual_fence(
+    tmp_path: Path,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="pre-submit")) == CaptureAccepted()
+    provider.ingest_failures.append(MemoryProviderPreSubmissionFailure())
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="pre-submit-worker",
+        now=lambda: current,
+    )
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert (row.state, row.attempts, row.next_retry_at, row.last_error) == (
+        "pending",
+        1,
+        "2026-01-01T00:00:30.000Z",
+        "memory_provider_timeout",
+    )
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "not_due"
+
+    current += timedelta(seconds=31)
+    assert await worker.drain_once() == 1
+    delivered = store.list_queue_rows()[0]
+    assert delivered.state == "delivered"
+    assert store.get_session_flush_state(row.provider_session_ref).flush_state == "not_due"
 
 
 async def test_manual_fence_error_survives_an_unrelated_success(tmp_path: Path) -> None:
