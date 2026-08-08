@@ -981,6 +981,46 @@ def test_manual_resolution_without_audit_evidence_stays_non_authoritative(
     assert _row_for_source(store, "missing-audit").flush_observation == "unknown"
 
 
+def test_manual_resolution_requires_a_live_manual_fence(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "manual-without-fence")
+    assert accepted.provider_session_ref is not None
+    state_before = store.get_session_flush_state(accepted.provider_session_ref)
+    assert state_before is not None
+    assert state_before.flush_state == "not_due"
+
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=accepted.provider_session_ref,
+            generation=state_before.generation,
+            fence_epoch=state_before.fence_epoch,
+            operation_id="manual-without-live-fence",
+            operation_kind="flush",
+            outcome="committed",
+            observed_at="2026-01-01T00:00:01.000Z",
+            actor="operator",
+            decision="committed",
+            evidence_ref="audit-without-live-fence",
+            source="manual",
+        )
+    )
+
+    state_after = store.get_session_flush_state(accepted.provider_session_ref)
+    assert state_after is not None
+    assert state_after.flush_state == "not_due"
+    assert state_after.watermark == state_before.watermark
+    settlement = next(
+        record
+        for record in store.list_flush_settlements(accepted.provider_session_ref)
+        if record.operation_id == "manual-without-live-fence"
+    )
+    assert settlement.flush_state is None
+    assert settlement.confirmed_watermark_ms is None
+    assert _row_for_source(store, "manual-without-fence").state == "pending"
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected_observation", "expected_state", "expected_request_id"),
     [
@@ -1064,14 +1104,15 @@ def test_manual_flush_resolution_reconciles_unknown_queue_rows(
         )
         assert settlement.confirmed_watermark_ms == 1_000
         assert settlement.watermark_after == 1_000
+        assert store.ensure_meta().last_success_at == "2026-01-01T00:00:03.000Z"
 
 
 @pytest.mark.parametrize(
-    ("outcome", "expected_row_state", "expected_flush_state", "expected_owner"),
+    ("outcome", "expected_row_state", "expected_flush_state"),
     [
-        ("committed", "delivered", "not_due", None),
-        ("not_committed", "pending", "manual_required", "manual-add-retry"),
-        ("settled_with_caveat", "dead", "settled_with_caveat", None),
+        ("committed", "delivered", "not_due"),
+        ("not_committed", "pending", "manual_required"),
+        ("settled_with_caveat", "dead", "settled_with_caveat"),
     ],
 )
 def test_manual_add_resolution_has_operation_specific_transitions(
@@ -1079,7 +1120,6 @@ def test_manual_add_resolution_has_operation_specific_transitions(
     outcome: str,
     expected_row_state: str,
     expected_flush_state: str,
-    expected_owner: str | None,
 ) -> None:
     store = MemoryStore(_store_path(tmp_path))
     accepted = _enqueue(store, "manual-add-resolution")
@@ -1103,6 +1143,10 @@ def test_manual_add_resolution_has_operation_specific_transitions(
     manual_state = store.get_session_flush_state(accepted.provider_session_ref)
     assert manual_state is not None
     assert manual_state.flush_state == "manual_required"
+    later = None
+    if outcome == "committed":
+        later = _enqueue(store, "manual-add-later", occurred_at_ms=2_000)
+        assert later.target_generation == manual_state.generation
 
     assert store.record_settlement(
         MemorySettlementRecord(
@@ -1127,12 +1171,31 @@ def test_manual_add_resolution_has_operation_specific_transitions(
     state = store.get_session_flush_state(accepted.provider_session_ref)
     assert state is not None
     assert state.flush_state == expected_flush_state
-    assert state.fence_owner == expected_owner
+    assert state.fence_owner == (
+        f"manual-add-retry:{claimed.source_message_digest}"
+        if outcome == "not_committed"
+        else None
+    )
     if outcome == "committed":
         assert row.payload_text is None
         assert state.watermark == 1_000
+        assert later is not None
+        assert _row_for_source(store, "manual-add-later").state == "pending"
     if outcome == "not_committed":
         assert row.payload_text == "queued payload"
+        later = _enqueue(store, "manual-add-later", occurred_at_ms=2_000)
+        assert later.row is not None
+        retry = store.claim_due(
+            lease_owner="retry-worker",
+            now="2026-01-01T00:00:03.000Z",
+        )
+        assert retry is not None
+        assert retry.source_message_digest == claimed.source_message_digest
+        assert store.claim_due(
+            lease_owner="retry-worker",
+            now="2026-01-01T00:00:03.000Z",
+        ) is None
+        assert _row_for_source(store, "manual-add-later").state == "pending"
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
@@ -1218,6 +1281,9 @@ def test_terminal_failure_keeps_a_generation_barrier_for_later_settlements(tmp_p
     assert failed_settlement.outcome == "rejected"
     assert failed_settlement.last_known_state == "dead"
     assert failed_settlement.source == "add"
+    failed_state = store.get_session_flush_state(failed.provider_session_ref)
+    assert failed_state is not None
+    assert failed_state.last_add_ack_at is None
 
     second_row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:02.000Z")
     assert second_row is not None

@@ -39,6 +39,7 @@ MEMORY_SCHEMA_VERSION = 2
 MEMORY_LEGACY_SCHEMA_VERSION = 1
 MANUAL_FLUSH_RETRY_OWNER = "manual-flush-retry"
 MANUAL_ADD_RETRY_OWNER = "manual-add-retry"
+MANUAL_ADD_RETRY_OWNER_PREFIX = MANUAL_ADD_RETRY_OWNER + ":"
 
 
 def memory_store_path() -> Path:
@@ -576,7 +577,14 @@ class MemoryStore:
                         AND session_state.project_ref = memory_capture_queue.project_ref
                         AND session_state.session_id = memory_capture_queue.session_id
                         AND (
-                            session_state.flush_state = 'manual_required'
+                            (
+                                session_state.flush_state = 'manual_required'
+                                AND NOT (
+                                    session_state.fence_owner = ?
+                                        || memory_capture_queue.source_message_digest
+                                    AND memory_capture_queue.target_generation = session_state.generation
+                                )
+                            )
                             OR (
                                 session_state.flush_state = 'due'
                                 AND session_state.fence_owner = ?
@@ -587,7 +595,12 @@ class MemoryStore:
                 ORDER BY created_at, source_message_digest
                 LIMIT 1
                 """,
-                (meta.epoch, now, MANUAL_FLUSH_RETRY_OWNER),
+                (
+                    meta.epoch,
+                    now,
+                    MANUAL_ADD_RETRY_OWNER_PREFIX,
+                    MANUAL_FLUSH_RETRY_OWNER,
+                ),
             ).fetchone()
             if row is None:
                 return None
@@ -1876,6 +1889,7 @@ class MemoryStore:
             and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
             and state.generation == record.generation
             and state.fence_epoch == record.fence_epoch
+            and state.flush_state == "manual_required"
             and actor is not None
             and decision is not None
             and evidence_ref is not None
@@ -1888,20 +1902,44 @@ class MemoryStore:
             and record.confirmed_watermark_ms is None
             and record.watermark_after is None
         ):
-            manual_watermark_state_clause = (
-                "state IN ('pending', 'processing', 'delivered')"
-                if record.operation_kind == "add"
-                else "state = 'delivered'"
-            )
-            watermark_row = conn.execute(
-                f"""
-                SELECT MAX(provider_timestamp_ms)
-                FROM memory_capture_queue
-                WHERE provider_session_ref = ? AND target_generation = ?
-                  AND {manual_watermark_state_clause}
-                """,
-                (provider_session_ref.serialize(), record.generation),
-            ).fetchone()
+            if record.operation_kind == "add":
+                digest = _manual_add_source_digest(record.operation_id)
+                request_id = _bounded_opaque_text(record.request_id)
+                watermark_row = conn.execute(
+                    """
+                    SELECT provider_timestamp_ms
+                    FROM memory_capture_queue
+                    WHERE provider_session_ref = ? AND target_generation = ?
+                      AND state IN ('pending', 'processing', 'delivered')
+                      AND (
+                          (? IS NOT NULL AND source_message_digest = ?)
+                          OR (
+                              ? IS NULL AND ? IS NOT NULL
+                              AND add_request_id = ?
+                          )
+                      )
+                    LIMIT 1
+                    """,
+                    (
+                        provider_session_ref.serialize(),
+                        record.generation,
+                        digest,
+                        digest,
+                        digest,
+                        request_id,
+                        request_id,
+                    ),
+                ).fetchone()
+            else:
+                watermark_row = conn.execute(
+                    """
+                    SELECT MAX(provider_timestamp_ms)
+                    FROM memory_capture_queue
+                    WHERE provider_session_ref = ? AND target_generation = ?
+                      AND state = 'delivered'
+                    """,
+                    (provider_session_ref.serialize(), record.generation),
+                ).fetchone()
             if watermark_row[0] is not None:
                 derived_manual_watermark_ms = max(
                     state.watermark,
@@ -1997,9 +2035,16 @@ class MemoryStore:
             return True
 
         if (
-            record.operation_kind == "add"
-            and record.source == "natural_boundary"
-            and record.outcome in {"succeeded", "committed"}
+            (
+                record.operation_kind == "add"
+                and record.source == "natural_boundary"
+                and record.outcome in {"succeeded", "committed"}
+            )
+            or (
+                record.operation_kind == "flush"
+                and record.source == "manual"
+                and record.outcome == "committed"
+            )
         ):
             conn.execute(
                 """
@@ -2056,7 +2101,7 @@ class MemoryStore:
                     WHERE provider_session_ref = ? AND generation = ?
                     """,
                     (
-                        MANUAL_ADD_RETRY_OWNER,
+                        _manual_add_retry_owner(record.operation_id),
                         record.observed_at,
                         watermark_after,
                         record.observed_at,
@@ -2098,7 +2143,10 @@ class MemoryStore:
                         record.generation,
                     ),
                 )
-        elif record.operation_kind == "add":
+        elif (
+            record.operation_kind == "add"
+            and record.outcome in {"succeeded", "committed"}
+        ):
             conn.execute(
                 """
                 UPDATE memory_session_flush_state
@@ -2314,12 +2362,7 @@ class MemoryStore:
     ) -> None:
         """Apply an audited add decision to the matching outbox claim."""
 
-        operation_id = record.operation_id
-        digest = operation_id[len("add-") :] if operation_id.startswith("add-") else None
-        if digest is not None and (
-            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            digest = None
+        digest = _manual_add_source_digest(record.operation_id)
         request_id = _bounded_opaque_text(record.request_id)
         target = (
             record.provider_session_ref.serialize(),
@@ -3074,6 +3117,24 @@ def _settlement_flush_state(record: MemorySettlementRecord) -> str | None:
     if record.outcome in {"rejected", "not_committed"}:
         return "due"
     return None
+
+
+def _manual_add_source_digest(operation_id: str) -> str | None:
+    """Extract the stable queue identity used by an audited add operation."""
+
+    if not operation_id.startswith("add-"):
+        return None
+    digest = operation_id[len("add-") :]
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        return None
+    return digest
+
+
+def _manual_add_retry_owner(operation_id: str) -> str:
+    digest = _manual_add_source_digest(operation_id)
+    if digest is None:
+        return MANUAL_ADD_RETRY_OWNER
+    return f"{MANUAL_ADD_RETRY_OWNER_PREFIX}{digest}"
 
 
 def _provider_ref_from_values(
