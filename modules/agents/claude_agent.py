@@ -1814,25 +1814,21 @@ class ClaudeAgent(BaseAgent):
                                         composite_key,
                                         buffered_primary,
                                     )
-                                    if buffered_text:
-                                        pending = self._pending_requests.get(
-                                            composite_key
-                                        ) or []
-                                        buffered_request = pending[0] if pending else None
+                                    pending = self._pending_requests.get(
+                                        composite_key
+                                    ) or []
+                                    buffered_request = pending[0] if pending else None
+                                    if buffered_text or self._request_activities(
+                                        buffered_request
+                                    ):
                                         self._adopt_pending_turn_token(
                                             context,
                                             buffered_request,
                                         )
-                                        await self.controller.emit_agent_message(
+                                        await self._emit_primary_phase_output(
                                             context,
-                                            "output",
+                                            buffered_request,
                                             buffered_text,
-                                            parse_mode="markdown",
-                                            output=MessageOutput(
-                                                completes_turn=False,
-                                                completes_run=False,
-                                                records_run_output=False,
-                                            ),
                                         )
                                     self._ambiguous_primary_results.pop(
                                         composite_key,
@@ -1851,6 +1847,7 @@ class ClaudeAgent(BaseAgent):
                                     self._last_assistant_text.get(composite_key),
                                     composite_key in self._turns_with_foreground_tools,
                                 )
+                                self._clear_result_phase_state(composite_key)
                                 logger.info(
                                     "Deferring Claude primary result until ambiguous steering reaches native EOF or a later result for %s",
                                     composite_key,
@@ -1911,21 +1908,15 @@ class ClaudeAgent(BaseAgent):
 
                         if terminal_superseded:
                             self._adopt_pending_turn_token(context, superseded_request)
-                            if superseded_result_text:
-                                await self.controller.emit_agent_message(
+                            if superseded_result_text or self._request_activities(
+                                superseded_request
+                            ):
+                                await self._emit_primary_phase_output(
                                     context,
-                                    "output",
+                                    superseded_request,
                                     superseded_result_text,
-                                    parse_mode="markdown",
-                                    output=MessageOutput(
-                                        completes_turn=False,
-                                        completes_run=False,
-                                        records_run_output=False,
-                                    ),
                                 )
-                            self._last_assistant_text.pop(composite_key, None)
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
+                            self._clear_result_phase_state(composite_key)
                             logger.info(
                                 "Kept Claude Turn open across a pre-steer terminal result for %s",
                                 composite_key,
@@ -2903,6 +2894,52 @@ class ClaudeAgent(BaseAgent):
         if composite_key in self._turns_with_foreground_tools:
             return "<silent>Claude turn completed without assistant text.</silent>"
         return str(sdk_result or "")
+
+    def _clear_result_phase_state(self, composite_key: str) -> None:
+        """Retire response-local evidence before Claude consumes another input."""
+
+        self._last_assistant_text.pop(composite_key, None)
+        self._pending_assistant_message.pop(composite_key, None)
+        self._foreground_tool_use_ids.pop(composite_key, None)
+        self._turns_with_foreground_tools.discard(composite_key)
+
+    async def _emit_primary_phase_output(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        text: str,
+    ) -> None:
+        """Emit a completed pre-steer phase without closing the shared Turn."""
+
+        activities = self._request_activities(request)
+        activity = activities[-1] if activities else None
+        output = (
+            self._activity_message_output(
+                activity,
+                activities=activities,
+                detached=False,
+                completes_turn=False,
+            )
+            if activity is not None
+            else MessageOutput(
+                completes_turn=False,
+                completes_run=False,
+                records_run_output=False,
+            )
+        )
+        message_id = await self.controller.emit_agent_message(
+            context,
+            "output",
+            text or (str(activity.metadata.get("summary") or "") if activity else ""),
+            parse_mode="markdown",
+            output=output,
+        )
+        if activity is None:
+            return
+        self._require_activity_delivery(activity, message_id)
+        self._clear_request_activities(request)
+        if request is not None:
+            request.output = terminal_turn_output()
 
     def _select_buffered_terminal_text(self, composite_key: str, buffered) -> str:
         """Render a buffered pre-steer result without using newer assistant text."""
