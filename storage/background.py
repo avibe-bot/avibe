@@ -43,7 +43,15 @@ from storage.migrations import (
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
-from storage.models import agents, agent_runs, agent_sessions, messages, run_definitions, scopes
+from storage.models import (
+    agents,
+    agent_runs,
+    agent_sessions,
+    message_deliveries,
+    messages,
+    run_definitions,
+    scopes,
+)
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import (
@@ -1553,6 +1561,19 @@ def _owed_failure_notice_for_transition(
         if has_turn_notification
         else ""
     )
+    participant_run_ids = list(
+        dict.fromkeys(
+            run_id
+            for value in (
+                metadata.get(TURN_PARTICIPANT_RUN_IDS_METADATA_KEY)
+                if isinstance(
+                    metadata.get(TURN_PARTICIPANT_RUN_IDS_METADATA_KEY), list
+                )
+                else []
+            )
+            if (run_id := str(value or "").strip())
+        )
+    )
     return {
         "state": NOTICE_PENDING,
         "attempts": 0,
@@ -1605,6 +1626,7 @@ def _owed_failure_notice_for_transition(
         "turn_notification_delivered": bool(turn_notification.get("delivered")),
         "turn_notification_ack_evidence": turn_notification.get("ack_evidence"),
         "turn_fallback_run_id": fallback_run_id or None,
+        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_run_ids if turn_id else [],
         # Optional, and only ever a copy selector. The lane a notice belongs to is
         # decided from this value's membership in ``RUN_INTERRUPTION_REASONS``, not
         # from its presence.
@@ -1808,11 +1830,99 @@ def _merge_owed_failure_notice(
             metadata=merged,
             now=now,
         )
+    # Participant membership belongs to the notice snapshot, not as a second
+    # top-level metadata contract. Deferred settlement reads its local copy before
+    # reaching this writer.
+    merged.pop(TURN_PARTICIPANT_RUN_IDS_METADATA_KEY, None)
     if notice is None and not extra_metadata:
         return
     if notice is not None:
         merged[OWED_FAILURE_NOTICE_KEY] = notice
     values["metadata_json"] = _json_dumps(merged)
+
+
+_ACK_EVIDENCE_PRIORITY = {"": 0, "delivery_only": 1, "receipt": 2}
+
+
+def _merge_replayed_turn_delivery_evidence(
+    conn: Any,
+    *,
+    run_id: str,
+    row: Any,
+    incoming_status: Any,
+    provenance: Optional[dict[str, Any]],
+    now: str,
+) -> bool:
+    """Promote same-Turn delivery evidence without resetting a terminal notice."""
+
+    notification = (
+        provenance.get("turn_failure_notification")
+        if isinstance(provenance, dict)
+        else None
+    )
+    turn_id = str((provenance or {}).get("turn_id") or "").strip()
+    if (
+        not turn_id
+        or not isinstance(notification, dict)
+        or not bool(notification.get("delivered"))
+    ):
+        return False
+    normalized_incoming_status = normalize_run_status(incoming_status)
+    current = row
+    for final_attempt in (False, True):
+        if normalize_run_status(current["status"]) != normalized_incoming_status:
+            return False
+        raw_metadata = current["metadata_json"]
+        metadata = _decoded_failure_notice_metadata(raw_metadata)
+        if metadata is None:
+            return False
+        notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+        if not isinstance(notice, dict) or str(notice.get("turn_id") or "").strip() != turn_id:
+            return False
+        incoming_ack = str(notification.get("ack_evidence") or "").strip()
+        current_ack = str(notice.get("turn_notification_ack_evidence") or "").strip()
+        merged_ack = current_ack
+        if _ACK_EVIDENCE_PRIORITY.get(incoming_ack, 1 if incoming_ack else 0) > (
+            _ACK_EVIDENCE_PRIORITY.get(current_ack, 1 if current_ack else 0)
+        ):
+            merged_ack = incoming_ack
+        if bool(notice.get("turn_notification_delivered")) and merged_ack == current_ack:
+            return False
+        merged_notice = dict(notice)
+        merged_notice["turn_notification_delivered"] = True
+        if merged_ack:
+            merged_notice["turn_notification_ack_evidence"] = merged_ack
+        metadata[OWED_FAILURE_NOTICE_KEY] = merged_notice
+        updated = conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.metadata_json == raw_metadata)
+            .where(
+                agent_runs.c.status.in_(
+                    _status_query_values(normalized_incoming_status)
+                )
+            )
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        if updated.rowcount:
+            return True
+        if final_attempt:
+            return False
+        current = (
+            conn.execute(
+                select(
+                    agent_runs.c.status,
+                    agent_runs.c.metadata_json,
+                )
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if current is None:
+            return False
+    return False
 
 
 def normalize_run_status(status: Any) -> str:
@@ -4037,8 +4147,9 @@ class SQLiteBackgroundTaskStore:
         *,
         run_id: Optional[str] = None,
         turn_id: Optional[str] = None,
+        participant_run_ids: Sequence[str] = (),
     ) -> list[Any]:
-        """Read callback delivery facts for one Run or one Turn snapshot."""
+        """Read callback delivery facts from bounded Run ownership."""
 
         parent = agent_runs.alias("callback_parent")
         child = agent_runs.alias("callback_child")
@@ -4085,37 +4196,40 @@ class SQLiteBackgroundTaskStore:
                 callback_session.c.id == child.c.session_id,
             )
         )
-        statement = statement.where(
-            func.coalesce(parent.c.cancel_requested, 0) == 0
-        ).where(~parent.c.status.in_(_status_query_values("canceled")))
+        live_parent = and_(
+            func.coalesce(parent.c.cancel_requested, 0) == 0,
+            ~parent.c.status.in_(_status_query_values("canceled")),
+        )
+        armed_callback = and_(
+            parent.c.callback_status == "sent",
+            parent.c.callback_run_id.is_not(None),
+            parent.c.callback_run_id != "",
+        )
+        statement = statement.where(or_(live_parent, armed_callback))
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
-            # Turn membership has two durable phases: settled Runs carry an owed
-            # notice, while Activity-owned Runs keep the same attribution in their
-            # deferred terminal intent until settlement moves it into metadata.
-            active_turn = and_(
-                func.json_valid(parent.c.metadata_json) == 1,
-                cast(
-                    func.json_extract(
-                        parent.c.metadata_json,
-                        f"$.{OWED_FAILURE_NOTICE_KEY}.turn_id",
-                    ),
-                    Text,
+            normalized_participant_ids = list(
+                dict.fromkeys(
+                    participant_id
+                    for value in participant_run_ids
+                    if (participant_id := str(value or "").strip())
                 )
-                == normalized_turn_id,
             )
-            deferred_turn = and_(
-                func.json_valid(parent.c.result_payload_json) == 1,
-                cast(
-                    func.json_extract(
-                        parent.c.result_payload_json,
-                        f"$.{DEFERRED_TERMINAL_METADATA_KEY}.turn_id",
-                    ),
-                    Text,
+            durable_participant_ids = (
+                select(agent_runs.c.id)
+                .select_from(
+                    agent_runs.join(
+                        message_deliveries,
+                        message_deliveries.c.id == agent_runs.c.delivery_id,
+                    )
                 )
-                == normalized_turn_id,
+                .where(message_deliveries.c.turn_id == normalized_turn_id)
+                .where(message_deliveries.c.state == "accepted")
             )
-            statement = statement.where(or_(active_turn, deferred_turn))
+            membership = [parent.c.id.in_(durable_participant_ids)]
+            if normalized_participant_ids:
+                membership.append(parent.c.id.in_(normalized_participant_ids))
+            statement = statement.where(or_(*membership))
         else:
             statement = statement.where(parent.c.id == str(run_id or ""))
         with self.engine.connect() as conn:
@@ -4189,7 +4303,12 @@ class SQLiteBackgroundTaskStore:
         rows = self._callback_state_rows(run_id=run_id)
         return self._callback_state_from_row(rows[0] if rows else None)
 
-    def turn_callback_state(self, turn_id: str) -> Optional[str]:
+    def turn_callback_state(
+        self,
+        turn_id: str,
+        *,
+        participant_run_ids: Sequence[str] = (),
+    ) -> Optional[str]:
         """Aggregate callback delivery across every failed Run in one Turn.
 
         A callback reports the Turn's terminal result, not only its parent Run. One
@@ -4201,7 +4320,10 @@ class SQLiteBackgroundTaskStore:
 
         states = [
             state
-            for row in self._callback_state_rows(turn_id=turn_id)
+            for row in self._callback_state_rows(
+                turn_id=turn_id,
+                participant_run_ids=participant_run_ids,
+            )
             if (state := self._callback_state_from_row(row)) is not None
         ]
         if "sent" in states:
@@ -4444,6 +4566,7 @@ class SQLiteBackgroundTaskStore:
         recorded = False
         terminal_transition = False
         text_backfilled = False
+        delivery_evidence_merged = False
         run_payload: Optional[dict[str, Any]] = None
         row_to_publish = None
         transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
@@ -4552,7 +4675,11 @@ class SQLiteBackgroundTaskStore:
                         row_metadata_json=terminal_row["metadata_json"],
                         extra_metadata={
                             key: value
-                            for key in ("turn_id", "turn_failure_notification")
+                            for key in (
+                                "turn_id",
+                                "turn_failure_notification",
+                                TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                            )
                             if provenance and (value := provenance.get(key)) is not None
                         }
                         or None,
@@ -4610,6 +4737,16 @@ class SQLiteBackgroundTaskStore:
                     # the real terminal result is PR7's job -- PR1 must not paper
                     # over it by writing text that contradicts the status.
                     if stored_status == incoming_status:
+                        delivery_evidence_merged = (
+                            _merge_replayed_turn_delivery_evidence(
+                                conn,
+                                run_id=run_id,
+                                row=terminal_row,
+                                incoming_status=incoming_status,
+                                provenance=provenance,
+                                now=now,
+                            )
+                        )
                         if terminal_result_text.strip():
                             filled = conn.execute(
                                 update(agent_runs)
@@ -4627,7 +4764,12 @@ class SQLiteBackgroundTaskStore:
                             )
                             text_backfilled = text_backfilled or bool(filled_error.rowcount)
 
-            if payload_changed or terminal_transition or text_backfilled:
+            if (
+                payload_changed
+                or terminal_transition
+                or text_backfilled
+                or delivery_evidence_merged
+            ):
                 row_to_publish = dict(
                     conn.execute(
                         select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -4647,6 +4789,7 @@ class SQLiteBackgroundTaskStore:
             # text/error. Distinct from ``terminal_transition`` on purpose: no
             # status changed, so callers must not read it as a settlement.
             "text_backfilled": text_backfilled,
+            "delivery_evidence_merged": delivery_evidence_merged,
             "run": run_payload,
         }
 
@@ -4743,15 +4886,22 @@ class SQLiteBackgroundTaskStore:
                     notification.pop("fallback_run_id", None)
                 terminal_provenance["turn_failure_notification"] = notification
 
-            deferred_metadata = {
-                key: value
-                for key in ("turn_id", "turn_failure_notification")
-                if (value := terminal_provenance.get(key)) is not None
-            }
-            if deferred_ids:
-                deferred_metadata[TURN_PARTICIPANT_RUN_IDS_METADATA_KEY] = list(
+            if isinstance(notification, dict) and str(
+                notification.get("failure_id") or ""
+            ).strip():
+                terminal_provenance[TURN_PARTICIPANT_RUN_IDS_METADATA_KEY] = list(
                     normalized_run_ids
                 )
+
+            deferred_metadata = {
+                key: value
+                for key in (
+                    "turn_id",
+                    "turn_failure_notification",
+                    TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                )
+                if (value := terminal_provenance.get(key)) is not None
+            }
             for run_id in normalized_run_ids:
                 run = runs.get(run_id)
                 if run is None or normalize_run_status(run.get("status")) == "canceled":
@@ -5054,7 +5204,7 @@ class SQLiteBackgroundTaskStore:
                     else None
                 )
                 if notice_metadata is not None:
-                    raw_participant_ids = notice_metadata.pop(
+                    raw_participant_ids = notice_metadata.get(
                         TURN_PARTICIPANT_RUN_IDS_METADATA_KEY, []
                     )
                     participant_ids = list(

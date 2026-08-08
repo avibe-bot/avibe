@@ -7447,6 +7447,7 @@ def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
         "failure_id": "turn:turn-with-callback",
         "turn_id": "turn-with-callback",
         "turn_fallback_run_id": owner_id,
+        "turn_participant_run_ids": [owner_id, callback_parent_id],
     }
     _pending_failure(
         sqlite,
@@ -7466,6 +7467,7 @@ def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
         failure_id="turn:turn-with-callback",
         turn_id="turn-with-callback",
         turn_fallback_run_id=owner_id,
+        turn_participant_run_ids=[owner_id, callback_parent_id],
     )
     callback = requests.enqueue_agent_run(
         message="deliver the shared Turn result",
@@ -7548,7 +7550,13 @@ def test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback(
     )
 
     assert sqlite.get_run(deferred.id)["status"] == "running"
-    assert sqlite.turn_callback_state(turn_id) == "pending"
+    assert (
+        sqlite.turn_callback_state(
+            turn_id,
+            participant_run_ids=[immediate.id, deferred.id],
+        )
+        == "pending"
+    )
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
@@ -7606,7 +7614,13 @@ def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
 
     assert sqlite.cancel_run(deferred.id)
     assert sqlite.get_run(deferred.id)["cancel_requested"] is True
-    assert sqlite.turn_callback_state(turn_id) is None
+    assert (
+        sqlite.turn_callback_state(
+            turn_id,
+            participant_run_ids=[immediate.id, deferred.id],
+        )
+        is None
+    )
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
@@ -7614,6 +7628,206 @@ def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
 
     assert delivered == [f"turn:{turn_id}"]
     assert sqlite.owed_failure_notice(immediate.id)["state"] == "sent"
+
+
+def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
+    tmp_path: Path,
+) -> None:
+    """Cancellation removes unarmed parents, not callback work already accepted."""
+
+    sqlite, requests = _store(tmp_path)
+    _callback_session(sqlite)
+
+    def _parent_with_callback(turn_id: str, *, delivered: bool) -> tuple[Any, Any]:
+        from sqlalchemy import update as sa_update
+
+        from storage.models import agent_runs
+
+        definition_id = f"watch-{turn_id}"
+        _task(sqlite, definition_id)
+        parent = requests.enqueue_task_run(definition_id)
+        assert requests.claim(parent.id) is not None
+        sqlite.record_turn_run_outputs(
+            [parent.id],
+            output_id="terminal",
+            text="",
+            provenance={
+                "turn_id": turn_id,
+                "turn_failure_notification": {
+                    "failure_id": f"turn:{turn_id}",
+                    "delivered": False,
+                    "fallback_run_id": parent.id,
+                },
+            },
+            terminal_status="failed",
+            error="stream disconnected",
+        )
+        callback = requests.enqueue_agent_run(
+            message="deliver the Turn result",
+            source_kind="callback",
+            parent_run_id=parent.id,
+            session_id="ses-callback-target",
+        )
+        with sqlite.engine.begin() as conn:
+            conn.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == parent.id)
+                .values(callback_session_id="ses-callback-target")
+            )
+        sqlite.update_callback_status(
+            parent.id,
+            status="sent",
+            callback_run_id=callback.id,
+        )
+        if delivered:
+            assert requests.claim(callback.id) is not None
+            sqlite.record_run_output(
+                callback.id,
+                output_id="terminal",
+                text="callback delivered",
+                terminal_status="succeeded",
+            )
+            _persist_callback_result(sqlite, callback.id, text="callback delivered")
+        assert sqlite.cancel_run(parent.id)
+        return parent, callback
+
+    pending_parent, _pending_callback = _parent_with_callback(
+        "turn-canceled-pending-callback", delivered=False
+    )
+    delivered_parent, _delivered_callback = _parent_with_callback(
+        "turn-canceled-delivered-callback", delivered=True
+    )
+
+    assert (
+        sqlite.turn_callback_state(
+            "turn-canceled-pending-callback",
+            participant_run_ids=[pending_parent.id],
+        )
+        == "pending"
+    )
+    assert (
+        sqlite.turn_callback_state(
+            "turn-canceled-delivered-callback",
+            participant_run_ids=[delivered_parent.id],
+        )
+        == "sent"
+    )
+
+
+def test_hfr_450_terminal_replay_promotes_new_turn_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    """A same-Turn replay upgrades its notice without resetting drain progress."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-delivery-replay")
+    run = requests.enqueue_task_run("watch-delivery-replay")
+    assert requests.claim(run.id) is not None
+    turn_id = "turn-delivery-replay"
+    provenance = {
+        "turn_id": turn_id,
+        "turn_failure_notification": {
+            "failure_id": f"turn:{turn_id}",
+            "delivered": False,
+            "fallback_run_id": run.id,
+        },
+    }
+    sqlite.record_turn_run_outputs(
+        [run.id],
+        output_id="terminal",
+        text="",
+        provenance=provenance,
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+    sqlite.update_owed_failure_notice(run.id, attempts=2)
+
+    replay = sqlite.record_run_output(
+        run.id,
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": True,
+                "ack_evidence": "delivery_only",
+                "fallback_run_id": run.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert replay["recorded"] is False
+    assert replay["terminal_transition"] is False
+    assert replay["delivery_evidence_merged"] is True
+    assert notice["attempts"] == 2
+    assert notice["turn_notification_delivered"] is True
+    assert notice["turn_notification_ack_evidence"] == "delivery_only"
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+    assert delivered == []
+    assert sqlite.owed_failure_notice(run.id)["state"] == "skipped"
+
+
+def test_hfr_451_turn_callback_lookup_uses_bounded_ownership(
+    tmp_path: Path,
+) -> None:
+    """Turn callback reads use Run ids and indexed Delivery ownership, never JSON scans."""
+
+    sqlite, _requests = _store(tmp_path)
+    _pending_failure(
+        sqlite,
+        "run-bounded-callback",
+        "watch-bounded-callback",
+        created_at="2026-07-27T00:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "failure_id": "turn:turn-bounded-callback",
+            "turn_id": "turn-bounded-callback",
+            "turn_fallback_run_id": "run-bounded-callback",
+            "turn_participant_run_ids": ["run-bounded-callback"],
+        },
+    )
+    statements: list[tuple[str, Any]] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        if "callback_parent" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    try:
+        sqlite.turn_callback_state(
+            "turn-bounded-callback",
+            participant_run_ids=["run-bounded-callback"],
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+
+    assert len(statements) == 1
+    statement, parameters = statements[0]
+    normalized_statement = statement.upper()
+    assert "CALLBACK_PARENT.METADATA_JSON" not in normalized_statement
+    assert "CALLBACK_PARENT.RESULT_PAYLOAD_JSON" not in normalized_statement
+    assert "MESSAGE_DELIVERIES.TURN_ID" in normalized_statement
+    assert "CALLBACK_PARENT.ID IN" in normalized_statement
+    with sqlite.engine.connect() as conn:
+        plan = conn.exec_driver_sql(
+            f"EXPLAIN QUERY PLAN {statement}",
+            parameters,
+        ).all()
+    plan_text = " ".join(str(row[-1]) for row in plan)
+    assert "message_deliveries_turn" in plan_text
+    assert "sqlite_autoindex_agent_runs_1" in plan_text
 
 
 @pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])

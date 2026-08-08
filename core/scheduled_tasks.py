@@ -5679,15 +5679,22 @@ class ScheduledTaskService:
         # read failure propagates to the drain loop's per-row handler and the row is
         # retried later, which errs toward one message rather than two.
         turn_id = failure_notices.notice_turn_id(notice)
-        callback_reader = (
-            store.turn_callback_state
-            if turn_id and hasattr(store, "turn_callback_state")
-            else store.run_callback_state
-        )
-        callback_status = await self._run_runtime_sync(
-            callback_reader,
-            turn_id or run_id,
-        )
+        if turn_id and hasattr(store, "turn_callback_state"):
+            participant_run_ids = notice.get("turn_participant_run_ids")
+            callback_status = await self._run_runtime_sync(
+                store.turn_callback_state,
+                turn_id,
+                participant_run_ids=(
+                    participant_run_ids
+                    if isinstance(participant_run_ids, list)
+                    else []
+                ),
+            )
+        else:
+            callback_status = await self._run_runtime_sync(
+                store.run_callback_state,
+                run_id,
+            )
         decision = failure_notices.decide(
             run_id=run_id,
             definition_id=definition_id,

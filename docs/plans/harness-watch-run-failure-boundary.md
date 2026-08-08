@@ -61,8 +61,15 @@ A callback delivers the terminal result for its whole Turn. One effective callba
 receipt suppresses every linked Run fallback, while one pending callback defers the
 Turn fallback until its delivery outcome is known. The aggregate is read from one
 SQLite snapshot and includes participants whose Turn attribution is still held in
-a deferred terminal intent. Canceled and cancel-requested participants are excluded
-because their callback can no longer become the Turn's visible delivery.
+a deferred terminal intent. Membership comes from the notice's bounded participant
+snapshot plus the indexed Delivery-to-Turn ownership relation, not a Run-history
+scan. Canceled and cancel-requested parents are excluded only before a callback is
+armed; an accepted callback child remains delivery evidence after parent cancellation.
+
+Terminal output replay is idempotent for status and content but monotonic for
+delivery evidence. A later same-Turn notification acknowledgement upgrades the
+existing owed notice without resetting its attempts, state, or fallback owner, so
+the durable drain cannot repeat a primary notification that succeeded on retry.
 
 Waiter health is observed only from completed outcome fields. Starting the first
 cycle does not prove success, so a Watch with no prior exit, finish, or error remains
@@ -134,6 +141,12 @@ does not claim that an event was detected.
   both immediate and deferred settlement.
 - `HFR-448`: a cancel-requested deferred callback participant no longer blocks
   the remaining Turn fallback.
+- `HFR-449`: cancellation preserves pending and delivered callback evidence once
+  the callback child has been accepted.
+- `HFR-450`: a same-Turn terminal replay merges newer delivery evidence without
+  resetting notice progress.
+- `HFR-451`: Turn callback aggregation uses bounded participant ownership and
+  indexed Delivery membership instead of scanning Run JSON.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

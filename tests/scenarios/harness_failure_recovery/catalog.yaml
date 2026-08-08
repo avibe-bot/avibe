@@ -4020,6 +4020,36 @@ scenarios:
     # they remain live. A canceled or cancel-requested parent cannot later deliver
     # its callback, so an immediate sibling's fallback is released.
     test: tests/test_harness_failure_visibility.py::test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback
+  - id: HFR-449
+    name: canceled parents preserve armed callback evidence
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Cancellation removes an unarmed parent from Turn callback membership, but
+    # cannot revoke a child that was already accepted. Pending and delivered child
+    # outcomes continue to defer or suppress the shared fallback.
+    test: tests/test_harness_failure_visibility.py::test_hfr_449_canceled_parent_keeps_armed_callback_evidence
+  - id: HFR-450
+    name: terminal replay promotes newer Turn delivery evidence
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # A duplicate terminal event cannot re-settle the Run, but a later successful
+    # primary notification is monotonic evidence. It upgrades the existing notice
+    # without resetting attempts or fallback ownership.
+    test: tests/test_harness_failure_visibility.py::test_hfr_450_terminal_replay_promotes_new_turn_delivery_evidence
+  - id: HFR-451
+    name: Turn callback membership lookup stays bounded
+    status: covered
+    kind: performance
+    layer: contract
+    backend: shared
+    # The callback snapshot is bounded by explicit participant ids and the indexed
+    # Delivery-to-Turn ownership relation. It never searches Run metadata JSON by
+    # Turn id as history grows.
+    test: tests/test_harness_failure_visibility.py::test_hfr_451_turn_callback_lookup_uses_bounded_ownership
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
