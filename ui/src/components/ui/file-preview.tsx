@@ -19,6 +19,7 @@ import {
   previewRenderKind,
 } from '@/lib/filePreview';
 import { FIT_VIEW, type ImageView, clampPan, maxScale, oneToOneScale, toggleScale, zoomPercent, zoomToPoint } from '@/lib/imageZoom';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 // ── Shared file-preview kernel ("Quick Look") ───────────────────────────────
 // One read-only renderer for every previewable file, reused by the File Browser overlay, the editor's
@@ -638,8 +639,7 @@ type TextKind = 'svg' | 'html' | 'markdown' | 'json' | 'csv' | 'code';
 
 const TextPreview: React.FC<{ source: PreviewSource; kind: TextKind; onText?: (text: string) => void; className?: string }> = ({ source, kind, onText, className }) => {
   const { t } = useTranslation();
-  const onTextRef = React.useRef(onText);
-  onTextRef.current = onText;
+  const onTextRef = useLatestRef(onText);
   const [state, setState] = React.useState<{ phase: 'loading' | 'ready' | 'error' | 'toolarge'; text: string }>(() =>
     source.text != null ? { phase: 'ready', text: source.text } : { phase: 'loading', text: '' },
   );

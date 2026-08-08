@@ -13,13 +13,28 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import psutil
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
 DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS = 3.0
+
+#: What a liveness probe could actually establish about a pid: a process is there,
+#: nothing is there, or this pass could not tell. Only the middle answer means a
+#: durable handle on that process has stopped being worth keeping.
+ProcessLivenessStatus = Literal["alive", "gone", "unknown"]
+
+#: What a recovery reap established about a managed tree: this pass stopped it, it
+#: was already gone, or neither could be shown. Only the last one keeps the record.
+ProcessReapOutcome = Literal["reaped", "gone", "unconfirmed"]
+
+#: What a LOOK established about a managed tree, with nothing signalled: something of
+#: it is still there, it is provably gone, or this pass could not tell. A caller
+#: deciding whether it may start a second copy of that work must treat the last two
+#: differently -- only "gone" is permission.
+ProcessTreePresence = Literal["present", "gone", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -70,6 +85,61 @@ def capture_spawned_process_identity(
     )
 
 
+def serialize_process_identity(identity: PersistedProcessIdentity) -> dict[str, Any]:
+    """The JSON form of a captured identity, for any store that persists one."""
+
+    return {
+        "pid": identity.pid,
+        "create_time": identity.create_time,
+        "worker_fingerprint": identity.worker_fingerprint,
+    }
+
+
+def _valid_worker_fingerprint(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
+        return False
+    return all(char in "0123456789abcdef" for char in value[7:])
+
+
+def process_identity_from_payload(
+    payload: Any,
+    pid: int,
+) -> PersistedProcessIdentity | None:
+    """Rebuild a persisted identity, or ``None`` if the payload cannot be trusted.
+
+    Deliberately strict, because the ONLY consumer of the result is a kill: a
+    payload that has been truncated, hand-edited, or written by an older format
+    must produce ``None`` (leave the process alone) rather than a plausible-looking
+    identity that authorises signalling some unrelated pid.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    identity_pid = payload.get("pid")
+    create_time = payload.get("create_time")
+    worker_fingerprint = payload.get("worker_fingerprint")
+    try:
+        normalized_create_time = float(create_time)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not isinstance(identity_pid, int)
+        or isinstance(identity_pid, bool)
+        or identity_pid != pid
+        or not isinstance(create_time, (int, float))
+        or isinstance(create_time, bool)
+        or not math.isfinite(normalized_create_time)
+        or normalized_create_time <= 0
+        or not _valid_worker_fingerprint(worker_fingerprint)
+    ):
+        return None
+    return PersistedProcessIdentity(
+        pid=identity_pid,
+        create_time=normalized_create_time,
+        worker_fingerprint=worker_fingerprint,
+    )
+
+
 def process_identity_matches(
     expected: PersistedProcessIdentity,
     live: ProcessIdentity,
@@ -111,6 +181,35 @@ def inspect_process_identity(pid: int) -> ProcessIdentity | None:
     except (psutil.Error, OSError, ValueError):
         return None
     return identity
+
+
+def probe_process_liveness(pid: int) -> ProcessLivenessStatus:
+    """Say whether a pid is occupied, free, or unanswerable right now.
+
+    ``inspect_process_identity`` collapses the third answer into ``None``, and for
+    its own callers that is correct: they are deciding whether they may still
+    *steer* a process, and a pid they cannot read is one they must not signal
+    either way. A caller deciding whether to DISCARD the only durable handle on
+    that process needs the answers apart. "Gone" retires the record because there
+    is nothing left to kill; "unanswerable" -- an exhausted fd table, a
+    ``/proc`` read losing a race, a platform refusing ``create_time`` -- says
+    only that this pass could not look, and throwing the record away then makes a
+    still-running backup unkillable by every pass after it too.
+
+    Mirrors ``process_group_identity_status``: the same three-way verdict, at the
+    granularity of a single pid rather than a group.
+    """
+
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        # Not a pid at all, so there is no process to preserve a handle for.
+        return "gone"
+    try:
+        _open_process_identity(pid)
+    except (psutil.NoSuchProcess, ProcessLookupError):
+        return "gone"
+    except (psutil.Error, OSError, ValueError):
+        return "unknown"
+    return "alive"
 
 
 def isolated_subprocess_kwargs() -> dict[str, Any]:
@@ -562,6 +661,139 @@ def terminate_process_tree_by_pid(
         return True
     logger.error("%s process group pgid=%s survived forced termination", label, pgid)
     return False
+
+
+def orphaned_process_tree_presence(
+    logger: logging.Logger,
+    label: str,
+    *,
+    expected_identity: PersistedProcessIdentity,
+) -> ProcessTreePresence:
+    """Answer whether a recorded tree is still out there, WITHOUT signalling it.
+
+    The read-only twin of ``reap_orphaned_process_tree``, asking the same question
+    along the same two paths -- the leader by identity, then the group it leads -- for
+    a caller with the opposite intent. The reap wants to stop a survivor; this wants
+    to know whether starting a *second* copy of that work would collide with one, and
+    a probe that killed the first copy to answer would be no answer at all.
+
+    The three verdicts are not two. ``present`` and ``unknown`` both forbid a second
+    copy, but for different reasons and with different remedies -- one is a running
+    process, the other is a pass that could not look -- and only ``gone`` is proof
+    that the recorded tree has stopped, which is what lets a caller both proceed and
+    retire the record.
+    """
+
+    if not isinstance(expected_identity, PersistedProcessIdentity):
+        # Nothing trustworthy was recorded, so there is no tree this can vouch for.
+        return "gone"
+    pid = expected_identity.pid
+    liveness = probe_process_liveness(pid)
+    if liveness == "unknown":
+        return "unknown"
+    if liveness == "alive":
+        live_identity = inspect_process_identity(pid)
+        if live_identity is None:
+            # Occupied, but unreadable: cannot show it is ours, cannot show it is not.
+            return "unknown"
+        if process_identity_matches(expected_identity, live_identity):
+            return "present"
+        # A stranger holds the recycled number. Our leader has exited -- which, as the
+        # reap's own comment says, only starts the question: the group may live on.
+
+    if not process_group_exists(pid, logger, label):
+        return "gone"
+    status = process_group_identity_status(pid, expected_identity, logger, label)
+    if status == "match":
+        return "present"
+    if status == "mismatch":
+        # Members, every one of them another tree's: this pgid was recycled too.
+        return "gone"
+    return "unknown"
+
+
+def reap_orphaned_process_tree(
+    logger: logging.Logger,
+    label: str,
+    *,
+    expected_identity: PersistedProcessIdentity,
+) -> ProcessReapOutcome:
+    """Kill whatever is left of a managed tree whose owner died, by identity.
+
+    Recovery asks one question -- "may I stop tracking this process now?" -- and it
+    has three answers, not two. ``gone`` and ``reaped`` retire the durable record
+    that names the tree; ``unconfirmed`` must keep it, because the record is
+    typically the only place the identity is written and discarding it makes the
+    survivor unfindable by every later pass, not just this one.
+
+    THE LEADER IS NOT THE TREE. A supervisor spawned with ``start_new_session``
+    leads the group ``pgid == pid``, and on POSIX that group outlives it: if the
+    supervisor is killed (an OOM kill, a crash in its own code) while the backup or
+    migration under it keeps running, the pid is free while the work continues in a
+    group nothing else names. So an empty pid only starts the question -- the group
+    is checked next, and only a group with no members, or one whose members carry
+    another tree's marker, means our tree is really gone.
+
+    Identity throughout, never a bare pid or pgid: ``terminate_process_tree_by_pid``
+    re-reads the leader's start time and ``AVIBE_PROCESS_IDENTITY`` marker, and
+    ``terminate_process_group_by_pgid`` requires a surviving member to carry that
+    marker, so a recycled number cannot make this signal a stranger's process.
+    """
+
+    if not isinstance(expected_identity, PersistedProcessIdentity):
+        return "gone"
+    pid = expected_identity.pid
+    liveness = probe_process_liveness(pid)
+    if liveness == "unknown":
+        # The probe could not read the process table; that says nothing about the
+        # process, so it cannot be the reason a handle on it is dropped.
+        return "unconfirmed"
+    if liveness == "alive":
+        try:
+            if terminate_process_tree_by_pid(
+                pid,
+                logger,
+                label,
+                expected_identity=expected_identity,
+            ):
+                return "reaped"
+        except Exception:
+            logger.exception("Unexpected error terminating %s pid=%s", label, pid)
+        if probe_process_liveness(pid) != "gone":
+            return "unconfirmed"
+        # The leader went away without confirming; its children may not have.
+
+    if not process_group_exists(pid, logger, label):
+        return "gone"
+    status = process_group_identity_status(pid, expected_identity, logger, label)
+    if status == "mismatch":
+        # Members, but every one of them carries some other tree's marker: this pgid
+        # was recycled and ours has exited.
+        return "gone"
+    if status != "match":
+        logger.warning(
+            "Could not verify what still occupies %s process group pgid=%s; leaving it "
+            "tracked for a later pass",
+            label,
+            pid,
+        )
+        return "unconfirmed"
+    logger.warning(
+        "Reaping %s process group pgid=%s after its leader exited",
+        label,
+        pid,
+    )
+    try:
+        if terminate_process_group_by_pgid(
+            pid,
+            logger,
+            label,
+            expected_identity=expected_identity,
+        ):
+            return "reaped"
+    except Exception:
+        logger.exception("Unexpected error terminating %s process group pgid=%s", label, pid)
+    return "unconfirmed"
 
 
 async def terminate_process_tree(

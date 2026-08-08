@@ -144,13 +144,27 @@ def bind_session(
     base_env: Mapping[str, str],
     working_dir: Path | str | None,
     ttl_hours: int = BINDING_TTL_HOURS,
+    message: object | None = None,
+    fallback_platform: object | None = None,
 ) -> bool:
+    """Persist the caller env an OpenCode shell command will source.
+
+    *message* is the turn's typed ``MessageContext``. Without it the binding carries
+    caller IDENTITY only; with it the binding also carries the CREATION ORIGIN, which is
+    what lets a Harness definition created by ``vibe task add`` inside this OpenCode
+    session record the conversation it came from.
+    """
+
     from core.git_runtime import prepend_vendored_git_to_path
 
     session_id = str(opencode_session_id or "").strip()
     if not session_id:
         return False
-    caller = caller_context_from_platform_payload(platform_payload)
+    caller = caller_context_from_platform_payload(
+        platform_payload,
+        message=message,
+        fallback_platform=fallback_platform,
+    )
     env = caller.to_env() if caller is not None else {}
     prepend_vendored_git_to_path(
         env,

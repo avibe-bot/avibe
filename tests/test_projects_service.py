@@ -8,7 +8,11 @@ project is restored after archiving, without a dedicated unarchive endpoint.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
 from core.vibe_agents import VibeAgentStore
 from storage import projects_service
@@ -25,11 +29,13 @@ def engine():
     return create_sqlite_engine()
 
 
-def _ensure_agent(name: str, backend: str) -> None:
+def _ensure_agent(name: str, backend: str) -> str:
     store = VibeAgentStore()
     try:
-        if store.get(name) is None:
-            store.create(name=name, backend=backend)
+        agent = store.get(name)
+        if agent is None:
+            agent = store.create(name=name, backend=backend)
+        return agent.id
     finally:
         store.close()
 
@@ -259,7 +265,7 @@ def test_new_project_has_no_default_agent(engine, tmp_path):
 
 
 def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
-    _ensure_agent("claude", "claude")
+    agent_id = _ensure_agent("claude", "claude")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:
@@ -273,6 +279,7 @@ def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
             reasoning_effort="high",
         )
     assert updated["default_agent"] == {
+        "agent_id": agent_id,
         "agent_backend": "claude",
         "agent_name": "claude",
         "agent_variant": "claude",
@@ -287,7 +294,30 @@ def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
     assert listed["default_agent"]["agent_backend"] == "claude"
 
 
+def test_update_project_canonicalizes_normalized_agent_name(engine, tmp_path):
+    _ensure_agent("Project Manager", "claude")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+
+    with engine.begin() as conn:
+        created = projects_service.create_project(conn, str(folder))
+        updated = projects_service.update_project(
+            conn,
+            created["id"],
+            agent_name="PROJECT-MANAGER",
+        )
+        stored_name = conn.execute(
+            select(scope_settings.c.agent_name).where(
+                scope_settings.c.scope_id == created["scope_id"]
+            )
+        ).scalar_one()
+
+    assert updated["default_agent"]["agent_name"] == "Project Manager"
+    assert stored_name == "Project Manager"
+
+
 def test_update_project_clears_default_agent(engine, tmp_path):
+    _ensure_agent("codex", "codex")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:
@@ -303,6 +333,132 @@ def test_update_project_clears_default_agent(engine, tmp_path):
             reasoning_effort=None,
         )
     assert cleared["default_agent"] is None
+
+
+def test_project_agent_save_serializes_with_archive_and_rejects_stale_route(engine, tmp_path):
+    _ensure_agent("pm", "claude")
+    _ensure_agent("zz-fallback", "claude")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        created = projects_service.create_project(conn, str(folder))
+        projects_service.update_project(conn, created["id"], agent_name="pm")
+
+    competitor = VibeAgentStore(Path(str(engine.url.database)))
+    race: dict[str, object] = {"fired": 0, "refused": [], "committed": 0}
+
+    @event.listens_for(competitor.engine, "checkout")
+    def _no_wait(dbapi_connection, *_args) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout = 0")
+        cursor.close()
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _archive_on_project_read(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        normalized = " ".join(statement.split())
+        if race["fired"] or "SELECT scopes.id FROM scopes WHERE scopes.id" not in normalized:
+            return
+        race["fired"] = 1
+        try:
+            competitor.archive("pm")
+        except OperationalError as exc:
+            race["refused"].append(str(exc))
+        else:
+            race["committed"] = 1
+
+    try:
+        with engine.begin() as conn:
+            updated = projects_service.update_project(conn, created["id"], agent_name="pm")
+        assert updated["default_agent"]["agent_name"] == "pm"
+        assert race["fired"] == 1
+        assert race["committed"] == 0
+        assert len(race["refused"]) == 1
+
+        archived = competitor.archive("pm")
+        assert archived is not None
+        with engine.begin() as conn:
+            preserved = projects_service.update_project(
+                conn,
+                created["id"],
+                display_name="Still archived",
+                agent_name=archived.archived_name,
+            )
+        assert preserved["display_name"] == "Still archived"
+        assert preserved["default_agent"]["agent_name"] == archived.archived_name
+
+        with engine.begin() as conn:
+            with pytest.raises(projects_service.ProjectAgentUnavailableError) as exc:
+                projects_service.update_project(conn, created["id"], agent_name="pm")
+        assert exc.value.code == "project_agent_unavailable"
+        assert exc.value.agent_name == "pm"
+        with engine.connect() as conn:
+            stored_name = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == created["scope_id"]
+                )
+            ).scalar_one()
+        assert stored_name == archived.archived_name
+    finally:
+        competitor.close()
+
+
+def test_project_agent_save_uses_stable_id_when_the_public_name_is_reused(engine, tmp_path):
+    original_id = _ensure_agent("pm", "claude")
+    _ensure_agent("zz-fallback", "claude")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    with engine.begin() as conn:
+        created = projects_service.create_project(conn, str(folder))
+        projects_service.update_project(conn, created["id"], agent_name="pm")
+
+    store = VibeAgentStore(Path(str(engine.url.database)))
+    try:
+        archived = store.archive("pm")
+        assert archived is not None
+        replacement = store.create(name="pm", backend="codex")
+
+        with engine.begin() as conn:
+            preserved = projects_service.update_project(
+                conn,
+                created["id"],
+                agent_id=original_id,
+                expected_agent_id=original_id,
+                agent_name="pm",
+                model="updated-model",
+            )
+        assert preserved["default_agent"]["agent_id"] == original_id
+        assert preserved["default_agent"]["agent_name"] == archived.archived_name
+        assert preserved["default_agent"]["model"] == "updated-model"
+
+        with engine.begin() as conn:
+            rebound = projects_service.update_project(
+                conn,
+                created["id"],
+                agent_id=replacement.id,
+                expected_agent_id=original_id,
+                agent_name=replacement.name,
+            )
+        assert rebound["default_agent"]["agent_id"] == replacement.id
+        assert rebound["default_agent"]["agent_name"] == replacement.name
+
+        with engine.begin() as conn:
+            with pytest.raises(projects_service.StaleProjectAgentBindingError) as exc:
+                projects_service.update_project(
+                    conn,
+                    created["id"],
+                    agent_id=original_id,
+                    expected_agent_id=original_id,
+                    agent_name="pm",
+                )
+        assert exc.value.details == {
+            "project_id": created["id"],
+            "expected_agent_id": original_id,
+            "current_agent_id": replacement.id,
+        }
+    finally:
+        store.close()
 
 
 def test_rename_leaves_default_agent_untouched(engine, tmp_path):

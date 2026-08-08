@@ -8,7 +8,7 @@ import os
 import shlex
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
 from config import paths
 from config.v2_config import (
@@ -19,13 +19,29 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
+from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.services.agent_steering import (
+    ActiveSteerTarget,
+    SteerOutcome,
+    SteerRequest,
+    SteerResult,
+    result as steer_result,
+)
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
+    memory_cli_prompt_admitted,
 )
 from core.resource_governance import governor_from_controller
+from core.runtime_activation import RuntimeActivationIdentity
+from core.runtime_ownership import (
+    RuntimeResourceTarget,
+    RuntimeSessionBinding,
+    SessionRuntimeDisposition,
+    wake_runtime_ownership,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -43,7 +59,34 @@ if TYPE_CHECKING:
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
 _CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
 _CODEX_DEFAULT_PROVIDER_ID = "openai"
+_CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
+    (_CODEX_MODEL_HUB_PROVIDER_ID,)
+)
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
+CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
+
+
+class _CodexConnectionProbeState:
+    def __init__(self, on_diagnostic: Callable[[str], None] | None = None) -> None:
+        self.terminal: asyncio.Future[tuple[str, str]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self.response_text = ""
+        self.turn_id = ""
+        self.on_diagnostic = on_diagnostic
+
+    def record_diagnostic(self, detail: str) -> None:
+        text = str(detail or "").strip()
+        if not text or self.on_diagnostic is None:
+            return
+        try:
+            self.on_diagnostic(text)
+        except Exception:
+            logger.debug("Codex probe diagnostic callback failed", exc_info=True)
+
+
+class CodexConnectionProbeRuntimeMismatchError(RuntimeError):
+    """The cached transport does not represent direct Codex credentials."""
 
 
 class CodexResumeUnavailableError(RuntimeError):
@@ -72,14 +115,22 @@ class CodexAgent(BaseAgent):
 
     name = "codex"
 
-    def __init__(self, controller: Any, codex_config: Any) -> None:
+    def __init__(
+        self,
+        controller: Any,
+        codex_config: Any,
+        *,
+        registered_runtime: bool = True,
+    ) -> None:
         super().__init__(controller)
         self.codex_config = codex_config
+        self._registered_runtime = registered_runtime
 
         # cwd → CodexTransport (one persistent process per working dir)
         self._transports: Dict[str, CodexTransport] = {}
         self._transport_locks: Dict[str, asyncio.Lock] = {}
         self._transport_last_activity: Dict[str, float] = {}
+        self._session_last_activity: Dict[str, float] = {}
         # cwd inode at app-server spawn time, keyed like ``_transports``. A
         # cached app-server whose directory was deleted (even if re-created
         # with the same path) sits in a dead inode and fails every
@@ -101,6 +152,9 @@ class CodexAgent(BaseAgent):
         # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
         self._thread_git_path_configs: Dict[str, tuple[str, str, bool]] = {}
         self._fork_correction_pending_base_sessions: set[str] = set()
+        self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
+        self._connection_probe_turns: Dict[str, str] = {}
+        self._connection_probe_cwds: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -148,6 +202,144 @@ class CodexAgent(BaseAgent):
             return lambda: None
         return lambda: self._transport_alive(transport)
 
+    def can_reuse_direct_connection_probe(self, cwd: str) -> bool:
+        """Return whether a cached transport can test direct credentials."""
+
+        transport = self._transports.get(cwd)
+        return bool(
+            transport is not None
+            and getattr(transport, "runtime_fingerprint", "direct") == "direct"
+            and os.path.isdir(cwd)
+        )
+
+    async def probe_connection(
+        self,
+        cwd: str,
+        *,
+        model: str | None = None,
+        on_diagnostic: Callable[[str], None] | None = None,
+    ) -> str:
+        """Run a read-only ephemeral turn on the normal persistent app-server."""
+
+        probe_cwd = paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR
+        probe_cwd.mkdir(parents=True, exist_ok=True)
+        transport: CodexTransport | None = None
+        state: _CodexConnectionProbeState | None = None
+        thread_id = ""
+        closed_task: asyncio.Task[None] | None = None
+        probe_cwds = self._connection_probe_cwds
+        owns_probe_cwd = False
+        try:
+            if (
+                getattr(self, "_registered_runtime", True)
+                and not self.can_reuse_direct_connection_probe(cwd)
+            ):
+                raise CodexConnectionProbeRuntimeMismatchError(
+                    "No cached direct Codex transport is available for the probe"
+                )
+            transport = await self._get_or_create_transport(
+                cwd,
+                allow_runtime_replacement=False,
+            )
+            probe_cwds[cwd] = probe_cwds.get(cwd, 0) + 1
+            owns_probe_cwd = True
+
+            thread_response = await transport.send_request(
+                "thread/start",
+                {
+                    "cwd": str(probe_cwd),
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "ephemeral": True,
+                    "developerInstructions": (
+                        "This is a connection probe. Do not use tools. "
+                        "Reply with a short greeting."
+                    ),
+                },
+            )
+            thread = thread_response.get("thread")
+            thread_id = str(
+                thread_response.get("id")
+                or (thread.get("id") if isinstance(thread, dict) else "")
+                or ""
+            )
+            if not thread_id:
+                raise RuntimeError("Codex thread/start returned no thread id")
+
+            state = _CodexConnectionProbeState(on_diagnostic)
+            self._connection_probes[thread_id] = state
+            turn_params: Dict[str, Any] = {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "Hi"}],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+                "effort": "low",
+            }
+            if isinstance(model, str) and model.strip():
+                turn_params["model"] = model.strip()
+            turn_response = await transport.send_request("turn/start", turn_params)
+            turn = turn_response.get("turn")
+            turn_id = turn_response.get("id") or (
+                turn.get("id") if isinstance(turn, dict) else None
+            )
+            if not turn_id:
+                raise RuntimeError("Codex turn/start returned no turn id")
+            state.turn_id = str(turn_id)
+            self._connection_probe_turns[state.turn_id] = thread_id
+
+            closed_task = asyncio.create_task(transport.wait_closed())
+            done, _ = await asyncio.wait(
+                {state.terminal, closed_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if state.terminal not in done:
+                raise ConnectionError("Codex app-server exited during the connection probe")
+            outcome, result = state.terminal.result()
+            if outcome == "error":
+                raise RuntimeError(result)
+            if not result.strip():
+                raise RuntimeError("Codex Agent turn returned no response")
+            self._touch_transport_activity(cwd)
+            return result
+        finally:
+            try:
+                if (
+                    transport is not None
+                    and state is not None
+                    and state.turn_id
+                    and not state.terminal.done()
+                    and transport.is_initialized
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            transport.send_request(
+                                "turn/interrupt",
+                                {"threadId": thread_id, "turnId": state.turn_id},
+                            ),
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to interrupt cancelled Codex connection probe",
+                            exc_info=True,
+                        )
+            finally:
+                if thread_id:
+                    self._connection_probes.pop(thread_id, None)
+                if state is not None and state.turn_id:
+                    self._connection_probe_turns.pop(state.turn_id, None)
+                if state is not None and not state.terminal.done():
+                    state.terminal.cancel()
+                if closed_task is not None:
+                    closed_task.cancel()
+                    await asyncio.gather(closed_task, return_exceptions=True)
+                if owns_probe_cwd:
+                    remaining = probe_cwds.get(cwd, 0) - 1
+                    if remaining > 0:
+                        probe_cwds[cwd] = remaining
+                    else:
+                        probe_cwds.pop(cwd, None)
+
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
         router = getattr(self.controller, "model_hub_runtime", None)
         recorder = getattr(router, "record_native_failure", None)
@@ -183,6 +375,7 @@ class CodexAgent(BaseAgent):
                         self.controller,
                         "codex",
                         requested_model or "",
+                        process_scope=request.working_path,
                     )
                     bind_launch(request.context, launch)
                     await self._interrupt_active_turn_before_runtime_change(request, launch)
@@ -258,6 +451,7 @@ class CodexAgent(BaseAgent):
                         await self._remove_ack_reaction(interrupted_request)
 
                 await self._refresh_thread_developer_instructions_if_needed(transport, request, thread_id)
+                self._bind_runtime_agent_session_id(request)
                 thread_id = await self._start_turn(transport, request, thread_id)
 
             except Exception as e:
@@ -278,6 +472,7 @@ class CodexAgent(BaseAgent):
                             transport = await self._get_or_create_transport(request.working_path, launch)
                         self._touch_transport_activity(request.working_path)
                         thread_id = await self._start_or_resume_thread(transport, request)
+                        self._bind_runtime_agent_session_id(request)
                         await self._start_turn(transport, request, thread_id)
                         return  # retry succeeded
                     except Exception as retry_err:
@@ -306,6 +501,118 @@ class CodexAgent(BaseAgent):
                 # web-Chat working/Stop state instead of leaving it until the
                 # fallback timeout (Codex P2).
                 self._event_handler._release_stream_turn(request.context)
+
+    def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
+        active_request = target.agent_request
+        if active_request is None:
+            return None
+        return self._turn_registry.get_active_turn(active_request.base_session_id)
+
+    async def steer_active_turn(
+        self,
+        request: SteerRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        active_request = target.agent_request
+        if active_request is None:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_primary_request", backend=self.name)
+
+        base_session_id = active_request.base_session_id
+        turn_id = self._turn_registry.get_active_turn(base_session_id)
+        if not turn_id or turn_id != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
+
+        thread_id = self._session_mgr.get_thread_id(base_session_id)
+        cwd = self._session_mgr.get_cwd(base_session_id) or active_request.working_path
+        transport = self._transports.get(cwd)
+        if not thread_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_native_thread", backend=self.name)
+        if transport is None or not transport.is_initialized:
+            return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
+
+        try:
+            response = await transport.send_request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": request.expected_native_turn_id,
+                    "input": [{"type": "text", "text": request.text}],
+                },
+            )
+        except RuntimeError as exc:
+            diagnostic = str(exc)
+            lowered = diagnostic.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "no active turn to steer",
+                    "thread not found",
+                    "expected turn",
+                    "expectedturnid",
+                )
+            ):
+                return steer_result(
+                    SteerOutcome.NOT_ACTIVE,
+                    reason="native_turn_mismatch",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            if "activeturnnotsteerable" in lowered or "not steerable" in lowered:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="native_turn_not_steerable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            return steer_result(
+                SteerOutcome.REFUSED,
+                reason="backend_refused",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except ConnectionError as exc:
+            diagnostic = str(exc)
+            if diagnostic in {
+                "Codex app-server transport is not available",
+                "Codex app-server stdin is not available",
+            }:
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="runtime_unavailable",
+                    backend=self.name,
+                    diagnostic=diagnostic,
+                )
+            self._touch_transport_activity(cwd)
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=diagnostic,
+            )
+        except TimeoutError as exc:
+            self._touch_transport_activity(cwd)
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="acknowledgement_ambiguous",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+
+        self._touch_transport_activity(cwd)
+        response_turn_id = str(response.get("turnId") or "").strip()
+        if response_turn_id != request.expected_native_turn_id:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="untrusted_acknowledgement",
+                backend=self.name,
+                response_turn_id=response_turn_id,
+            )
+        return steer_result(
+            SteerOutcome.ACCEPTED,
+            backend=self.name,
+            thread_id=thread_id,
+            turn_id=response_turn_id,
+        )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         """Gracefully interrupt the active turn."""
@@ -390,6 +697,8 @@ class CodexAgent(BaseAgent):
         """Drop app-server runtime state so future turns pick up fresh auth."""
         if not hasattr(self, "_transport_last_activity"):
             self._transport_last_activity = {}
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
         base_session_ids = list(self._session_mgr.all_base_sessions())
         controller = getattr(self, "controller", None)
         turn_manager = getattr(controller, "session_turns", None)
@@ -402,22 +711,33 @@ class CodexAgent(BaseAgent):
                 )
             except Exception:
                 logger.warning("Failed to release Workbench turns during Codex refresh", exc_info=True)
-        transports = list(self._transports.values())
-        self._transports.clear()
-        self._transport_last_activity.clear()
-
-        for transport in transports:
-            try:
-                await transport.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
+        if not hasattr(self, "_transport_locks"):
+            self._transport_locks = {}
+        transport_items = list(self._transports.items())
+        self._session_last_activity.clear()
+        stopped = 0
+        for cwd, transport in transport_items:
+            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
+            async with lock:
+                try:
+                    detached = await self._stop_and_detach_transport_generation(
+                        cwd,
+                        transport,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
+                    continue
+                if not detached:
+                    continue
+                self._retire_model_hub_process_scope(cwd)
+                stopped += 1
 
         for base_session_id in base_session_ids:
             self._session_mgr.invalidate_thread(base_session_id)
             self._turn_registry.clear_session(base_session_id)
             self._clear_thread_developer_instructions(base_session_id)
 
-        logger.info("Refreshed Codex auth state across %d transport(s)", len(transports))
+        logger.info("Refreshed Codex auth state across %d transport(s)", stopped)
 
     async def refresh_runtime_config(self, codex_config: Any) -> None:
         """Reload persisted runtime config before respawning app-server transports."""
@@ -433,29 +753,40 @@ class CodexAgent(BaseAgent):
         working_path: str,
     ) -> None:
         """Restart a Codex transport only when the resumed session owns that cwd."""
-        transport = self._transports.get(working_path)
-        if transport is None:
-            return
+        if not hasattr(self, "_transport_locks"):
+            self._transport_locks = {}
+        lock = self._transport_locks.setdefault(working_path, asyncio.Lock())
+        async with lock:
+            transport = self._transports.get(working_path)
+            if transport is None:
+                return
 
-        affected_sessions = self._session_mgr.sessions_for_cwd(working_path)
-        other_sessions = [session_id for session_id in affected_sessions if session_id != base_session_id]
-        if other_sessions:
-            logger.info(
-                "Skipping Codex resume preparation for %s; cwd=%s is shared by %d other session(s)",
-                base_session_id,
-                working_path,
-                len(other_sessions),
-            )
-            return
+            affected_sessions = self._session_mgr.sessions_for_cwd(working_path)
+            other_sessions = [session_id for session_id in affected_sessions if session_id != base_session_id]
+            if other_sessions:
+                logger.info(
+                    "Skipping Codex resume preparation for %s; cwd=%s is shared by %d other session(s)",
+                    base_session_id,
+                    working_path,
+                    len(other_sessions),
+                )
+                return
+            try:
+                detached = await self._stop_and_detach_transport_generation(
+                    working_path,
+                    transport,
+                )
+            except Exception as exc:
+                logger.warning("Failed to stop Codex transport during resume preparation: %s", exc)
+                return
+            if not detached:
+                logger.warning(
+                    "Failed to retire Codex transport generation during resume preparation for cwd=%s",
+                    working_path,
+                )
+                return
+            self._retire_model_hub_process_scope(working_path)
 
-        try:
-            await transport.stop()
-        except Exception as exc:
-            logger.warning("Failed to stop Codex transport during resume preparation: %s", exc)
-            return
-
-        self._transports.pop(working_path, None)
-        self._transport_last_activity.pop(working_path, None)
         self._session_mgr.invalidate_thread(base_session_id)
         self._turn_registry.clear_session(base_session_id)
         self._clear_thread_developer_instructions(base_session_id)
@@ -469,16 +800,26 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
-        transports = list(self._transports.values())
-        self._transports.clear()
-        self._transport_last_activity.clear()
-        self._transport_locks.clear()
-
-        for transport in transports:
-            try:
-                await transport.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop Codex transport during shutdown: %s", exc)
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
+        transport_items = list(self._transports.items())
+        self._session_last_activity.clear()
+        stopped = 0
+        for cwd, transport in transport_items:
+            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
+            async with lock:
+                try:
+                    detached = await self._stop_and_detach_transport_generation(
+                        cwd,
+                        transport,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to stop Codex transport during shutdown: %s", exc)
+                    continue
+                if not detached:
+                    continue
+                self._retire_model_hub_process_scope(cwd)
+                stopped += 1
 
         for base_session_id in list(self._session_mgr.all_base_sessions()):
             session_key = self._session_mgr.get_session_key(base_session_id)
@@ -489,10 +830,327 @@ class CodexAgent(BaseAgent):
             self._clear_thread_developer_instructions(base_session_id)
 
         self._session_locks.clear()
-        logger.info("Stopped Codex runtime across %d transport(s)", len(transports))
+        self._transport_locks.clear()
+        logger.info("Stopped Codex runtime across %d transport(s)", stopped)
+
+    def _bind_runtime_agent_session_id(self, request: AgentRequest) -> None:
+        setter = getattr(self._session_mgr, "set_agent_session_id", None)
+        if not callable(setter):
+            return
+        payload = getattr(request.context, "platform_specific", None) or {}
+        session_id = payload.get("agent_session_id") if isinstance(payload, dict) else None
+        setter(request.base_session_id, session_id)
+
+    def _runtime_ownership_target_for_cwd(
+        self,
+        cwd: str,
+    ) -> RuntimeResourceTarget | None:
+        sessions_for_cwd = getattr(self._session_mgr, "sessions_for_cwd", None)
+        all_base_sessions = getattr(self._session_mgr, "all_base_sessions", None)
+        get_cwd = getattr(self._session_mgr, "get_cwd", None)
+        get_session_key = getattr(self._session_mgr, "get_session_key", None)
+        get_agent_session_id = getattr(
+            self._session_mgr,
+            "get_agent_session_id",
+            None,
+        )
+        if not all(
+            callable(method)
+            for method in (
+                sessions_for_cwd,
+                all_base_sessions,
+                get_cwd,
+                get_session_key,
+                get_agent_session_id,
+            )
+        ):
+            return None
+
+        bindings: list[RuntimeSessionBinding] = []
+        for base_session_id in sessions_for_cwd(cwd):
+            session_key = str(get_session_key(base_session_id) or "").strip()
+            agent_session_id = str(
+                get_agent_session_id(base_session_id) or ""
+            ).strip()
+            bound_cwd = str(get_cwd(base_session_id) or "").strip()
+            if not session_key or not agent_session_id or bound_cwd != cwd:
+                return None
+            bindings.append(
+                RuntimeSessionBinding(
+                    session_id=agent_session_id,
+                    session_anchor=base_session_id,
+                    workdir=cwd,
+                    activity_runtime_keys=(f"{base_session_id}:{cwd}",),
+                    fallback_route_keys=(session_key,),
+                )
+            )
+
+        known_activity_keys = tuple(
+            sorted(
+                f"{base_session_id}:{bound_cwd}"
+                for base_session_id in all_base_sessions()
+                if (bound_cwd := str(get_cwd(base_session_id) or "").strip())
+            )
+        )
+        known_route_keys = tuple(
+            sorted(
+                {
+                    session_key
+                    for base_session_id in all_base_sessions()
+                    if (
+                        session_key := str(
+                            get_session_key(base_session_id) or ""
+                        ).strip()
+                    )
+                }
+            )
+        )
+        return RuntimeResourceTarget(
+            backend="codex",
+            resource_key=cwd,
+            bindings=tuple(bindings),
+            known_activity_runtime_keys=known_activity_keys,
+            known_fallback_route_keys=known_route_keys,
+            durable_session_workdir=cwd,
+        )
+
+    def _runtime_ownership_snapshot_for_cwd(self, cwd: str):
+        target = self._runtime_ownership_target_for_cwd(cwd)
+        provider = getattr(getattr(self, "controller", None), "runtime_ownership", None)
+        snapshot = getattr(provider, "snapshot", None)
+        if target is None or not callable(snapshot):
+            logger.error(
+                "Codex runtime ownership mapping unavailable for cwd=%s",
+                cwd,
+            )
+            return None
+        result = snapshot(target)
+        wake_runtime_ownership(self.controller, result)
+        return result
+
+    async def _runtime_ownership_snapshots_for_cwds(
+        self,
+        cwds: tuple[str, ...],
+    ) -> tuple[Any, ...] | None:
+        """Read one backend snapshot batch without blocking the controller loop."""
+
+        if not cwds:
+            return ()
+        provider = getattr(getattr(self, "controller", None), "runtime_ownership", None)
+        snapshot_many = getattr(provider, "snapshot_many", None)
+        targets = tuple(self._runtime_ownership_target_for_cwd(cwd) for cwd in cwds)
+        if callable(snapshot_many) and all(target is not None for target in targets):
+            snapshots = await asyncio.to_thread(snapshot_many, targets)
+            for snapshot in snapshots:
+                wake_runtime_ownership(self.controller, snapshot)
+            return tuple(snapshots)
+
+        # Tests and legacy embedders can still provide the older single-target
+        # probe. Keep it off the event loop; production SQLite providers take the
+        # batched path above.
+        snapshots = await asyncio.gather(
+            *(
+                asyncio.to_thread(self._runtime_ownership_snapshot_for_cwd, cwd)
+                for cwd in cwds
+            )
+        )
+        if any(snapshot is None for snapshot in snapshots):
+            return None
+        return tuple(snapshots)
+
+    async def _runtime_ownership_snapshot_for_cwd_async(self, cwd: str):
+        snapshots = await self._runtime_ownership_snapshots_for_cwds((cwd,))
+        return snapshots[0] if snapshots else None
+
+    async def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
+        return await self._runtime_ownership_snapshots_for_cwds(tuple(self._transports))
+
+    @staticmethod
+    def _transport_activation_identity(
+        transport: CodexTransport | None,
+    ) -> RuntimeActivationIdentity | None:
+        identity = getattr(transport, "_vibe_runtime_activation_identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
+
+    def _attach_transport_activation(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+    ) -> RuntimeActivationIdentity | None:
+        if not getattr(self, "_registered_runtime", True):
+            return None
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        if registry is None:
+            return None
+        existing = self._transport_activation_identity(transport)
+        if existing is not None and registry.is_current(existing):
+            return existing
+        identity = registry.attach(self.name, cwd)
+        setattr(transport, "_vibe_runtime_activation_identity", identity)
+        return identity
+
+    def _reserve_transport_retirement(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+    ) -> tuple[Any, Any] | None:
+        if self._transports.get(cwd) is not transport:
+            return None
+        if not getattr(self, "_registered_runtime", True):
+            return (None, None)
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        if registry is None:
+            return (None, None)
+        identity = self._transport_activation_identity(transport)
+        if identity is None:
+            identity = self._attach_transport_activation(cwd, transport)
+        if identity is None:
+            return None
+        reservation = registry.reserve_retirement(identity)
+        return (registry, reservation) if reservation is not None else None
+
+    @staticmethod
+    def _finish_transport_retirement(
+        reserved: tuple[Any, Any],
+        *,
+        retire: bool,
+    ) -> bool:
+        registry, reservation = reserved
+        if registry is None:
+            return True
+        return bool(registry.finish_retirement(reservation, retire=retire))
+
+    def _detach_transport_bookkeeping(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+    ) -> bool:
+        """Remove only the exact transport after its process has stopped."""
+        if self._transports.get(cwd) is not transport:
+            return False
+        self._transports.pop(cwd, None)
+        if hasattr(self, "_transport_last_activity"):
+            self._transport_last_activity.pop(cwd, None)
+        self._cwd_inodes().pop(cwd, None)
+        return True
+
+    async def _stop_and_detach_transport_generation(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+        *,
+        final_predicate: Callable[[], Awaitable[bool]] | None = None,
+    ) -> bool:
+        """Stop one exact generation, retaining it if validation or stop fails."""
+
+        reserved = self._reserve_transport_retirement(cwd, transport)
+        if reserved is None:
+            return False
+        try:
+            if final_predicate is not None and not await final_predicate():
+                self._finish_transport_retirement(reserved, retire=False)
+                return False
+            await transport.stop()
+        except BaseException:
+            self._finish_transport_retirement(reserved, retire=False)
+            raise
+        if not self._finish_transport_retirement(reserved, retire=True):
+            raise RuntimeError(
+                f"Codex transport retirement lost its exact generation for cwd={cwd}"
+            )
+        return self._detach_transport_bookkeeping(cwd, transport)
+
+    def runtime_activation_identity_for_request(
+        self,
+        request: Any,
+    ) -> RuntimeActivationIdentity | None:
+        cwd = str(getattr(request, "working_path", "") or "").strip()
+        if not cwd:
+            metadata = getattr(request, "metadata", None)
+            if isinstance(metadata, dict):
+                cwd = str(metadata.get("session_workdir") or "").strip()
+        if cwd:
+            return self._transport_activation_identity(self._transports.get(cwd))
+
+        session_key = str(getattr(request, "session_key", "") or "").strip()
+        if not session_key:
+            return None
+        get_sessions = getattr(self._session_mgr, "get_sessions_by_session_key", None)
+        get_cwd = getattr(self._session_mgr, "get_cwd", None)
+        if not callable(get_sessions) or not callable(get_cwd):
+            raise ValueError("Codex Session route mapping is unavailable")
+
+        live_identities: dict[str, RuntimeActivationIdentity] = {}
+        for base_session_id in get_sessions(session_key):
+            mapped_cwd = str(get_cwd(base_session_id) or "").strip()
+            if not mapped_cwd or mapped_cwd in live_identities:
+                continue
+            transport = self._transports.get(mapped_cwd)
+            if transport is None:
+                continue
+            identity = self._transport_activation_identity(transport)
+            if identity is None:
+                raise ValueError("Codex runtime generation is not attached")
+            live_identities[mapped_cwd] = identity
+
+        if len(live_identities) > 1:
+            raise ValueError("multiple live Codex runtime resources match Session route")
+        return next(iter(live_identities.values()), None)
+
+    def runtime_activation_identity_for_session_binding(
+        self,
+        *,
+        session_anchor: str,
+        workdir: str | None,
+    ) -> RuntimeActivationIdentity | None:
+        normalized_anchor = str(session_anchor or "").strip()
+        normalized_workdir = str(workdir or "").strip()
+        if not normalized_anchor or not normalized_workdir:
+            return None
+        bound_workdir = str(self._session_mgr.get_cwd(normalized_anchor) or "").strip()
+        if bound_workdir and bound_workdir != normalized_workdir:
+            raise ValueError("Codex Session binding changed workdir")
+        transport = self._transports.get(normalized_workdir)
+        if transport is None:
+            return None
+        identity = self._transport_activation_identity(transport)
+        if identity is None:
+            raise ValueError("Codex runtime generation is not attached")
+        return identity
+
+    def record_runtime_turn_start(
+        self,
+        *,
+        runtime_key: str,
+        request: AgentRequest | None,
+    ) -> None:
+        if request is None:
+            return
+        self._touch_transport_activity(request.working_path)
+        self._touch_session_activity(request.base_session_id)
+
+    def _stuck_active_sessions_for_cwd(
+        self,
+        cwd: str,
+        *,
+        now: float,
+        cap: float | None,
+    ) -> list[str]:
+        if cap is None:
+            return []
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
+        stuck = []
+        for base_session_id in self._session_mgr.sessions_for_cwd(cwd):
+            if not self._turn_registry.get_active_turn(base_session_id):
+                continue
+            last_progress = self._session_last_activity.get(base_session_id)
+            if last_progress is not None and now - last_progress >= cap:
+                stuck.append(base_session_id)
+        return stuck
 
     async def evict_idle_transports(self, idle_timeout: float) -> int:
-        """Stop idle Codex transports and invalidate stale thread mappings."""
+        """Stop idle Codex transports after two exact ownership snapshots."""
         if idle_timeout <= 0:
             return 0
         if not hasattr(self, "_transport_last_activity"):
@@ -501,30 +1159,45 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
 
-        # Absolute-time backstop: a transport whose turn is stuck "active"
-        # forever (turn/completed never arrives — wedged/silently-disconnected
-        # app-server) would otherwise be vetoed from eviction indefinitely and
-        # leak its app-server process until restart (#622/#623 analog). Once it
-        # has been idle past this cap, force-evict it despite the active turn.
         stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
-
         now = time.monotonic()
         evicted = 0
+        initial_cwds = tuple(self._transports)
+        initial_snapshots = await self._runtime_ownership_snapshots_for_cwds(
+            initial_cwds
+        )
+        if initial_snapshots is None:
+            return 0
+        ownership_by_cwd = dict(zip(initial_cwds, initial_snapshots, strict=True))
 
         for cwd, last_activity in list(self._transport_last_activity.items()):
             transport = self._transports.get(cwd)
             if transport is None:
                 self._transport_last_activity.pop(cwd, None)
                 continue
-            idle_for = now - last_activity
+            ownership = ownership_by_cwd.get(cwd)
+            if ownership is None:
+                continue
+            stuck_sessions = self._stuck_active_sessions_for_cwd(
+                cwd,
+                now=now,
+                cap=stuck_active_cap,
+            )
             has_active = self._has_active_turns_for_cwd(cwd)
-            if not self._is_transport_evictable(
-                has_active=has_active,
-                idle_for=idle_for,
-                idle_timeout=idle_timeout,
-                stuck_active_cap=stuck_active_cap,
-            ):
+            idle_for = now - last_activity
+            ordinary_candidate = (
+                not ownership.blocks_reclamation
+                and not has_active
+                and idle_for >= idle_timeout
+            )
+            stuck_candidate = bool(stuck_sessions) and ownership.disposition not in {
+                SessionRuntimeDisposition.TRANSITIONING,
+                SessionRuntimeDisposition.UNKNOWN,
+            }
+            if not ordinary_candidate and not stuck_candidate:
                 continue
 
             lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
@@ -535,55 +1208,105 @@ class CodexAgent(BaseAgent):
                     continue
                 if current_last_activity is None:
                     continue
-                # Recheck from CURRENT state inside the lock: activity (and the
-                # active-turn flag) may have changed between the two passes.
-                idle_for = time.monotonic() - current_last_activity
-                has_active = self._has_active_turns_for_cwd(cwd)
-                if not self._is_transport_evictable(
-                    has_active=has_active,
-                    idle_for=idle_for,
-                    idle_timeout=idle_timeout,
-                    stuck_active_cap=stuck_active_cap,
-                ):
+                ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
+                if ownership is None:
+                    continue
+                current_now = time.monotonic()
+                idle_for = current_now - current_last_activity
+                stuck_sessions = self._stuck_active_sessions_for_cwd(
+                    cwd,
+                    now=current_now,
+                    cap=stuck_active_cap,
+                )
+                if ownership.disposition in {
+                    SessionRuntimeDisposition.TRANSITIONING,
+                    SessionRuntimeDisposition.UNKNOWN,
+                }:
+                    continue
+                if ownership.blocks_reclamation and not stuck_sessions:
                     continue
 
-                if has_active:
+                settled_stuck_sessions: set[str] = set()
+                for base_session_id in stuck_sessions:
                     logger.warning(
-                        "Force-evicting stuck-active Codex transport for cwd=%s after %.1fs idle "
-                        "(active turn exceeded stuck-active cap of %.1fs; app-server presumed wedged)",
+                        "Settling stuck-active Codex session %s for cwd=%s after exact progress timeout",
+                        base_session_id,
                         cwd,
-                        idle_for,
-                        stuck_active_cap,
                     )
-                else:
-                    logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
-                try:
-                    await transport.stop()
-                except Exception as exc:
-                    logger.warning("Failed to stop idle Codex transport for cwd=%s: %s", cwd, exc)
-                    continue
+                    await self._settle_stuck_active_request(base_session_id)
+                    self._turn_registry.clear_session(base_session_id)
+                    settled_stuck_sessions.add(base_session_id)
+                    self._session_locks.pop(base_session_id, None)
+                    self._session_last_activity.pop(base_session_id, None)
 
-                self._transports.pop(cwd, None)
-                self._transport_last_activity.pop(cwd, None)
-                self._cwd_inodes().pop(cwd, None)
+                if stuck_sessions:
+                    ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
+                    if ownership is None or ownership.blocks_reclamation:
+                        continue
+                final: dict[str, float] = {}
+
+                async def final_reclamation_predicate() -> bool:
+                    if self._transports.get(cwd) is not transport:
+                        return False
+                    latest_activity = self._transport_last_activity.get(cwd)
+                    if latest_activity is None:
+                        return False
+                    current_ownership = (
+                        await self._runtime_ownership_snapshot_for_cwd_async(cwd)
+                    )
+                    if current_ownership is None or current_ownership.blocks_reclamation:
+                        return False
+                    current_idle_for = time.monotonic() - latest_activity
+                    final["idle_for"] = current_idle_for
+                    return bool(
+                        not self._has_active_turns_for_cwd(cwd)
+                        and current_idle_for >= idle_timeout
+                    )
+
+                try:
+                    detached = await self._stop_and_detach_transport_generation(
+                        cwd,
+                        transport,
+                        final_predicate=final_reclamation_predicate,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to stop idle Codex transport for cwd=%s: %s",
+                        cwd,
+                        exc,
+                    )
+                    continue
+                if not detached:
+                    continue
+                idle_for = final.get("idle_for", idle_for)
+
+                logger.info(
+                    "Evicting idle Codex transport for cwd=%s after %.1fs idle",
+                    cwd,
+                    idle_for,
+                )
+                self._retire_model_hub_process_scope(cwd)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                    # A force-evicted stuck-active turn never emitted a terminal
-                    # result, so the Workbench status and SSE/runtime gate are
-                    # still owned by that turn. Settle it through the same
-                    # terminal-result path as normal completions before dropping
-                    # turn state. No-op for sessions with no active turn.
-                    await self._settle_stuck_active_request(base_session_id)
-                    # Keep the persisted thread mapping so a later transport restart
-                    # can resume the same Codex conversation for this Slack thread.
                     self._session_mgr.invalidate_thread(base_session_id)
-                    self._turn_registry.clear_session(base_session_id)
+                    if base_session_id not in settled_stuck_sessions:
+                        self._turn_registry.clear_session(base_session_id)
                     self._session_locks.pop(base_session_id, None)
+                    self._session_last_activity.pop(base_session_id, None)
                     self._clear_thread_developer_instructions(base_session_id)
 
                 evicted += 1
 
         return evicted
+
+    def _retire_model_hub_process_scope(self, cwd: str) -> None:
+        if not getattr(self, "_registered_runtime", True):
+            return
+        controller = getattr(self, "controller", None)
+        router = getattr(controller, "model_hub_runtime", None)
+        retire = getattr(router, "retire_process_scope", None)
+        if callable(retire):
+            retire("codex", cwd)
 
     async def _settle_stuck_active_request(self, base_session_id: str) -> None:
         """Settle a turn we are about to force-reap.
@@ -711,13 +1434,62 @@ class CodexAgent(BaseAgent):
             current = self._transports.get(cwd)
             should_invalidate_cwd_sessions = current is None or current is transport
             if current is transport:
-                self._transports.pop(cwd, None)
-                self._transport_last_activity.pop(cwd, None)
-                self._cwd_inodes().pop(cwd, None)
-            try:
-                await transport.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop broken Codex transport for cwd=%s: %s", cwd, exc)
+                try:
+                    detached = await self._stop_and_detach_transport_generation(
+                        cwd,
+                        transport,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to stop broken Codex transport for cwd=%s: %s",
+                        cwd,
+                        exc,
+                    )
+                    return
+                if not detached:
+                    return
+            elif current is None:
+                identity = self._transport_activation_identity(transport)
+                registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+                if identity is not None and registry is not None and registry.is_current(identity):
+                    logger.error(
+                        "Refusing to stop an untracked current Codex generation for cwd=%s",
+                        cwd,
+                    )
+                    return
+                try:
+                    await transport.stop()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to stop detached broken Codex transport for cwd=%s: %s",
+                        cwd,
+                        exc,
+                    )
+                    return
+            else:
+                identity = self._transport_activation_identity(transport)
+                registry = getattr(
+                    getattr(self, "controller", None),
+                    "runtime_activation",
+                    None,
+                )
+                if identity is not None and registry is not None and registry.is_current(
+                    identity
+                ):
+                    logger.error(
+                        "Refusing to stop a replaced but still-current Codex generation for cwd=%s",
+                        cwd,
+                    )
+                    return
+                try:
+                    await transport.stop()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to stop replaced broken Codex transport for cwd=%s: %s",
+                        cwd,
+                        exc,
+                    )
+                    return
 
             if should_invalidate_cwd_sessions:
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
@@ -735,6 +1507,8 @@ class CodexAgent(BaseAgent):
         self,
         cwd: str,
         launch: "ModelHubLaunch | None" = None,
+        *,
+        allow_runtime_replacement: bool = True,
     ) -> CodexTransport:
         """Return an initialized transport for the given working directory."""
         # Serialize creation per cwd
@@ -746,6 +1520,13 @@ class CodexAgent(BaseAgent):
             async with self._transport_locks[cwd]:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
+                desired_fingerprint = launch.fingerprint if launch is not None else "direct"
+                existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
+                runtime_changed = existing_fingerprint != desired_fingerprint
+                if existing is not None and runtime_changed and not allow_runtime_replacement:
+                    raise CodexConnectionProbeRuntimeMismatchError(
+                        "The cached Codex transport does not use direct credentials"
+                    )
                 if existing and existing.is_initialized:
                     # Reuse only while the directory the app-server was spawned in
                     # is still the SAME directory (#561): after a delete (+ possible
@@ -753,9 +1534,8 @@ class CodexAgent(BaseAgent):
                     # thread/start fails. Untracked legacy entries reuse as before.
                     spawned_ino = self._cwd_inodes().get(cwd)
                     stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
-                    desired_fingerprint = launch.fingerprint if launch is not None else "direct"
-                    runtime_changed = getattr(existing, "runtime_fingerprint", "direct") != desired_fingerprint
                     if not stale_cwd and not runtime_changed:
+                        self._attach_transport_activation(cwd, existing)
                         self._touch_transport_activity(cwd)
                         return existing
                     if runtime_changed and self._has_active_turns_for_cwd(cwd):
@@ -774,7 +1554,36 @@ class CodexAgent(BaseAgent):
                 else:
                     # Stop stale transport if any
                     if existing:
-                        await existing.stop()
+                        async def replacement_is_safe() -> bool:
+                            ownership = (
+                                await self._runtime_ownership_snapshot_for_cwd_async(cwd)
+                            )
+                            return bool(
+                                ownership is not None
+                                and not getattr(
+                                    ownership,
+                                    "blocks_transport_replacement",
+                                    True,
+                                )
+                                and not self._has_active_turns_for_cwd(cwd)
+                            )
+
+                        detached = await self._stop_and_detach_transport_generation(
+                            cwd,
+                            existing,
+                            final_predicate=replacement_is_safe,
+                        )
+                        if not detached:
+                            raise RuntimeError(
+                                "Codex transport replacement blocked by a durable owner "
+                                "or changed generation"
+                            )
+                        if (
+                            runtime_changed
+                            and desired_fingerprint == "direct"
+                            and existing_fingerprint.startswith("hub:")
+                        ):
+                            self._retire_model_hub_process_scope(cwd)
                         # The new app-server process won't know about threads/turns
                         # from the old process. Invalidate only sessions bound to
                         # this cwd so healthy sessions on other cwds are unaffected.
@@ -822,6 +1631,7 @@ class CodexAgent(BaseAgent):
                         getattr(transport, "pid", None),
                         label="codex app-server",
                     )
+                    self._attach_transport_activation(cwd, transport)
                     self._transports[cwd] = transport
                     self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
                     self._touch_transport_activity(cwd)
@@ -875,8 +1685,21 @@ class CodexAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _caller_env_for_request(self, request: AgentRequest) -> dict[str, str]:
+        # The typed context carries the CREATION ORIGIN (platform, channel, thread,
+        # user, message id) that a Harness definition created by ``vibe task add`` in
+        # this turn's shell needs in order to record where it came from. This env is
+        # the only hop it can travel: the CLI runs as a subprocess of the Codex shell.
         context = getattr(request, "context", None)
-        return caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        return caller_env_for_platform_payload(
+            getattr(context, "platform_specific", None),
+            message=context,
+            # Defensively resolved: this is reached from payload-shaping helpers that
+            # are exercised (and legitimately used) without a fully wired controller,
+            # and a missing fallback costs an origin platform — never a raised turn.
+            fallback_platform=getattr(
+                getattr(getattr(self, "controller", None), "config", None), "platform", None
+            ),
+        )
 
     def _caller_env_script_path(self, request: AgentRequest) -> Path:
         caller_env = self._caller_env_for_request(request)
@@ -1129,7 +1952,7 @@ class CodexAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
-        effective_model = explicit_model or (agent_definition.model if agent_definition else None) or self.codex_config.default_model
+        effective_model = explicit_model or (agent_definition.model if agent_definition else None)
         if getattr(self.controller, "model_hub_runtime", None) is not None:
             from modules.agents.model_hub import launch_for_context
 
@@ -1190,7 +2013,12 @@ class CodexAgent(BaseAgent):
                     resume_params,
                     request,
                 )
-                model_provider = await self._resolve_resume_model_provider_override(transport, request, persisted)
+                model_provider = await self._resolve_resume_model_provider_override(
+                    transport,
+                    request,
+                    persisted,
+                    rebind_same_provider=True,
+                )
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
                 resp = await transport.send_request(
@@ -1256,15 +2084,17 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         request: AgentRequest,
         thread_id: str,
+        *,
+        rebind_same_provider: bool = False,
     ) -> Optional[str]:
         """Return a provider override only when a persisted thread is stale.
 
         Codex preserves a thread's latest model / reasoning effort on resume
         unless the client sends a model/provider override. Vibe Remote only
-        needs to override the provider after the user changes Codex auth mode
-        between Vibe Remote-managed OAuth/API-key providers, so inspect the
-        stored thread first and leave normal resumes on Codex's persisted
-        fallback path.
+        overrides transitions between managed providers. A persisted thread's
+        first resume in a fresh app-server also rebinds Avibe-managed same-id
+        providers, because OAuth and API-key/custom-base-URL configurations
+        deliberately reuse ``openai-managed``.
         """
         current_provider = await self._read_effective_model_provider(transport, request)
         if not current_provider:
@@ -1291,6 +2121,8 @@ class CodexAgent(BaseAgent):
 
         stored_provider = stored_provider.strip()
         if stored_provider == current_provider:
+            if rebind_same_provider and current_provider in _CODEX_REBINDABLE_SAME_ID_PROVIDERS:
+                return current_provider
             return None
         if not self._is_managed_provider_transition(stored_provider, current_provider):
             return None
@@ -1348,12 +2180,18 @@ class CodexAgent(BaseAgent):
         if agent_instructions:
             instruction_parts.append(agent_instructions)
 
+        # Resolve admission once: it associates or clears this turn's Memory CLI
+        # session scope as a side effect, so a second call per turn would repeat
+        # that write.
+        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+
         instruction_parts.append(
             build_system_prompt_injection(
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
                 include_codex_generated_images=True,
+                include_memory_cli=memory_cli_admitted,
                 avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
                 context=request.context,
                 fallback_platform=platform,
@@ -1402,8 +2240,10 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh thread-level instructions for already-cached Codex threads."""
         self.ensure_agent_session_id(request)
-        caller_env = self._caller_env_for_request(request)
         developer_instructions = self._build_thread_developer_instructions(request)
+        # Building the instructions also grants/revokes the per-turn Memory CLI
+        # capability, so resolve the caller environment only after that decision.
+        caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 
         if not hasattr(self, "_thread_developer_instructions"):
@@ -1557,6 +2397,7 @@ class CodexAgent(BaseAgent):
         )
         if callable(snapshot_generated_images):
             snapshot_generated_images(thread_id, request.base_session_id)
+        mark_backend_dispatch_attempted(request.context)
         resp = await transport.send_request("turn/start", turn_params)
 
         turn_id = resp.get("id", "")
@@ -1570,7 +2411,10 @@ class CodexAgent(BaseAgent):
             raise RuntimeError("Codex turn/start returned no turn id")
 
         turn_state = self._turn_registry.finalize_turn_start_response(turn_id, request)
-        self._mark_runtime_turn_started(getattr(request, "context", None))
+        self._mark_runtime_turn_started(
+            getattr(request, "context", None),
+            activation_identity=self._transport_activation_identity(transport),
+        )
         bind_generated_image_snapshot = getattr(event_handler, "bind_generated_image_snapshot", None)
         if callable(bind_generated_image_snapshot):
             bind_generated_image_snapshot(thread_id, turn_id, request.base_session_id)
@@ -1583,11 +2427,16 @@ class CodexAgent(BaseAgent):
         )
         return thread_id
 
-    def _mark_runtime_turn_started(self, context: Any) -> None:
+    def _mark_runtime_turn_started(
+        self,
+        context: Any,
+        *,
+        activation_identity: RuntimeActivationIdentity | None = None,
+    ) -> None:
         service = getattr(getattr(self, "controller", None), "agent_service", None)
         mark_started = getattr(service, "mark_runtime_turn_started", None)
         if callable(mark_started):
-            mark_started(context)
+            mark_started(context, activation_identity=activation_identity)
 
     # ------------------------------------------------------------------
     # Input building
@@ -1631,6 +2480,8 @@ class CodexAgent(BaseAgent):
 
     async def _on_notification(self, method: str, params: Dict[str, Any]) -> None:
         """Route a server notification to the event handler."""
+        if self._handle_connection_probe_notification(method, params):
+            return
         request = self._find_request_for_notification(method, params)
         if not request:
             thread_id = self._extract_thread_id(params)
@@ -1643,8 +2494,71 @@ class CodexAgent(BaseAgent):
             )
             return
 
-        self._touch_transport_activity(request.working_path)
+        if self._notification_is_real_progress(method):
+            self._touch_transport_activity(request.working_path)
+            self._touch_session_activity(request.base_session_id)
         await self._event_handler.handle_notification(method, params, request)
+
+    def _handle_connection_probe_notification(
+        self,
+        method: str,
+        params: Dict[str, Any],
+    ) -> bool:
+        thread_id = self._extract_thread_id(params)
+        turn_id = self._extract_turn_id(params)
+        probe_turns = getattr(self, "_connection_probe_turns", {})
+        if not thread_id and turn_id:
+            thread_id = probe_turns.get(turn_id, "")
+        state = getattr(self, "_connection_probes", {}).get(thread_id)
+        if state is None:
+            return False
+        if turn_id:
+            state.turn_id = turn_id
+            probe_turns[turn_id] = thread_id
+
+        if method == "item/completed":
+            item = params.get("item") if isinstance(params, dict) else None
+            if isinstance(item, dict) and item.get("type") == "agentMessage":
+                text = str(item.get("text") or "").strip()
+                if text:
+                    state.response_text = text
+            return True
+        if method == "error":
+            error = params.get("error") if isinstance(params, dict) else params
+            detail = (
+                error.get("message")
+                if isinstance(error, dict)
+                else str(error or "Codex error")
+            )
+            state.record_diagnostic(str(detail or "Codex error"))
+            if params.get("willRetry") is True:
+                return True
+            if not state.terminal.done():
+                state.terminal.set_result(("error", str(detail or "Codex error")))
+            return True
+        if method != "turn/completed":
+            return True
+
+        turn = params.get("turn") if isinstance(params, dict) else None
+        status = turn.get("status") if isinstance(turn, dict) else None
+        if status == "completed":
+            outcome = ("success", state.response_text)
+        elif status == "interrupted":
+            outcome = ("error", "Codex turn was interrupted")
+        elif status == "failed":
+            error = turn.get("error") if isinstance(turn, dict) else None
+            detail = (
+                error.get("message")
+                if isinstance(error, dict)
+                else str(error or "Codex turn failed")
+            )
+            state.record_diagnostic(str(detail or "Codex turn failed"))
+            outcome = ("error", str(detail or "Codex turn failed"))
+        else:
+            outcome = ("error", f"Codex turn ended with status: {status or 'unknown'}")
+        if not state.terminal.done():
+            state.terminal.set_result(outcome)
+        return True
 
     async def _on_server_request(
         self,
@@ -1654,9 +2568,6 @@ class CodexAgent(BaseAgent):
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Handle server requests — auto-approve all."""
-        # A server request means this app-server is alive and actively driving a
-        # turn, so count it as activity for the stuck-active idle backstop.
-        self._touch_transport_activity(cwd)
         if method in (
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -1758,7 +2669,24 @@ class CodexAgent(BaseAgent):
         if cwd:
             self._transport_last_activity[cwd] = time.monotonic()
 
+    def _touch_session_activity(self, base_session_id: str) -> None:
+        if not hasattr(self, "_session_last_activity"):
+            self._session_last_activity = {}
+        if base_session_id:
+            self._session_last_activity[base_session_id] = time.monotonic()
+
+    @staticmethod
+    def _notification_is_real_progress(method: str) -> bool:
+        return method in {
+            "item/completed",
+            "item/agentMessage/delta",
+            "item/commandExecution/outputDelta",
+            "item/reasoning/summaryTextDelta",
+        }
+
     def _has_active_turns_for_cwd(self, cwd: str) -> bool:
+        if cwd in getattr(self, "_connection_probe_cwds", set()):
+            return True
         for base_session_id in self._session_mgr.sessions_for_cwd(cwd):
             if self._turn_registry.get_active_turn(base_session_id):
                 return True

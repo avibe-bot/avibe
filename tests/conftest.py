@@ -43,11 +43,98 @@ write to ``~/.avibe/`` or legacy ``~/.vibe_remote/``).
 
 from __future__ import annotations
 
+import ast
+import shutil
+import sqlite3
+import sys
+import warnings
+from functools import wraps
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import SAWarning
 
 REAL_USER_HOME = Path.home()
+_SQLITE_DEFAULT_STATE_MODULES: dict[Path, bool] = {}
+
+
+def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:
+    """Avoid creating a migration template for tests that never use SQLite state."""
+
+    module = request.node.getparent(pytest.Module)
+    module_path = Path(str(module.path))
+    cached = _SQLITE_DEFAULT_STATE_MODULES.get(module_path)
+    if cached is not None:
+        return cached
+
+    source = module_path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        tree = ast.parse(source, filename=str(module_path))
+    except SyntaxError:
+        uses_sqlite = False
+    else:
+        uses_sqlite = any(
+            _is_default_sqlite_call(node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        )
+    _SQLITE_DEFAULT_STATE_MODULES[module_path] = uses_sqlite
+    return uses_sqlite
+
+
+def _is_default_sqlite_call(node: ast.Call) -> bool:
+    if isinstance(node.func, ast.Name):
+        function_name = node.func.id
+    elif isinstance(node.func, ast.Attribute):
+        function_name = node.func.attr
+    else:
+        function_name = None
+    if function_name in {"get_sqlite_state_path", "_vault_engine", "_open_vault_engine"}:
+        return True
+    if function_name not in {"ensure_sqlite_state", "create_sqlite_engine"}:
+        return False
+    return not node.args and not any(
+        keyword.arg in {"db_path", "state_dir"} for keyword in node.keywords
+    )
+
+
+@pytest.fixture(scope="session")
+def _sqlite_state_template_factory(tmp_path_factory):
+    """Lazily build one empty SQLite database at the current migration head."""
+
+    template_path: Path | None = None
+
+    def get_template() -> Path:
+        nonlocal template_path
+        if template_path is not None:
+            return template_path
+
+        from storage.importer import ensure_sqlite_state
+
+        template_root = tmp_path_factory.mktemp("sqlite-state-template")
+        state_dir = template_root / "state"
+        template_path = state_dir / "vibe.sqlite"
+        # Migration 0044 deliberately recreates ``agent_runs`` and restores
+        # its expression indexes afterward; SQLAlchemy cannot reflect those
+        # indexes during the rebuild, so suppress only that expected warning.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=SAWarning,
+                message=r"Skipped unsupported reflection of expression-based index ix_agent_runs_.*",
+            )
+            ensure_sqlite_state(
+                db_path=template_path,
+                state_dir=state_dir,
+                primary_platform="avibe",
+            )
+        # The template is copied as one file into each test home. Checkpoint the
+        # WAL first so no untracked -wal/-shm sidecars are needed by a clone.
+        with sqlite3.connect(template_path) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return template_path
+
+    return get_template
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +160,67 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _seed_sqlite_state_template(
+    request: pytest.FixtureRequest,
+    _isolate_vibe_remote_home,
+    _sqlite_state_template_factory,
+    monkeypatch,
+):
+    """Clone a migrated empty DB before ordinary tests touch default state.
+
+    Migration/bootstrap tests opt out with ``no_sqlite_template`` because their
+    purpose is to exercise the real upgrade/import path from an unseeded DB.
+    Real-path tests are always read-only and must never receive a template copy.
+    Every other test keeps its per-test database copy, so writes and schema
+    mutations remain isolated without replaying all migrations per test.
+    """
+
+    if (
+        request.node.get_closest_marker("uses_real_paths")
+        or request.node.get_closest_marker("no_sqlite_template")
+        or not _module_uses_default_sqlite_state(request)
+    ):
+        yield
+        return
+
+    from config import paths
+
+    target = paths.get_sqlite_state_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    template_factory = _sqlite_state_template_factory
+    shutil.copy2(template_factory(), target)
+
+    # Some UI tests deliberately change AVIBE_HOME after fixture setup. Patch
+    # already-imported references as well as the importer module so those new
+    # default paths receive the same head-shaped clone on first initialization.
+    from storage import importer
+
+    original_ensure_sqlite_state = importer.ensure_sqlite_state
+
+    @wraps(original_ensure_sqlite_state)
+    def seeded_ensure_sqlite_state(*, db_path=None, state_dir=None, primary_platform=None):
+        if db_path is None and state_dir is None:
+            dynamic_target = paths.get_sqlite_state_path()
+            if not dynamic_target.exists():
+                dynamic_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(template_factory(), dynamic_target)
+        return original_ensure_sqlite_state(
+            db_path=db_path,
+            state_dir=state_dir,
+            primary_platform=primary_platform,
+        )
+
+    monkeypatch.setattr(importer, "ensure_sqlite_state", seeded_ensure_sqlite_state)
+    for module in tuple(sys.modules.values()):
+        try:
+            if getattr(module, "ensure_sqlite_state", None) is original_ensure_sqlite_state:
+                monkeypatch.setattr(module, "ensure_sqlite_state", seeded_ensure_sqlite_state)
+        except Exception:
+            continue
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_cached_sqlite_engines():
     """Keep process-local SQLite engine caches scoped to each isolated test."""
     try:
@@ -83,6 +231,19 @@ def _reset_cached_sqlite_engines():
     dispose_cached_sqlite_engines()
     yield
     dispose_cached_sqlite_engines()
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory_artifact_manager():
+    """Keep the managed Memory runtime bound to the current test home."""
+    try:
+        from core.memory.artifact import set_memory_artifact_manager_for_tests
+    except Exception:
+        yield
+        return
+    set_memory_artifact_manager_for_tests(None)
+    yield
+    set_memory_artifact_manager_for_tests(None)
 
 
 @pytest.fixture(autouse=True)

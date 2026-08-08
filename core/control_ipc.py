@@ -22,6 +22,17 @@ from config import paths
 CONTROL_IPC_SCHEMA_VERSION = 1
 CONTROL_IPC_INSTANCE_HEADER = "X-Avibe-Control-Instance"
 MAX_DESCRIPTOR_BYTES = 4096
+_SOCKET_MODE = 0o600
+_SOCKET_UMASK_MODE = 0o700
+_UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+    )
+    if value is not None
+)
 _DESCRIPTOR_FIELDS = frozenset(
     {
         "schema_version",
@@ -128,8 +139,7 @@ class PosixUnixSocketHost(ControlIpcHost):
     def bind(self) -> BoundControlIpc:
         target = self.socket_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() or target.is_symlink():
-            target.unlink()
+        _remove_stale_owned_socket(target)
 
         previous_umask = os.umask(0o077)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -138,9 +148,13 @@ class PosixUnixSocketHost(ControlIpcHost):
             listener.listen(2048)
             listener.setblocking(False)
             try:
-                os.chmod(target, 0o600)
-            except OSError:
-                pass
+                os.chmod(target, _SOCKET_MODE)
+            except OSError as error:
+                if error.errno not in _UNSUPPORTED_SOCKET_CHMOD_ERRNOS:
+                    raise
+                _verify_owned_socket(target, allow_umask_mode=True)
+            else:
+                _verify_owned_socket(target)
             return BoundControlIpc(
                 listener=listener,
                 transport="unix",
@@ -148,6 +162,7 @@ class PosixUnixSocketHost(ControlIpcHost):
             )
         except Exception:
             listener.close()
+            _remove_socket_after_bind_failure(target)
             raise
         finally:
             os.umask(previous_umask)
@@ -165,10 +180,48 @@ class PosixUnixSocketHost(ControlIpcHost):
         if target is None:
             return
         try:
-            if target.exists() or target.is_symlink():
-                target.unlink()
+            _verify_owned_socket(target, allow_umask_mode=True)
+            target.unlink()
+        except FileNotFoundError:
+            return
         except OSError:
             pass
+
+
+def _remove_stale_owned_socket(target: Path) -> None:
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        return
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise OSError("control IPC socket owner mismatch")
+    target.unlink()
+
+
+def _remove_socket_after_bind_failure(target: Path) -> None:
+    try:
+        metadata = target.lstat()
+        if stat.S_ISSOCK(metadata.st_mode) and (
+            not hasattr(os, "getuid") or metadata.st_uid == os.getuid()
+        ):
+            target.unlink()
+    except (FileNotFoundError, OSError):
+        return
+
+
+def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> None:
+    metadata = target.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISSOCK(metadata.st_mode):
+        raise OSError("control IPC socket is unsafe")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise OSError("control IPC socket owner mismatch")
+    allowed_modes = (
+        {_SOCKET_MODE, _SOCKET_UMASK_MODE}
+        if allow_umask_mode
+        else {_SOCKET_MODE}
+    )
+    if stat.S_IMODE(metadata.st_mode) not in allowed_modes:
+        raise OSError("control IPC socket mode mismatch")
 
 
 class WindowsLoopbackHost(ControlIpcHost):

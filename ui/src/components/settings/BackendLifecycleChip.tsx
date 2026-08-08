@@ -5,7 +5,7 @@ import clsx from 'clsx';
 import { useApi, type BackendRuntimeInfo } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { Button } from '../ui/button';
-import { badgeVariants } from '../ui/badge';
+import { badgeVariants } from '../ui/badge-variants';
 import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';

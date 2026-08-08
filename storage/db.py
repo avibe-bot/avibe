@@ -7,6 +7,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
 
 from config import paths
+from storage.sqlite_semantics import sqlite_run_at_epoch
 
 
 def escape_sql_like(value: str) -> str:
@@ -36,6 +37,12 @@ def create_sqlite_engine(db_path: Path | None = None) -> Engine:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.create_function(
+            "avibe_run_at_epoch",
+            2,
+            sqlite_run_at_epoch,
+            deterministic=True,
+        )
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")
@@ -90,15 +97,26 @@ class SqliteInvalidationProbe:
     def __init__(self, engine: Engine):
         self._connection = engine.connect()
         self._last_data_version: int | None = None
+        self._lock = RLock()
 
     def has_external_write(self) -> bool:
-        version = int(self._connection.exec_driver_sql("PRAGMA data_version").scalar_one())
-        changed = self._last_data_version is not None and version != self._last_data_version
-        self._last_data_version = version
-        return changed
+        # Runtime work lanes may ask the same store to refresh from separate
+        # executor workers. The probe deliberately owns one persistent
+        # connection, so its read-and-compare operation must remain single-file.
+        with self._lock:
+            version = int(
+                self._connection.exec_driver_sql("PRAGMA data_version").scalar_one()
+            )
+            changed = (
+                self._last_data_version is not None
+                and version != self._last_data_version
+            )
+            self._last_data_version = version
+            return changed
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> "SqliteInvalidationProbe":
         return self

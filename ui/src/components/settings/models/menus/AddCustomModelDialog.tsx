@@ -1,8 +1,7 @@
 // 添加自定义模型 (frame 08). Supplements a source's supply list with a model the
-// auto-discovery missed, so it appears in the OpenCode menu. Source + model id
-// (+ optional display name) → a LIVE identifier preview built with the vendor-id
-// rule (`custom/` fallback). Persists via POST /custom-models; also used to edit
-// an existing custom entry (same upsert endpoint).
+// auto-discovery missed. OpenCode callers show its provider-prefixed identifier;
+// fixed-backend and source-list callers keep the upstream's raw model id. Persists
+// via POST /custom-models; also used to edit an existing custom entry.
 import * as React from 'react';
 import { ChevronDown, Copy, Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -22,9 +21,10 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from '../modelsApi';
+import { manualModelSources } from '../modelRows';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from '../vendorMeta';
 import type { Source } from '../types';
-import { buildIdentifier, type StandardVendors } from './identifiers';
+import { manualModelIdentifier, type StandardVendors } from './identifiers';
 
 const FieldLabel: React.FC<{ mono?: boolean; children: React.ReactNode }> = ({ mono, children }) => (
   <span
@@ -112,13 +112,27 @@ export const AddCustomModelDialog: React.FC<{
   /** Server-populated standard OpenCode vendor prefixes (agent-supply v1.2),
    *  so the live identifier preview byte-matches the backend. */
   standardVendors: StandardVendors;
+  /** Optional source door that opened the shared action. */
+  initialSourceId?: string | null;
+  /** OpenCode uses provider-prefixed identifiers; every other caller uses the raw upstream id. */
+  showOpenCodeIdentifier?: boolean;
   /** When set, prefill for editing an existing custom entry. */
   edit?: { sourceId: string; modelId: string; displayName: string | null } | null;
   onClose: () => void;
   onSaved: (identifier: string) => void;
   /** Fired after a custom model is removed (edit mode only). */
   onDeleted?: (identifier: string) => void;
-}> = ({ open, sources, standardVendors, edit, onClose, onSaved, onDeleted }) => {
+}> = ({
+  open,
+  sources,
+  standardVendors,
+  initialSourceId,
+  showOpenCodeIdentifier = false,
+  edit,
+  onClose,
+  onSaved,
+  onDeleted,
+}) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
@@ -127,13 +141,16 @@ export const AddCustomModelDialog: React.FC<{
   const [displayName, setDisplayName] = React.useState('');
   const [saving, setSaving] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const writableSources = React.useMemo(() => manualModelSources(sources), [sources]);
 
-  // Seed on open: edit prefill, else the first source that can carry custom
-  // models (an api_key source), else the first source.
+  // Seed on open: existing invalid legacy rows remain selectable in edit mode
+  // so they can be deleted, but create mode only accepts credential-backed
+  // inventories. A subscription inventory is read-only by contract.
   React.useEffect(() => {
     if (!open) return;
     const editing = edit ? sources.find((s) => s.id === edit.sourceId) ?? null : null;
-    const preferred = editing ?? sources.find((s) => s.kind === 'api_key') ?? sources[0] ?? null;
+    const requested = initialSourceId ? writableSources.find((s) => s.id === initialSourceId) ?? null : null;
+    const preferred = editing ?? requested ?? writableSources[0] ?? null;
     setSource(preferred);
     setModelId(edit?.modelId ?? '');
     setDisplayName(edit?.displayName ?? '');
@@ -142,7 +159,12 @@ export const AddCustomModelDialog: React.FC<{
   }, [open]);
 
   const trimmedId = modelId.trim();
-  const identifier = source && trimmedId ? buildIdentifier(source.vendor, trimmedId, standardVendors) : '';
+  const identifier = manualModelIdentifier(
+    trimmedId,
+    source?.vendor ?? null,
+    standardVendors,
+    showOpenCodeIdentifier,
+  );
 
   const copyIdentifier = () => {
     if (!identifier || !navigator.clipboard?.writeText) {
@@ -156,7 +178,7 @@ export const AddCustomModelDialog: React.FC<{
   };
 
   const submit = async () => {
-    if (!source || !trimmedId || saving) return;
+    if (!source || source.kind !== 'api_key' || !trimmedId || saving) return;
     setSaving(true);
     try {
       await modelsApi.addCustomModel({ source_id: source.id, model_id: trimmedId, display_name: displayName.trim() || null });
@@ -203,7 +225,7 @@ export const AddCustomModelDialog: React.FC<{
 
         <div className="flex flex-col gap-2">
           <FieldLabel>{t('settings.models.menus.custom.sourceLabel')}</FieldLabel>
-          <SourceSelect sources={sources} value={source} onChange={setSource} disabled={Boolean(edit)} />
+          <SourceSelect sources={writableSources} value={source} onChange={setSource} disabled={Boolean(edit)} />
         </div>
 
         <div className="flex flex-col gap-2">
@@ -230,26 +252,28 @@ export const AddCustomModelDialog: React.FC<{
           />
         </div>
 
-        <div className="flex flex-col gap-2 rounded-xl border border-violet/30 bg-violet-soft/40 px-4 py-3.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-[11px] font-semibold uppercase tracking-wide text-violet">
-              {t('settings.models.menus.custom.previewLabel')}
+        {showOpenCodeIdentifier && (
+          <div className="flex flex-col gap-2 rounded-xl border border-violet/30 bg-violet-soft/40 px-4 py-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-[11px] font-semibold uppercase tracking-wide text-violet">
+                {t('settings.models.menus.custom.previewLabel')}
+              </span>
+              <button
+                type="button"
+                aria-label={t('common.copy') as string}
+                onClick={copyIdentifier}
+                disabled={!identifier}
+                className="flex size-10 items-center justify-center rounded-md text-muted transition-colors hover:text-foreground disabled:opacity-40 sm:size-6"
+              >
+                <Copy className="size-4" />
+              </button>
+            </div>
+            <span className="font-mono text-[16px] font-semibold text-foreground">
+              {identifier || t('settings.models.menus.custom.previewEmpty')}
             </span>
-            <button
-              type="button"
-              aria-label={t('common.copy') as string}
-              onClick={copyIdentifier}
-              disabled={!identifier}
-              className="flex size-10 items-center justify-center rounded-md text-muted transition-colors hover:text-foreground disabled:opacity-40 sm:size-6"
-            >
-              <Copy className="size-4" />
-            </button>
+            <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.menus.custom.previewHint')}</p>
           </div>
-          <span className="font-mono text-[16px] font-semibold text-foreground">
-            {identifier || t('settings.models.menus.custom.previewEmpty')}
-          </span>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.menus.custom.previewHint')}</p>
-        </div>
+        )}
 
         <DialogFooter className={cn('gap-2', edit ? 'sm:justify-between' : 'sm:justify-end')}>
           {edit && (
@@ -268,7 +292,13 @@ export const AddCustomModelDialog: React.FC<{
             <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={saving}>
               {t('common.cancel')}
             </Button>
-            <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void submit()} disabled={!source || !trimmedId || saving}>
+            <Button
+              variant="brand"
+              size="sm"
+              className="h-10 sm:h-9"
+              onClick={() => void submit()}
+              disabled={!source || source.kind !== 'api_key' || !trimmedId || saving}
+            >
               <Plus className="size-4" />
               {t(edit ? 'common.save' : 'settings.models.menus.custom.add')}
             </Button>

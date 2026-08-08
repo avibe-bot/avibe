@@ -179,6 +179,7 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
             discord_module.discord.Thread = original_thread
 
         bot.on_message_callback.assert_awaited_once()
+        self.assertTrue(bot.on_message_callback.await_args.args[0].is_ordinary_text)
         self.assertEqual(bot.on_message_callback.await_args.args[1], "scheduled follow-up context")
 
     async def test_send_auth_denial_acknowledges_silent_interaction_denial(self):

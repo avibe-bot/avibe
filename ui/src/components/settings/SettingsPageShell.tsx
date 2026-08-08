@@ -9,7 +9,7 @@ import {
   Stethoscope,
 } from 'lucide-react';
 
-type SettingsTab = 'service' | 'platforms' | 'backends' | 'models' | 'dependencies' | 'messaging' | 'diagnostics';
+type SettingsTab = 'service' | 'platforms' | 'backends' | 'models' | 'dependencies' | 'messaging' | 'diagnostics' | 'memory';
 
 const TABS: Array<{
   key: SettingsTab;

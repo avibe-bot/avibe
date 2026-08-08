@@ -70,7 +70,7 @@ class _StubConfig(SimpleNamespace):
             platform="slack",
             language="en",
             agents=SimpleNamespace(
-                codex=SimpleNamespace(cli_path="codex"),
+                codex=SimpleNamespace(cli_path="codex", auth_mode="oauth"),
                 claude=SimpleNamespace(cli_path="claude"),
                 opencode=SimpleNamespace(cli_path="opencode"),
             ),
@@ -199,6 +199,22 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIn("/setup codex", persisted_text)  # actionable without a button
         self.assertNotIn("button", persisted_text.lower())  # no dangling button reference
 
+    async def test_maybe_emit_auth_recovery_message_classifies_terminal_diagnostic(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with patch("core.message_mirror.persist_agent_message"):
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "claude",
+                "❌ Claude Code 进程已终止；会话已重置，请重试。",
+                terminal_error="Cannot write to terminated process after OAuth login failed",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(len(controller.im_client.sent_button_messages), 1)
+
     async def test_maybe_emit_auth_recovery_message_settles_turn_for_auth_error(self):
         # An AUTH error is handled here (reset button + persisted notify). The
         # recovery message is a button row, not a result, so this settles the
@@ -223,6 +239,41 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             output=ANY,
             terminal_error="❌ Codex error: 401 Unauthorized",
         )
+
+    async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
+        from config.v2_compat import to_app_config
+        from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+
+        controller = _StubController()
+        v2_config = V2Config(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(),
+            runtime=RuntimeConfig(default_cwd="."),
+            agents=AgentsConfig(),
+        )
+        v2_config.agents.codex.auth_mode = "api_key"
+        controller.config = to_app_config(v2_config)
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(controller.im_client.sent_button_messages, [])
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        _, text = controller.im_client.sent_messages[0]
+        self.assertIn("API key", text)
+        self.assertIn("Base URL", text)
+        self.assertNotIn("OAuth", text)
+        persisted_text = persist.call_args.args[2]
+        self.assertIn("API key", persisted_text)
+        self.assertNotIn("/setup codex", persisted_text)
 
     async def test_maybe_emit_auth_recovery_message_defers_non_auth_error_to_caller(self):
         # A NON-auth terminal error returns False: the calling backend emits its
@@ -868,6 +919,39 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         self.assertTrue(consumed)
         service.submit_code.assert_awaited_once_with(context, "sk-opencode-secret", backend_hint="opencode")
+
+    async def test_maybe_consume_setup_reply_fences_duplicate_before_submission(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+        flow = AgentAuthFlow(
+            flow_id="flow-opencode-duplicate",
+            backend="opencode",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=SimpleNamespace(returncode=None),
+            reader_task=done_task,
+            waiter_task=done_task,
+            pty_master_fd=11,
+            awaiting_code=True,
+            provider="opencode",
+        )
+        service._flows[flow.flow_key] = flow
+        service.submit_code = AsyncMock()
+        claim_native_event = Mock(return_value=False)
+
+        consumed = await service.maybe_consume_setup_reply(
+            context,
+            "sk-opencode-secret",
+            claim_native_event=claim_native_event,
+        )
+
+        self.assertTrue(consumed)
+        claim_native_event.assert_called_once_with()
+        service.submit_code.assert_not_awaited()
 
     async def test_maybe_consume_setup_reply_accepts_non_sk_opencode_credential(self):
         controller = _StubController()
@@ -1884,6 +1968,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertTrue(captured["connected"])
         self.assertEqual(captured["options"].max_buffer_size, CLAUDE_SDK_MAX_BUFFER_SIZE)
         self.assertEqual(captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"], "auth")
+        self.assertEqual(captured["options"].settings, '{"autoMemoryEnabled":false}')
 
     async def test_claude_control_flow_start_in_flight_disables_unknown_pid_guard(self):
         controller = _StubController()
@@ -1959,6 +2044,17 @@ class ClassifyAuthErrorTests(unittest.TestCase):
 
     def test_opencode_credential_error_requires_reset(self):
         self.assertTrue(classify_auth_error("opencode", "OpenCode error: missing provider credential"))
+
+    def test_opencode_provider_mentions_without_auth_evidence_are_ignored(self):
+        diagnostics = (
+            "NativeSessionEndedBeforeResult - OpenCode ended without a model reply. "
+            "Provider: openai; model: gpt-5.6-terra.",
+            "ProviderError - rate limited",
+            "Provider model is unavailable",
+        )
+        for diagnostic in diagnostics:
+            with self.subTest(diagnostic=diagnostic):
+                self.assertFalse(classify_auth_error("opencode", diagnostic))
 
 
 class VerifyOpenCodeAuthListOutputTests(unittest.TestCase):

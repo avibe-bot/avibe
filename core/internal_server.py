@@ -4,8 +4,7 @@ This is the C4 piece of Plan 2 from
 ``docs/plans/workbench-dispatch-architecture.md``: the controller process
 exposes a minimal FastAPI app over a POSIX UDS or authenticated Windows
 loopback listener so cross-process callers can invoke
-``core.services.dispatch.dispatch_turn`` and stream the agent's output back
-over an SSE chunked response.
+the controller-owned session turn manager.
 
 Three properties matter:
 
@@ -18,17 +17,24 @@ Three properties matter:
 3. **Restrictive discovery.** Unix sockets and Windows endpoint descriptors
    use the narrowest practical current-user permissions.
 
-The endpoint set is intentionally tiny for v1 (``dispatch`` + a stub
-``cancel``); follow-ups can grow it without changing the bind contract.
+The endpoint set is intentionally tiny; follow-ups can grow it without
+changing the bind contract.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import hmac
 import json
 import logging
+import os
+import re
 import socket
+import tempfile
+import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -37,15 +43,62 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
+from config import paths
 from core import control_ipc
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
+_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+
+
+def _memory_log_list_query(request: Request) -> tuple[str | None, int]:
+    items = list(request.query_params.multi_items())
+    keys = [key for key, _value in items]
+    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+        raise ValueError("invalid memory log query")
+    values = dict(items)
+    cursor = values.get("cursor")
+    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid memory log cursor")
+    raw_limit = values.get("limit", "20")
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 50:
+        raise ValueError("invalid memory log limit")
+    return cursor, limit
+
+
+def _memory_log_entry_query(request: Request) -> str:
+    items = list(request.query_params.multi_items())
+    if len(items) != 1 or items[0][0] != "memcell_id":
+        raise ValueError("invalid memory log entry query")
+    memcell_id = items[0][1]
+    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid memory log entry id")
+    return memcell_id
+
+
+def _create_controller_loop_server(config: Any) -> Any:
+    """Create a uvicorn server without taking over process signal handlers."""
+
+    import uvicorn
+
+    class _ControllerLoopServer(uvicorn.Server):
+        def capture_signals(self):
+            return contextlib.nullcontext()
+
+        def install_signal_handlers(self) -> None:
+            return None
+
+    return _ControllerLoopServer(config)
 
 
 def default_socket_path() -> Path:
@@ -65,15 +118,21 @@ def create_app(
     *,
     instance_id: Optional[str] = None,
     bearer_token: Optional[str] = None,
+    memory_ui_secret: str | None = None,
 ) -> FastAPI:
     """Build the minimal FastAPI app the internal server exposes.
 
     Factored out so tests can mount the same routes against a fake
     controller without spinning up uvicorn.
     """
-    from core.inbox_events import bus, mark_controller_process
+    from core.inbox_events import mark_controller_process
 
     mark_controller_process()
+    if memory_ui_secret is None:
+        from core.memory.ui_access import process_ui_read_secret
+
+        memory_ui_secret = process_ui_read_secret()
+    from core.memory.runtime import MemoryStoreUnavailableError
 
     app = FastAPI(
         title="avibe internal dispatch",
@@ -118,14 +177,14 @@ def create_app(
     # waiting for the agent to settle, and reuses the stored context so it
     # interrupts the backend the turn actually started on — even if the Chat
     # header changed the session's agent / model while the reply was streaming.
-    # Tasks are registered when the SSE response starts and removed in its
-    # ``finally`` so cancelled / completed sessions don't leak slots.
+    # Tasks are registered by ``SessionTurnManager`` before they run and removed
+    # in its ``finally`` so cancelled / completed sessions don't leak slots.
     # The turn owner (FSM) is created in Controller.__init__ so it exists for boot
     # stale-reset + OpenCode restore; reuse it here and bind the routing-context
     # builder now that the gate (which owns _build_session_context) is built. A fake
     # controller in tests may lack one — create it then. The registry bound below
     # is the SAME object the closures + ``controller.session_turn_gate`` use.
-    from core.session_turns import SessionTurnManager, Turn
+    from core.session_turns import SessionTurnManager
 
     manager = getattr(controller, "session_turns", None)
     if not isinstance(manager, SessionTurnManager):
@@ -135,77 +194,428 @@ def create_app(
         controller.session_turns = manager
     manager.bind_context(_build_session_context)
 
-    # The turn registry (``session_id -> Turn``) is owned by the manager; the legacy
-    # streaming ``/internal/dispatch`` (Show-page) endpoint below shares it directly,
-    # and tests inspect it via ``app.state``. The flush intents live ON each ``Turn``
-    # (set by ``manager.cancel`` / ``manager.send_now``), not in side sets here.
+    # The turn registry (``session_id -> Turn``) is owned by the manager and tests
+    # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
+    # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
 
-    async def _flush_queue(session_id: str) -> bool:
-        """Thin delegation to ``SessionTurnManager.flush_queue`` (FSM, Phase 1b):
-        pop + merge the send-while-busy queue and run it as the next turn. Returns
-        True if a turn was started, False on an empty queue / failure."""
-        return await manager.flush_queue(session_id)
+    def _publish_scheduled_queue_growth(session_id: str, state: str) -> None:
+        if state != "queued":
+            return
+        try:
+            from core.inbox_events import bus
 
-    async def _submit_scheduled_turn(session_id: str, context: MessageContext, text: str) -> str:
-        """Run a scheduled / watch turn through the SAME unified ``manager.submit``
-        the interactive Chat path uses, so a scheduled run can never preempt an
-        active Chat turn and gets the full turn lifecycle (in_flight + turn.start /
-        turn.end + Stop) the Chat page renders (Codex P2). Unlike Chat there is no
-        pre-persisted ``pending`` row to promote, so the enqueue callback ``append``s
-        a fresh ``queued`` row attributed to the harness.
+            bus.publish("queue.updated", {"session_id": session_id})
+        except Exception:
+            logger.exception(
+                "scheduled Delivery queue projection failed for Session=%s",
+                session_id,
+            )
+
+    async def _submit_scheduled_turn(
+        session_id: str,
+        context: MessageContext,
+        text: str,
+        *,
+        delivery_intent: str = "steer",
+    ) -> Any:
+        """Run a Harness input through the same durable owner as interactive Chat.
+
+        The explicit source intent decides whether it queues or steers. Send-now
+        persists the new input at P3, then promotes the exact FIFO head through
+        empty P1; it never stops the active Turn or jumps older queued work.
+        The submission remains a Delivery until exact native acceptance materializes
+        the harness Message.
         """
         if not session_id:
-            return await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
+            submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
+            return submission.route
 
+        from core.message_mirror import _scope_id_for_session
+        from core.session_turns import (
+            DeliveryRequest,
+            SCHEDULED_PROVENANCE_KEY,
+            TurnSubmissionResult,
+            capture_scheduled_provenance,
+        )
+        from storage import message_deliveries, messages_service
+        from storage.background import (
+            agent_run_cancellation_won_in_connection,
+            attach_agent_run_delivery_in_connection,
+            cancel_queued_agent_run_delivery_in_connection,
+            normalize_run_status,
+            record_agent_run_delivery_outcome_in_connection,
+            run_update_event_transaction,
+        )
+
+        submission_platform = str(getattr(context, "platform", None) or "avibe").strip()
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
-        if native_message_id:
-            active = manager.in_flight.get(session_id)
-            active_message_id = str(getattr(getattr(active, "context", None), "message_id", None) or "").strip()
-            if active_message_id == native_message_id:
-                return "duplicate"
-            from storage import messages_service
+        submission_spec = dict(getattr(context, "platform_specific", None) or {})
+        author_id = str(submission_spec.get("task_definition_id") or "").strip() or None
+        author_name = str(submission_spec.get("task_trigger_kind") or "").strip() or None
+        dedupe_key: str | None = None
+        delivery_id: str | None = None
+        delivery_request: DeliveryRequest | None = None
+        scope_id: str | None = None
+        delivery_owner_transferred = False
+        target_was_busy = False
+        effective_delivery_intent = delivery_intent
+        execution_id = str(
+            (context.platform_specific or {}).get("task_execution_id") or ""
+        ).strip()
+        with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+            from sqlalchemy import select
+            from storage.agent_session_rows import reserve_write_lock
+            from storage.models import agent_runs, agent_sessions
 
-            engine = get_cached_sqlite_engine()
-            with engine.connect() as conn:
-                if messages_service.native_message_exists(
+            reserve_write_lock(conn)
+            scope_id = _scope_id_for_session(conn, session_id)
+            dedupe_key = message_deliveries.native_dedupe_key(
+                submission_platform,
+                native_message_id,
+                scope_id=scope_id,
+            )
+            existing = message_deliveries.get_delivery_by_native_identity(
+                conn,
+                platform=submission_platform,
+                native_message_id=native_message_id,
+                scope_id=scope_id,
+                session_id=session_id,
+                normalize_legacy=True,
+            )
+            legacy_accepted = bool(
+                native_message_id
+                and messages_service.native_message_exists(
                     conn,
-                    platform="avibe",
+                    platform=submission_platform,
+                    scope_id=scope_id,
                     native_message_id=native_message_id,
-                ):
+                )
+            )
+            target_was_busy = message_deliveries.active_turn(conn, session_id) is not None
+            if existing is not None and existing["session_id"] != session_id:
+                return "duplicate"
+            if existing is not None and existing["state"] != "reserved":
+                if execution_id:
+                    run_owner = conn.execute(
+                        select(
+                            agent_runs.c.status,
+                            agent_runs.c.session_id,
+                            agent_runs.c.delivery_id,
+                        )
+                        .where(agent_runs.c.id == execution_id)
+                        .limit(1)
+                    ).mappings().first()
+                    if (
+                        run_owner is not None
+                        and normalize_run_status(run_owner["status"])
+                        in {"queued", "running"}
+                        and run_owner["session_id"] == session_id
+                        and run_owner["delivery_id"] == existing["id"]
+                    ):
+                        existing_state = str(existing["state"])
+                        if existing_state == "retired":
+                            cancel_queued_agent_run_delivery_in_connection(
+                                conn,
+                                execution_id,
+                                session_id=session_id,
+                                delivery_id=str(existing["id"]),
+                            )
+                            return TurnSubmissionResult(
+                                route="enqueued",
+                                queue_persisted=False,
+                                target_was_busy=target_was_busy,
+                                delivery_status="canceled",
+                            )
+                        if not (
+                            delivery_intent == "send_now"
+                            and existing_state == "queued"
+                        ):
+                            return TurnSubmissionResult(
+                                route=(
+                                    "enqueued"
+                                    if existing_state
+                                    in {
+                                        "queued",
+                                        "interrupt_waiting",
+                                        "waiting_terminal",
+                                        "reconciling_steer",
+                                    }
+                                    else "ran"
+                                ),
+                                queue_persisted=True,
+                                target_was_busy=target_was_busy,
+                                delivery_status=existing_state,
+                                delivery_owner_transferred=True,
+                            )
+                        delivery_owner_transferred = True
+                if not delivery_owner_transferred:
                     return "duplicate"
+            if legacy_accepted:
+                return "duplicate"
+            status = conn.execute(
+                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            if status != "active":
+                raise ValueError("Session is archived")
+            if existing is not None:
+                delivery_id = str(existing["id"])
+                delivery_request = manager._request_from_delivery(existing)
+                scope_id = delivery_request.scope_id
+                from core.message_priority import delivery_intent_for_priority
 
-        def _enqueue() -> None:
-            from core.message_mirror import _scope_id_for_session
-            from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
-            from storage import messages_service
+                persisted_intent = delivery_intent_for_priority(
+                    delivery_request.priority
+                )
+                effective_delivery_intent = (
+                    "send_now"
+                    if delivery_intent == "send_now"
+                    and delivery_request.priority == "p3"
+                    else persisted_intent
+                )
+                delivery_request = replace(
+                    delivery_request,
+                    admission_only=effective_delivery_intent == "send_now",
+                )
+                provenance = (delivery_request.metadata or {}).get(
+                    SCHEDULED_PROVENANCE_KEY
+                )
+                persisted_spec = (
+                    provenance.get("platform_specific")
+                    if isinstance(provenance, dict)
+                    else None
+                )
+                if isinstance(persisted_spec, dict):
+                    execution_id = str(
+                        persisted_spec.get("task_execution_id") or execution_id
+                    ).strip()
+            else:
+                from core.message_priority import priority_for_delivery_intent
 
-            # Persist the scheduled run's delivery / attribution provenance on the
-            # queued row's metadata so flush_queue re-runs it as SOURCE_SCHEDULED with
-            # that restored — keeping suppress_delivery / the delivery target / the task
-            # attribution instead of degrading to a plain user turn (#84). The key's
-            # PRESENCE also marks this row as a scheduled segment for the flush.
-            engine = get_cached_sqlite_engine()
-            with engine.begin() as conn:
-                scope_id = _scope_id_for_session(conn, session_id)
-                try:
-                    messages_service.append(
-                        conn,
+                delivery_id = message_deliveries.new_delivery_id()
+                admitted_state = "reserved"
+                priority = (
+                    "p3"
+                    if delivery_intent == "send_now"
+                    else priority_for_delivery_intent(delivery_intent)
+                )
+                message_deliveries.insert_delivery(
+                    conn,
+                    delivery_id=delivery_id,
+                    session_id=session_id,
+                    priority=priority,
+                    state=admitted_state,
+                    snapshot=message_deliveries.message_snapshot(
                         scope_id=scope_id,
                         session_id=session_id,
-                        platform="avibe",
+                        platform=submission_platform,
                         author="harness",
+                        author_id=author_id,
+                        author_name=author_name,
                         source="harness",
-                        message_type=messages_service.QUEUED_TYPE,
+                        message_type="harness",
                         text=text,
-                        metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
+                        metadata={
+                            SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
+                                context
+                            )
+                        },
                         native_message_id=native_message_id or None,
-                    )
-                except IntegrityError:
-                    logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
+                    ),
+                    dispatch_text=text,
+                    dedupe_key=dedupe_key,
+                    history_event={
+                        "kind": "admission",
+                        "priority": priority,
+                        "state": admitted_state,
+                    },
+                )
+            if execution_id and not delivery_owner_transferred:
+                if not attach_agent_run_delivery_in_connection(
+                    conn,
+                    execution_id,
+                    session_id=session_id,
+                    delivery_id=delivery_id,
+                    delivery_outcome={
+                        "intent": effective_delivery_intent,
+                        "status": "admitted",
+                        "target_was_busy": target_was_busy,
+                    },
+                ):
+                    if agent_run_cancellation_won_in_connection(conn, execution_id):
+                        message_deliveries.retire_not_written(
+                            conn,
+                            session_id,
+                            delivery_id,
+                            reason="agent_run_canceled",
+                        )
+                        return TurnSubmissionResult(
+                            route="enqueued",
+                            queue_persisted=False,
+                            delivery_status="canceled",
+                        )
+                    raise RuntimeError("Agent Run Delivery binding was refused")
+                delivery_owner_transferred = True
 
-        return await manager.submit(session_id, context, text, source=SOURCE_SCHEDULED, enqueue=_enqueue)
+        if delivery_request is None:
+            from core.message_priority import priority_for_delivery_intent
+
+            delivery_request = DeliveryRequest(
+                session_id=session_id,
+                priority=(
+                    "p3"
+                    if delivery_intent == "send_now"
+                    else priority_for_delivery_intent(delivery_intent)
+                ),
+                content=text,
+                delivery_id=delivery_id,
+                scope_id=scope_id,
+                platform=submission_platform,
+                source="harness",
+                author="harness",
+                author_id=author_id,
+                author_name=author_name,
+                message_type="harness",
+                display_text=text,
+                metadata={
+                    SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
+                },
+                native_message_id=native_message_id or None,
+                admission_only=delivery_intent == "send_now",
+            )
+
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific.update(
+            {
+                "delivery_id": delivery_id,
+                "native_message_id": delivery_request.native_message_id,
+                "scope_id": scope_id,
+                "display_text": delivery_request.display_text,
+                "message_metadata": dict(delivery_request.metadata or {}),
+                "author_id": delivery_request.author_id,
+                "author_name": delivery_request.author_name,
+            }
+        )
+        try:
+            result = await manager.deliver(
+                delivery_request,
+                context=context,
+            )
+        except Exception:
+            if not delivery_owner_transferred:
+                raise
+            logger.exception(
+                "Delivery admission deferred to recovery after Agent Run ownership "
+                "transfer: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            delivery_status = "reserved"
+            try:
+                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                    persisted = message_deliveries.get_delivery(conn, delivery_id)
+                    delivery_status = str(
+                        (persisted or {}).get("state") or delivery_status
+                    )
+                    recorded = record_agent_run_delivery_outcome_in_connection(
+                        conn,
+                        execution_id,
+                        {
+                            "intent": effective_delivery_intent,
+                            "status": delivery_status,
+                            "target_was_busy": target_was_busy,
+                        },
+                    )
+                if not recorded:
+                    logger.warning(
+                        "Agent Run deferred Delivery outcome lost its exact CAS: "
+                        "run=%s delivery=%s",
+                        execution_id,
+                        delivery_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Agent Run deferred outcome projection failed; Delivery "
+                    "ownership remains authoritative: run=%s delivery=%s",
+                    execution_id,
+                    delivery_id,
+                )
+            _publish_scheduled_queue_growth(session_id, delivery_status)
+            return TurnSubmissionResult(
+                route="enqueued",
+                queue_persisted=True,
+                target_was_busy=target_was_busy,
+                delivery_status=delivery_status,
+                delivery_owner_transferred=True,
+            )
+        delivery_state = str(result.state)
+        if effective_delivery_intent == "send_now":
+            with get_cached_sqlite_engine().connect() as conn:
+                admitted = message_deliveries.get_delivery(conn, delivery_id)
+                observed_head = message_deliveries.ordering_head(conn, session_id)
+            if (
+                admitted is not None
+                and admitted["state"] == "queued"
+                and observed_head is not None
+                and observed_head["state"] == "queued"
+            ):
+                await manager.send_now(
+                    session_id,
+                    expected_delivery_id=str(observed_head["id"]),
+                )
+                with get_cached_sqlite_engine().connect() as conn:
+                    latest = message_deliveries.get_delivery(conn, delivery_id)
+                if latest is not None:
+                    delivery_state = str(latest["state"])
+
+        route = "enqueued" if delivery_state in {
+            "queued",
+            "pending_steer",
+            "steering",
+            "interrupt_waiting",
+            "waiting_terminal",
+            "reconciling_steer",
+        } else "ran"
+        submission = TurnSubmissionResult(
+            route=route,
+            queue_persisted=True,
+            target_was_busy=target_was_busy,
+            delivery_status=(
+                delivery_state if effective_delivery_intent == "send_now" else None
+            ),
+            delivery_owner_transferred=delivery_owner_transferred,
+        )
+        _publish_scheduled_queue_growth(session_id, delivery_state)
+        if effective_delivery_intent == "send_now":
+            try:
+                with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                    recorded = record_agent_run_delivery_outcome_in_connection(
+                        conn,
+                        execution_id,
+                        {
+                            "intent": "send_now",
+                            "status": delivery_state,
+                            "target_was_busy": submission.target_was_busy,
+                        },
+                    )
+                if not recorded:
+                    logger.warning(
+                        "send-now Agent Run outcome lost its exact CAS after Delivery "
+                        "ownership transfer: run=%s delivery=%s",
+                        execution_id,
+                        delivery_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "send-now Agent Run outcome persistence deferred after Delivery "
+                    "ownership transfer: run=%s delivery=%s",
+                    execution_id,
+                    delivery_id,
+                )
+            return submission
+        return submission if delivery_owner_transferred else route
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
@@ -267,165 +677,147 @@ def create_app(
             return JSONResponse(status_code=409, content=result)
         return result
 
-    @app.post("/internal/dispatch")
-    async def _dispatch(request: Request) -> Any:
-        """Streaming turn dispatch: runs a turn and proxies its notify/result
-        chunks back over an SSE response. The web **Chat** page no longer uses
-        this (it's fire-and-forget via ``/internal/dispatch_async`` +
-        ``message.new``); this backs the **Show-page** dispatch flow, where
-        ``ui_server._run_show_event_dispatch`` re-publishes each event as
-        ``show.dispatch`` for the open Show page."""
-        payload = await _safe_json(request)
-        try:
-            text, context = await _build_dispatch_payload(payload)
-        except ValueError as err:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
-
-        session_id = payload.get("session_id")
-
-        # One streaming turn per session. If a turn is already in flight for
-        # this session (a second browser tab, or a resend before the first
-        # finishes), refuse the new one HERE — before creating a task or
-        # touching ``in_flight`` — so we never overwrite the real turn's task
-        # handle. Overwriting it would orphan the running turn: its sink keeps
-        # streaming but ``/internal/cancel`` could no longer find the task to
-        # interrupt, so the Stop button would silently no-op.
-        if isinstance(session_id, str) and session_id:
-            existing = in_flight.get(session_id)
-            if existing is not None and not existing.task.done():
-                async def _busy_stream():
-                    yield _sse_event("turn.start", {"session_id": session_id})
-                    yield _sse_event(
-                        "turn.chunk",
-                        {
-                            "kind": "error",
-                            "text": controller._t("error.streamTurnInProgress"),
-                            "message_id": None,
-                        },
-                    )
-                    yield _sse_event("turn.end", {"session_id": session_id})
-
-                return StreamingResponse(
-                    _busy_stream(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-                )
-
-        # SSE chunked stream — the response body is fed by ``on_chunk``
-        # callbacks that the dispatcher fires for every successful
-        # ``emit_agent_message`` notify / result during the turn. The
-        # turn coroutine and the producer-consumer queue live on the
-        # same loop, so ordering is preserved.
-        chunk_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
-
-        async def on_chunk(envelope: dict) -> None:
-            await chunk_queue.put(envelope)
-
-        async def _runner() -> None:
-            try:
-                await dispatch_turn(controller, context, text, on_chunk=on_chunk)
-            except asyncio.CancelledError:
-                # Surface a cancel envelope so the SSE consumer can
-                # distinguish "user stopped me" from "agent finished".
-                await chunk_queue.put({"kind": "cancelled", "text": ""})
-                raise
-            except Exception as err:
-                logger.exception("internal dispatch failed for session=%s", session_id)
-                await chunk_queue.put({"kind": "error", "text": str(err)})
-            finally:
-                # This legacy streaming route invokes dispatch_turn directly, so it
-                # bypasses SessionTurnManager._run_turn, which owns lifecycle bus
-                # events for Chat/scheduled turns. The two paths are exclusive:
-                # streaming lifecycle is owned here; manager lifecycle stays in
-                # core/session_turns.py. Publishing before the sentinel also makes
-                # post-turn subscribers finish before queued work can be flushed.
-                if isinstance(session_id, str) and session_id:
-                    bus.publish("turn.end", {"session_id": session_id})
-                # Sentinel signals end-of-stream to the consumer below.
-                await chunk_queue.put(None)
-
-        task = asyncio.create_task(_runner(), name="internal-dispatch")
-        if isinstance(session_id, str) and session_id:
-            in_flight[session_id] = Turn(task=task, context=context)
-            # create_task cannot run until this coroutine yields, so synchronous
-            # pre-turn subscribers complete before the backend can touch files.
-            bus.publish("turn.start", {"session_id": session_id})
-
-        async def _stream():
-            saw_cancel = False
-            reached_end = False
-            try:
-                yield _sse_event("turn.start", {"session_id": session_id})
-                while True:
-                    envelope = await chunk_queue.get()
-                    if envelope is None:
-                        reached_end = True
-                        break
-                    if envelope.get("kind") == "cancelled":
-                        saw_cancel = True
-                    yield _sse_event("turn.chunk", envelope)
-                yield _sse_event("turn.end", {"session_id": session_id})
-            finally:
-                if not task.done():
-                    task.cancel()
-                # Release the slot whether the task completed normally,
-                # was cancelled by the UI, or the SSE consumer
-                # disconnected mid-stream. ``pop`` is idempotent.
-                if isinstance(session_id, str):
-                    in_flight.pop(session_id, None)
-                    # This endpoint shares ``in_flight`` with the session, so a Chat
-                    # send during a Show-page dispatch enqueues behind it. Drain that
-                    # queue on NATURAL completion (not a Stop / consumer disconnect,
-                    # mirroring _run_turn's no-flush-on-cancel rule) so the queued
-                    # Chat message isn't stranded until manual intervention (Codex P2).
-                    if reached_end and not saw_cancel:
-                        await _flush_queue(session_id)
-
-        return StreamingResponse(
-            _stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
-
     @app.post("/internal/dispatch_async")
     async def _dispatch_async(request: Request) -> Any:
-        """Fire-and-forget turn dispatch for the session/page-scoped stream.
+        """Admit one already-persisted Delivery on the controller loop."""
 
-        Starts the turn and returns ``202`` immediately. The reply — plus any
-        notify/result — reaches the browser over the persistent ``message.new``
-        session stream, so the HTTP response isn't held open for the turn's
-        duration and a closed browser tab can't cancel an in-flight turn.
-        ``_run_turn`` holds the turn open (keeping ``in_flight`` populated so
-        Stop works), publishes the turn lifecycle, and flushes the
-        send-while-busy queue when it settles.
-        """
+        from storage import message_deliveries
+        from storage import workbench_sessions_service
+
         payload = await _safe_json(request)
-        try:
-            text, context = await _build_dispatch_payload(payload)
-        except ValueError as err:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
+        session_id = str(payload.get("session_id") or "").strip()
+        delivery_id = str(payload.get("user_message_id") or "").strip()
+        if not delivery_id:
+            from core.workbench_media import file_attachments_from_specs
 
-        session_id = payload.get("session_id")
-        sid = session_id if isinstance(session_id, str) and session_id else None
-        user_message_id = payload.get("user_message_id")
+            raw_text = payload.get("text")
+            if not (
+                isinstance(raw_text, str) and raw_text.strip()
+            ) and not file_attachments_from_specs(payload.get("files")):
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "text or files is required"},
+                )
+        if not session_id or not delivery_id:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "session_id and user_message_id are required"},
+            )
+        with get_cached_sqlite_engine().begin() as conn:
+            from storage.agent_session_rows import reserve_write_lock
 
-        def _enqueue() -> None:
-            # Chat already persisted the user's message as a ``pending`` row; promote
-            # it to ``queued`` so it drains via the queue after the active turn.
-            if isinstance(user_message_id, str) and user_message_id:
-                from storage import messages_service
+            reserve_write_lock(conn)
+            delivery = message_deliveries.get_delivery(conn, delivery_id)
+            archived = workbench_sessions_service.is_session_archived(conn, session_id)
+            if (
+                archived
+                and delivery is not None
+                and delivery["session_id"] == session_id
+                and delivery["state"] == "reserved"
+            ):
+                message_deliveries.retire_not_written(
+                    conn,
+                    session_id,
+                    delivery_id,
+                    reason="session_archived",
+                )
+                delivery = message_deliveries.get_delivery(conn, delivery_id)
+            delivery_payload = (
+                message_deliveries.delivery_payload(delivery)
+                if delivery is not None and delivery["session_id"] == session_id
+                else None
+            )
+            attachment_specs: list[dict[str, Any]] = []
+            if delivery_payload is not None:
+                from core.workbench_media import resolve_attachment_specs
 
-                engine = get_cached_sqlite_engine()
-                with engine.begin() as conn:
-                    messages_service.promote_pending(conn, user_message_id, messages_service.QUEUED_TYPE)
-
-        outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
-        if outcome == "enqueued":
+                attachment_specs = resolve_attachment_specs(
+                    conn,
+                    session_id=session_id,
+                    attachments=(delivery_payload.get("content") or {}).get(
+                        "attachments"
+                    )
+                    or [],
+                )
+        if archived or delivery is None or delivery["session_id"] != session_id:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "code": "session_archived" if archived else "delivery_reservation_lost",
+                    "session_id": session_id,
+                    "delivery_id": delivery_id,
+                },
+            )
+        if delivery["state"] != "reserved":
             return JSONResponse(
                 status_code=202,
-                content={"ok": True, "queued": True, "session_id": session_id, "message_id": user_message_id},
+                content={
+                    "ok": True,
+                    "duplicate": True,
+                    "session_id": session_id,
+                    "delivery_id": delivery_id,
+                    "message_id": delivery.get("message_id"),
+                    "delivery_state": delivery["state"],
+                    "queued": delivery["state"] == "queued",
+                },
             )
-        return JSONResponse(status_code=202, content={"ok": True, "session_id": session_id})
+        # The HTTP request only wakes the durable owner. Prompt, provenance, and
+        # attachments always come from the reservation, never from a stale caller.
+        dispatch_payload = {
+            **payload,
+            "text": str(delivery.get("dispatch_text") or ""),
+            "files": attachment_specs,
+            "platform": delivery_payload.get("platform"),
+            "user_id": delivery_payload.get("author_id"),
+            "message_id": delivery_payload.get("native_message_id") or delivery_id,
+            "thread_id": delivery_payload.get("parent_native_message_id"),
+            "scope_id": delivery_payload.get("scope_id"),
+            "display_text": delivery_payload.get("text"),
+            "content": dict(delivery_payload.get("content") or {}),
+            "metadata": dict(delivery_payload.get("metadata") or {}),
+            "author_id": delivery_payload.get("author_id"),
+            "author_name": delivery_payload.get("author_name"),
+        }
+        try:
+            text, context = await _build_dispatch_payload(dispatch_payload)
+        except ValueError as err:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific.update(
+            {
+                "delivery_id": delivery_id,
+                "scope_id": dispatch_payload.get("scope_id"),
+                "display_text": dispatch_payload.get("display_text"),
+                "message_content": dispatch_payload.get("content"),
+                "message_metadata": dispatch_payload.get("metadata") or {},
+                "author_id": dispatch_payload.get("author_id"),
+                "author_name": dispatch_payload.get("author_name"),
+            }
+        )
+        from core.message_priority import delivery_intent_for_priority
+
+        delivery_intent = delivery_intent_for_priority(str(delivery["priority"]))
+        submission = await manager.submit(
+            session_id,
+            context,
+            text,
+            delivery_intent=delivery_intent,
+        )
+        with get_cached_sqlite_engine().connect() as conn:
+            settled = message_deliveries.get_delivery(conn, delivery_id)
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "session_id": session_id,
+                "delivery_id": delivery_id,
+                "message_id": (settled or {}).get("message_id"),
+                "delivery_state": (settled or {}).get("state"),
+                "queued": submission.route == "enqueued",
+            },
+        )
 
     @app.post("/internal/reconcile-platforms")
     async def _reconcile_platforms() -> Any:
@@ -459,6 +851,429 @@ def create_app(
             logger.exception("internal Agent backend reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/backend-auth/test")
+    async def _test_backend_auth(request: Request) -> Any:
+        """Probe credentials through the controller-owned Agent runtime."""
+        payload = await _safe_json(request)
+        backend = payload.get("backend")
+        model = payload.get("model")
+        if not isinstance(backend, str) or not backend.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "backend must be a non-empty string"},
+            )
+        if model is not None and not isinstance(model, str):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "model must be a string"},
+            )
+        service = getattr(controller, "agent_auth_service", None)
+        test = getattr(service, "test_web_auth", None)
+        if not callable(test):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "backend_runtime_unavailable"},
+            )
+        try:
+            result = await test(
+                backend.strip().lower(),
+                model=model.strip() if isinstance(model, str) and model.strip() else None,
+            )
+            return JSONResponse(status_code=200, content=result)
+        except Exception as exc:
+            logger.exception("internal backend auth test failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+    def _memory_runtime():
+        return getattr(controller, "memory_runtime", None)
+
+    @app.post("/internal/reconcile-memory")
+    async def _reconcile_memory() -> Any:
+        """Hot-apply persisted Memory configuration on the controller loop."""
+
+        from core.memory.artifact import MemoryRuntimeActivationError
+
+        try:
+            from config.v2_config import V2Config
+
+            config = await asyncio.to_thread(V2Config.load)
+            result = await controller.reconcile_memory(config.memory)
+            return JSONResponse(status_code=200, content=result)
+        except MemoryRuntimeActivationError:
+            # Only the runtime install/activation bridge earns the "install
+            # failed" message. Everything else reported it too, which sent an
+            # incident caused by a pause/probe timeout in the wrong direction.
+            logger.exception("internal memory runtime activation failed during reconcile")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
+        except Exception:
+            logger.exception("internal memory reconcile failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_reconcile_failed"})
+
+    @app.post("/internal/memory/restart")
+    async def _memory_restart() -> Any:
+        """Replace the live Memory sidecar through the Runtime lifecycle."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing"},
+            )
+        try:
+            result = await runtime.restart()
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.exception("internal memory restart failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_restart_failed"},
+            )
+
+    @app.post("/internal/memory/install-runtime")
+    async def _memory_install_runtime() -> Any:
+        """Install or repair the managed runtime on the controller lifecycle."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
+        try:
+            result = await runtime.install_artifact()
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.exception("internal memory runtime install failed")
+            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
+
+    def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        if not session_id:
+            return None
+        resolve = getattr(controller, "memory_scope_for_cli_session", None)
+        scope = resolve(session_id) if callable(resolve) else None
+        from core.memory.store import is_principal_id, is_project_id
+
+        if (
+            isinstance(scope, tuple)
+            and len(scope) == 2
+            and is_principal_id(scope[0])
+            and is_project_id(scope[1])
+        ):
+            return scope
+        return None
+
+    def _verified_memory_ui_user_key(request: Request) -> str | None:
+        from core.memory.http_headers import (
+            CALLER_SESSION_HEADER,
+            MEMORY_USER_KEY_HEADER,
+        )
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
+        remote_prefix = "avibe:remote:"
+        if session_id or not (
+            user_key == "avibe:local"
+            or (user_key.startswith(remote_prefix) and len(user_key) > len(remote_prefix))
+        ):
+            return None
+        from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+
+        proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
+        if memory_ui_secret is None or not verify_ui_read_proof(
+            memory_ui_secret,
+            proof,
+            method=request.method,
+            path=request.url.path,
+            user_key=user_key,
+        ):
+            return None
+        return user_key
+
+    def _memory_read_scope(request: Request) -> tuple[str, str] | None:
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+
+        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+            user_key = _verified_memory_ui_user_key(request)
+            if user_key is None:
+                return None
+            runtime = _memory_runtime()
+            try:
+                principal_id = runtime.principal_for_user_key(user_key) if runtime is not None else None
+                resolve_project = getattr(controller, "default_memory_project_id", None)
+                project_id = resolve_project() if callable(resolve_project) else None
+                from core.memory.store import is_principal_id, is_project_id
+
+                if is_principal_id(principal_id) and is_project_id(project_id):
+                    return principal_id, project_id
+                return None
+            except MemoryStoreUnavailableError:
+                raise
+            except Exception as exc:
+                raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
+        return _memory_cli_scope(request)
+
+    memory_admin_log_access = object()
+
+    def _memory_log_access(request: Request) -> object | tuple[str, str] | None:
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+
+        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+            return (
+                memory_admin_log_access
+                if _verified_memory_ui_user_key(request) is not None
+                else None
+            )
+        return _memory_cli_scope(request)
+
+    @app.get("/internal/memory/status")
+    async def _memory_status() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.status_payload()
+        except Exception:
+            logger.warning("internal memory status failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/failures")
+    async def _memory_failures() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.failure_log_payload()
+        except Exception:
+            logger.warning("internal memory failure log failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/profile")
+    async def _memory_profile(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        try:
+            return await runtime.profile_payload(principal_id, project_id)
+        except Exception:
+            logger.warning("internal memory profile failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.get("/internal/memory/log")
+    async def _memory_log(request: Request) -> Any:
+        try:
+            cursor, limit = _memory_log_list_query(request)
+            access = _memory_log_access(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if access is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        try:
+            if access is memory_admin_log_access:
+                return await runtime.admin_log_entries_payload(cursor, limit)
+            principal_id, project_id = access
+            return await runtime.log_entries_payload(
+                principal_id,
+                project_id,
+                cursor,
+                limit,
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal memory log failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+
+    @app.get("/internal/memory/log/entry")
+    async def _memory_log_entry(request: Request) -> Any:
+        try:
+            memcell_id = _memory_log_entry_query(request)
+            access = _memory_log_access(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if access is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        try:
+            if access is memory_admin_log_access:
+                payload = await runtime.admin_log_entry_payload(memcell_id)
+            else:
+                principal_id, project_id = access
+                payload = await runtime.log_entry_payload(
+                    principal_id,
+                    project_id,
+                    memcell_id,
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal memory log entry failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+        if payload.get("status") == "not_found":
+            return JSONResponse(
+                status_code=404,
+                content={"status": "failed", "error": "memory_log_entry_not_found"},
+            )
+        return payload
+
+    @app.post("/internal/memory/search")
+    async def _memory_search(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"query", "limit"}
+            or not isinstance(payload.get("query"), str)
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        limit = payload.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
+        except Exception:
+            logger.warning("internal memory search failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/remember")
+    async def _memory_remember(request: Request) -> Any:
+        scope = _memory_cli_scope(request)
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        module = getattr(runtime, "module", None) if runtime is not None else None
+        if module is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"text"}
+            or not isinstance(payload.get("text"), str)
+            or not payload["text"].strip()
+            or len(payload["text"]) > 4_000
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+
+        from core.memory import CaptureRequest
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        text = payload["text"]
+        source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        try:
+            receipt = await module.capture(
+                CaptureRequest(
+                    source_message_id=(
+                        f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
+                    ),
+                    session_id=session_id,
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    provenance="agent",
+                    text=text,
+                    occurred_at_ms=int(time.time() * 1000),
+                )
+            )
+        except Exception:
+            logger.warning("internal memory remember failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        response: dict[str, Any] = {"status": receipt.status}
+        reason = getattr(receipt, "reason", None)
+        error = getattr(receipt, "error", None)
+        if reason is not None:
+            response["reason"] = reason
+        if error is not None:
+            response["error"] = error
+        return response
+
+    @app.post("/internal/memory/clear")
+    async def _memory_clear(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.clear()
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except Exception:
+            logger.warning("internal memory clear failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""
@@ -486,6 +1301,7 @@ def create_app(
             response = {"ok": False, "error": exc.code}
             if exc.detail:
                 response["detail"] = exc.detail
+            response.update(exc.data)
             return JSONResponse(status_code=exc.status, content=response)
         return {"ok": True, "result": result}
 
@@ -533,14 +1349,25 @@ def create_app(
         but they can reach this permission-restricted Unix socket and reuse the
         same Controller -> UI-server -> browser SSE path.
         """
-        from core.inbox_events import RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT, bus
+        from core.inbox_events import (
+            DEFINITIONS_UPDATED_EVENT,
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+            bus,
+        )
 
         payload = await _safe_json(request)
         if not isinstance(payload, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payload"})
         event_type = str(payload.get("type") or "").strip()
         data = payload.get("data")
-        if event_type not in {RUNS_UPDATED_EVENT, VAULTS_UPDATED_EVENT}:
+        if event_type not in {
+            DEFINITIONS_UPDATED_EVENT,
+            QUEUE_UPDATED_EVENT,
+            RUNS_UPDATED_EVENT,
+            VAULTS_UPDATED_EVENT,
+        }:
             return JSONResponse(status_code=400, content={"ok": False, "error": "unsupported_event_type"})
         if not isinstance(data, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_event_data"})
@@ -575,23 +1402,32 @@ def create_app(
         code = result.get("code")
         if code == "not_in_flight":
             return JSONResponse(status_code=404, content=result)
-        if code == "stop_failed":
+        if code in {"stop_failed", "stop_unknown"}:
             return JSONResponse(status_code=409, content=result)
         return result
 
     @app.post("/internal/send-now/{session_id}")
-    async def _send_now(session_id: str) -> Any:
+    async def _send_now(
+        session_id: str,
+        expected_delivery_id: str | None = None,
+    ) -> Any:
         """HTTP adapter: delegate "立即发送" (run the send-while-busy queue now) to
-        the turn owner (FSM, Phase 1b); ``stop_failed`` -> 409."""
-        result = await manager.send_now(session_id)
-        if result.get("code") == "stop_failed":
+        the turn owner (FSM, Phase 1b); typed failures remain HTTP failures."""
+        result = await manager.send_now(
+            session_id,
+            expected_delivery_id=expected_delivery_id,
+        )
+        code = result.get("code")
+        if code in {"stop_failed", "stale_head", "ordering_fence"}:
             return JSONResponse(status_code=409, content=result)
+        if code == "flush_failed":
+            return JSONResponse(status_code=503, content=result)
         return result
 
     # Expose the per-session turn gate to in-process callers (the scheduler)
     # WITHOUT going through the HTTP surface: ``ScheduledTaskService`` runs on the
-    # same loop and routes avibe scheduled / watch turns through
-    # ``submit_scheduled`` so they share the Chat path's queueing + lifecycle.
+    # same loop and routes persisted Session inputs through ``submit_scheduled``
+    # so they share the Chat path's durable priority and lifecycle authority.
     # ``in_flight`` is the SAME dict object as ``app.state.in_flight_dispatches``
     # (the cancel endpoint, turn-state, and the tests all read it), so a scheduled
     # run registered by ``_run_turn`` is Stoppable through ``/internal/cancel``.
@@ -625,23 +1461,16 @@ async def serve(
         socket_path=socket_path,
         descriptor_path=descriptor_path,
     )
-    app = create_app(
-        controller,
-        instance_id=host.instance_id,
-        bearer_token=host.bearer_token,
-    )
-    manager = getattr(controller, "session_turns", None)
-    recover_queue = getattr(manager, "recover_persisted_agent_run_queue", None)
-    if callable(recover_queue):
-        try:
-            recovered = await recover_queue()
-            if recovered:
-                logger.info(
-                    "Recovered persisted Workbench Agent Run queues for %s",
-                    ",".join(recovered),
-                )
-        except Exception:
-            logger.exception("Failed to recover persisted Workbench Agent Run queues")
+    app_kwargs: dict[str, str] = {}
+    if host.instance_id is not None and host.bearer_token is not None:
+        app_kwargs = {
+            "instance_id": host.instance_id,
+            "bearer_token": host.bearer_token,
+        }
+    app = create_app(controller, **app_kwargs)
+    recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
+    if recovery_complete is not None:
+        await recovery_complete.wait()
     config = uvicorn.Config(
         app,
         log_config=None,
@@ -649,11 +1478,12 @@ async def serve(
         loop="asyncio",
         lifespan="off",
     )
-    server = uvicorn.Server(config)
+    server = _create_controller_loop_server(config)
 
     bound = host.bind()
     try:
         host.publish(bound)
+        _write_internal_server_status("ready")
         await server.serve(sockets=[bound.listener])
     finally:
         host.cleanup(bound)
@@ -675,6 +1505,50 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     return bound.listener, bound.socket_path
 
 
+def _write_internal_server_status(
+    state: str,
+    *,
+    error: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Persist internal-server lifecycle state for the out-of-process CLI."""
+
+    target = paths.get_internal_server_status_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "state": state,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if error is not None:
+            payload["error"] = error
+        if detail is not None:
+            payload["detail"] = detail
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(file_descriptor, 0o600)
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, separators=(",", ":"))
+            file_descriptor = -1
+            os.replace(temporary, target)
+        except Exception:
+            if file_descriptor >= 0:
+                try:
+                    os.close(file_descriptor)
+                except OSError:
+                    pass
+            temporary.unlink(missing_ok=True)
+            raise
+    except OSError:
+        logger.warning("could not persist internal dispatch server status", exc_info=True)
+
+
 def start(
     controller: "Controller",
     *,
@@ -690,6 +1564,7 @@ def start(
     """
 
     loop = asyncio.get_event_loop()
+    _write_internal_server_status("starting")
     task = loop.create_task(
         serve(
             controller,
@@ -702,13 +1577,33 @@ def start(
 
     def _on_done(t: asyncio.Task) -> None:
         if t.cancelled():
+            _write_internal_server_status("stopped")
             return
         exc = t.exception()
         if exc:
             logger.error("internal dispatch server exited with exception: %r", exc)
+            _write_internal_server_status(
+                "error",
+                error="internal_server_unavailable",
+                detail=str(exc)[:500],
+            )
+        else:
+            _write_internal_server_status("stopped")
 
     task.add_done_callback(_on_done)
     return task
+
+
+def note_stopped() -> None:
+    """Record the server as stopped from a shutdown path.
+
+    ``start``'s done callback is scheduled with ``call_soon``, so a shutdown
+    that cancels the task and then closes the loop can finish before it runs.
+    Shutdown calls this directly; a duplicate write from the callback is
+    harmless because both record the same terminal state.
+    """
+
+    _write_internal_server_status("stopped")
 
 
 # --- Internals --------------------------------------------------------
@@ -760,8 +1655,23 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         channel_id=payload.get("channel_id"),
         platform=payload.get("platform"),
         thread_id=payload.get("thread_id"),
-        message_id=payload.get("message_id"),
+        message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
+        memory_cli_admitted=payload.get("memory_cli_admitted") is True,
+        is_ordinary_text=payload.get("is_ordinary_text") is True,
+    )
+    if context.platform_specific is None:
+        context.platform_specific = {}
+    context.platform_specific.update(
+        {
+            "delivery_id": payload.get("user_message_id"),
+            "scope_id": payload.get("scope_id"),
+            "display_text": payload.get("display_text"),
+            "message_content": payload.get("content"),
+            "message_metadata": payload.get("metadata") or {},
+            "author_id": payload.get("author_id"),
+            "author_name": payload.get("author_name"),
+        }
     )
     return text, context
 
@@ -775,23 +1685,41 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
+    memory_cli_admitted: bool = False,
+    is_ordinary_text: bool = False,
 ) -> MessageContext:
-    """Build the avibe ``MessageContext`` for a workbench session.
+    """Rebuild a Session's routing context from its durable scope and target.
 
     Shared by the dispatch endpoint and the cancel endpoint so a stop reuses
     the exact same session-routing context (chosen agent / model / effort,
     native session id, workdir) the turn ran under — that's what lets cancel
     reuse the IM ``/stop`` path to interrupt the right backend session.
-    Defaults to ``platform="avibe"``.
+    Workbench and IM Sessions use the same builder; Delivery hydration adds the
+    exact sender and native Message identity afterward.
     """
 
-    # ``agent_session_id`` is the agent_sessions PK; persist_agent_message reads
-    # it to attribute avibe agent replies to the right session (IM stamps it at
-    # session-resolve time). For avibe the dispatch session_id IS that PK.
+    from core.scheduled_tasks import resolve_session_id_target
+
+    target_info = resolve_session_id_target(session_id)
+    resolved_platform = platform or target_info.session_key.platform or "avibe"
+    is_dm = target_info.session_key.scope_type == "user"
+    resolved_channel_id = channel_id or (
+        session_id
+        if resolved_platform == "avibe"
+        else target_info.session_key.scope_id
+    )
+    resolved_user_id = user_id or (
+        target_info.session_key.scope_id if is_dm else "workbench"
+    )
     platform_specific: dict[str, Any] = {
-        "workbench_session_id": session_id,
         "agent_session_id": session_id,
+        "platform": resolved_platform,
+        "is_dm": is_dm,
     }
+    if resolved_platform == "avibe":
+        platform_specific["workbench_session_id"] = session_id
+    if memory_cli_admitted:
+        platform_specific["memory_cli_admitted"] = True
     session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {
@@ -817,13 +1745,14 @@ def _build_session_context(
             platform_specific["vibe_agent_name"] = session_row["agent_name"]
 
     return MessageContext(
-        user_id=str(user_id or "workbench"),
-        channel_id=str(channel_id or session_id),
-        platform=platform or "avibe",
-        thread_id=thread_id,
+        user_id=str(resolved_user_id),
+        channel_id=str(resolved_channel_id),
+        platform=resolved_platform,
+        thread_id=thread_id or target_info.session_key.thread_id,
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
+        is_ordinary_text=is_ordinary_text,
     )
 
 

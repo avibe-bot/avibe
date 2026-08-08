@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { LayoutGrid, Minus, MoreHorizontal, PinOff, Settings, Sun, UserRound, X } from 'lucide-react';
+import { LayoutGrid, Minus, MoreHorizontal, PinOff, Settings, UserRound, X } from 'lucide-react';
 
 import { APP_REGISTRY, type AppDefinition, type AppId } from '../../apps/registry';
 import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
-import { dockIdToSession, useDock } from '../../context/DockContext';
+import { useDock } from '../../context/DockContext';
+import { dockIdToSession } from '../../context/dockDoc';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { useShowPageInventory } from '../useShowPages';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
@@ -25,7 +26,7 @@ type ResidentTile =
   | { kind: 'builtin'; id: string; def: AppDefinition }
   | { kind: 'showpage'; id: string; sessionId: string; title: string; iconVersion: string | null };
 
-type FooterSheet = 'account' | 'appearance' | 'more';
+type FooterSheet = 'account' | 'more';
 
 export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
   const { t } = useTranslation();
@@ -39,7 +40,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   // isn't used here — its close backdrop is z-40, below this z-50 drawer, so taps
   // outside the menu would fall through to the tiles instead of dismissing it.
   const [menu, setMenu] = useState<{ item: ResidentTile; label: string } | null>(null);
-  // Which footer overflow sheet is open (账号 / 外观 / 更多) — one reusable shell.
+  // Which footer overflow sheet is open (账号 / 更多) — one reusable shell.
   const [sheet, setSheet] = useState<FooterSheet | null>(null);
 
   // Long-press detection: a press-hold opens the manage menu and suppresses the
@@ -108,7 +109,6 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
 
   const sheetTitle: Record<FooterSheet, string> = {
     account: t('more.account'),
-    appearance: t('more.appearance'),
     more: t('nav.more'),
   };
 
@@ -221,8 +221,9 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
           </button>
         )}
 
-        {/* Footer chip row — the absorbed More-page content. 设置 navigates; the
-            rest open a small overflow sheet. */}
+        {/* Footer chip row — the absorbed More-page content. 设置 navigates; 账号
+            and 更多 open a small overflow sheet. Appearance lives inside 更多 so
+            the three English labels fit without truncation. */}
         <div className="mt-4 flex items-stretch gap-2 border-t border-border pt-3">
           <Link to="/admin/dashboard" onClick={onClose} className={chipClass}>
             <Settings className="size-4 shrink-0" />
@@ -234,10 +235,6 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
               <span className="truncate">{t('more.account')}</span>
             </button>
           )}
-          <button type="button" onClick={() => setSheet('appearance')} className={chipClass}>
-            <Sun className="size-4 shrink-0" />
-            <span className="truncate">{t('more.appearance')}</span>
-          </button>
           <button type="button" onClick={() => setSheet('more')} className={chipClass}>
             <MoreHorizontal className="size-4 shrink-0" />
             <span className="truncate">{t('nav.more')}</span>
@@ -287,7 +284,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
         </div>
       )}
 
-      {/* Footer overflow sheet (账号 / 外观 / 更多) — a focused bottom modal above
+      {/* Footer overflow sheet (账号 / 更多) — a focused bottom modal above
           the drawer. Backdrop closes only the sheet, returning to the drawer. */}
       {sheet && (
         <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true">
@@ -312,8 +309,12 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
             </div>
             <div className="pt-2">
               {sheet === 'account' && <MoreAccountSection />}
-              {sheet === 'appearance' && <MoreAppearanceSection />}
-              {sheet === 'more' && <MoreConnectionSection />}
+              {sheet === 'more' && (
+                <div className="flex flex-col gap-3">
+                  <MoreAppearanceSection />
+                  <MoreConnectionSection />
+                </div>
+              )}
             </div>
           </div>
         </div>

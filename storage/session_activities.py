@@ -61,7 +61,7 @@ class SQLiteSessionActivityStore:
     def connection_key(*, backend: str, runtime_key: str) -> str:
         return _record_key(backend, runtime_key)
 
-    def upsert_activity(self, activity: dict[str, Any], *, phase: str) -> None:
+    def _activity_upsert(self, activity: dict[str, Any], *, phase: str):
         backend = str(activity.get("backend") or "")
         runtime_key = str(activity.get("runtime_key") or "")
         activity_id = str(activity.get("id") or "")
@@ -92,17 +92,35 @@ class SQLiteSessionActivityStore:
             "updated_at": now,
         }
         stmt = sqlite_insert(runtime_records).values(**values)
+        return stmt.on_conflict_do_update(
+            index_elements=[runtime_records.c.record_type, runtime_records.c.record_key],
+            set_={
+                "session_anchor": stmt.excluded.session_anchor,
+                "payload_json": stmt.excluded.payload_json,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+
+    def upsert_activity(self, activity: dict[str, Any], *, phase: str) -> None:
+        stmt = self._activity_upsert(activity, phase=phase)
         with self.engine.begin() as conn:
-            conn.execute(
-                stmt.on_conflict_do_update(
-                    index_elements=[runtime_records.c.record_type, runtime_records.c.record_key],
-                    set_={
-                        "session_anchor": stmt.excluded.session_anchor,
-                        "payload_json": stmt.excluded.payload_json,
-                        "updated_at": stmt.excluded.updated_at,
-                    },
-                )
-            )
+            conn.execute(stmt)
+
+    def upsert_activities(
+        self,
+        activities: list[dict[str, Any]],
+        *,
+        phase: str,
+    ) -> None:
+        """Persist one concrete output batch in a single transaction."""
+
+        statements = [
+            self._activity_upsert(activity, phase=phase)
+            for activity in activities
+        ]
+        with self.engine.begin() as conn:
+            for stmt in statements:
+                conn.execute(stmt)
 
     def delete_activity(self, *, backend: str, runtime_key: str, activity_id: str) -> None:
         record_key = self.activity_key(

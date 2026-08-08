@@ -346,3 +346,101 @@ def test_main_unexpected_startup_error_fails_fast() -> None:
         rc = module.main()
 
     assert rc == 1
+
+
+def test_main_only_on_failure_skips_agent_turn_for_green_run() -> None:
+    module = _load_module()
+
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+        return (
+            [
+                {
+                    "id": 1,
+                    "name": "CI",
+                    "head_sha": "abc123",
+                    "head_branch": "main",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": "https://github.com/example/actions/runs/1",
+                }
+            ],
+            1,
+        )
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "_fetch_workflow_runs", side_effect=_fake_fetch_workflow_runs),
+        patch(
+            "sys.argv",
+            [
+                "wait_action.py",
+                "--repo",
+                "cyhhao/sub2api",
+                "--branch",
+                "main",
+                "--sha",
+                "abc123",
+                "--workflow",
+                "CI",
+                "--only-on-failure",
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == module.NO_EVENT_EXIT_CODE
+    # Nothing on stdout means vibe watch builds no follow-up prompt.
+    assert stdout.getvalue() == ""
+    # The code alone is sysexits EX_USAGE; the marker is what makes it a quiet cycle
+    # rather than a failure, so the waiter has to print it.
+    assert module.NO_EVENT_MARKER in stderr.getvalue()
+    assert "All watched workflows succeeded" in stderr.getvalue()
+
+
+def test_main_only_on_failure_still_reports_failed_run() -> None:
+    module = _load_module()
+
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+        return (
+            [
+                {
+                    "id": 1,
+                    "name": "CI",
+                    "head_sha": "abc123",
+                    "head_branch": "main",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "html_url": "https://github.com/example/actions/runs/1",
+                }
+            ],
+            1,
+        )
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "_fetch_workflow_runs", side_effect=_fake_fetch_workflow_runs),
+        patch(
+            "sys.argv",
+            [
+                "wait_action.py",
+                "--repo",
+                "cyhhao/sub2api",
+                "--sha",
+                "abc123",
+                "--workflow",
+                "CI",
+                "--only-on-failure",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert "GitHub Actions failure" in stdout.getvalue()
+    assert "Failed workflow(s): CI" in stdout.getvalue()

@@ -15,19 +15,22 @@ export type ChatTriggerLink =
   | { kind: 'harness'; to: string };
 
 const AGENT_RUN_NATIVE_PREFIX = 'agent_run:';
+const HARNESS_NATIVE_PREFIXES = ['agent_run:', 'scheduled:', 'watch:', 'webhook:', 'hook:'];
 
-// True for a live agent-callback ("自动触发") harness message that has NOT yet
-// been enriched with its source session (A9a). The live ``message.new`` payload
-// is published raw (before ``list_session_messages`` resolves the source), so
-// ChatPage triggers a targeted reconcile on these to pull the enriched REST row
-// (``mergeById`` then fills ``source_session_*`` in place) — otherwise the source
-// chip would only appear after a manual reload/refocus.
-export function isUnresolvedAgentCallback(
-  message: Pick<WorkbenchMessage, 'source' | 'native_message_id' | 'source_session_id'>,
+// Live Harness rows can arrive before read-side enrichment. Agent callbacks need
+// source-session resolution; legacy queued triggers may need kind/definition
+// recovery from their stable native id. A targeted reconcile fills either set.
+export function needsHarnessProvenanceReconcile(
+  message: Pick<
+    WorkbenchMessage,
+    'source' | 'native_message_id' | 'source_session_id' | 'author_name'
+  >,
 ): boolean {
+  if (message.source !== 'harness' || typeof message.native_message_id !== 'string') return false;
+  if (message.author_name == null) {
+    return HARNESS_NATIVE_PREFIXES.some((prefix) => message.native_message_id?.startsWith(prefix));
+  }
   return (
-    message.source === 'harness' &&
-    typeof message.native_message_id === 'string' &&
     message.native_message_id.startsWith(AGENT_RUN_NATIVE_PREFIX) &&
     message.source_session_id == null
   );
@@ -69,6 +72,10 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
   }
 
   const kind = message.author_name;
+  // ``show_intent`` (a page button action) stays a non-navigating harness row.
+  // ``show_annotation`` no longer reaches here at all: an annotation is typed
+  // ``annotation`` and renders as its own card, never as a harness trigger row.
+  if (kind === 'show_intent') return null;
   if (kind === 'watch' || TASK_KINDS.has(kind ?? '')) {
     const itemKind = kind === 'watch' ? 'watch' : 'task';
     return {
@@ -90,8 +97,11 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
 export function harnessChipLabelKey(message: TriggerFields): string {
   if (message.source === 'harness' && message.source_session_id) return 'chat.source.from';
   const kind = message.author_name;
+  if (kind === 'show_intent') return 'chat.source.showIntent';
   if (kind === 'watch') return 'chat.source.watch';
   if (kind === 'webhook') return 'chat.source.webhook';
+  if (kind === 'hook') return 'chat.source.hook';
+  if (kind === 'activity_recovery') return 'chat.source.activityRecovery';
   if (TASK_KINDS.has(kind ?? '')) return 'chat.source.scheduled';
   return 'chat.source.harness';
 }

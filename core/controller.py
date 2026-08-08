@@ -5,10 +5,16 @@ import concurrent.futures
 import json
 import logging
 import threading
+import time
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
-from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS, DEFAULT_AGENT_PROGRESS_STYLE
+from config.v2_config import (
+    DEFAULT_AGENT_BACKEND,
+    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_AGENT_PROGRESS_STYLE,
+    MemoryConfig,
+)
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
@@ -30,14 +36,38 @@ from core.message_output import MessageOutput
 from core.processing_indicator import ProcessingIndicatorService
 from core.run_settlement import SETTLED_BY_NO_TERMINAL_RESULT
 from core.runtime_commands import RuntimeCommandWatcher
+from core.runtime_activation import RuntimeActivationRegistry
+from core.runtime_ownership import RuntimeOwnershipProvider
+from core.runtime_recovery import SessionDeliveryRecoveryHandler
+from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
+from core.memory import CaptureRequest
+from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
+
+
+class _SettingsUserBindings:
+    """Answer Memory's binding question from the per-platform settings stores."""
+
+    def __init__(self, managers: object) -> None:
+        self._managers = managers if isinstance(managers, dict) else {}
+
+    def is_enabled_user(self, platform: str, user_id: str) -> bool:
+        manager = self._managers.get(platform)
+        if manager is None:
+            return False
+        store = manager.get_store()
+        store.maybe_reload()
+        user = store.get_user(user_id, platform=platform)
+        return bool(user is not None and user.enabled)
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -187,10 +217,20 @@ class Controller:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._im_thread: Optional[threading.Thread] = None
         self._im_run_exception: Optional[BaseException] = None
+        self._shutdown_requested = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._runtime_work_shutdown_task: asyncio.Task[None] | None = None
+        self._shutdown_tainted = False
+        self._service_lock_safe_to_release = False
+        self._runtime_work_shutdown_grace_seconds = (
+            _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+        )
         self.enabled_platforms = list(getattr(config, "enabled_platforms", lambda: [config.platform])())
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
+        self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
+        self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -210,11 +250,10 @@ class Controller:
         # the ``active_turn_sinks`` property below delegate to it.
 
         # Per-session turn gate, published by ``core.internal_server.create_app``
-        # once the internal server is built on the loop. The scheduler routes
-        # avibe scheduled / watch turns through it so they QUEUE behind an active
-        # Chat turn (never preempt it) and get the Chat path's turn lifecycle
-        # (in_flight + turn.start / turn.end + Stop). ``None`` until the server is
-        # up — callers must treat its absence as "fall back to the direct path".
+        # once the internal server is built on the loop. Persisted Session inputs
+        # route through it so their source policy can queue, steer, or replace via
+        # the same durable lifecycle (in_flight + turn.start / turn.end + Stop).
+        # ``None`` until the server is up; callers then fall back to the direct path.
         self.session_turn_gate: Optional[Any] = None
 
         # Per-session turn owner (FSM). Created here so the controller owns it from
@@ -224,7 +263,25 @@ class Controller:
         # dispatcher, and scheduler all share this one owner's in_flight + flush state.
         from core.session_turns import SessionTurnManager
 
+        self.runtime_activation = RuntimeActivationRegistry()
         self.session_turns = SessionTurnManager(self)
+        self.runtime_ownership = RuntimeOwnershipProvider(
+            self.session_turns._sqlite_engine()
+        )
+        self.runtime_work_supervisor = RuntimeWorkSupervisor(
+            on_lease_lost=lambda: self.request_shutdown("service lease lost")
+        )
+        self._runtime_work_tokens = [
+            self.runtime_work_supervisor.register(
+                RuntimeWorkLane.SESSION_DELIVERIES,
+                SessionDeliveryRecoveryHandler(self.session_turns),
+            )
+        ]
+        # The internal server publishes the Session gate before waiting on this
+        # event. Controller startup owns backend restoration, durable owner
+        # recovery, and supervisor activation, then releases HTTP serving and
+        # the scheduler/watch services together.
+        self._delivery_recovery_complete = asyncio.Event()
 
         self._init_model_hub()
 
@@ -255,12 +312,16 @@ class Controller:
         # Consolidated message dispatcher
         self.message_dispatcher = ConsolidatedMessageDispatcher(self)
         self.scheduled_task_service = ScheduledTaskService(self)
+        self._runtime_work_tokens.extend(
+            self.scheduled_task_service.register_controller_runtime_work_lanes()
+        )
         self.watch_service = ManagedWatchService(self)
         self.runtime_command_watcher = RuntimeCommandWatcher(self)
         self.show_git_checkpoint_service = ShowGitCheckpointService()
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self._memory_reconcile_task: Optional[asyncio.Task] = None
 
         # Initialize update checker (use default config if not present)
         from config.v2_config import UpdateConfig
@@ -271,10 +332,9 @@ class Controller:
         # Restore session mappings on startup (after handlers are initialized)
         self.session_handler.restore_session_mappings()
 
-        # Crash recovery: no turn survives a restart, so any session left
-        # ``running`` in the table is stale — reset it to ``idle`` so the
-        # workbench sidebar dot doesn't show a phantom green forever.
-        self.session_turns.reset_stale()
+        # Clean only pre-durable status projections. Durable Turn owners remain
+        # running until backend restoration and exact reconciliation complete.
+        self.session_turns.reset_legacy_ownerless_status()
 
     def _init_model_hub(self) -> None:
         """Create the Model Hub aggregate only for an explicit release opt-in."""
@@ -293,7 +353,30 @@ class Controller:
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
 
-        self.model_hub_service = create_default_service()
+        def default_vibe_agent_model(backend: str) -> Optional[str]:
+            agent = self.vibe_agent_store.get_default_agent()
+            if agent is None or agent.backend != backend:
+                return None
+            return agent.model
+
+        def default_vibe_agent_name(backend: str) -> Optional[str]:
+            agent = self.vibe_agent_store.get_default_agent()
+            if agent is None or agent.backend != backend or not str(agent.model or "").strip():
+                return None
+            return agent.name
+
+        def named_vibe_agents(backend: str) -> list[tuple[str, Optional[str]]]:
+            return [
+                (agent.name, agent.model)
+                for agent in self.vibe_agent_store.list_agents(include_disabled=False)
+                if agent.backend == backend
+            ]
+
+        self.model_hub_service = create_default_service(
+            requested_model_override=default_vibe_agent_model,
+            selected_agent_override=default_vibe_agent_name,
+            named_agents_override=named_vibe_agents,
+        )
         self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
         self.model_hub_runtime = ModelHubRuntimeRouter(
             service=self.model_hub_service,
@@ -331,6 +414,15 @@ class Controller:
         self.native_session_service = None
         self.processing_indicator = ProcessingIndicatorService(self)
         self.audio_asr_service = AudioAsrService(self.config)
+        # The runtime serves controller UDS reads/capture and the shared
+        # private-IM Memory admission path.
+        from core.memory.runtime import create_memory_runtime
+
+        self.memory_runtime = create_memory_runtime(
+            getattr(self.config, "memory", None) or MemoryConfig(),
+            processing_event=self._send_memory_processing_event,
+        )
+        self.memory_module = self.memory_runtime.module
         self._migrate_discord_guild_scope_from_config()
 
         # Migrate legacy per-channel language into global config
@@ -528,6 +620,15 @@ class Controller:
             "states": states,
         }
 
+    async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
+        """Hot-apply persisted Memory settings without restarting Avibe."""
+
+        result = await self.memory_runtime.reconcile(memory_config)
+        self.memory_module = self.memory_runtime.module
+        if result.get("ok") is True:
+            self.config.memory = memory_config
+        return result
+
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
             return
@@ -599,6 +700,7 @@ class Controller:
                 self.config.agent_status_heartbeat_ms = v2_config.agent_status_heartbeat_ms
                 self.config.agent_status_no_output_ms = v2_config.agent_status_no_output_ms
                 self.config.resource_governance = v2_config.runtime.resource_governance
+                self.config.harness_prompt_echo = v2_config.runtime.harness_prompt_echo
                 governor = getattr(self, "_agent_resource_governor", None)
                 if governor is not None:
                     governor.update_config(self.config.resource_governance)
@@ -703,7 +805,11 @@ class Controller:
         activity_store = SQLiteSessionActivityStore(get_cached_sqlite_engine())
         self.agent_service = AgentService(
             self,
-            activities=SessionActivityRegistry(activity_store),
+            activities=SessionActivityRegistry(
+                activity_store,
+                activation_registry=self.runtime_activation,
+            ),
+            activation_registry=self.runtime_activation,
         )
         self.agent_service.register(ClaudeAgent(self))
         if self.config.codex:
@@ -720,19 +826,25 @@ class Controller:
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
 
+        def inbound(callback):
+            return self._dispatch_to_controller_loop(
+                callback,
+                wait_for_owner_recovery=True,
+            )
+
         # Command handlers dict
         # Admin protection for "set_cwd" and "settings" is now handled by
         # the centralized auth pipeline (core.auth.check_auth) in IM entry points.
         command_handlers = {
-            "start": self._dispatch_to_controller_loop(self.command_handler.handle_start),
-            "new": self._dispatch_to_controller_loop(self.command_handler.handle_new),
-            "cwd": self._dispatch_to_controller_loop(self.command_handler.handle_cwd),
-            "set_cwd": self._dispatch_to_controller_loop(self.command_handler.handle_set_cwd),
-            "resume": self._dispatch_to_controller_loop(self.command_handler.handle_resume),
-            "setup": self._dispatch_to_controller_loop(self.command_handler.handle_setup),
-            "settings": self._dispatch_to_controller_loop(self.settings_handler.handle_settings),
-            "stop": self._dispatch_to_controller_loop(self.command_handler.handle_stop),
-            "bind": self._dispatch_to_controller_loop(self.command_handler.handle_bind),
+            "start": inbound(self.command_handler.handle_start),
+            "new": inbound(self.command_handler.handle_new),
+            "cwd": inbound(self.command_handler.handle_cwd),
+            "set_cwd": inbound(self.command_handler.handle_set_cwd),
+            "resume": inbound(self.command_handler.handle_resume),
+            "setup": inbound(self.command_handler.handle_setup),
+            "settings": inbound(self.settings_handler.handle_settings),
+            "stop": inbound(self.command_handler.handle_stop),
+            "bind": inbound(self.command_handler.handle_bind),
         }
 
         # IM inbound messages funnel through ``core.services.dispatch``
@@ -747,25 +859,45 @@ class Controller:
 
         # Register callbacks with the IM client
         self.im_client.register_callbacks(
-            on_message=self._dispatch_im_message_to_controller_loop(_on_im_message),
+            on_message=self._dispatch_im_message_to_controller_loop(
+                _on_im_message,
+                wait_for_owner_recovery=True,
+            ),
             on_command=command_handlers,
-            on_callback_query=self._dispatch_to_controller_loop(self.message_handler.handle_callback_query),
-            on_settings_update=self._dispatch_to_controller_loop(self.settings_handler.handle_settings_update),
-            on_change_cwd=self._dispatch_to_controller_loop(self.command_handler.handle_change_cwd_submission),
-            on_routing_update=self._dispatch_to_controller_loop(self.settings_handler.handle_routing_update),
-            on_routing_modal_update=self._dispatch_to_controller_loop(
+            on_callback_query=inbound(self.message_handler.handle_callback_query),
+            on_settings_update=inbound(self.settings_handler.handle_settings_update),
+            on_change_cwd=inbound(self.command_handler.handle_change_cwd_submission),
+            on_routing_update=inbound(self.settings_handler.handle_routing_update),
+            on_routing_modal_update=inbound(
                 self.settings_handler.handle_routing_modal_update
             ),
-            on_resume_session=self._dispatch_to_controller_loop(self.session_handler.handle_resume_session_submission),
+            on_resume_session=inbound(
+                self.session_handler.handle_resume_session_submission
+            ),
             on_ready=self._dispatch_to_controller_loop(self._on_runtime_ready),
             on_transport_ready=self._dispatch_to_controller_loop(self._on_im_ready),
         )
 
-    def _dispatch_to_controller_loop(self, callback):
+    async def _await_runtime_owner_recovery(self) -> None:
+        recovery_complete = getattr(self, "_delivery_recovery_complete", None)
+        if recovery_complete is not None:
+            await recovery_complete.wait()
+
+    def _dispatch_to_controller_loop(
+        self,
+        callback,
+        *,
+        wait_for_owner_recovery: bool = False,
+    ):
         async def _wrapped(*args, **kwargs):
+            async def _invoke():
+                if wait_for_owner_recovery:
+                    await self._await_runtime_owner_recovery()
+                return await callback(*args, **kwargs)
+
             loop = self._loop
             if loop is None:
-                return await callback(*args, **kwargs)
+                return await _invoke()
 
             try:
                 current_loop = asyncio.get_running_loop()
@@ -773,21 +905,31 @@ class Controller:
                 current_loop = None
 
             if current_loop is loop:
-                return await callback(*args, **kwargs)
+                return await _invoke()
 
-            future = asyncio.run_coroutine_threadsafe(callback(*args, **kwargs), loop)
+            future = asyncio.run_coroutine_threadsafe(_invoke(), loop)
             return await asyncio.wrap_future(future)
 
         return _wrapped
 
-    def _dispatch_im_message_to_controller_loop(self, callback):
+    def _dispatch_im_message_to_controller_loop(
+        self,
+        callback,
+        *,
+        wait_for_owner_recovery: bool = False,
+    ):
         tracked_platforms = {"telegram", "wechat"}
 
         async def _wrapped(context, *args, **kwargs):
+            async def _invoke():
+                if wait_for_owner_recovery:
+                    await self._await_runtime_owner_recovery()
+                return await callback(context, *args, **kwargs)
+
             platform = self._platform_for_im_callback_context(context)
             if platform in tracked_platforms:
-                return await self._run_on_controller_loop(callback, context, *args, **kwargs)
-            self._schedule_controller_callback(callback, context, *args, **kwargs)
+                return await self._run_on_controller_loop(_invoke)
+            self._schedule_controller_callback(_invoke)
             return None
 
         return _wrapped
@@ -889,14 +1031,17 @@ class Controller:
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
-        self.scheduled_task_service.notify_transport_ready(platform)
-        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
-        if callable(notify_update_checker):
-            notify_update_checker(platform)
         platforms = {platform}
         if platform == self.primary_platform:
             platforms.add("")
         await self._restore_active_polls(platforms)
+        # Poll registration is durable-owner evidence needed by startup recovery.
+        # All work admission and user-visible delivery remain behind the barrier.
+        await self._await_runtime_owner_recovery()
+        self.scheduled_task_service.notify_transport_ready(platform)
+        notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
+        if callable(notify_update_checker):
+            notify_update_checker(platform)
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform=platform)
         except Exception as e:
@@ -912,6 +1057,11 @@ class Controller:
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
         await self._restore_active_polls(workbench_platforms)
+        try:
+            await self._recover_runtime_owners()
+        except Exception:
+            self.request_shutdown("runtime owner recovery failed")
+            raise
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -939,6 +1089,52 @@ class Controller:
             self.cleanup_task is None or self.cleanup_task.done()
         ):
             self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
+
+    async def _recover_runtime_owners(self) -> None:
+        """Restore durable execution owners before any producer can admit work."""
+
+        recover_deliveries = getattr(
+            self.session_turns,
+            "recover_durable_delivery_state",
+            None,
+        )
+        if callable(recover_deliveries):
+            try:
+                recovered = await recover_deliveries(service_restart=True)
+                if recovered:
+                    logger.info(
+                        "Recovered durable Session delivery owners for %s",
+                        ",".join(recovered),
+                    )
+            except Exception:
+                logger.exception("Failed to recover durable Session delivery owners")
+                raise
+
+        recover_queue = getattr(
+            self.session_turns,
+            "recover_persisted_agent_run_queue",
+            None,
+        )
+        if callable(recover_queue):
+            try:
+                recovered = await recover_queue()
+                if recovered:
+                    logger.info(
+                        "Recovered persisted Workbench Agent Run queues for %s",
+                        ",".join(recovered),
+                    )
+            except Exception:
+                logger.exception("Failed to recover persisted Workbench Agent Run queues")
+                raise
+
+        try:
+            self.scheduled_task_service.recover_processing_requests()
+        except Exception:
+            logger.exception("Failed to recover fallback request owners")
+            raise
+
+        await self.runtime_work_supervisor.activate()
+        self._delivery_recovery_complete.set()
 
     # Utility methods used by handlers
 
@@ -995,6 +1191,18 @@ class Controller:
 
         settings_key = resolve_context_settings_key(context)
         return build_context_session_key(context, platform=platform, settings_key=settings_key)
+
+    def _get_turn_sink_key(self, context: MessageContext) -> str:
+        """Get the live turn sink's key for ``context``.
+
+        Thread-scoped, unlike ``_get_session_key``: the sink is one agent
+        session's turn-concurrency slot, so sharing it across a channel's
+        threads made ``dispatch_turn`` refuse unrelated sessions' turns. See
+        ``core.message_context.build_context_turn_sink_key``.
+        """
+        from core.message_context import build_context_turn_sink_key
+
+        return build_context_turn_sink_key(context, session_key=self._get_session_key(context))
 
     def backend_alive(self, context: MessageContext) -> Optional[bool]:
         """Best-effort backend liveness for the concise status bubble's footer.
@@ -1130,7 +1338,7 @@ class Controller:
         when an agent turn is genuinely in flight (the result emit releases it)."""
         if context is None:
             return
-        sink = self.get_turn_sink(self._get_session_key(context))
+        sink = self.get_turn_sink(self._get_turn_sink_key(context))
         if sink is None:
             return
         # Turn-token guard (mirrors ``_stream_chunk`` / ``_is_active_turn``): a
@@ -1162,18 +1370,9 @@ class Controller:
 
     # ----- Live agent-runtime status (workbench sidebar dot) -------------
     #
-    # ``agent_sessions.agent_status`` is idle/running/failed, written at EXACTLY
-    # two chokepoints every turn funnels through — no per-path / per-backend
-    # instrumentation:
-    #   * inbound  — ``AgentService.handle_message`` flips the session to
-    #     ``running`` (every source/backend dispatches through it).
-    #   * outbound — ``MessageDispatcher.emit_agent_message`` settles the terminal
-    #     ``result`` to ``idle`` (or ``failed`` when ``is_error``).
-    # A fire-and-forget backend error surfaces as an emitted message, not an
-    # exception, so terminal failures are emitted as ``result`` + ``is_error`` and
-    # ride the same outbound chokepoint. ``set_agent_status`` is the shared writer;
-    # ``SessionTurnManager.reset_stale`` recovers ``running`` rows to ``idle`` on
-    # startup (a turn whose process died never reached the outbound chokepoint).
+    # ``agent_sessions.agent_status`` is a projection of durable Turn ownership.
+    # Admission projects running; the terminal transaction projects the exact
+    # successor state. Legacy non-durable paths use this writer directly.
 
     @staticmethod
     def _session_id_from_context(context: Optional[MessageContext]) -> Optional[str]:
@@ -1218,6 +1417,197 @@ class Controller:
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
         return self.platform_settings_managers.get(platform, self.platform_settings_managers[self.primary_platform])
 
+    # ----- Direct Memory entry admission ---------------------------------
+    #
+    # The policy lives in ``core.memory.admission``. The controller only
+    # collects the facts one turn carries and acts on the verdict.
+
+    def _memory_admission(self) -> CaptureAdmission:
+        # ``getattr`` keeps a controller assembled without a Memory runtime
+        # failing closed inside the admission module rather than raising here.
+        return CaptureAdmission(
+            principals=getattr(self, "memory_runtime", None),
+            bindings=_SettingsUserBindings(getattr(self, "platform_settings_managers", None)),
+        )
+
+    def _memory_turn_facts(
+        self,
+        context: MessageContext,
+        *,
+        text: object = None,
+        session_id: object = None,
+        include_workdir: bool = True,
+    ) -> InboundTurnFacts:
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        workdir = None
+        if include_workdir:
+            try:
+                workdir = self.get_cwd(context)
+            except Exception:
+                workdir = None
+        return InboundTurnFacts(
+            platform=context.platform or payload.get("platform"),
+            user_id=getattr(context, "user_id", None),
+            message_id=getattr(context, "message_id", None),
+            session_id=session_id,
+            workdir=workdir,
+            text=text,
+            files=getattr(context, "files", None),
+            is_dm=payload.get("is_dm") is True,
+            is_ordinary_text=context.is_ordinary_text,
+            memory_enabled=bool(
+                getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
+            ),
+        )
+
+    def memory_capture_admitted(self, context: MessageContext) -> bool:
+        return self._memory_admission().admits(
+            self._memory_turn_facts(context, include_workdir=False)
+        )
+
+    def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
+        return self._memory_admission().principal_for(
+            self._memory_turn_facts(context, include_workdir=False)
+        )
+
+    def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
+        """Associate an admitted Agent session with its Memory read/write scope."""
+
+        from core.caller_context import caller_context_from_platform_payload
+
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        caller = caller_context_from_platform_payload(payload)
+        if caller is None:
+            return False
+        facts_by_session = getattr(self, "_memory_cli_facts_by_session", None)
+        if not isinstance(facts_by_session, dict):
+            facts_by_session = {}
+            self._memory_cli_facts_by_session = facts_by_session
+        admission = self._memory_admission()
+        facts = self._memory_turn_facts(context)
+        principal_id = admission.principal_for(facts) if admitted else None
+        project_id = admission.project_for(facts) if admitted else None
+        if principal_id is None or project_id is None:
+            self._memory_scopes_by_session.pop(caller.session_id, None)
+            facts_by_session.pop(caller.session_id, None)
+            return False
+        self._memory_scopes_by_session[caller.session_id] = (principal_id, project_id)
+        facts_by_session[caller.session_id] = facts
+        return True
+
+    def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
+        """Return the principal and project owned by an admitted Agent session."""
+
+        from core.memory.store import is_principal_id, is_project_id
+
+        session_key = str(session_id or "").strip()
+        scope = self._memory_scopes_by_session.get(session_key)
+        if (
+            isinstance(scope, tuple)
+            and len(scope) == 2
+            and is_principal_id(scope[0])
+            and is_project_id(scope[1])
+        ):
+            facts = getattr(self, "_memory_cli_facts_by_session", {}).get(session_key)
+            if facts is not None:
+                admission = self._memory_admission()
+                memory_enabled = bool(
+                    getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
+                )
+                current_scope = (
+                    admission.principal_for(facts),
+                    admission.project_for(facts),
+                )
+                if (
+                    not memory_enabled
+                    or not admission.admits(facts)
+                    or current_scope != scope
+                ):
+                    self._memory_scopes_by_session.pop(session_key, None)
+                    self._memory_cli_facts_by_session.pop(session_key, None)
+                    return None
+            return scope
+        return None
+
+    def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
+        """Return the principal associated with an admitted Agent session."""
+
+        scope = self.memory_scope_for_cli_session(session_id)
+        return scope[0] if scope is not None else None
+
+    def memory_project_for_cli_session(self, session_id: str) -> Optional[str]:
+        """Return the project associated with an admitted Agent session."""
+
+        scope = self.memory_scope_for_cli_session(session_id)
+        return scope[1] if scope is not None else None
+
+    def default_memory_project_id(self) -> str:
+        """Return the Memory project used by a default-cwd Agent Session."""
+
+        from core.services.agent_run_target import resolve_default_agent_workdir
+
+        workdir = resolve_default_agent_workdir(
+            self,
+            platform="avibe",
+            settings_key="memory-ui",
+            session_key="memory-ui",
+        )
+        return self.memory_runtime.project_for_workdir(workdir)
+
+    async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
+        """Submit one eligible attributed human turn after session resolution.
+
+        This is deliberately best effort. It is scheduled by ``MessageHandler``
+        and never participates in an agent turn's completion path.
+        """
+
+        facts = self._memory_turn_facts(context, text=text, session_id=session_id)
+        request = self._memory_admission().decide(facts)
+        if not isinstance(request, CaptureRequest):
+            return
+
+        platform = CaptureAdmission.platform_of(facts)
+        started_at = time.monotonic()
+        try:
+            await self.memory_runtime.module.capture(request)
+            logger.info(
+                "Memory capture platform=%s latency_ms=%d",
+                platform,
+                int((time.monotonic() - started_at) * 1000),
+            )
+        except Exception:
+            logger.warning(
+                "Memory capture failed platform=%s latency_ms=%d",
+                platform,
+                int((time.monotonic() - started_at) * 1000),
+            )
+
+    async def _send_memory_processing_event(
+        self,
+        event: str,
+        kind: str | None,
+        occurred_at: str,
+        queued: int,
+    ) -> bool:
+        from core.handlers.admin_notifications import send_admin_text
+
+        store = self.settings_manager.get_store()
+        admin_ids = list(store.get_admins().keys()) if store else []
+        if not admin_ids:
+            return True
+        if event == "recovered":
+            key = "memory.alert.recovered"
+        else:
+            key = "memory.alert.credential" if kind == "credential" else "memory.alert.engine"
+        text = self._t(key, occurred_at=occurred_at, queued=queued)
+        delivered = await send_admin_text(
+            self,
+            admin_ids,
+            text,
+            log_label="Memory processing notification",
+        )
+        return bool(delivered)
+
     def update_thread_message_id(self, context: MessageContext) -> None:
         """Run real-turn-start hooks after the runtime gate is acquired."""
         self.message_dispatcher.update_thread_message_id(context)
@@ -1238,12 +1628,15 @@ class Controller:
         4. AgentService.default_agent / first registered backend compatibility fallback
         """
         target = self._agent_run_target_payload(context)
+        payload = context.platform_specific or {}
+        target_agent_id = payload.get("vibe_agent_id") or (target.get("agent_id") if target else None)
         target_agent_name = target.get("agent_name") if target else None
         target_backend = target.get("agent_backend") if target else None
-        if target_agent_name:
+        if target_agent_id or target_agent_name:
             vibe_agent = self.resolve_vibe_agent_for_context(
                 context,
-                override_agent_name=str(target_agent_name),
+                override_agent_id=str(target_agent_id) if target_agent_id else None,
+                override_agent_name=str(target_agent_name) if target_agent_name else None,
                 required=False,
             )
             if vibe_agent:
@@ -1270,6 +1663,7 @@ class Controller:
         self,
         context: MessageContext,
         *,
+        override_agent_id: Optional[str] = None,
         override_agent_name: Optional[str] = None,
         required: bool = True,
     ) -> Optional[VibeAgent]:
@@ -1284,9 +1678,12 @@ class Controller:
         agent_name = override_agent_name or (target.get("agent_name") if target else None) or (
             routing.agent_name if routing else None
         )
+        agent_id = override_agent_id or (target.get("agent_id") if target else None)
         try:
+            if agent_id:
+                return self.vibe_agent_store.require_reference_by_id(str(agent_id))
             if agent_name:
-                return self.vibe_agent_store.require_enabled(agent_name)
+                return self.vibe_agent_store.require_reference(agent_name)
             default_agent = self.vibe_agent_store.get_default_agent()
             if default_agent is not None:
                 return default_agent
@@ -1296,7 +1693,11 @@ class Controller:
         except Exception as exc:
             if required:
                 raise
-            logger.warning("Scope references Vibe Agent '%s' but it cannot be resolved: %s", agent_name or "default", exc)
+            logger.warning(
+                "Scope references Vibe Agent '%s' but it cannot be resolved: %s",
+                agent_id or agent_name or "default",
+                exc,
+            )
             return None
 
     @staticmethod
@@ -1380,26 +1781,32 @@ class Controller:
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
+        delivery: Any = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
-        try:
-            return await self.message_dispatcher.emit_agent_message(
-                context=context,
-                message_type=message_type,
-                text=text,
-                parse_mode=parse_mode,
-                is_error=is_error,
-                level=level,
-                status_label=status_label,
-                result_footer=result_footer,
-                output=output,
-                terminal_error=terminal_error,
-            )
-        finally:
-            manager = getattr(self, "session_turns", None)
-            complete = getattr(manager, "on_terminal_delivery_complete", None)
-            if callable(complete):
-                complete(context)
+        result = await self.message_dispatcher.emit_agent_message(
+            context=context,
+            message_type=message_type,
+            text=text,
+            parse_mode=parse_mode,
+            is_error=is_error,
+            level=level,
+            status_label=status_label,
+            result_footer=result_footer,
+            output=output,
+            terminal_error=terminal_error,
+            # Forwarded ONLY when a caller asked for it, for the same reason
+            # ``emit_backend_failure`` does: ``message_dispatcher`` is a
+            # substitutable collaborator (six test suites replace it), so passing
+            # an optional diagnostic unconditionally would change the required
+            # signature of every stand-in.
+            **({"delivery": delivery} if delivery is not None else {}),
+        )
+        manager = getattr(self, "session_turns", None)
+        complete = getattr(manager, "on_terminal_delivery_complete", None)
+        if callable(complete):
+            complete(context)
+        return result
 
     def note_session_tokens(self, context: MessageContext, *, total: int) -> None:
         """Report the session's current context-window occupancy for the status
@@ -1421,6 +1828,143 @@ class Controller:
         return dispatcher.session_token_field(context)
 
     # Main run method
+    @property
+    def service_lock_safe_to_release(self) -> bool:
+        return bool(getattr(self, "_service_lock_safe_to_release", False))
+
+    def request_shutdown(self, reason: str = "requested") -> None:
+        """Schedule shutdown on the controller loop without blocking its owner."""
+
+        if getattr(self, "_shutdown_requested", False):
+            return
+        self._shutdown_requested = True
+        self._service_lock_safe_to_release = False
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        try:
+            loop.call_soon_threadsafe(self._ensure_shutdown_task, reason)
+        except RuntimeError:
+            logger.exception("Failed to schedule controller shutdown")
+            self._shutdown_tainted = True
+
+    def _ensure_shutdown_task(self, reason: str = "requested") -> None:
+        task = getattr(self, "_shutdown_task", None)
+        if task is not None and not task.done():
+            return
+        self._shutdown_task = asyncio.create_task(
+            self._shutdown_on_loop(reason),
+            name="controller-shutdown",
+        )
+
+    async def _shutdown_on_loop(self, reason: str) -> None:
+        """Join passive recovery owners before allowing the loop to stop."""
+
+        logger.info("Controller shutdown started: %s", reason)
+        try:
+            stop_task = self._begin_runtime_work_stack_shutdown()
+            grace = max(
+                0.0,
+                float(
+                    getattr(
+                        self,
+                        "_runtime_work_shutdown_grace_seconds",
+                        _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS,
+                    )
+                ),
+            )
+            done, _ = await asyncio.wait({stop_task}, timeout=grace)
+            if not done:
+                self._shutdown_tainted = True
+                logger.critical(
+                    "Runtime work shutdown exceeded %.1fs; retaining the "
+                    "service lease until exact workers join",
+                    grace,
+                )
+            await asyncio.shield(stop_task)
+        except Exception:
+            self._shutdown_tainted = True
+            logger.exception("Controller shutdown could not join runtime work")
+        finally:
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon(loop.stop)
+
+    def _begin_runtime_work_stack_shutdown(self) -> asyncio.Task[None]:
+        task = getattr(self, "_runtime_work_shutdown_task", None)
+        if task is None:
+            task = asyncio.create_task(
+                self._stop_runtime_work_stack(),
+                name="controller-runtime-work-stack-stop",
+            )
+            self._runtime_work_shutdown_task = task
+        return task
+
+    async def _join_runtime_work_stack_shutdown(self) -> None:
+        await asyncio.shield(self._begin_runtime_work_stack_shutdown())
+
+    async def _stop_runtime_work_stack(self) -> None:
+        """Stop lane consumers before disposing their shared executor."""
+
+        supervisor = getattr(self, "runtime_work_supervisor", None)
+        quiesce = getattr(supervisor, "quiesce", None)
+        if callable(quiesce):
+            quiesce()
+
+        # Controller-generation lanes can still be finishing work after
+        # quiesce. Join them before ScheduledTaskService releases durable Turn
+        # owners; otherwise a delivery-recovery worker can admit a new Turn
+        # immediately after the final owner snapshot.
+        controller_tokens = tuple(getattr(self, "_runtime_work_tokens", ()))
+        if controller_tokens:
+            begin_unregister = getattr(supervisor, "begin_unregister", None)
+            if not callable(begin_unregister):
+                self._shutdown_tainted = True
+                raise RuntimeError(
+                    "runtime work supervisor cannot join controller lanes"
+                )
+            controller_lane_joins = [
+                begin_unregister(token) for token in controller_tokens
+            ]
+            self._runtime_work_tokens = []
+            controller_results = await asyncio.gather(
+                *controller_lane_joins,
+                return_exceptions=True,
+            )
+            controller_errors = [
+                result
+                for result in controller_results
+                if isinstance(result, BaseException)
+            ]
+            if controller_errors:
+                self._shutdown_tainted = True
+                raise RuntimeError(
+                    "controller runtime work lane shutdown failed"
+                ) from controller_errors[0]
+
+        service_stops: list[asyncio.Task[None]] = []
+        for service_name in ("scheduled_task_service", "watch_service"):
+            service = getattr(self, service_name, None)
+            stop = getattr(service, "stop", None)
+            if callable(stop):
+                service_stops.append(
+                    asyncio.create_task(
+                        stop(),
+                        name=f"controller-{service_name}-stop",
+                    )
+                )
+        results = await asyncio.gather(*service_stops, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        stop_supervisor = getattr(supervisor, "stop", None)
+        if callable(stop_supervisor):
+            try:
+                await stop_supervisor()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            self._shutdown_tainted = True
+            raise RuntimeError("runtime work stack shutdown failed") from errors[0]
+
     def run(self):
         """Run the controller"""
         logger.info("Starting Claude Proxy Controller with platforms: %s", ", ".join(self.enabled_platforms))
@@ -1428,9 +1972,13 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            memory_config = getattr(self.config, "memory", None)
+            if memory_config is not None:
+                self._memory_reconcile_task = self._loop.create_task(
+                    self.reconcile_memory(memory_config),
+                    name="memory-runtime-reconcile",
+                )
             self.show_git_checkpoint_service.start()
-            self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
-            self._im_thread.start()
             # Internal control-IPC ASGI server for the Web UI / future
             # ``vibe agent run --sync`` cross-process callers. Lives on
             # the same loop as the IM dispatch path so they share one
@@ -1442,6 +1990,10 @@ class Controller:
             except Exception:
                 logger.exception("internal dispatch server failed to schedule; UI fallback will use the queue path")
                 self._internal_server_task = None
+            self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
+            self._im_thread.start()
+            if self._shutdown_requested:
+                self._ensure_shutdown_task("pre-loop request")
             self._loop.run_forever()
             if self._im_run_exception and not isinstance(self._im_run_exception, (KeyboardInterrupt, SystemExit)):
                 raise self._im_run_exception
@@ -1451,6 +2003,8 @@ class Controller:
             logger.error(f"Error in main run loop: {e}", exc_info=True)
         finally:
             self.cleanup_sync()
+            if not getattr(self, "_shutdown_tainted", False):
+                self._service_lock_safe_to_release = True
             # Let the transport owner close its listener and remove only the
             # endpoint it published. This is required for the Windows descriptor:
             # a stale Controller must not unlink a successor's endpoint.
@@ -1569,10 +2123,61 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_internal_server_task() -> None:
+            task = getattr(self, "_internal_server_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._internal_server_task = None
+
+        async def _cancel_memory_reconcile_task() -> None:
+            task = getattr(self, "_memory_reconcile_task", None)
+            try:
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as error:
+                        logger.debug("Memory startup reconciliation already failed: %s", error)
+            finally:
+                self._memory_reconcile_task = None
+
+        # Without this the task is never settled, so the done callback that
+        # records "stopped" never runs and internal-server.json keeps saying
+        # "ready" after the service exits.
+        _stop_loop_coroutine(_cancel_internal_server_task(), "Internal dispatch server")
+        try:
+            from core import internal_server as _internal_server
+
+            _internal_server.note_stopped()
+        except Exception as e:
+            logger.debug(f"Internal dispatch server status write skipped: {e}")
+
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
-        _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
-        _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
+        _stop_loop_coroutine(
+            self._join_runtime_work_stack_shutdown(),
+            "Runtime work stack",
+        )
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        # Reconciliation can start the sidecar, so settle it before closing the
+        # runtime or it could race shutdown and leave a process behind.
+        _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
+        async def _drain_memory_capture_tasks() -> None:
+            handler = getattr(self, "message_handler", None)
+            drain = getattr(handler, "drain_memory_capture_tasks", None)
+            if callable(drain):
+                await drain()
+
+        _stop_loop_coroutine(_drain_memory_capture_tasks(), "Memory capture tasks")
+        memory_runtime = getattr(self, "memory_runtime", None)
+        if memory_runtime is not None:
+            _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
         if model_hub_turn_gateway is not None:
             _stop_loop_coroutine(model_hub_turn_gateway.close(), "Model Hub turn gateway")

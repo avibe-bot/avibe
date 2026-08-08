@@ -1,4 +1,4 @@
-version: 1
+version: 2
 capability: tunnel_quality
 observations:
   - date: 2026-07-15
@@ -9,3 +9,7 @@ observations:
     scenario_ids: [RA-TQ-004, RA-TQ-005]
     source: cloudflare_replica_contract
     note: Candidate evaluation uses a supported same-tunnel replica; hostname and tunnel identity remain unchanged during overlap and drain.
+  - date: 2026-08-03
+    scenario_ids: [RA-TQ-010, RA-TQ-011, RA-TQ-012, RA-TQ-013, RA-TQ-015, RA-TQ-016, RA-TQ-017, RA-TQ-018, RA-TQ-019, RA-TQ-020]
+    source: live_local_ab
+    note: Healthy QUIC edge RTT hid 1.8-2.7 second request tails; HTTP2 reduced the persistent-path worst case, motivating request-failure recovery, connector-gated comparison, durable rollback, and drain convergence.

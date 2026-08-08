@@ -1,0 +1,83 @@
+{
+  "defaults": {
+    "transcript": false,
+    "searchable": false,
+    "inputAuthors": [],
+    "inboxActivity": false,
+    "inboxPreview": false,
+    "inboxSettlesReply": false,
+    "activityRole": "none",
+    "terminalWhenEvents": [],
+    "unread": false,
+    "webPush": false,
+    "webPushWhenEvents": [],
+    "render": "none"
+  },
+  "types": {
+    "user": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inputAuthors": [
+        "user"
+      ],
+      "activityRole": "turn_start",
+      "render": "user"
+    },
+    "harness": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inputAuthors": [
+        "harness"
+      ],
+      "activityRole": "turn_start",
+      "render": "harness"
+    },
+    "annotation": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inputAuthors": ["harness"],
+      "render": "annotation"
+    },
+    "result": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inboxPreview": true,
+      "inboxSettlesReply": true,
+      "activityRole": "terminal",
+      "unread": true,
+      "webPush": true,
+      "render": "agent"
+    },
+    "notify": {
+      "transcript": true,
+      "inboxActivity": true,
+      "inboxPreview": true,
+      "inboxSettlesReply": true,
+      "terminalWhenEvents": [
+        "backend_failure"
+      ],
+      "webPushWhenEvents": [
+        "backend_failure"
+      ],
+      "render": "status"
+    },
+    "error": {
+      "transcript": true,
+      "inboxActivity": true,
+      "inboxPreview": true,
+      "inboxSettlesReply": true,
+      "activityRole": "terminal",
+      "webPush": true,
+      "render": "status"
+    },
+    "assistant": {
+      "inboxActivity": true,
+      "activityRole": "activity",
+      "render": "activity"
+    }
+  }
+}

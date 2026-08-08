@@ -9,6 +9,7 @@ import { SegmentedRadio } from '../../ui/segmented';
 import { Checkbox } from '../../ui/checkbox';
 import { BACKEND_CHIP, BACKEND_LABEL, BACKEND_ORDER, type Backend } from '../../../lib/backendAccent';
 import { FileDropzone } from './FileDropzone';
+import { errorMessage } from '@/lib/errorMessage';
 
 const AGENT_OF: Record<Backend, string> = { claude: 'claude-code', opencode: 'opencode', codex: 'codex' };
 
@@ -66,8 +67,8 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
       if (reqId !== previewReq.current) return; // a newer source superseded this
       if (res.ok && res.skills) onDiscovered(res.skills);
       else setError(res.error?.message ?? t('skills.addDialog.fetchFirst'));
-    } catch (err: any) {
-      if (reqId === previewReq.current) setError(err?.message ?? String(err));
+    } catch (err) {
+      if (reqId === previewReq.current) setError(errorMessage(err) ?? String(err));
     } finally {
       if (reqId === previewReq.current) setBusy(null);
     }
@@ -89,8 +90,8 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
       } else {
         setError(res.error?.message ?? t('skills.addDialog.fetchFirst'));
       }
-    } catch (err: any) {
-      if (reqId === previewReq.current) setError(err?.message ?? String(err));
+    } catch (err) {
+      if (reqId === previewReq.current) setError(errorMessage(err) ?? String(err));
     } finally {
       if (reqId === previewReq.current) setBusy(null);
     }
@@ -162,8 +163,8 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
       }
       showToast(t('skills.addSuccess', { count: selected.size }), 'success');
       onInstalled();
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     } finally {
       setBusy(null);
     }

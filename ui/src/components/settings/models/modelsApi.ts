@@ -12,45 +12,122 @@ import {
   buildMockAgents,
   buildMockEvents,
   buildMockMigration,
-  buildMockPriority,
   buildMockRuntime,
   buildMockSources,
   mockDiscoveredCount,
+  mockEligibility,
+  mockRecommendedOrder,
 } from './mockData';
+import { buildIdentifier } from './menus/identifiers';
+import { canReauth, canReplaceKey, wasBlocked } from './repair';
+import { isUnhealthy } from './supply';
 import type {
+  AdoptedBy,
   AgentBackend,
+  AgentChain,
+  AgentChainLink,
   AgentMapping,
   AgentMenu,
   AgentMode,
+  AgentSourcesPut,
   AgentSupply,
   ApiKeySourceCreate,
+  CredentialReplace,
   CustomModelCreate,
   MigrationApplyResult,
   MigrationScan,
   OAuthFlow,
-  OAuthSourceCreate,
-  Priority,
+  ProbeResult,
   ResolutionEvent,
   RuntimeDependency,
+  SkippedBy,
   Source,
   SourcePatch,
+  SourceRepaired,
   SupplyChannel,
+  SupplyGap,
 } from './types';
-import { CONTRACT_VERSION } from './types';
+import { AGENT_CHAIN_CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './types';
+
+/**
+ * The terminal result of BOTH creation paths (api.md 「The terminal result of both
+ * ordinary API-key creation and OAuth creation is」).
+ *
+ * `adopted_by` travels with the source rather than being re-read from
+ * `/agents` afterwards, and that is the whole point: it is a snapshot frozen at
+ * commit time, listing only the eligible `follow` backends that took the source
+ * in and at which one-based position. A `custom` backend is absent — not because
+ * nothing happened to it, but because nothing did, which is exactly the case the
+ * user has to be told about while the dialog is still open.
+ *
+ * `skipped_by` is the server naming that case: the backends that COULD have used
+ * this source and were left out because they keep a `custom` order. It is carried
+ * beside `adopted_by` rather than derived from it, because 「absent」 covers both
+ * that and 「never eligible」, and only the server can tell the two apart. Kept
+ * nullable through this reader: an absent array is a server that did not answer
+ * the question, which is not the same as one answering 「nobody」.
+ */
+export type Adoption = { adopted_by: AdoptedBy[]; skipped_by: SkippedBy[] | null };
+export type SourceCreated = { source: Source } & Adoption;
+export type SourceRefresh = { source: Source; discovered: number };
+
+/**
+ * The response of BOTH oauth status and submit (api.md → OAuth completion): the
+ * flow, plus — once a `create` flow reaches success — the source the server
+ * materialized while answering THAT request, and who took it in.
+ *
+ * `created` is the half a client must not throw away. The server creates the
+ * source inside the very call that first reports success and consumes the flow
+ * binding doing it, so a client that keeps only `flow` and then posts to
+ * `/sources` to "finalize" gets `flow_not_found` on a connection that in fact
+ * succeeded. `null` means this response did not report a creation (still
+ * pending, failed, cancelled, or a `reauth` flow, which reports recovery
+ * instead) — NOT that nothing adopted the source. That distinction is why this
+ * is nullable rather than `[]`.
+ *
+ * `repaired` is the other terminal arm, keyed on the payload's own `intent`: a
+ * `reauth` flow succeeds into `{source, recovered, interrupted_pairs}` (api.md,
+ * "recovery symmetry") rather than an adoption list. At most one arm is ever
+ * non-null, because a flow has exactly one intent.
+ */
+export type OAuthResult = {
+  flow: OAuthFlow;
+  created: SourceCreated | null;
+  repaired: SourceRepaired | null;
+};
 
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
-  createApiKeySource(draft: ApiKeySourceCreate): Promise<Source>;
-  /** Finalize a completed subscription OAuth flow into a persisted Source. */
-  createOAuthSource(draft: OAuthSourceCreate): Promise<Source>;
+  createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
   patchSource(id: string, patch: SourcePatch): Promise<Source>;
-  /** Re-run discovery on a hub source; resolves with the discovered count. */
-  testSource(id: string): Promise<number>;
+  /** Re-run discovery on a hub source; resolves with the updated source and count.
+   *  Contractually ALSO the recovery test: run on a needs_action / error source
+   *  it clears the blocker and returns the source to standby. v3 adds no second
+   *  「recover」 endpoint, so this is the whole retry affordance. */
+  refreshSource(id: string): Promise<SourceRefresh>;
   /** Delete a source. `force` overrides the only-supplier guard. */
   deleteSource(id: string, force?: boolean): Promise<void>;
-  putPriority(order: string[]): Promise<Priority>;
+  /** Replace the credential of a hub-channel api_key source. Refuses with
+   *  `source_last_supplier` + `would_interrupt` when the replacement set would
+   *  strand a selected model; `force` commits anyway. */
+  replaceCredential(id: string, body: CredentialReplace): Promise<SourceRepaired>;
+  /** Start re-authorization for a subscription source. Irreversible once it
+   *  begins, which is why the acknowledgement is sent unconditionally — the
+   *  server rejects a native source without it (`reauth_confirmation_required`).
+   *  Resolves with the flow to drive; the repair tail arrives on its terminal
+   *  status/submit response as `OAuthResult.repaired`. */
+  reauthSource(id: string): Promise<OAuthFlow>;
   listAgents(): Promise<AgentSupply[]>;
+  /** Per-backend enabled subset + order + policy (the 来源顺序 drawer's read). */
+  getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
+  /** Total write: `follow` hands the order back to the server, `custom` freezes
+   *  exactly the ids sent. The response re-echoes the canonical order. */
+  putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
+  /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
+  getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
+  /** One real request through the chain. Hub mode only, same reason. */
+  probeAgent(backend: AgentBackend, model?: string): Promise<ProbeResult>;
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
   putMappings(backend: AgentBackend, mappings: AgentMapping[]): Promise<AgentSupply>;
   putMenu(menu: AgentMenu): Promise<AgentSupply>;
@@ -58,13 +135,15 @@ export type ModelsApi = {
   deleteCustomModel(sourceId: string, modelId: string): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
-  listEvents(limit?: number): Promise<ResolutionEvent[]>;
+  /** `before` is an event id cursor (「查看全部」 pagination). */
+  listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
+  startRuntime(): Promise<RuntimeDependency>;
   /** `experimentalConsent` MUST be true for a consent-gated hub-held
    *  subscription connect, or the server returns consent_required. */
   startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean): Promise<OAuthFlow>;
-  getOAuthStatus(flowId: string): Promise<OAuthFlow>;
-  submitOAuth(flowId: string, value: string): Promise<OAuthFlow>;
+  getOAuthStatus(flowId: string): Promise<OAuthResult>;
+  submitOAuth(flowId: string, value: string): Promise<OAuthResult>;
   cancelOAuth(flowId: string): Promise<void>;
 };
 
@@ -74,13 +153,102 @@ const isLive = () => MODELS_API_MODE === 'live';
 class ApiCallError extends Error {
   code: string;
   detail?: string;
-  constructor(code: string, detail?: string) {
+  /**
+   * The `source_last_supplier` payload half. Carried on the error rather than
+   * looked up afterwards for the same reason `adopted_by` travels with a
+   * creation: it is the server's evaluation of the write it just refused, and
+   * no later read of `/agents` reproduces it — that read describes today's
+   * supply, not the supply the refused write would have left behind.
+   *
+   * `[]` on every other code, so a call site can render the gap report without
+   * first proving which error it has.
+   */
+  wouldInterrupt: SupplyGap[];
+  /**
+   * The OTHER half, and deliberately not the same field: `would_interrupt` names
+   * what a REFUSED write would have stranded (nothing changed, the copy is future
+   * tense), while `interrupted_pairs` on an error names what a write that already
+   * COMMITTED did strand. A native reauth is where that difference is not
+   * academic — `_materialize_reauth` clears the source, marks it unavailable, and
+   * only then answers `discovery_failed` with the pairs beside it, so these gaps
+   * are a report about the past, not a confirm about the future. Collapsed into
+   * one field, the caller would have no way to pick the right tense.
+   */
+  interrupted: SupplyGap[];
+  /**
+   * Whether the ROUTE named this failure, i.e. whether `code` came off the wire.
+   *
+   * Two of the codes here are this client's own summary of a response that never
+   * said what happened: `bad_response` when the body would not parse, `http_<n>`
+   * when it parsed and carried no `error`. They are not outcomes — a route that
+   * names a failure has already decided what it did, while these say only that
+   * the answer did not arrive intact, which the server having written first is
+   * entirely consistent with. Anything downstream that skips a corrective re-read
+   * because 「the route said so」 has to ask this rather than 「is it one of ours?」.
+   *
+   * `true` by default because every other throw in this module IS an outcome: the
+   * local mock raises the same codes the routes do. Only `call` invents any, and
+   * it says so at both sites.
+   */
+  serverNamed: boolean;
+  constructor(
+    code: string,
+    detail?: string,
+    serverNamed = true,
+    wouldInterrupt: SupplyGap[] = [],
+    interrupted: SupplyGap[] = [],
+  ) {
     super(detail || code);
     this.name = 'ApiCallError';
     this.code = code;
     this.detail = detail;
+    this.serverNamed = serverNamed;
+    this.wouldInterrupt = wouldInterrupt;
+    this.interrupted = interrupted;
   }
 }
+
+/** Normalize to the FULL contract shape: a gap without `agents` is a gap whose
+ *  confirm copy has nothing to name, and `[]` renders as 「无」 rather than
+ *  crashing the dialog that was opened to explain the refusal. */
+const supplyGaps = (raw: unknown): SupplyGap[] =>
+  Array.isArray(raw)
+    ? raw
+        .filter((g): g is Record<string, unknown> => Boolean(g) && typeof g === 'object')
+        .map((g) => ({
+          backend: g.backend as SupplyGap['backend'],
+          model_id: String(g.model_id ?? ''),
+          agents: Array.isArray(g.agents) ? g.agents.map(String) : [],
+        }))
+    : [];
+
+/**
+ * The one reader every call site uses instead of casting a caught `unknown`.
+ *
+ * Both clients throw `ApiCallError`, but a caught value is still `unknown` to
+ * TypeScript, and `(err as {code?: string}).code` spread across call sites is
+ * how a renamed field goes silently unread. Returns null for anything that is
+ * not one of ours — a TypeError from our own render code must not be reported
+ * to the user as a supply refusal.
+ */
+export const apiFailure = (
+  err: unknown,
+): {
+  code: string;
+  detail?: string;
+  serverNamed: boolean;
+  wouldInterrupt: SupplyGap[];
+  interrupted: SupplyGap[];
+} | null =>
+  err instanceof ApiCallError
+    ? {
+        code: err.code,
+        detail: err.detail,
+        serverNamed: err.serverNamed,
+        wouldInterrupt: err.wouldInterrupt,
+        interrupted: err.interrupted,
+      }
+    : null;
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
@@ -88,10 +256,21 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     payload = await res.json();
   } catch {
-    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`);
+    // Invented here, not read off the wire: the request may well have been
+    // carried out and its answer lost coming back.
+    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false);
   }
   if (!res.ok || payload?.ok === false) {
-    throw new ApiCallError(payload?.error || `http_${res.status}`, payload?.detail);
+    throw new ApiCallError(
+      payload?.error || `http_${res.status}`,
+      payload?.detail,
+      // `payload.error` is the only thing that carries a route's own verdict, so
+      // its presence IS the answer. `http_502` is this client summarizing a
+      // response that never gave one.
+      Boolean(payload?.error),
+      supplyGaps(payload?.would_interrupt),
+      supplyGaps(payload?.interrupted_pairs),
+    );
   }
   return payload as T;
 }
@@ -102,15 +281,107 @@ const jsonInit = (method: string, body?: unknown): RequestInit => ({
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 
+/**
+ * The adoption tail, defaulted. Both creation routes answer with it — the plain
+ * one and the oauth envelope — and the two defaults below are DIFFERENT rules, so
+ * they get one reader rather than two copies that would eventually agree.
+ *
+ * `adopted_by` is a list of things that happened: absent can only mean none did.
+ * (Absent-is-not-empty holds in the contract for reauth, which never reaches here.)
+ *
+ * `skipped_by` is the answer to 「who was left out」, and `[]` there is a positive
+ * claim that nobody was. A server that never sent the field has not made that
+ * claim, so silence stays null — defaulting it to `[]` would upgrade 「did not
+ * say」 into 「fully covered」, which is the one thing the adoption note exists to
+ * avoid.
+ */
+type AdoptionTail = { adopted_by?: AdoptedBy[]; skipped_by?: SkippedBy[] };
+const adoption = (r: AdoptionTail): Adoption => ({
+  adopted_by: r.adopted_by ?? [],
+  skipped_by: r.skipped_by ?? null,
+});
+
+/** api.md pins the shape to `{source, adopted_by, skipped_by}` with no extra
+ *  nesting; the bare-`Source` arm is the same tolerance every other write here
+ *  keeps. */
+type SourceCreatedResponse = { source?: Source } & AdoptionTail & Source;
+const created = (r: SourceCreatedResponse): SourceCreated => ({
+  source: (r.source ?? r) as Source,
+  ...adoption(r),
+});
+
+/** api.md "recovery symmetry": both repair routes answer with this same tail,
+ *  so both unwrap through one reader. */
+type SourceRepairedResponse = { source?: Source; recovered?: boolean; interrupted_pairs?: SupplyGap[] } & Source;
+const repaired = (r: SourceRepairedResponse): SourceRepaired => ({
+  source: (r.source ?? r) as Source,
+  recovered: r.recovered === true,
+  interrupted_pairs: supplyGaps(r.interrupted_pairs),
+});
+
+/** The oauth terminal envelope, unwrapped without discarding either tail. */
+export type OAuthResultResponse = { flow?: OAuthFlow } & OAuthFlow &
+  AdoptionTail & {
+    source?: Source;
+    recovered?: boolean;
+    interrupted_pairs?: SupplyGap[];
+  };
+/** Exported for its own test: this is where the create half was being dropped. */
+export const oauthResult = (r: OAuthResultResponse): OAuthResult => {
+  const flow = (r.flow ?? r) as OAuthFlow;
+  // Discriminate on the payload's own `intent`, not on which dialog is open:
+  // `reauth` also terminates with a `source` but carries recovery counts instead
+  // of adoption, and reading those as an adoption list would report the wrong
+  // thing about the wrong flow. Absent `intent` is a `create` flow (the field
+  // postdates the first shipped payloads, and create is the flow this UI starts
+  // from the vendor buttons).
+  const isCreate = flow.intent !== 'reauth';
+  return {
+    flow,
+    // No bare-`Source` tolerance here, unlike `created()`: this envelope always
+    // nests the source under `source`, beside the flow it accompanies. The tail
+    // itself goes through the same `adoption` reader, so the two routes cannot
+    // default one of these arrays differently from the other.
+    created: isCreate && r.source ? { source: r.source, ...adoption(r) } : null,
+    // The repair tail. `recovered` is defaulted false rather than optional: it is
+    // the server's own 「this source had been blocked」 judgement, and absent must
+    // read as 「did not say so」 — never as a client guess that it was.
+    repaired:
+      !isCreate && r.source
+        ? {
+            source: r.source,
+            recovered: r.recovered === true,
+            interrupted_pairs: supplyGaps(r.interrupted_pairs),
+          }
+        : null,
+  };
+};
+
 const liveApi: ModelsApi = {
   listSources: () => call<{ sources: Source[] }>('/api/models/sources').then((r) => r.sources),
-  createApiKeySource: (draft) => call<{ source?: Source } & Source>('/api/models/sources', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
-  createOAuthSource: (draft) => call<{ source?: Source } & Source>('/api/models/sources', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
+  // Both keep `adopted_by`. The old unwrap-to-`source` dropped it on the floor,
+  // and no later read can put it back: `/agents` shows today's orders, not which
+  // of them this commit changed.
+  createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
-  testSource: (id) => call<{ discovered: number }>(`/api/models/sources/${encodeURIComponent(id)}/test`, jsonInit('POST')).then((r) => r.discovered),
-  deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=1' : ''}`, jsonInit('DELETE')).then(() => undefined),
-  putPriority: (order) => call<{ priority?: Priority } & Priority>('/api/models/priority', jsonInit('PUT', { contract_version: CONTRACT_VERSION, order })).then((r) => (r.priority ?? r) as Priority),
+  refreshSource: (id) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST')),
+  deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=true' : ''}`, jsonInit('DELETE')).then(() => undefined),
+  // Both repair routes reject unknown body keys outright (`discovery_failed` /
+  // `reauth_confirmation_required`), so these bodies are exactly the contract's
+  // and carry no `contract_version` — the same closed-body rule as putAgentSources.
+  replaceCredential: (id, body) => call<SourceRepairedResponse>(`/api/models/sources/${encodeURIComponent(id)}/credential`, jsonInit('PUT', body)).then(repaired),
+  // The acknowledgement is unconditional by design: the server enforces it for
+  // native sources pre-login, and api.md's per-channel truth makes a hub grant
+  // replacement equally irreversible once new material is written. One confirm,
+  // no channel branch.
+  reauthSource: (id) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/sources/${encodeURIComponent(id)}/reauth`, jsonInit('POST', { acknowledge_irreversible: true })).then((r) => (r.flow ?? r) as OAuthFlow),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
+  getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
+  // The body is TOTAL and closed: the route rejects unknown keys, so
+  // `contract_version` is deliberately absent (unlike every other write here).
+  putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
+  getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
   putMappings: (backend, mappings) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mappings`, jsonInit('PUT', { mappings })).then((r) => (r.agent ?? r) as AgentSupply),
   putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
@@ -118,49 +389,164 @@ const liveApi: ModelsApi = {
   deleteCustomModel: (sourceId, modelId) => call<{ source?: Source } & Source>('/api/models/custom-models', jsonInit('DELETE', { source_id: sourceId, model_id: modelId })).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
-  listEvents: (limit = 20) => call<{ events: ResolutionEvent[] }>(`/api/models/events?limit=${limit}`).then((r) => r.events),
+  listEvents: (limit = 20, before) =>
+    call<{ events: ResolutionEvent[] }>(
+      `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
+    ).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
+  startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startOAuth: (vendor, channel, experimentalConsent) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
       '/api/models/oauth/start',
       jsonInit('POST', { vendor, channel, ...(experimentalConsent ? { experimental_consent: true } : {}) }),
     ).then((r) => (r.flow ?? r) as OAuthFlow),
-  getOAuthStatus: (flowId) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then((r) => (r.flow ?? r) as OAuthFlow),
-  submitOAuth: (flowId, value) => call<{ flow?: OAuthFlow } & OAuthFlow>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then((r) => (r.flow ?? r) as OAuthFlow),
+  getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(oauthResult),
+  submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(oauthResult),
   cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(() => undefined),
 };
 
 // ── Mock client ─────────────────────────────────────────────────────────
 // A single mutable store so reorder / add / mode-switch stick across calls
 // within a session, giving a realistic demo without a backend.
-type MockFlow = { flow: OAuthFlow; polls: number; submitted: boolean };
+/** `recovered` is captured when a reauth flow STARTS, like the server's own
+ *  `recovered = source.state.status in {needs_action, error}` — read before the
+ *  native irreversible step rewrites that very status. */
+type MockFlow = { flow: OAuthFlow; polls: number; submitted: boolean; recovered?: boolean };
 
 const rid = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const delay = <T>(value: T, ms = 260): Promise<T> => new Promise((r) => setTimeout(() => r(value), ms));
 
 class MockStore {
   sources = buildMockSources();
-  priority = buildMockPriority();
-  agents = buildMockAgents();
+  agents = buildMockAgents(this.sources);
   events = buildMockEvents();
   runtime = buildMockRuntime();
   flows = new Map<string, MockFlow>();
 
-  private ordered(): Source[] {
+  // ── Fake server-side recomputation ───────────────────────────────────
+  // Every read of an agent re-derives what the real server derives: the
+  // per-backend order (recommended under `follow`, pruned under `custom`),
+  // eligibility, and the supply rollup. That is what makes a drag-reorder or a
+  // source deletion update supply status in the demo instead of leaving it stale.
+  private syncAgents() {
+    for (const a of this.agents) {
+      if (a.mode === 'direct') {
+        a.sources = null;
+      } else {
+        const policy = a.sources?.policy ?? 'follow';
+        const eligibility = mockEligibility(this.sources, a.backend);
+        const eligible = new Set(eligibility.filter((e) => e.eligible).map((e) => e.source_id));
+        const order =
+          policy === 'follow'
+            ? mockRecommendedOrder(this.sources, a.backend)
+            : // A `custom` subset is frozen, never extended — but a deleted or
+              // newly ineligible id drops out (the invariant the server enforces).
+              (a.sources?.order ?? []).filter((id) => eligible.has(id));
+        a.sources = { policy, order, eligibility };
+      }
+      this.deriveSupply(a);
+    }
+  }
+
+  /** §4.3 + §4.5 in miniature: capability (supplies the mapped id) split from
+   *  runnability (not blocked), then the rollup over the resulting chain. */
+  private deriveSupply(a: AgentSupply) {
+    if (a.mode === 'direct') {
+      a.selected_model_id = null;
+      a.selected_model_explicit = false;
+      a.selected_by_agent = null;
+      a.supply_status = null;
+      a.model_supply = null;
+      a.named_agents = (a.named_agents ?? []).map((n) => ({ ...n, effective_model_id: null, supply_status: null }));
+      return;
+    }
     const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const ranked = this.priority.order.map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
-    const extras = this.sources.filter((s) => !this.priority.order.includes(s.id));
-    return [...ranked, ...extras];
+    const order = (a.sources?.order ?? []).map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
+    const target = (model: string) => {
+      const m = a.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
+      return m ? m.target_model_id : model;
+    };
+    const chainFor = (model: string) => order.filter((s) => s.models.some((mm) => mm.id === target(model)));
+    if (a.builtin_models) {
+      a.model_supply = a.builtin_models.map((m) => ({ model_id: m, chain_length: chainFor(m).length }));
+    }
+    const selected = a.selected_model_id ?? null;
+    if (!selected) {
+      a.supply_status = null;
+    } else {
+      const chain = chainFor(selected);
+      const head = chain.find(isRunnable) ?? null;
+      const blocked = chain.filter((s) => !isRunnable(s));
+      if (!head) {
+        a.supply_status =
+          chain.length > 0 && blocked.every((s) => s.state.status === 'cooldown') ? 'waiting' : 'interrupted';
+      } else {
+        a.supply_status = head.id === chain[0]?.id && blocked.length === 0 ? 'ok' : 'degraded';
+      }
+    }
+    const rollup = a.supply_status ?? null;
+    a.named_agents = (a.named_agents ?? []).map((n) =>
+      n.effective_model_id ? { ...n, supply_status: rollup } : n,
+    );
   }
 
   listSources() {
-    return delay(structuredClone(this.ordered()));
+    // api.md: the inventory is explicitly UNORDERED — order is per-backend.
+    return delay(structuredClone(this.sources));
+  }
+
+  /**
+   * The `adopted_by` projection, derived the same way the server derives it:
+   * re-run the recommendation, then report where the new id actually landed.
+   *
+   * It is deliberately NOT a guess from the source's vendor — a `follow` backend
+   * adopts only what its eligibility admits, so the answer for one credential can
+   * be 「claude 第 2 位」 and nothing at all for opencode. Anything on `custom` is
+   * omitted by the contract; that omission is the signal the dialogs read.
+   */
+  private adoptionOf(sourceId: string): AdoptedBy[] {
+    this.syncAgents();
+    return this.agents
+      .filter((a) => a.mode === 'hub' && a.sources?.policy === 'follow')
+      .map((a) => ({ backend: a.backend, order: a.sources?.order ?? [] }))
+      .filter(({ order }) => order.includes(sourceId))
+      .map(({ backend, order }) => ({
+        backend,
+        policy: 'follow' as const,
+        position: order.indexOf(sourceId) + 1, // one-based, per api.md
+      }));
+  }
+
+  /**
+   * The complement, derived the way `_skipped_by` derives it: ELIGIBLE for this
+   * backend, on a `custom` order, and not in it. The eligibility filter is what
+   * makes the two lists different from `MODEL_HUB_BACKENDS` minus `adopted_by` —
+   * a backend that could never use the credential belongs to neither.
+   */
+  private skippedOf(sourceId: string): SkippedBy[] {
+    this.syncAgents();
+    return this.agents
+      .filter(
+        (a) =>
+          a.mode === 'hub' &&
+          a.sources?.policy === 'custom' &&
+          !a.sources.order.includes(sourceId) &&
+          (a.sources.eligibility ?? []).some((e) => e.source_id === sourceId && e.eligible),
+      )
+      .map((a) => ({ backend: a.backend, reason: 'custom_order' as const }));
+  }
+
+  /** Both creation routes answer with the same pair. */
+  private adoptionTail(sourceId: string) {
+    return { adopted_by: this.adoptionOf(sourceId), skipped_by: this.skippedOf(sourceId) };
   }
 
   createApiKeySource(draft: ApiKeySourceCreate) {
     const count = mockDiscoveredCount(draft.vendor);
     const source: Source = {
       id: rid('src'),
+      created_at: new Date().toISOString(),
+      last_discovered_at: new Date().toISOString(),
       kind: 'api_key',
       vendor: draft.vendor,
       display_name: draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor),
@@ -182,61 +568,342 @@ class MockStore {
       credential_ref: rid('cred'),
     };
     this.sources.push(source);
-    this.priority.order.push(source.id);
-    return delay(structuredClone(source), 900); // simulate probe latency
+    // simulate probe latency
+    return delay({ source: structuredClone(source), ...this.adoptionTail(source.id) }, 900);
+  }
+
+  /**
+   * The supply guard, evaluated the way the server evaluates it: against the
+   * CANDIDATE config the write would produce, not against a live binding.
+   *
+   * The old version asked 「is this source some agent's `current`?」, which is a
+   * different and weaker question: deleting the second source of a two-source
+   * chain strands nothing (the head still serves), while deleting the only
+   * supplier of a *cooling* head strands a model that has no `current` at all.
+   * Reporting per (backend, model) with the Agents that run it is also what makes
+   * the confirm copy nameable — 「删除后 pm 将没有可用来源」.
+   */
+  private wouldInterrupt(candidate: Source[]): SupplyGap[] {
+    const byId = new Map(candidate.map((s) => [s.id, s]));
+    const gaps: SupplyGap[] = [];
+    for (const a of this.agents) {
+      if (a.mode !== 'hub') continue;
+      const model = a.selected_model_id;
+      if (!model) continue;
+      const mapping = a.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
+      const resolved = mapping ? mapping.target_model_id : model;
+      // A `follow` order only ever LOSES the removed id (the recommendation never
+      // gains a source from a write), so filtering the live order through the
+      // candidate set is the same answer refresh_follow_orders would give.
+      const survives = (a.sources?.order ?? [])
+        .map((id) => byId.get(id))
+        .some((s) => s !== undefined && s.models.some((mm) => mm.id === resolved) && isRunnable(s));
+      if (survives) continue;
+      gaps.push({
+        backend: a.backend,
+        model_id: model,
+        agents: (a.named_agents ?? []).filter((n) => n.effective_model_id === model).map((n) => n.name),
+      });
+    }
+    return gaps;
   }
 
   deleteSource(id: string, force = false) {
-    // Mirror the server's only-supplier guard (mode_switch_blocked): a source
-    // currently bound as some agent's supply can't be dropped without force.
-    if (!force && this.agents.some((a) => a.current?.source_id === id)) {
-      throw new ApiCallError('mode_switch_blocked');
-    }
-    this.sources = this.sources.filter((s) => s.id !== id);
-    this.priority.order = this.priority.order.filter((x) => x !== id);
-    for (const a of this.agents) if (a.current?.source_id === id) a.current = null;
+    this.syncAgents();
+    const remaining = this.sources.filter((s) => s.id !== id);
+    // `source_last_supplier` — the code the contract actually sends here.
+    // `mode_switch_blocked` belongs to the mode route, and a client written
+    // against it retried nothing on a real refusal.
+    const gaps = this.wouldInterrupt(remaining);
+    if (gaps.length > 0 && !force)
+      throw new ApiCallError('source_last_supplier', undefined, true, gaps);
+    this.sources = remaining;
+    // Orders and the rollup are recomputed on the next read (syncAgents).
     return delay(undefined);
   }
 
-  putPriority(order: string[]) {
-    // Server echoes the authoritative full order (every non-deleted source once).
-    const known = new Set(this.sources.map((s) => s.id));
-    const cleaned = order.filter((id) => known.has(id));
-    const missing = this.sources.map((s) => s.id).filter((id) => !cleaned.includes(id));
-    this.priority = { contract_version: CONTRACT_VERSION, order: [...cleaned, ...missing] };
-    return delay(structuredClone(this.priority));
+  replaceCredential(id: string, body: CredentialReplace) {
+    this.syncAgents();
+    const source = this.sources.find((s) => s.id === id);
+    if (!source) throw new ApiCallError('source_not_found');
+    // The server's preconditions, restated rather than assumed: the menu offers
+    // this only where they hold, but a mock that failed open would hide a wiring
+    // mistake until it reached a real backend.
+    if (!canReplaceKey(source) || !body.key.trim()) throw new ApiCallError('discovery_failed');
+    const recovered = wasBlocked(source.state);
+    const previousMask = source.masked_credential;
+    const previousState = { ...source.state };
+    // Atomic commit, standby-clearing semantics shared with refreshSource: a
+    // replacement re-discovers and lands on standby, never straight to active.
+    source.masked_credential = maskKey(body.key);
+    source.credential_ref = rid('cred');
+    source.state = { status: 'standby', retry_at: null, detail_key: null };
+    const interrupted = this.wouldInterrupt(this.sources);
+    // A RECOVERING write is exempt from the guard and merely reports what is
+    // still stranded; only an elective one can be refused.
+    if (interrupted.length > 0 && !recovered && !body.force) {
+      source.masked_credential = previousMask;
+      source.state = previousState;
+      throw new ApiCallError('source_last_supplier', undefined, true, interrupted);
+    }
+    this.syncAgents();
+    return delay(
+      { source: structuredClone(source), recovered, interrupted_pairs: interrupted },
+      700,
+    );
+  }
+
+  reauthSource(id: string) {
+    const source = this.sources.find((s) => s.id === id);
+    if (!source) throw new ApiCallError('source_not_found');
+    if (!canReauth(source)) throw new ApiCallError('discovery_failed');
+    // Read BEFORE the irreversible step below, which sets needs_action itself and
+    // would otherwise make every native re-auth report a recovery.
+    const recovered = wasBlocked(source.state);
+    // Native re-auth is irreversible from the first step: the server clears the
+    // discovered models and drops the account label BEFORE any login happens, so
+    // the row goes to 需处理 even if the user abandons the browser tab. Mirrored
+    // here, because a mock that kept the old models would make the confirm dialog
+    // look like a formality.
+    if (source.supply_channel === 'native_cli') {
+      source.models = [];
+      source.account_label = null;
+      source.state = { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.oauth_expired' };
+    }
+    const isDevice = source.vendor === 'openai';
+    const flow: OAuthFlow = {
+      flow_id: rid('oaf'),
+      intent: 'reauth',
+      // A reauth flow binds to the EXISTING source, which is what makes its
+      // terminal response a repair rather than a creation.
+      source_id: source.id,
+      vendor: source.vendor,
+      channel: source.supply_channel,
+      state: 'awaiting_action',
+      presentation: isDevice
+        ? { auth_url: 'https://chatgpt.com/device', device_code: 'RFTQ-MPZK', expects: 'none', instructions_key: 'settings.models.oauth.deviceCode.hint' }
+        : { auth_url: 'https://claude.ai/oauth/authorize?code=true&client_id=avibe&scope=org%3Acreate_api_key', device_code: null, expects: 'paste_code', instructions_key: 'settings.models.oauth.pasteCode.hint' },
+      error_key: null,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+    };
+    this.flows.set(flow.flow_id, { flow, polls: 0, submitted: false, recovered });
+    this.syncAgents();
+    return delay(structuredClone(flow), 400);
   }
 
   listAgents() {
+    this.syncAgents();
     return delay(structuredClone(this.agents));
   }
 
-  setAgentMode(backend: AgentBackend, mode: AgentMode) {
+  private agentOr404(backend: AgentBackend): AgentSupply {
     const agent = this.agents.find((a) => a.backend === backend);
     if (!agent) throw new ApiCallError('source_not_found');
-    agent.mode = mode;
-    if (mode === 'direct') {
-      agent.current = null;
-    } else if (!agent.current) {
-      const top = this.ordered().find((s) => s.state.status !== 'error');
-      agent.current = top
-        ? { model_id: top.models[0]?.id ?? 'unknown', source_id: top.id, channel: top.supply_channel }
-        : null;
+    return agent;
+  }
+
+  getAgentSources(backend: AgentBackend) {
+    this.syncAgents();
+    return delay(structuredClone(this.agentOr404(backend)));
+  }
+
+  putAgentSources(backend: AgentBackend, body: AgentSourcesPut) {
+    const agent = this.agentOr404(backend);
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    if (body.policy === 'follow') {
+      // 恢复推荐顺序 discards the frozen subset; the order comes back from §4.2.
+      agent.sources = { policy: 'follow', order: [], eligibility: null };
+    } else {
+      // §4.4's invariants, server-side: every id exists, is eligible here, and
+      // appears once. Omitting one is how the user says 未启用 — not an error.
+      const eligible = new Set(
+        mockEligibility(this.sources, backend).filter((e) => e.eligible).map((e) => e.source_id),
+      );
+      const seen = new Set<string>();
+      for (const id of body.order) {
+        if (!eligible.has(id) || seen.has(id)) throw new ApiCallError('invalid_source_order', id);
+        seen.add(id);
+      }
+      agent.sources = { policy: 'custom', order: [...body.order], eligibility: null };
     }
+    this.syncAgents();
+    return delay(structuredClone(agent), 380);
+  }
+
+  /**
+   * The chain both hub-only routes answer from, shared the way the server shares
+   * it: `probe_agent` calls `_agent_chain` and takes its first runnable member.
+   * Deriving the head a second time is how the mock's probe and chain would
+   * disagree about the same supply — and `supply_state` is a rollup the v4 schema
+   * now pins to this very array, so it cannot be restated per route either.
+   */
+  private chainFor(agent: AgentSupply, model: string) {
+    const byId = new Map(this.sources.map((s) => [s.id, s]));
+    const mapping = agent.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
+    const resolved = mapping ? mapping.target_model_id : model;
+    const chain: AgentChainLink[] = (agent.sources?.order ?? [])
+      .map((id) => byId.get(id))
+      .filter((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved))
+      .map((s) => ({
+        source_id: s.id,
+        channel: s.supply_channel,
+        via_mapping: Boolean(mapping),
+        resolved_model_id: mapping ? resolved : null,
+        health: chainHealth(s),
+        runnable: isRunnable(s),
+        // v4: process availability is a fact about the serving process — which
+        // native CLI it can launch under its own login — and a browser mock has
+        // no way to observe it. So it stands in for a runtime where every
+        // configured CLI is launchable, rather than inventing an outage. The
+        // unavailable branch is asserted in the unit tests, which can state the
+        // fact instead of guessing it.
+        reason: null,
+        retry_at: s.state.status === 'cooldown' ? s.state.retry_at ?? null : null,
+      }));
+    const supply_state: AgentChain['supply_state'] = chain.some((l) => l.runnable)
+      ? 'ok'
+      : chain.length > 0 && chain.every((l) => l.health === 'cooldown' && l.reason === null)
+        ? 'waiting'
+        : 'interrupted';
+    return { chain, supply_state };
+  }
+
+  getAgentChain(backend: AgentBackend, model: string) {
+    this.syncAgents();
+    const agent = this.agentOr404(backend);
+    // AC-7: direct mode has no src_* identity to report, so the route refuses
+    // rather than answering with an empty (falsely alarming) chain.
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    const { chain, supply_state } = this.chainFor(agent, model);
+    return delay({
+      contract_version: AGENT_CHAIN_CONTRACT_VERSION,
+      backend,
+      model_id: model,
+      chain,
+      supply_state,
+    });
+  }
+
+  probeAgent(backend: AgentBackend, model?: string) {
+    this.syncAgents();
+    const agent = this.agentOr404(backend);
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    const modelId = model ?? agent.selected_model_id;
+    if (!modelId) throw new ApiCallError('model_unsupported');
+    const { chain, supply_state } = this.chainFor(agent, modelId);
+    const head = chain.find((l) => l.runnable);
+    // `probe_no_candidate` is the contract's code for this; `no_runnable_source`
+    // was invented here and is in no error vocabulary, so the L5 dry-run button
+    // would have been written against a code the server never sends. The server
+    // also names WHICH blocked family it is in the 409's detail, and the drawer
+    // renders that key — a detail-less throw would leave it unreachable here.
+    // `ok` cannot occur on this branch: it is the rollup's word for "some member
+    // is runnable", which is exactly what failing to find a head rules out.
+    if (!head) throw new ApiCallError('probe_no_candidate', `models.probe.no_candidate.${supply_state}`);
+    // The native_cli half is a readiness answer, not a request: nothing upstream
+    // is attempted, so there is no latency to report and a measured local number
+    // would impersonate completion evidence. Readiness itself follows `reason`
+    // above — every configured CLI is launchable in the mock.
+    const native = head.channel === 'native_cli';
+    const probe: ProbeResult = {
+      contract_version: PROBE_RESULT_CONTRACT_VERSION,
+      backend,
+      channel: head.channel,
+      reachable: true,
+      source_id: head.source_id,
+      // The resolved id, mapping applied — what the server reports, and not the
+      // requested id it was rewritten from.
+      model_id: head.resolved_model_id ?? modelId,
+      latency_ms: native ? null : 180 + Math.floor(Math.random() * 420),
+      via_mapping: head.via_mapping,
+      error: null,
+    };
+    // A real upstream request takes a real moment; a local readiness check does not.
+    return delay(probe, native ? 400 : 1200);
+  }
+
+  setAgentMode(backend: AgentBackend, mode: AgentMode) {
+    const agent = this.agentOr404(backend);
+    agent.mode = mode;
+    if (mode === 'hub') {
+      // Rejoining the hub starts on the recommendation, and picks up whatever
+      // model selected for the Agent (first built-in / first supplied id in mock mode).
+      agent.sources = { policy: 'follow', order: [], eligibility: null };
+      agent.selected_model_id = agent.builtin_models?.[0] ?? this.sources[0]?.models[0]?.id ?? null;
+      // The server's default comes from the STORED per-backend request, so a
+      // non-null id here is explicit; nothing selected is the false case.
+      agent.selected_model_explicit = agent.selected_model_id !== null;
+      agent.named_agents = (agent.named_agents ?? []).map((n) => ({
+        ...n,
+        effective_model_id: agent.selected_model_id ?? null,
+      }));
+    }
+    this.syncAgents();
     return delay(structuredClone(agent));
+  }
+
+  /**
+   * `_enroll_target_sources` in miniature (api.md → "Mapping and menu
+   * enrollment"): a target whose suppliers are all outside the order pulls in
+   * EXACTLY ONE — the first in the recommendation — and the order forks to
+   * `custom` only when something was actually appended.
+   *
+   * Modelled here rather than left as a no-op for the reason `oauthResult`
+   * documents: a mock that treats a mutation and its side effect as separate is
+   * a mock that cannot fail the way the product does, and the drawers' 完成
+   * notice exists only because of this side effect.
+   */
+  private enrollTargets(agent: AgentSupply, targetGroups: string[][]) {
+    const order = agent.sources?.order ?? [];
+    const enrolled = new Set(order);
+    const appended: string[] = [];
+    for (const group of targetGroups) {
+      if (group.length === 0 || group.some((id) => enrolled.has(id))) continue;
+      enrolled.add(group[0]);
+      appended.push(group[0]);
+    }
+    if (appended.length === 0) return;
+    agent.sources = { policy: 'custom', order: [...order, ...appended], eligibility: null };
+  }
+
+  /** The suppliers of one target, in the recommendation's order — the list the
+   *  server picks its single enrollee from. */
+  private suppliersOf(backend: AgentBackend, carries: (source: Source) => boolean): string[] {
+    const byId = new Map(this.sources.map((s) => [s.id, s]));
+    return mockRecommendedOrder(this.sources, backend).filter((id) => {
+      const source = byId.get(id);
+      return source ? carries(source) : false;
+    });
   }
 
   putMappings(backend: AgentBackend, mappings: AgentMapping[]) {
     const agent = this.agents.find((a) => a.backend === backend);
     if (!agent) throw new ApiCallError('source_not_found');
+    this.enrollTargets(
+      agent,
+      mappings
+        .filter((m) => m.enabled)
+        .map((m) => this.suppliersOf(backend, (s) => s.models.some((mm) => mm.id === m.target_model_id))),
+    );
     agent.mappings = mappings;
+    this.syncAgents();
     return delay(structuredClone(agent));
   }
 
   putMenu(menu: AgentMenu) {
     const agent = this.agents.find((a) => a.backend === 'opencode');
     if (!agent) throw new ApiCallError('source_not_found');
+    const standardVendors = new Set(agent.standard_vendors ?? []);
+    this.enrollTargets(
+      agent,
+      menu.checked.map((identifier) =>
+        this.suppliersOf('opencode', (s) =>
+          s.models.some((mm) => buildIdentifier(s.vendor, mm.id, standardVendors) === identifier),
+        ),
+      ),
+    );
     agent.menu = menu;
+    this.syncAgents();
     return delay(structuredClone(agent));
   }
 
@@ -283,6 +950,8 @@ class MockStore {
       const channel: SupplyChannel = item.proposed_action === 'keep_native' ? 'native_cli' : 'hub';
       this.sources.push({
         id: rid('src'),
+        created_at: new Date().toISOString(),
+        last_discovered_at: new Date().toISOString(),
         kind: isKey ? 'api_key' : 'subscription',
         vendor: item.backend === 'opencode' ? 'zhipuai' : item.backend === 'codex' ? 'openai' : 'anthropic',
         display_name: item.masked_detail.split(' · ')[0] || 'Imported',
@@ -305,15 +974,22 @@ class MockStore {
       const agent = this.agents.find((a) => a.backend === backend);
       if (agent) agent.mode = 'hub';
     }
-    this.priority.order = this.sources.map((s) => s.id);
-    return delay({ applied: chosen.length, sources: structuredClone(this.ordered()) }, 700);
+    this.syncAgents();
+    return delay({ applied: chosen.length, sources: structuredClone(this.sources) }, 700);
   }
 
-  listEvents(limit = 20) {
-    return delay(structuredClone(this.events.slice(0, limit)));
+  listEvents(limit = 20, before?: string) {
+    const start = before ? this.events.findIndex((e) => e.id === before) + 1 : 0;
+    return delay(structuredClone(this.events.slice(start, start + limit)));
   }
 
   getRuntimeStatus() {
+    return delay(structuredClone(this.runtime));
+  }
+
+  startRuntime() {
+    this.runtime.status.health = 'ok';
+    this.runtime.status.listening = { host: '127.0.0.1', port: 15220 };
     return delay(structuredClone(this.runtime));
   }
 
@@ -324,8 +1000,8 @@ class MockStore {
     const flow: OAuthFlow = {
       flow_id: rid('oaf'),
       // Deterministic pending-source binding (schema: hub flows always set it),
-      // consumed by createOAuthSource on finalize — mirrors the server, where
-      // create_source assigns source.id = flow.source_id.
+      // consumed when the flow completes — mirrors the server, where the
+      // materialized source takes source.id = flow.source_id.
       source_id: rid('src'),
       vendor,
       channel,
@@ -356,7 +1032,7 @@ class MockStore {
     entry.polls += 1;
     const { flow } = entry;
     if (flow.state === 'success' || flow.state === 'failed' || flow.state === 'cancelled') {
-      return delay(structuredClone(flow));
+      return delay(this.oauthResult(entry));
     }
     if (flow.presentation.expects === 'none') {
       // Device flow self-completes after a few polls.
@@ -365,7 +1041,7 @@ class MockStore {
       // Paste flows: verifying → success on the next poll.
       this.completeFlow(entry);
     }
-    return delay(structuredClone(flow));
+    return delay(this.oauthResult(entry));
   }
 
   submitOAuth(flowId: string, _value: string) {
@@ -373,7 +1049,7 @@ class MockStore {
     if (!entry) throw new ApiCallError('flow_not_found');
     entry.submitted = true;
     entry.flow.state = 'verifying';
-    return delay(structuredClone(entry.flow));
+    return delay(this.oauthResult(entry));
   }
 
   cancelOAuth(flowId: string) {
@@ -382,48 +1058,96 @@ class MockStore {
     return delay(undefined);
   }
 
-  // A completed flow reaches `success` but does NOT itself materialize a Source
-  // (mirrors the server, where flow completion and source creation are split):
-  // the UI must finalize via createOAuthSource. Earlier the mock appended here,
-  // which hid the live P0 gap the audit flagged.
+  // Reaching `success` IS the creation, as on the server: status/submit
+  // materialize the Source inside the same call that first reports success, and
+  // consume the flow binding doing it. Splitting the two here is what let a
+  // client that finalized with a second POST look correct against the mock while
+  // failing `flow_not_found` against the real server.
   private completeFlow(entry: MockFlow) {
     entry.flow.state = 'success';
-  }
-
-  createOAuthSource(draft: OAuthSourceCreate) {
-    const entry = this.flows.get(draft.oauth_flow_ref);
-    if (!entry || entry.flow.state !== 'success') throw new ApiCallError('flow_not_found');
     const flow = entry.flow;
-    const isOpenai = flow.vendor === 'openai';
     const id = flow.source_id ?? rid('src');
-    // Idempotent finalize: a duplicate browser retry must not double-create
-    // (the server raises migration_item_conflict; here we just re-echo).
-    const existing = this.sources.find((s) => s.id === id);
-    if (existing) return delay(structuredClone(existing), 300);
-    const source: Source = {
+    flow.source_id = id;
+    const isOpenai = flow.vendor === 'openai';
+    if (flow.intent === 'reauth') {
+      // A reauth flow REPAIRS the source it bound to; it creates nothing. The
+      // login is what puts the credential back, so the blocker clears and the
+      // supply a native start had wiped comes back with it.
+      const source = this.sources.find((s) => s.id === id);
+      if (!source) return;
+      source.account_label = 'me@gmail.com';
+      source.state = { status: 'standby', retry_at: null, detail_key: null };
+      source.last_discovered_at = new Date().toISOString();
+      if (source.models.length === 0) {
+        source.models = [
+          {
+            id: isOpenai ? 'gpt-5.6' : 'claude-opus-4-6',
+            display_name: isOpenai ? 'GPT-5.6' : 'Opus 4.6',
+            provenance: 'discovered',
+            discovered_at: new Date().toISOString(),
+          },
+        ];
+      }
+      return;
+    }
+    // Idempotent, like `_create_oauth_source(idempotent=True)`: re-polling a
+    // completed flow re-echoes the same source instead of creating a second one.
+    if (this.sources.some((s) => s.id === id)) return;
+    this.sources.push({
       id,
+      created_at: new Date().toISOString(),
+      last_discovered_at: new Date().toISOString(),
       kind: 'subscription',
       vendor: flow.vendor,
-      display_name: draft.display_name ?? (isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅'),
+      display_name: isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅',
       protocol: isOpenai ? 'openai_responses' : 'anthropic',
       base_url: null,
-      supply_channel: draft.supply_channel,
-      experimental_consent_at: draft.supply_channel === 'hub' ? new Date().toISOString() : null,
+      supply_channel: flow.channel,
+      experimental_consent_at: flow.channel === 'hub' ? new Date().toISOString() : null,
       billing: 'monthly',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 0, month_spend_cents: null, currency: null },
       // native_cli subscriptions surface the sanctioned CLI account; hub-held
       // experimental sources may stay null until a later adapter rev (schema).
-      account_label: draft.supply_channel === 'native_cli' ? 'me@gmail.com' : null,
+      account_label: flow.channel === 'native_cli' ? 'me@gmail.com' : null,
       masked_credential: null,
       models: isOpenai
         ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: new Date().toISOString() }]
         : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: new Date().toISOString() }],
-      credential_ref: draft.supply_channel === 'hub' ? rid('cred') : null,
+      credential_ref: flow.channel === 'hub' ? rid('cred') : null,
+    });
+  }
+
+  /**
+   * The terminal envelope every status/submit response carries (api.md, "OAuth
+   * completion"): the flow, plus the creation it performed once it succeeded.
+   * Looked up by `source_id` rather than remembered from the completing call, so
+   * a later poll on an already-finished flow answers the same thing the server's
+   * idempotent path does instead of pretending nothing was created.
+   */
+  private oauthResult(entry: MockFlow): OAuthResult {
+    const flow = structuredClone(entry.flow);
+    const source = flow.state === 'success' ? this.sources.find((s) => s.id === flow.source_id) : undefined;
+    if (!source) return { flow, created: null, repaired: null };
+    // One intent, one tail — the same discrimination the live unwrap makes, so a
+    // reauth never reports an adoption list and a create never reports recovery.
+    if (flow.intent === 'reauth') {
+      this.syncAgents();
+      return {
+        flow,
+        created: null,
+        repaired: {
+          source: structuredClone(source),
+          recovered: entry.recovered === true,
+          interrupted_pairs: this.wouldInterrupt(this.sources),
+        },
+      };
+    }
+    return {
+      flow,
+      created: { source: structuredClone(source), ...this.adoptionTail(source.id) },
+      repaired: null,
     };
-    this.sources.push(source);
-    this.priority.order.push(source.id);
-    return delay(structuredClone(source), 300);
   }
 
   patchSource(id: string, patch: SourcePatch) {
@@ -434,16 +1158,28 @@ class MockStore {
     return delay(structuredClone(source), 300);
   }
 
-  testSource(id: string) {
+  refreshSource(id: string) {
     const source = this.sources.find((s) => s.id === id);
     if (!source) throw new ApiCallError('source_not_found');
     // Native-CLI subscriptions can't be re-discovered (server rejects them);
     // the UI only offers this action for hub sources, but fail closed anyway.
     if (source.supply_channel === 'native_cli') throw new ApiCallError('discovery_failed');
     source.state = { status: 'standby', retry_at: null, detail_key: null };
-    return delay(source.models.length, 700);
+    source.last_discovered_at = new Date().toISOString();
+    return delay({ source: structuredClone(source), discovered: source.models.length }, 700);
   }
 }
+
+// §4.3's runnability half: retry-ready, and never needs_action / error. A
+// cooling source stays visible in the chain but is skipped by the turn. Derived
+// from the page's own predicate rather than restated, so the fake server and the
+// UI cannot drift into disagreeing about which statuses can serve a turn.
+const isRunnable = (s: Source): boolean => !isUnhealthy(s.state);
+
+// SourceStatus → the chain link's health vocabulary (the two healthy statuses
+// collapse; the three blockers map one-to-one).
+const chainHealth = (s: Source): AgentChainLink['health'] =>
+  s.state.status === 'cooldown' ? 'cooldown' : s.state.status === 'needs_action' ? 'needs_action' : s.state.status === 'error' ? 'error' : 'healthy';
 
 function vendorLabel(vendor: string): string {
   const table: Record<string, string> = {
@@ -478,12 +1214,16 @@ const mockStore = new MockStore();
 const mockApi: ModelsApi = {
   listSources: () => mockStore.listSources(),
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
-  createOAuthSource: (draft) => mockStore.createOAuthSource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
-  testSource: (id) => mockStore.testSource(id),
+  refreshSource: (id) => mockStore.refreshSource(id),
   deleteSource: (id, force) => mockStore.deleteSource(id, force),
-  putPriority: (order) => mockStore.putPriority(order),
+  replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
+  reauthSource: (id) => mockStore.reauthSource(id),
   listAgents: () => mockStore.listAgents(),
+  getAgentSources: (backend) => mockStore.getAgentSources(backend),
+  putAgentSources: (backend, body) => mockStore.putAgentSources(backend, body),
+  getAgentChain: (backend, model) => mockStore.getAgentChain(backend, model),
+  probeAgent: (backend, model) => mockStore.probeAgent(backend, model),
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
   putMappings: (backend, mappings) => mockStore.putMappings(backend, mappings),
   putMenu: (menu) => mockStore.putMenu(menu),
@@ -491,8 +1231,9 @@ const mockApi: ModelsApi = {
   deleteCustomModel: (sourceId, modelId) => mockStore.deleteCustomModel(sourceId, modelId),
   scanMigration: () => mockStore.scanMigration(),
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
-  listEvents: (limit) => mockStore.listEvents(limit),
+  listEvents: (limit, before) => mockStore.listEvents(limit, before),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
+  startRuntime: () => mockStore.startRuntime(),
   startOAuth: (vendor, channel, experimentalConsent) => mockStore.startOAuth(vendor, channel, experimentalConsent),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
   submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),

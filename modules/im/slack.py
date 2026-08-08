@@ -21,6 +21,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
+from .message_facts import is_ordinary_slack_text
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import SlackFormatter
@@ -779,12 +780,20 @@ class SlackBot(BaseIMClient):
                 reply_to=reply_to,
             )
 
-            # Mark thread as active if we sent a message to a thread
+            # Mark thread as active if we sent a message to a thread. This is
+            # post-send bookkeeping: the message is ALREADY delivered, so a raise
+            # here must never destroy the native id on its way out. Callers such as
+            # the message dispatcher treat any exception from the adapter as a send
+            # failure with no delivery evidence, which would re-send an
+            # already-delivered message. Same guard as discord.py send_message.
             if self.settings_manager and (context.thread_id or reply_to):
                 thread_ts = context.thread_id or reply_to
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
-                logger.debug(f"Marked thread {thread_ts} as active after bot message")
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+                    logger.debug(f"Marked thread {thread_ts} as active after bot message")
+                except Exception:
+                    pass
 
             return response["ts"]
 
@@ -833,10 +842,15 @@ class SlackBot(BaseIMClient):
         except SlackApiError as e:
             logger.error(f"Error sending Slack status bubble: {e}")
             raise
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see send_message).
         if self.settings_manager and (context.thread_id or reply_to):
             thread_ts = context.thread_id or reply_to
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+            except Exception:
+                pass
         return response["ts"]
 
     async def send_markdown_message(
@@ -921,11 +935,16 @@ class SlackBot(BaseIMClient):
                 )
             return await self.send_message(context, body, parse_mode="markdown", reply_to=reply_to)
 
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see send_message).
         if self.settings_manager and (context.thread_id or reply_to):
             thread_ts = context.thread_id or reply_to
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
-            logger.debug(f"Marked thread {thread_ts} as active after bot native markdown message")
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+                logger.debug(f"Marked thread {thread_ts} as active after bot native markdown message")
+            except Exception:
+                pass
 
         return response["ts"]
 
@@ -1336,7 +1355,8 @@ class SlackBot(BaseIMClient):
         Slack's ``reactions.add`` / ``reactions.remove`` require the short name
         (e.g. ``ok_hand``), NOT the raw unicode character — sending the codepoint
         returns ``invalid_name``. Every emoji used as a reaction by the processing
-        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent.
+        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent,
+        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered.
         """
         name = (emoji or "").strip()
         if name.startswith(":") and name.endswith(":") and len(name) > 2:
@@ -1348,6 +1368,10 @@ class SlackBot(BaseIMClient):
             "robot": "robot_face",
             "👌": "ok_hand",
             "ok": "ok_hand",
+            "✍️": "writing_hand",
+            "✍": "writing_hand",
+            "🤔": "thinking_face",
+            "🤷": "shrug",
         }
         return aliases.get(name, name)
 
@@ -1589,12 +1613,16 @@ class SlackBot(BaseIMClient):
                 log_label="message-with-buttons send",
             )
 
-            # Mark thread as active if we sent a message to a thread
+            # Post-send bookkeeping must not destroy the delivered message id
+            # (see send_message); mirrors discord.py send_message_with_buttons.
             if self.settings_manager and (context.thread_id or reply_to):
                 thread_ts = context.thread_id or reply_to
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
-                logger.debug(f"Marked thread {thread_ts} as active after bot message with buttons")
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+                    logger.debug(f"Marked thread {thread_ts} as active after bot message with buttons")
+                except Exception:
+                    pass
 
             return response["ts"]
 
@@ -1956,6 +1984,11 @@ class SlackBot(BaseIMClient):
                 if not shared_text and not route_text and not file_attachments:
                     logger.debug("Ignoring shared message with no extractable content")
                     return
+            normalized_user_text = route_text
+            if shared_text:
+                normalized_user_text = (
+                    f"{normalized_user_text}\n\n{shared_text}" if normalized_user_text else shared_text
+                )
 
             # Extract context
             # For Slack: if no thread_ts, use the message's own ts as thread_id (start of thread)
@@ -1964,17 +1997,21 @@ class SlackBot(BaseIMClient):
             context = MessageContext(
                 user_id=user_id,
                 channel_id=channel_id,
+                platform="slack",
                 thread_id=thread_id,  # Always have a thread_id
                 message_id=event.get("ts"),
                 platform_specific={
+                    "platform": "slack",
                     "team_id": payload.get("team_id"),
                     "event": event,
                     "is_dm": is_dm,
                     "bot_user_id": bot_user_id,
                     "bot_mention": bot_mention,
                     "control_text": route_text,
+                    "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
             )
 
             if handled_bot_mention_in_message_event and self.settings_manager and thread_id:
@@ -2049,23 +2086,32 @@ class SlackBot(BaseIMClient):
 
             # Extract shared/forwarded message content (defer appending until after command check)
             shared_text = await self._extract_shared_message_content(event)
+            normalized_user_text = route_text
+            if shared_text:
+                normalized_user_text = (
+                    f"{normalized_user_text}\n\n{shared_text}" if normalized_user_text else shared_text
+                )
 
             had_mention_only = not route_text and not file_attachments and not shared_text
 
             context = MessageContext(
                 user_id=event.get("user"),
                 channel_id=channel_id,
+                platform="slack",
                 thread_id=thread_id,  # Always have a thread_id
                 message_id=event.get("ts"),
                 platform_specific={
+                    "platform": "slack",
                     "team_id": payload.get("team_id"),
                     "event": event,
                     "is_dm": channel_id.startswith("D"),
                     "bot_user_id": bot_user_id,
                     "bot_mention": bot_mention,
                     "control_text": route_text,
+                    "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),
             )
 
             # Mark thread as active only when the mention carries actionable content.
@@ -2121,8 +2167,7 @@ class SlackBot(BaseIMClient):
             await self._send_auth_denial(channel_id, user_id, auth, response_url=response_url)
             return
 
-        # Map Slack slash commands to internal commands
-        # Only /start and /stop commands are exposed to users
+        # Map native Slack slash commands to the shared command handlers.
         command_mapping = {"start": "start", "stop": "stop"}
 
         # Get the actual command name
@@ -2132,7 +2177,10 @@ class SlackBot(BaseIMClient):
         context = MessageContext(
             user_id=payload.get("user_id"),
             channel_id=payload.get("channel_id"),
+            platform="slack",
+            message_id=payload.get("trigger_id"),
             platform_specific={
+                "platform": "slack",
                 "trigger_id": payload.get("trigger_id"),
                 "response_url": payload.get("response_url"),
                 "command": command,
@@ -2140,6 +2188,7 @@ class SlackBot(BaseIMClient):
                 "payload": payload,
                 "is_dm": is_dm,
             },
+            is_ordinary_text=True,
         )
 
         # Send immediate acknowledgment to Slack
@@ -2155,6 +2204,7 @@ class SlackBot(BaseIMClient):
                 "clear",
                 "cwd",
                 "queue",
+                "memory",
             ]:
                 await self.send_slash_response(
                     response_url, f"⏳ {self._t('common.processing', channel_id, command=command)}"
@@ -2279,11 +2329,11 @@ class SlackBot(BaseIMClient):
                                 fallback_selected_backend="",
                             )
                             await self._on_routing_modal_update(
-                                user.get("id"),
-                                effective_channel,
-                                view.get("id"),
-                                view.get("hash"),
-                                selection,
+                                user_id=user.get("id"),
+                                channel_id=effective_channel,
+                                view_id=view.get("id"),
+                                view_hash=view.get("hash"),
+                                selection=selection,
                                 is_dm=isinstance(effective_channel, str) and effective_channel.startswith("D"),
                             )
                 elif action_type == "plain_text_input":
@@ -2340,11 +2390,11 @@ class SlackBot(BaseIMClient):
             # Update settings - need access to settings manager
             if hasattr(self, "_on_settings_update"):
                 await self._on_settings_update(
-                    user_id,
-                    show_types,
-                    channel_id,
-                    require_mention,
-                    language,
+                    user_id=user_id,
+                    show_message_types=show_types,
+                    channel_id=channel_id,
+                    require_mention=require_mention,
+                    language=language,
                     is_dm=isinstance(channel_id, str) and channel_id.startswith("D"),
                 )
 
@@ -2571,18 +2621,18 @@ class SlackBot(BaseIMClient):
             # Update routing via callback
             if hasattr(self, "_on_routing_update"):
                 await self._on_routing_update(
-                    user_id,
-                    channel_id,
-                    backend,
-                    oc_agent,
-                    oc_model,
-                    oc_reasoning,
-                    claude_agent,
-                    claude_model,
-                    claude_reasoning,
-                    codex_agent,
-                    codex_model,
-                    codex_reasoning,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    backend=backend,
+                    opencode_agent=oc_agent,
+                    opencode_model=oc_model,
+                    opencode_reasoning_effort=oc_reasoning,
+                    claude_agent=claude_agent,
+                    claude_model=claude_model,
+                    claude_reasoning_effort=claude_reasoning,
+                    codex_agent=codex_agent,
+                    codex_model=codex_model,
+                    codex_reasoning_effort=codex_reasoning,
                     is_dm=isinstance(channel_id, str) and channel_id.startswith("D"),
                 )
 

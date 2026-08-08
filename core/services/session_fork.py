@@ -10,26 +10,62 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from config import paths
-from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
+from core.backend_failure import is_backend_failure_notification
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
+from vibe.message_types import spec_for, types_with
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
-# ``silent`` is the invisible completion marker (messages_service.SILENT_TYPE): a turn
-# that finished with no user-visible reply is still TERMINAL, so a fork created after
-# it must not trim/roll back the completed turn as if it were still running.
-TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error", "silent"}
-SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
+# Turn settlement is read from ``session_turns`` below, so a reply-less completion
+# cannot be mistaken for a still-running input.
+TERMINAL_AGENT_OUTPUT_TYPES = {
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "terminal"
+}
+SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] in {"activity", "terminal"}
+}
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
+_CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_FORK_ANCHOR_TYPES = tuple(
+    dict.fromkeys(
+        (
+            *types_with("transcript"),
+            *(
+                message_type
+                for message_type in types_with("activityRole")
+                if message_type in TERMINAL_AGENT_OUTPUT_TYPES
+            ),
+        )
+    )
+)
+
+SESSION_AGENT_UNAVAILABLE_CODE = "session_agent_unavailable"
+SESSION_AGENT_UNAVAILABLE_I18N_KEY = "error.sessionFork.agentUnavailable"
 
 
 class SessionForkError(ValueError):
     """Raised when a Session cannot be forked."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session_fork_failed",
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -99,10 +135,11 @@ class SourceMessageAnchor:
     message_id: Optional[str] = None
     author: Optional[str] = None
     message_type: Optional[str] = None
+    running_turn: bool = False
 
     @property
     def is_running_input_turn(self) -> bool:
-        return is_input_turn(self.author, self.message_type)
+        return self.running_turn or is_input_turn(self.author, self.message_type)
 
 
 def reserve_forked_session(
@@ -130,10 +167,12 @@ def reserve_forked_session(
     from sqlalchemy import select
 
     from core.vibe_agents import VibeAgentStore
-    from storage.agent_session_rows import create_agent_session_row, utc_now_iso
+    from storage.agent_session_rows import create_agent_session_row, reserve_write_lock, utc_now_iso
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
+    from storage.session_reclaim import reconcile_explicit_overrides
+    from storage.workbench_sessions_service import require_enabled_agent_identity
 
     path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -142,6 +181,7 @@ def reserve_forked_session(
     agent_store = VibeAgentStore(path)
     try:
         with engine.begin() as conn:
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()
@@ -189,9 +229,37 @@ def reserve_forked_session(
                     "agent backend does not match the source session backend"
                 )
 
-            target_agent_id = override_agent.id if override_agent else row["agent_id"]
-            target_agent_name = override_agent.name if override_agent else row["agent_name"]
-            target_backend = override_agent.backend if override_agent else source_backend
+            inherited_agent = None
+            if override_agent is None and (row["agent_id"] or row["agent_name"]):
+                try:
+                    inherited_agent = require_enabled_agent_identity(
+                        conn,
+                        agent_id=row["agent_id"],
+                        agent_name=row["agent_name"],
+                    )
+                except LookupError as exc:
+                    raise SessionForkError(
+                        "source session Agent is unavailable; choose an enabled Agent override",
+                        code=SESSION_AGENT_UNAVAILABLE_CODE,
+                        details={"source_session_id": source_session_id},
+                    ) from exc
+                if inherited_agent["backend"] != source_backend:
+                    raise SessionForkError(
+                        "source session Agent backend does not match the session backend"
+                    )
+
+            if override_agent is not None:
+                target_agent_id = override_agent.id
+                target_agent_name = override_agent.name
+                target_backend = override_agent.backend
+            elif inherited_agent is not None:
+                target_agent_id = inherited_agent["id"]
+                target_agent_name = inherited_agent["name"]
+                target_backend = inherited_agent["backend"]
+            else:
+                target_agent_id = None
+                target_agent_name = None
+                target_backend = source_backend
             target_variant = target_backend if override_agent else str(row["agent_variant"] or target_backend)
             now = utc_now_iso()
             target_model = _clean_optional(model) if model is not None else row["model"]
@@ -239,6 +307,38 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
+            # The copied metadata carries the SOURCE session's explicit-override
+            # marker. Whether that claim is still TRUE depends on whether this fork
+            # copied the column or replaced it, and the two cases are opposites:
+            #
+            # - OMITTED (``model is None``): ``target_model`` above is
+            #   ``row["model"]`` -- the column is copied verbatim, so the source's
+            #   marker is a true claim about the value the fork now holds and must
+            #   be PRESERVED. Dropping it converts a fork of an explicit-null
+            #   session into an ordinary inherited-null one, and the next Agent
+            #   default change silently hands the fork settings the source had
+            #   deliberately pinned away.
+            # - SUPPLIED: the fork owns the setting. It is an explicit pin only
+            #   when the resolved value is empty (pin nothing); a concrete value
+            #   needs no marker, because dispatch reads a non-null column anyway.
+            #
+            # Only the supplied fields are reconciled. This is the inverse of the
+            # first version of this guard, which cleared exactly the copied fields.
+            resolved_forked_settings = {"model": target_model, "reasoning_effort": target_effort}
+            supplied_settings = [
+                name
+                for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+                if value is not None
+            ]
+            metadata = reconcile_explicit_overrides(
+                metadata,
+                cleared=[
+                    name for name in supplied_settings if resolved_forked_settings[name] is not None
+                ],
+                explicit=[
+                    name for name in supplied_settings if resolved_forked_settings[name] is None
+                ],
+            )
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,
@@ -401,6 +501,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
 
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+    from storage.messages_service import transcript_order_value
     from storage.models import messages
 
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
@@ -409,7 +510,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
         with engine.connect() as conn:
             anchor = conn.execute(
                 select(
-                    messages.c.created_at,
+                    transcript_order_value().label("transcript_order_at"),
                     messages.c.id,
                     messages.c.author,
                     messages.c.type,
@@ -420,11 +521,11 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             ).mappings().first()
             if anchor is None:
                 return ForkSourceState()
-            anchor_created_at = anchor["created_at"]
+            anchor_order_at = anchor["transcript_order_at"]
             anchor_id = anchor["id"]
             after_anchor = (
-                (messages.c.created_at > anchor_created_at)
-                | ((messages.c.created_at == anchor_created_at) & (messages.c.id > anchor_id))
+                (transcript_order_value() > anchor_order_at)
+                | ((transcript_order_value() == anchor_order_at) & (messages.c.id > anchor_id))
             )
             latest_after_anchor = conn.execute(
                 select(messages.c.author, messages.c.type, messages.c.metadata_json)
@@ -434,15 +535,19 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         messages.c.type.in_(
                             [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
                         ),
-                        and_(
-                            messages.c.type == "notify",
-                            func.json_extract(messages.c.metadata_json, "$.event")
-                            == BACKEND_FAILURE_EVENT,
+                        *(
+                            and_(
+                                messages.c.type == message_type,
+                                func.json_extract(messages.c.metadata_json, "$.event").in_(
+                                    spec_for(message_type)["terminalWhenEvents"]
+                                ),
+                            )
+                            for message_type in _CONDITIONAL_TERMINAL_TYPES
                         ),
                     ),
                     after_anchor,
                 )
-                .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+                .order_by(transcript_order_value().desc(), messages.c.id.desc())
                 .limit(1)
             ).mappings().first()
             latest_after_anchor_author = (
@@ -535,38 +640,149 @@ def _clean_optional(value: Any) -> Optional[str]:
     return text or None
 
 
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _emitted_micros(row_id: Any, timestamp: datetime) -> int:
+    identity = str(row_id or "")
+    if len(identity) >= 19 and identity[3] == "_":
+        try:
+            return int(identity[4:19], 16)
+        except ValueError:
+            pass
+    return int(timestamp.timestamp() * 1_000_000)
+
+
 def _forked_session_title(source_title: str, lang: str = "en") -> str:
     return t("fork.title", lang, title=source_title) if source_title else t("fork.titleUntitled", lang)
 
 
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
-    from sqlalchemy import func, or_, select
+    from sqlalchemy import select
 
-    from storage.messages_service import SILENT_TYPE, TRANSCRIPT_TYPES
-    from storage.models import messages
+    from storage.messages_service import transcript_order_value
+    from storage.models import agent_events, message_deliveries, messages, session_turns
+
+    active_initial = conn.execute(
+        select(
+            messages.c.id,
+            messages.c.author,
+            messages.c.type,
+            message_deliveries.c.state.label("delivery_state"),
+        )
+        .select_from(
+            session_turns.join(
+                message_deliveries,
+                message_deliveries.c.id == session_turns.c.initial_delivery_id,
+            ).outerjoin(
+                messages,
+                messages.c.id == message_deliveries.c.message_id,
+            )
+        )
+        .where(
+            session_turns.c.session_id == source_session_id,
+            session_turns.c.state.in_(("starting", "active")),
+        )
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    if active_initial is not None and active_initial["id"] is not None:
+        return SourceMessageAnchor(
+            message_id=str(active_initial["id"]),
+            author=str(active_initial["author"] or "").strip() or None,
+            message_type=str(active_initial["type"] or "").strip() or None,
+        )
+    pre_materialized_start = bool(
+        active_initial is not None
+        and active_initial["delivery_state"] == "claimed"
+    )
 
     row = conn.execute(
-        select(messages.c.id, messages.c.author, messages.c.type)
+        select(messages.c.id, messages.c.author, messages.c.type, messages.c.created_at)
         .where(
             messages.c.session_id == source_session_id,
-            or_(
-                # Include the invisible ``silent`` completion marker so a turn that
-                # finished silently is the anchor (a terminal, NOT a running input),
-                # otherwise the anchor falls back to the input row and the fork treats
-                # the completed turn as still running and trims/rolls it back.
-                messages.c.type.in_([*TRANSCRIPT_TYPES, SILENT_TYPE]),
-                func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
-            ),
+            messages.c.type.in_(_FORK_ANCHOR_TYPES),
         )
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(1)
     ).mappings().first()
     if row is None:
-        return SourceMessageAnchor()
+        return SourceMessageAnchor(running_turn=pre_materialized_start)
+    latest_turn = conn.execute(
+        select(
+            session_turns.c.state,
+            session_turns.c.terminal_outcome,
+            session_turns.c.terminal_at,
+        )
+        .where(session_turns.c.session_id == source_session_id)
+        .where(
+            session_turns.c.terminal_outcome.is_(None)
+            | (session_turns.c.terminal_outcome != "not_written")
+        )
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    silent_terminal = conn.execute(
+        select(
+            agent_events.c.id,
+            agent_events.c.created_at,
+            agent_events.c.metadata_json,
+        )
+        .where(
+            agent_events.c.session_id == source_session_id,
+            agent_events.c.event_type == "silent_terminal",
+        )
+        .order_by(agent_events.c.created_at.desc(), agent_events.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    terminal_candidates: list[tuple[int, str]] = []
+    if latest_turn is not None and latest_turn["state"] == "terminal":
+        terminal_at = _parse_utc_timestamp(latest_turn["terminal_at"])
+        if terminal_at is not None:
+            terminal_candidates.append(
+                (
+                    int(terminal_at.timestamp() * 1_000_000),
+                    str(latest_turn["terminal_outcome"] or "completed"),
+                )
+            )
+    if silent_terminal is not None:
+        terminal_at = _parse_utc_timestamp(silent_terminal["created_at"])
+        if terminal_at is not None:
+            metadata = _load_metadata(silent_terminal["metadata_json"])
+            event_id = metadata.get("legacy_message_id") or silent_terminal["id"]
+            terminal_candidates.append(
+                (
+                    _emitted_micros(event_id, terminal_at),
+                    str(metadata.get("terminal_outcome") or "completed"),
+                )
+            )
+    message_at = _parse_utc_timestamp(row["created_at"])
+    latest_terminal = max(terminal_candidates, default=None)
+    if (
+        message_at is not None
+        and latest_terminal is not None
+        and latest_terminal[0] >= _emitted_micros(row["id"], message_at)
+    ):
+        return SourceMessageAnchor(
+            message_id=str(row["id"]) if row["id"] else None,
+            author="agent",
+            message_type=(
+                "error" if latest_terminal[1] == "failed" else "result"
+            ),
+            running_turn=pre_materialized_start,
+        )
     return SourceMessageAnchor(
         message_id=str(row["id"]) if row["id"] else None,
         author=str(row["author"] or "").strip() or None,
         message_type=str(row["type"] or "").strip() or None,
+        running_turn=pre_materialized_start,
     )
 
 

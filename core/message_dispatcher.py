@@ -9,47 +9,142 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
+from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
-    persist_silent_completion_marker,
+    persist_silent_terminal,
 )
-from core.message_output import MessageOutput, output_for_message
+from core.message_output import (
+    HARNESS_RUN_ID_TRIGGER_KINDS,
+    HARNESS_TRIGGER_KINDS,
+    MessageOutput,
+    output_for_message,
+)
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENTS_WITHOUT_RESULT,
 )
+from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
 from storage.background import SQLiteBackgroundTaskStore
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
+# Harness prompt echo (``emit_harness_prompt``). The echo is context for the reply
+# that follows, not the payload, so a long generated prompt is cut rather than split
+# across messages the way a result is.
+HARNESS_PROMPT_ECHO_MAX_CHARS = 800
+# Bounded per-process memory of already-echoed Harness deliveries, so an in-process
+# re-dispatch of one delivery cannot read as the task having fired twice.
+HARNESS_PROMPT_ECHO_MEMORY = 256
+# Harness kinds whose prompt is a user-authored instruction worth showing. Excludes
+# ``activity_recovery``: that turn is a runtime re-injection describing a resumed
+# Activity, so echoing it would explain internals nobody asked about.
+HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
+# The subset whose dispatch text is COMPOSED by Avibe instead of written by a person:
+# a watch appends the waiter's raw stdout, an ``--on-failure agent`` escalation (a
+# ``hook`` run) appends the generated failure report, and a webhook appends its
+# payload. That text exists for the AGENT to read, so echoing it verbatim would
+# publish raw command output — tokens, stack traces, customer data — into a shared
+# conversation before the agent can summarize or redact it (Codex P1). For these
+# kinds the echo shows ONLY the definition's stored instruction
+# (``harness_display_prompt``) and stays silent when none can be resolved; the
+# Workbench transcript still renders the full prompt for the operator.
+HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS = frozenset({"watch", "webhook", "hook"})
+# Mention neutralizers for the echoed prompt. The echo repeats text an operator wrote
+# for an agent, into a channel: quoting it does not stop a renderer from resolving a
+# broadcast, a username, or an id mention, and the Discord adapter sends without
+# ``allowed_mentions``, so an echoed ``@everyone`` would really ping the channel
+# (Codex P2). A zero-width space after the sigil keeps the text readable while
+# leaving nothing for any renderer to resolve. Deliberately platform-agnostic: every
+# adapter renders the same body, so ``@`` before a word character covers the
+# Slack/Discord broadcasts AND a bare Telegram ``@username`` (which
+# ``TelegramFormatter.render`` HTML-escapes without defusing), and a new adapter
+# inherits the guard instead of needing its own.
+_HARNESS_ECHO_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
+_HARNESS_ECHO_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
+_HARNESS_ECHO_MENTION_BREAK = "\u200b"
+# Cap for the definition name in the echo label. The prompt has its own cap, but the
+# label is appended after it and task/watch names are never length-validated at
+# creation, so an unbounded name could push the body past Discord's 2,000-char or
+# Telegram's 4,096-char limit \u2014 the adapter would then reject the echo and the channel
+# would see no prompt at all (Codex P2).
+HARNESS_PROMPT_ECHO_MAX_NAME_CHARS = 80
+_HARNESS_PROMPT_ECHO_I18N_KEYS = {
+    "scheduled": "harness.promptEcho.scheduled",
+    "watch": "harness.promptEcho.watch",
+    "webhook": "harness.promptEcho.webhook",
+    "hook": "harness.promptEcho.hook",
+    "agent_run": "harness.promptEcho.agentRun",
+}
 
-def _coalesced_task_execution_ids(payload: dict[str, Any]) -> list[str]:
+
+def _neutralize_mentions(text: str) -> str:
+    """Make every mention in *text* inert without changing how it reads.
+
+    Used for the Harness prompt echo, which republishes text an operator wrote for an
+    agent into a shared channel. Covers every ``@`` sigil — the broadcast words
+    (``@everyone`` / ``@here`` / ``@channel``) and a bare ``@username``, which Telegram
+    resolves into a real notification — plus the bracketed id forms both Slack
+    (``<@U…>``, ``<!here>``, ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
+    """
+
+    neutralized = _HARNESS_ECHO_MENTION_SIGIL_PATTERN.sub(
+        "@" + _HARNESS_ECHO_MENTION_BREAK, text or ""
+    )
+    return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
+
+
+class ActivityOutputDeliveryError(RuntimeError):
+    """An Activity result did not complete its local output boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        delivered: bool,
+        durable: bool = False,
+        message_id: str | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.delivered = delivered
+        self.durable = durable
+        self.message_id = message_id
+        self.cause = cause
+
+
+def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
     run_ids: list[str] = []
-    primary = str(payload.get("task_execution_id") or "").strip()
-    if primary:
-        run_ids.append(primary)
-    coalesced = payload.get("coalesced_queue")
-    execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
-    if isinstance(execution_ids, list):
-        for value in execution_ids:
+    accepted = payload.get("accepted_agent_run_ids")
+    if isinstance(accepted, list):
+        for value in accepted:
             run_id = str(value or "").strip()
             if run_id and run_id not in run_ids:
                 run_ids.append(run_id)
+    if payload.get("task_trigger_kind") in HARNESS_RUN_ID_TRIGGER_KINDS:
+        primary = str(payload.get("task_execution_id") or "").strip()
+        if primary and primary not in run_ids:
+            run_ids.append(primary)
     return run_ids
 
 
@@ -75,21 +170,20 @@ async def _stream_chunk(
     ``controller.active_turn_sinks`` (see ``core.services.dispatch.dispatch_turn``)
     so the SSE response stream sees notify + result emits as they happen —
     even though the agent's receiver runs on a background task carrying a
-    stale per-turn context. We resolve the sink by *session key* (stable
-    across a session's turns) rather than off the context, so reused agent
-    sessions stream correctly too. A terminal ``result`` emit also marks the
+    stale per-turn context. We resolve the sink by its *thread-scoped sink key*
+    (stable across a session's turns) rather than off the context, so reused
+    agent sessions stream correctly too. A terminal ``result`` emit also marks the
     turn complete so ``dispatch_turn`` can close the stream right after it;
     multi-output callers explicitly pass ``completes_turn=False``. No
     sink (IM / CLI turns) => no-op, byte-identical to master.
     """
 
     get_sink = getattr(controller, "get_turn_sink", None)
-    get_key = getattr(controller, "_get_session_key", None)
-    if not callable(get_sink) or not callable(get_key):
+    if not callable(get_sink):
         # Controller has no streaming turn-sink registry (IM/CLI stubs, older
         # controllers) => nothing to stream to; stay a no-op.
         return
-    sink = get_sink(get_key(context))
+    sink = get_sink(resolve_turn_sink_key(controller, context))
     if sink is None:
         return
     # NB: we deliberately do NOT gate forwarding on a per-turn token here.
@@ -136,7 +230,16 @@ async def _stream_chunk(
         # terminal STATUS is still first-writer-wins in the store, so a result whose row
         # write already landed keeps its ``succeeded`` — this only stops the reason from
         # silently disagreeing with what the user was told.
-        if sink.get("settled_by") != SETTLED_BY_STOPPED:
+        #
+        # A contained backend teardown is the same case for the same reason: the
+        # service retired the runtime itself and the release already named that as
+        # the settlement, so a straggler result must not relabel an infrastructure
+        # interruption as a healthy terminal result. Only these two are protected --
+        # NOT all of ``SETTLEMENTS_WITHOUT_RESULT`` -- because
+        # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
+        # releaser writes, and upgrading THAT when a real result lands is the whole
+        # point of this line.
+        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH):
             sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:
@@ -208,6 +311,12 @@ class ConsolidatedMessageDispatcher:
         # first use per turn (see ``_concise_progress_style``), dropped in
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
+        # Harness deliveries whose prompt has already been echoed to IM, kept as a
+        # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
+        # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
+        # while a missing one defeats the feature.
+        self._harness_prompt_echo_keys: set[str] = set()
+        self._harness_prompt_echo_order: list[str] = []
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -1024,7 +1133,10 @@ class ConsolidatedMessageDispatcher:
         terminal_status: Optional[str] = None,
     ) -> None:
         payload = context.platform_specific or {}
-        run_ids = _coalesced_task_execution_ids(payload)
+        run_ids = _owned_agent_run_ids(payload)
+        for run_id in self._durable_accepted_agent_run_ids(context):
+            if run_id not in run_ids:
+                run_ids.append(run_id)
         if not run_ids:
             return
         store = None
@@ -1122,6 +1234,137 @@ class ConsolidatedMessageDispatcher:
             logger.warning("Failed to inspect owned Activities for Run %s", run_id, exc_info=True)
             return True
 
+    def _claimed_activity_batch_for_output(
+        self,
+        output_semantics: MessageOutput,
+    ) -> tuple[Any, list[SessionActivity]] | None:
+        service = getattr(self.controller, "agent_service", None)
+        registry = getattr(service, "activities", None)
+        find_claimed = getattr(
+            registry,
+            "claimed_completed_output_batch_for_output",
+            None,
+        )
+        if not callable(find_claimed):
+            return None
+        activities = list(find_claimed(output_semantics))
+        return (registry, activities) if activities else None
+
+    def _settle_activity_output_claims(
+        self,
+        output_semantics: MessageOutput,
+        *,
+        accepted_message_exists: bool,
+        settlement_error: BaseException | None = None,
+        visible_output: bool = True,
+    ) -> bool | None:
+        claimed = self._claimed_activity_batch_for_output(output_semantics)
+        if claimed is None:
+            return None
+        registry, activities = claimed
+        settle = getattr(registry, "settle_completed_output_batch", None)
+        if not callable(settle):
+            return False
+        service = getattr(self.controller, "agent_service", None)
+        on_terminal = getattr(service, "on_activity_terminal", None)
+
+        def settle_terminal(terminal_activity: SessionActivity) -> bool:
+            if not callable(on_terminal):
+                return False
+            try:
+                return bool(on_terminal(terminal_activity))
+            except Exception:
+                logger.error(
+                    "Failed to terminally settle delivered Activity %s after local failure",
+                    terminal_activity.id,
+                    exc_info=True,
+                )
+                return False
+
+        settled = bool(
+            settle(
+                output_semantics,
+                accepted_message_exists=accepted_message_exists,
+                settlement_error=settlement_error,
+                settle_terminal=(settle_terminal if settlement_error is not None else None),
+                visible_output=visible_output,
+            )
+        )
+        if not settled:
+            logger.error(
+                "Delivered Activity batch %s remains claimed without complete local settlement",
+                ",".join(activity.id for activity in activities),
+            )
+        return settled
+
+    @staticmethod
+    def _output_with_accepted_provenance(
+        output_semantics: MessageOutput,
+        accepted_message: Any,
+    ) -> MessageOutput:
+        if not isinstance(accepted_message, Mapping):
+            return output_semantics
+        metadata = accepted_message.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return output_semantics
+
+        def identities(name: str) -> tuple[str, ...]:
+            values = metadata.get(name)
+            if not isinstance(values, list):
+                return ()
+            return tuple(
+                dict.fromkeys(
+                    value
+                    for item in values
+                    if (value := str(item or "").strip())
+                )
+            )
+
+        activity_ids = identities("activity_ids")
+        run_ids = identities("run_ids")
+        output_id = str(metadata.get("output_id") or "").strip()
+        return replace(
+            output_semantics,
+            idempotency_key=output_id or output_semantics.idempotency_key,
+            activity_ids=activity_ids or output_semantics.activity_ids,
+            run_ids=run_ids or output_semantics.run_ids,
+        )
+
+    @classmethod
+    def _accepted_message_result_text(
+        cls,
+        accepted_message: Any,
+        fallback_text: str,
+        fallback_footer: str | None,
+    ) -> str:
+        if not isinstance(accepted_message, Mapping):
+            return cls._fold_footer(fallback_text, fallback_footer)
+        text = str(accepted_message.get("text") or "")
+        content = accepted_message.get("content")
+        footer = (
+            str(content.get("result_footer") or "")
+            if isinstance(content, Mapping)
+            else ""
+        )
+        if footer and not text.rstrip().endswith(footer):
+            return cls._fold_footer(text, footer)
+        return text
+
+    @staticmethod
+    def _accepted_message_is_error(
+        accepted_message: Any,
+        *,
+        fallback: bool,
+    ) -> bool:
+        if not isinstance(accepted_message, Mapping):
+            return fallback
+        message_type = str(accepted_message.get("type") or "").strip().lower()
+        if message_type == "error":
+            return True
+        if message_type == "result":
+            return False
+        return fallback
+
     def _record_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -1137,8 +1380,12 @@ class ConsolidatedMessageDispatcher:
         semantics = output_semantics or MessageOutput(completes_turn=True)
         require_confirmation = semantics.requires_delivery_for_run_settlement
         run_ids: list[str] = []
+        for value in semantics.run_ids:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
         explicit_run_id = str(semantics.run_id or "").strip()
-        if explicit_run_id:
+        if explicit_run_id and explicit_run_id not in run_ids:
             run_ids.append(explicit_run_id)
         explicit_run_ids = semantics.metadata.get("run_ids")
         if isinstance(explicit_run_ids, list):
@@ -1146,8 +1393,11 @@ class ConsolidatedMessageDispatcher:
                 run_id = str(value or "").strip()
                 if run_id and run_id not in run_ids:
                     run_ids.append(run_id)
-        if not run_ids and payload.get("task_trigger_kind") == "agent_run":
-            run_ids = _coalesced_task_execution_ids(payload)
+        if not run_ids:
+            run_ids = _owned_agent_run_ids(payload)
+            for durable_run_id in self._durable_accepted_agent_run_ids(context):
+                if durable_run_id not in run_ids:
+                    run_ids.append(durable_run_id)
         if not run_ids:
             return
         terminal_status = None
@@ -1173,6 +1423,25 @@ class ConsolidatedMessageDispatcher:
         finally:
             if store is not None:
                 store.close()
+
+    def _durable_accepted_agent_run_ids(self, context: MessageContext) -> list[str]:
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        if not turn_id:
+            return []
+        manager = getattr(self.controller, "session_turns", None)
+        read = getattr(manager, "accepted_agent_run_ids_for_turn", None)
+        if not callable(read):
+            return []
+        try:
+            return list(read(turn_id))
+        except Exception:
+            logger.warning(
+                "Failed to read durable Agent Run attribution for Turn %s",
+                turn_id,
+                exc_info=True,
+            )
+            return []
+
     def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -1368,6 +1637,191 @@ class ConsolidatedMessageDispatcher:
 
         return first_message_id
 
+    async def emit_harness_prompt(
+        self,
+        context: MessageContext,
+        text: str,
+    ) -> Optional[str]:
+        """Echo a Harness-originated prompt into its IM conversation.
+
+        A scheduled task / watch / webhook / hook / ``vibe agent run`` turn writes a
+        ``harness`` Message row (``mirror_harness_inbound`` and the durable Delivery
+        snapshot), which the Workbench transcript renders as the turn that asked the
+        question. An IM channel has no such view: it only ever received the agent's
+        reply, so a scheduled result read as an answer to a question nobody could see.
+        This posts that question once, at the real start of the turn (called from
+        ``AgentService._begin_turn_status``, i.e. after the runtime gate is acquired).
+
+        Deliberately NOT routed through ``emit_agent_message``: this is neither an
+        agent output nor a lifecycle event. It must not consolidate into the status
+        bubble, settle a turn, touch an ``agent_runs`` row, or persist a second row on
+        top of the ``harness`` one that already exists. Best-effort — a failed echo
+        never blocks the turn.
+
+        Skipped for:
+        * ``avibe`` — the Workbench Chat already renders the ``harness`` row.
+        * ``suppress_delivery`` — a background Session delivers nothing outward.
+        * a trigger kind that is not a Harness run (a human turn is the IM message).
+        * ``runtime.harness_prompt_echo = false``.
+        """
+
+        spec = context.platform_specific or {}
+        if context.platform == "avibe":
+            return None
+        if spec.get("suppress_delivery"):
+            return None
+        trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+        if trigger_kind not in HARNESS_PROMPT_ECHO_TRIGGER_KINDS:
+            return None
+        # A Harness turn never passes through an IM inbound handler, so nothing else
+        # has reloaded ``controller.config`` for this turn: without this mtime-guarded
+        # refresh the config-only switch would be read from the process-start snapshot
+        # (a true->false toggle would still send one prompt, a false->true one would
+        # skip the first). Same reason as ``_refresh_status_bubble_config``.
+        self._refresh_runtime_config()
+        if not getattr(self.controller.config, "harness_prompt_echo", True):
+            return None
+        if trigger_kind in HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS:
+            # Composed, agent-facing prompt: echo the stored instruction alone, never
+            # the appended waiter output / failure report / webhook payload. Read
+            # per-delivery, because an instruction EDITED between two firings leaves a
+            # merged batch dispatching two different instructions. No resolvable
+            # instruction means no echo — a run whose definition was deleted cannot
+            # prove which part of its prompt a person wrote.
+            prompt = self._harness_echo_merged_prompt(
+                spec, "harness_display_prompts", "harness_display_prompt"
+            )
+            if not prompt:
+                return None
+        else:
+            # The Delivery's display snapshots win over the dispatch text when present:
+            # ``SessionTurnGate`` prepends internal instructions to ``dispatch_text``
+            # (the ``[Avibe recovery: ...]`` guard on an ambiguous-start replay), and
+            # the channel must see the stored prompt, not a backend-only directive.
+            prompt = (
+                self._harness_echo_merged_prompt(spec, "display_texts", "display_text")
+                or text
+            )
+        body = self._harness_prompt_body(trigger_kind, spec.get("task_definition_name"), prompt)
+        if not body:
+            return None
+        # The prompt is delivered to the SAME target as the run's result (post_to /
+        # deliver_key overrides included), so the question and its answer cannot land
+        # in different conversations.
+        target_context = self._get_target_context(context)
+        echo_key = "|".join(
+            [
+                str(target_context.platform or ""),
+                str(target_context.channel_id or ""),
+                str(target_context.thread_id or ""),
+                str(spec.get("native_message_id") or context.message_id or ""),
+            ]
+        )
+        if echo_key in self._harness_prompt_echo_keys:
+            # One echo per Harness delivery. A queue flush or a fallback re-dispatch
+            # can reach this turn twice in one process; the prompt text is identical,
+            # so the second post would only read as the task having fired twice.
+            return None
+        try:
+            message_id = await self._get_im_client(context).send_message(
+                target_context,
+                body,
+                # Markdown so the ``> `` prefix renders as a real quote: Slack builds a
+                # plain_text block for anything else and would show the markers
+                # literally (Codex P3). Telegram is unaffected — it resolves ``None``
+                # to its own HTML default anyway.
+                parse_mode="markdown",
+            )
+        except Exception as err:
+            logger.warning(
+                "Failed to echo harness prompt (%s) to %s: %s",
+                trigger_kind,
+                target_context.channel_id,
+                err,
+                exc_info=True,
+            )
+            return None
+        self._remember_harness_prompt_echo(echo_key)
+        return message_id
+
+    @staticmethod
+    def _harness_echo_merged_prompt(spec: dict, batch_key: str, single_key: str) -> str:
+        """Every prompt this turn is about to answer, one entry per merged Delivery.
+
+        A busy session merges the queued Harness deliveries of one definition into a
+        single Turn (``core/session_turns.py::_collect_delivery_segment``) and sends
+        *all* of their prompts to the backend, so reading the singular key — the first
+        Delivery only — would announce one instruction for a result answering several.
+        Two ``vibe agent run`` calls merge under the shared ``agent_run`` definition id
+        with different prompts; a watch/webhook/hook definition whose instruction was
+        EDITED between two firings merges with different stored instructions.
+
+        Repeat firings of an unchanged definition carry the same text, hence the
+        de-dup: a merged batch reads as one echo unless the instructions really differ.
+        ``batch_key`` is stamped by the durable batch hydration only, so the singular
+        key still serves the legacy mirror path, which has no batch.
+        """
+        raw = spec.get(batch_key)
+        entries = (
+            [str(item or "") for item in raw] if isinstance(raw, (list, tuple)) else []
+        )
+        if not any(entry.strip() for entry in entries):
+            entries = [str(spec.get(single_key) or "")]
+        unique = dict.fromkeys(entry.strip() for entry in entries if entry.strip())
+        return "\n\n".join(unique)
+
+    def _harness_prompt_body(
+        self,
+        trigger_kind: str,
+        definition_name: Any,
+        text: str,
+    ) -> Optional[str]:
+        prompt = strip_silent_blocks(text or "").strip()
+        if not prompt:
+            return None
+        truncated = self._t("harness.promptEcho.truncated")
+        if len(prompt) > HARNESS_PROMPT_ECHO_MAX_CHARS:
+            prompt = prompt[:HARNESS_PROMPT_ECHO_MAX_CHARS].rstrip() + truncated
+        label = self._t(
+            _HARNESS_PROMPT_ECHO_I18N_KEYS.get(trigger_kind, "harness.promptEcho.generic")
+        )
+        name = str(definition_name or "").strip()
+        if len(name) > HARNESS_PROMPT_ECHO_MAX_NAME_CHARS:
+            # The name is appended AFTER the prompt cap and is never length-validated
+            # when a task/watch is created, so leaving it unbounded could push the body
+            # past a platform message limit — the adapter would reject the echo and the
+            # channel would see no prompt at all.
+            name = name[:HARNESS_PROMPT_ECHO_MAX_NAME_CHARS].rstrip() + truncated
+        if name:
+            label = self._t("harness.promptEcho.named", label=label, name=name)
+        # Quoted body: plain-text platforms still read it as a quote, and the
+        # markdown platforms render it de-emphasized, so the echo never competes
+        # with the agent's own reply.
+        quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
+        # Both halves are neutralized: the label carries the definition NAME, which a
+        # user typed too and can hold a mention just as easily as the prompt.
+        return _neutralize_mentions(f"{label}\n{quoted}")
+
+    def _refresh_runtime_config(self) -> None:
+        """Best-effort, mtime-guarded reload of ``controller.config`` from disk.
+
+        Resolved through ``getattr`` so the lightweight controller stubs used by the
+        dispatcher tests simply skip it instead of raising.
+        """
+        refresh = getattr(self.controller, "_refresh_config_from_disk", None)
+        if not callable(refresh):
+            return
+        try:
+            refresh()
+        except Exception:
+            logger.debug("runtime config refresh failed; using cached config", exc_info=True)
+
+    def _remember_harness_prompt_echo(self, echo_key: str) -> None:
+        self._harness_prompt_echo_keys.add(echo_key)
+        self._harness_prompt_echo_order.append(echo_key)
+        while len(self._harness_prompt_echo_order) > HARNESS_PROMPT_ECHO_MEMORY:
+            self._harness_prompt_echo_keys.discard(self._harness_prompt_echo_order.pop(0))
+
     async def emit_agent_message(
         self,
         context: MessageContext,
@@ -1381,6 +1835,7 @@ class ConsolidatedMessageDispatcher:
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
+        delivery: DeliveryEvidence | None = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -1428,6 +1883,14 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
+        activity_batch_incomplete = bool(
+            output_semantics.requires_delivery_for_run_settlement
+            and output_semantics.metadata.get("activity_batch_complete") is False
+        )
+        activity_local_settlement_only = bool(
+            output_semantics.requires_delivery_for_run_settlement
+            and output_semantics.metadata.get("activity_local_settlement_only") is True
+        )
         current_runtime_turn = self._is_current_runtime_turn(context)
         mutates_turn_lifecycle = (
             canonical_type == "result"
@@ -1440,32 +1903,53 @@ class ConsolidatedMessageDispatcher:
         # a clean turn is "done" (✅); a failure is "stopped" (⏹) when it was an
         # intentional silent stop (e.g. user stop), else "failed" (⏹). An explicit
         # diagnostic distinguishes a silent backend failure from a silent stop.
-        if not is_error:
+        #
+        # The settlement outranks ``is_error`` here, as it already does on every
+        # other terminal surface. A user Stop is not an error -- nobody's backend
+        # broke -- so it emits with the flag CLEAR, and reading the flag alone put
+        # a green ``✅ done`` on a turn the user called off before it answered.
+        # ``SETTLEMENTS_WITHOUT_RESULT`` is the existing "no terminal result will
+        # ever arrive for this run" set, which is exactly the condition that
+        # forbids the word ``done``; membership is tested rather than naming
+        # ``stopped``, so a future settlement in that set cannot regress to a
+        # green footer by being forgotten here.
+        if not is_error and output_semantics.settled_by not in SETTLEMENTS_WITHOUT_RESULT:
             terminal_reason = "done"
         elif level == "silent" and terminal_error is None:
             terminal_reason = "stopped"
         else:
             terminal_reason = "failed"
 
-        # OUTBOUND status chokepoint (one of exactly two — the other is the
-        # inbound AgentService.handle_message). A terminal ``result`` ends the
-        # turn, so settle the avibe sidebar dot here regardless of delivery
-        # outcome. Non-avibe contexts resolve to no session id and are skipped;
-        # ``getattr`` keeps it a no-op for controllers without the hook (mirrors
-        # ``_signal_turn_complete``).
         if canonical_type == "result":
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
                 return None
-            # Settle the avibe dot for the ACTIVE turn's terminal result (idle, or
-            # failed on is_error) via the turn owner, which applies the active-turn
-            # guard + skips non-avibe contexts. Runtime gate release happens after
-            # the result path clears/persists/streams its own state.
-            if mutates_turn_lifecycle:
-                manager = getattr(self.controller, "session_turns", None)
-                if manager is not None:
-                    manager.on_terminal_result(context, is_error=is_error)
-        text = strip_silent_blocks(text)
+        raw_text = text
+        enhanced = None
+        if canonical_type == "result" and level != "silent":
+            quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
+            enhanced = process_reply(raw_text, include_quick_replies=quick_replies_on)
+            text = enhanced.visible_text
+        else:
+            text = strip_silent_blocks(raw_text)
+        # Persist the exact terminal body in the Turn snapshot before delivery.
+        # A steer accepted after this Turn settles can then complete its Agent Run
+        # without guessing from transcript order or requiring a live sink.
+        if mutates_turn_lifecycle:
+            terminal_body = enhanced.text if enhanced and enhanced.text.strip() else text
+            manager = getattr(self.controller, "session_turns", None)
+            if manager is not None:
+                manager.on_terminal_result(
+                    context,
+                    is_error=is_error,
+                    settled_by=self._turn_release_settlement(output_semantics),
+                    terminal_evidence={
+                        "result_text": self._fold_footer(terminal_body, result_footer),
+                        "terminal_error": terminal_error,
+                        "settles_run": output_semantics.settles_run,
+                        "output_provenance": output_semantics.provenance(context),
+                    },
+                )
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
         # we release the SSE waiter and return BEFORE any delivery / persistence /
@@ -1473,6 +1957,47 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
+                if activity_local_settlement_only:
+                    settlement_complete = self._settle_activity_output_claims(
+                        output_semantics,
+                        accepted_message_exists=False,
+                        settlement_error=RuntimeError(
+                            "Retrying delivered Activity terminal settlement"
+                        ),
+                    )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Delivered Activity local settlement retry is incomplete",
+                            delivered=True,
+                        )
+                    return output_semantics.idempotency_key
+                if activity_batch_incomplete:
+                    raise ActivityOutputDeliveryError(
+                        "Activity output batch recovery is incomplete",
+                        delivered=False,
+                    )
+                # This row is the IM turn's ONLY terminal boundary — an IM turn has
+                # no durable execution owner, and ``list_turn_groups`` /
+                # ``_latest_source_message_anchor`` both close a turn on it. So a
+                # settlement that ends a turn without a result must still write one;
+                # skipping it leaves the turn logically open, which renders as a
+                # still-running activity card long after the runtime is gone. Only
+                # ``stopped`` is exempt, and only because the stop path reports the
+                # boundary itself. Passing the settlement lets the row say
+                # ``canceled`` where ``is_error`` alone would have said ``failed`` —
+                # a contained backend teardown gets a boundary that is honest about
+                # being an interruption rather than a backend fault.
+                if (
+                    mutates_turn_lifecycle
+                    and context.platform != "avibe"
+                    and self._turn_release_settlement(output_semantics)
+                    != SETTLED_BY_STOPPED
+                ):
+                    persist_silent_terminal(
+                        context,
+                        is_error=is_error,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
@@ -1497,26 +2022,17 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
-                    if level != "silent" and not is_error:
-                        # A CLEAN silent completion — ``level='normal'`` with an
-                        # empty/``<silent>``-stripped body (we're already inside the
-                        # ``level=='silent' or not text.strip()`` branch, so here the
-                        # body is empty). Persist an INVISIBLE ``silent`` terminal
-                        # marker; without it the activity grouping sees "activity rows +
-                        # no terminal" and misreads a legal completion as interrupted.
-                        #
-                        # This must NOT fire for ``level='silent'``: the user-stop paths
-                        # (codex/claude/opencode) emit a terminal ``result`` with
-                        # ``level='silent'`` and ``is_error=False`` — a stop legitimately
-                        # stays ``interrupted``, so ``not is_error`` is the wrong gate.
-                        # Backend failures also arrive ``level='silent'`` (after a
-                        # visible notify), and are excluded here too. Background
-                        # sessions still keep this local terminal marker; visibility
-                        # suppresses outward delivery, not durable history.
-                        try:
-                            persist_silent_completion_marker(context)
-                        except Exception:
-                            logger.exception("emit_agent_message: silent completion marker failed")
+                if output_semantics.requires_delivery_for_run_settlement:
+                    settlement_complete = self._settle_activity_output_claims(
+                        output_semantics,
+                        accepted_message_exists=False,
+                        visible_output=False,
+                    )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Invisible Activity output local settlement is incomplete",
+                            delivered=False,
+                        )
                 return None
             finally:
                 if mutates_turn_lifecycle:
@@ -1537,18 +2053,60 @@ class ConsolidatedMessageDispatcher:
         # quick-reply button block before delivery/streaming, so persisting the
         # raw text would surface markup in the inbox preview / chat transcript
         # that was never shown. Computed once here and reused for delivery below.
-        enhanced = None
         persist_text = text
         if canonical_type == "result":
-            quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
-            enhanced = process_reply(text, include_quick_replies=quick_replies_on)
             persist_text = enhanced.text if enhanced.text.strip() else text
 
-        if native_output_id and agent_message_exists(target_context, native_output_id):
+        accepted_message = None
+        native_output_candidates = tuple(
+            dict.fromkeys(
+                candidate
+                for candidate in (
+                    native_output_id,
+                    *output_semantics.native_message_id_aliases,
+                )
+                if candidate
+            )
+        )
+        for candidate in native_output_candidates:
+            accepted_message = agent_message_exists(target_context, candidate)
+            if accepted_message:
+                native_output_id = candidate
+                break
+        if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
+            accepted_output_semantics = self._output_with_accepted_provenance(
+                output_semantics,
+                accepted_message,
+            )
+            # An existing row is the STRONGEST receipt available — stronger than a
+            # send that returned an id, because it proves the write committed. Report
+            # it here or a caller holding a durable notice cannot distinguish "already
+            # delivered" from "never delivered": this branch returns ~112 lines above
+            # the notify branch's evidence assignment, and the drain reads the
+            # evidence, not the return value.
+            #
+            # That gap was reachable exactly where it hurts most — a crash between
+            # persisting the message and acknowledging the notice, which is the case
+            # the idempotency key exists for. The retry would find the row, decline to
+            # re-send, report nothing, and then either walk on to another delivery
+            # rung (a duplicate by another route) or exhaust its backoff and
+            # dead-letter a notice the user already has.
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = native_output_id
+                delivery.persisted_row = {
+                    "native_message_id": native_output_id,
+                    "evidence": "duplicate_short_circuit",
+                }
             try:
-                if canonical_type == "result" and output_semantics.settles_run:
-                    duplicate_result_text = self._fold_footer(
+                if canonical_type == "result" and accepted_output_semantics.settles_run:
+                    accepted_is_error = self._accepted_message_is_error(
+                        accepted_message,
+                        fallback=is_error,
+                    )
+                    duplicate_result_text = self._accepted_message_result_text(
+                        accepted_message,
                         persist_text,
                         result_footer if mutates_turn_lifecycle else None,
                     )
@@ -1556,17 +2114,31 @@ class ConsolidatedMessageDispatcher:
                         context,
                         duplicate_result_text,
                         None,
-                        is_error=is_error,
-                        terminal_error=terminal_error,
-                        output_semantics=output_semantics,
+                        is_error=accepted_is_error,
+                        terminal_error=(terminal_error if accepted_is_error else None),
+                        output_semantics=accepted_output_semantics,
                     )
                 if mutates_turn_lifecycle:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
                     self._signal_turn_complete(
                         context,
-                        settled_by=self._turn_release_settlement(output_semantics),
+                        settled_by=self._turn_release_settlement(
+                            accepted_output_semantics
+                        ),
                     )
+                if accepted_output_semantics.requires_delivery_for_run_settlement:
+                    settlement_complete = self._settle_activity_output_claims(
+                        accepted_output_semantics,
+                        accepted_message_exists=True,
+                    )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Accepted Activity output has incomplete local settlement",
+                            delivered=True,
+                            durable=True,
+                            message_id=native_output_id,
+                        )
                 # A previously persisted output is a successful idempotent
                 # delivery attempt. Return its stable identity so a recovered
                 # Activity can acknowledge its durable Outbox snapshot instead
@@ -1576,6 +2148,27 @@ class ConsolidatedMessageDispatcher:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
                     self._release_runtime_turn(context)
+
+        if activity_batch_incomplete:
+            raise ActivityOutputDeliveryError(
+                "Activity output batch recovery is incomplete",
+                delivered=False,
+            )
+
+        if activity_local_settlement_only:
+            settlement_complete = self._settle_activity_output_claims(
+                output_semantics,
+                accepted_message_exists=False,
+                settlement_error=RuntimeError(
+                    "Retrying delivered Activity terminal settlement"
+                ),
+            )
+            if settlement_complete is False:
+                raise ActivityOutputDeliveryError(
+                    "Delivered Activity local settlement retry is incomplete",
+                    delivered=True,
+                )
+            return native_output_id
 
         # Persistence is decided per delivery path below, not here, so that:
         #   * background sessions retain local history without platform delivery,
@@ -1595,19 +2188,16 @@ class ConsolidatedMessageDispatcher:
                     result_type = "error" if is_error else "result"
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
-                            text,
+                            raw_text,
                             include_quick_replies=quick_replies_on,
                             keep_file_links=True,
-                        )
-                        recorded_text = self._fold_footer(
-                            background_enhanced.text or persist_text,
-                            result_footer,
                         )
                         persisted_output = persist_agent_message(
                             target_context,
                             result_type,
-                            recorded_text,
+                            background_enhanced.text or persist_text,
                             quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1616,6 +2206,7 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             result_type,
                             recorded_text,
+                            result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1631,10 +2222,14 @@ class ConsolidatedMessageDispatcher:
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
                 terminal_status = None
-                if (
-                    canonical_type == "result"
-                    and (context.platform_specific or {}).get("task_trigger_kind") == "agent_run"
-                ):
+                # These two branches are one rule and must be edited as a pair:
+                # the ``elif`` is the negation of the ``if``. A terminal result on
+                # a Harness run takes the rich recorder (output ledger + settlement
+                # + ``result_text``); everything else falls back to the legacy
+                # message recorder, except an intermediate message on a Harness run,
+                # which belongs to no output ledger entry and is recorded by neither.
+                suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
+                if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
                         recorded_text,
@@ -1643,7 +2238,7 @@ class ConsolidatedMessageDispatcher:
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
-                elif canonical_type == "result" or (context.platform_specific or {}).get("task_trigger_kind") != "agent_run":
+                elif canonical_type == "result" or suppressed_trigger_kind not in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_run_message(
                         context,
                         recorded_text,
@@ -1659,6 +2254,17 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
+                if output_semantics.requires_delivery_for_run_settlement:
+                    settlement_complete = self._settle_activity_output_claims(
+                        output_semantics,
+                        accepted_message_exists=persisted_output is not None,
+                        visible_output=False,
+                    )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Suppressed Activity output local settlement is incomplete",
+                            delivered=False,
+                        )
                 return message_id
             finally:
                 if mutates_turn_lifecycle:
@@ -1666,24 +2272,54 @@ class ConsolidatedMessageDispatcher:
                     self._release_runtime_turn(context)
 
         if canonical_type == "notify":
+            # Three steps, three error scopes — deliberately NOT one blanket ``try``.
+            #
+            # Under a single ``try`` a persistence failure returned ``None`` and
+            # DISCARDED the message id assigned on the line above, turning
+            # "delivered but unpersisted" into "looks like never delivered" and
+            # re-sending a notice the user already had. A post-delivery
+            # ``_stream_chunk`` failure did the same thing. Whoever owes a durable
+            # notice for this message has to be able to tell those apart from a send
+            # that genuinely failed, so each stage reports itself.
             try:
                 message_id = await im_client.send_message(target_context, text, parse_mode=parse_mode)
-                # Record only once delivered (avibe always, via SSE) so a failed
-                # IM send isn't stored as if the user received it.
-                if persists_without_delivery or message_id is not None:
-                    persist_agent_message(
-                        target_context,
-                        "notify",
-                        text,
-                        metadata=output_metadata,
-                        native_message_id=native_output_id,
-                    )
-                # Live SSE turn stream for the web Chat page (no-op for IM/CLI).
-                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
-                return message_id
             except Exception as err:
-                logger.error("Failed to send notify message: %s", err)
-            return None
+                logger.error("Failed to send notify message: %s", err, exc_info=True)
+                if delivery is not None:
+                    delivery.error = err
+                    delivery.error_stage = STAGE_SEND
+                return None
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = message_id
+            # Record only once delivered (avibe always, via SSE) so a failed
+            # IM send isn't stored as if the user received it.
+            if persists_without_delivery or message_id is not None:
+                persist_errors: list[BaseException] = []
+                persisted_notify = persist_agent_message(
+                    target_context,
+                    "notify",
+                    text,
+                    metadata=output_metadata,
+                    native_message_id=native_output_id,
+                    error_sink=persist_errors,
+                )
+                if delivery is not None:
+                    delivery.persisted_row = persisted_notify
+                    if persisted_notify is None and persist_errors:
+                        delivery.error = persist_errors[0]
+                        delivery.error_stage = STAGE_PERSIST
+            # Live SSE turn stream for the web Chat page (no-op for IM/CLI). Past
+            # this point the message is delivered; a failure here is recorded for
+            # diagnosis and must not be read as a delivery failure.
+            try:
+                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
+            except Exception as err:
+                logger.error("notify stream failed after delivery: %s", err, exc_info=True)
+                if delivery is not None:
+                    delivery.error = err
+                    delivery.error_stage = STAGE_STREAM
+            return message_id
 
         if canonical_type == "result":
             try:
@@ -1724,14 +2360,15 @@ class ConsolidatedMessageDispatcher:
                 #     grey subtext — and in concise mode it supersedes the bubble's
                 #     own ``✅ done · …`` line so the terminal footer stays
                 #     consistent (grey, one line, no head text);
-                #   * platforms WITHOUT subtext rendering (Telegram/WeChat/Avibe)
+                #   * IM platforms WITHOUT subtext rendering (Telegram/WeChat)
                 #     fold it onto the body as a trailing line, so the footnote
                 #     stays visible AND their senders (which don't accept the
                 #     ``subtext`` kwarg) are never handed it.
-                # ``folded_footer`` is the footnote to APPEND to the stored text so
-                # a reloaded transcript / inbox / agent-run record keeps the
-                # duration/token info (it used to live in the result body). It is
-                # set for BOTH platform kinds; only the DELIVERY form differs.
+                #   * Avibe carries it as structured message content; the Web
+                #     transcript renders it beside the timestamp.
+                # ``folded_footer`` is the canonical footnote carried to IM
+                # delivery, agent-run records, and structured Web message content.
+                # It is set for every platform; only the presentation differs.
                 folded_footer: Optional[str] = result_footer if mutates_turn_lifecycle else None
                 if folded_footer:
                     # Gate on the DELIVERY TARGET's capabilities, not the source
@@ -1742,7 +2379,7 @@ class ConsolidatedMessageDispatcher:
                         # Subtext-capable: deliver as the grey subtext footer (body
                         # stays clean); persistence still folds it in below.
                         done_footer = folded_footer
-                    else:
+                    elif target_context.platform != "avibe":
                         # No subtext rendering: fold onto the delivered body too.
                         display_text = self._fold_footer(display_text, folded_footer)
                 # Pass subtext to RAW send_message calls only when set, so an adapter
@@ -1910,15 +2547,32 @@ class ConsolidatedMessageDispatcher:
                     else:
                         await self._clear_consolidated_state(context)
 
-                # The stored text keeps the footnote for BOTH platform kinds:
-                # ``display_text`` already carries it on non-subtext platforms (folded
-                # above), while subtext platforms delivered it out-of-band — folding
-                # ``folded_footer`` onto the clean ``persist_text`` reconstructs the
-                # same body+footer without double-appending (persist_text is never
-                # mutated) and is a no-op when there is no footer.
+                # Agent-run records keep the complete body+footer text for every
+                # platform. The Web message row separately persists a clean body
+                # plus structured footer below.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
+                run_provenance = output_semantics.provenance(context)
+                workbench_run_waits_for_persistence = (
+                    target_context.platform == "avibe"
+                    and output_semantics.settles_run
+                    and bool(run_provenance.get("run_id") or run_provenance.get("run_ids"))
+                )
+                workbench_terminal_waits_for_persistence = (
+                    target_context.platform == "avibe" and mutates_turn_lifecycle
+                )
+                settlement_waits_for_persistence = (
+                    output_semantics.requires_delivery_for_run_settlement
+                    or workbench_run_waits_for_persistence
+                    or workbench_terminal_waits_for_persistence
+                )
+                activity_delivery_error: ActivityOutputDeliveryError | None = None
+                activity_settlement_error: BaseException | None = None
+                durable_output_exists = False
+                activity_was_delivered = False
+                settlement_output_semantics = output_semantics
+                settlement_result_text = persisted_result_text
 
-                if not output_semantics.requires_delivery_for_run_settlement:
+                if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
                         context,
                         persisted_result_text,
@@ -1947,14 +2601,14 @@ class ConsolidatedMessageDispatcher:
                         # render the button group (IM channels render native buttons
                         # from the same ``enhanced.buttons``).
                         avibe_enhanced = process_reply(
-                            text, include_quick_replies=quick_replies_on, keep_file_links=True
+                            raw_text, include_quick_replies=quick_replies_on, keep_file_links=True
                         )
-                        avibe_text = self._fold_footer(avibe_enhanced.text or persist_text, folded_footer)
                         persisted_output = persist_agent_message(
                             target_context,
                             result_type,
-                            avibe_text,
+                            avibe_enhanced.text or persist_text,
                             quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
@@ -1963,26 +2617,82 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             result_type,
                             persisted_result_text,
+                            result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                         )
 
-                if output_semantics.requires_delivery_for_run_settlement:
-                    if persisted_output is None and not (
-                        native_output_id
-                        and agent_message_exists(target_context, native_output_id)
-                    ):
-                        raise RuntimeError(
-                            "Activity output was not durably persisted after delivery"
-                        )
-                    self._record_agent_run_terminal_result(
-                        context,
-                        persisted_result_text,
-                        primary_message_id,
-                        is_error=is_error,
-                        terminal_error=terminal_error,
-                        output_semantics=output_semantics,
+                if settlement_waits_for_persistence:
+                    accepted_message = persisted_output or (
+                        agent_message_exists(target_context, native_output_id)
+                        if native_output_id
+                        else None
                     )
+                    durable_output_exists = bool(accepted_message)
+                    if accepted_message:
+                        settlement_output_semantics = (
+                            self._output_with_accepted_provenance(
+                                output_semantics,
+                                accepted_message,
+                            )
+                        )
+                        settlement_result_text = self._accepted_message_result_text(
+                            accepted_message,
+                            persisted_result_text,
+                            None,
+                        )
+                    activity_was_delivered = bool(
+                        output_semantics.requires_delivery_for_run_settlement
+                        and target_context.platform != "avibe"
+                        and primary_message_id is not None
+                    )
+                    if (
+                        output_semantics.requires_delivery_for_run_settlement
+                        and not durable_output_exists
+                    ):
+                        if not activity_was_delivered:
+                            raise ActivityOutputDeliveryError(
+                                "Activity output was not durably persisted or delivered",
+                                delivered=False,
+                            )
+                    if workbench_terminal_waits_for_persistence and not durable_output_exists:
+                        raise RuntimeError(
+                            "Workbench terminal output was not durably persisted"
+                        )
+                    if workbench_run_waits_for_persistence and not durable_output_exists:
+                        raise RuntimeError("Workbench run output was not durably persisted")
+                    try:
+                        self._record_agent_run_terminal_result(
+                            context,
+                            settlement_result_text,
+                            primary_message_id,
+                            is_error=is_error,
+                            terminal_error=terminal_error,
+                            output_semantics=settlement_output_semantics,
+                        )
+                    except Exception as err:
+                        if not activity_was_delivered:
+                            raise
+                        if durable_output_exists:
+                            logger.warning(
+                                "Durable Activity output requires local Run settlement retry",
+                                exc_info=True,
+                            )
+                            activity_delivery_error = ActivityOutputDeliveryError(
+                                "Activity output was delivered durably but linked Run settlement failed",
+                                delivered=True,
+                                durable=True,
+                                message_id=primary_message_id,
+                                cause=err,
+                            )
+                        else:
+                            logger.error(
+                                "Activity output reached the user without durable message "
+                                "evidence and linked Run settlement failed; preparing "
+                                "Registry-owned terminal settlement",
+                                exc_info=True,
+                            )
+                            activity_settlement_error = err
 
                 if primary_message_id and display_text and not output_semantics.detached:
                     # Stream the delivered result to live consumers (avibe SSE).
@@ -2003,6 +2713,24 @@ class ConsolidatedMessageDispatcher:
                         context,
                         settled_by=self._turn_release_settlement(output_semantics),
                     )
+
+                if activity_delivery_error is not None:
+                    raise activity_delivery_error
+
+                if output_semantics.requires_delivery_for_run_settlement:
+                    settlement_complete = self._settle_activity_output_claims(
+                        settlement_output_semantics,
+                        accepted_message_exists=durable_output_exists,
+                        settlement_error=activity_settlement_error,
+                    )
+                    if settlement_complete is False:
+                        raise ActivityOutputDeliveryError(
+                            "Activity output was delivered but local settlement is incomplete",
+                            delivered=activity_was_delivered or durable_output_exists,
+                            durable=durable_output_exists,
+                            message_id=primary_message_id,
+                            cause=activity_settlement_error,
+                        )
 
                 return primary_message_id
             finally:

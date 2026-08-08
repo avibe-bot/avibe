@@ -4,6 +4,7 @@ from typing import Optional
 from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
     DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
     V2Config,
     SlackConfig,
@@ -11,6 +12,7 @@ from config.v2_config import (
     TelegramConfig,
     LarkConfig,
     WeChatConfig,
+    MemoryConfig,
 )
 
 
@@ -20,7 +22,6 @@ class ClaudeCompatConfig:
     permission_mode: str
     cwd: str
     system_prompt: Optional[str] = None
-    default_model: Optional[str] = None
     cli_path: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     auth_mode: str = "oauth"
@@ -43,8 +44,8 @@ class CodexCompatConfig:
     enabled: bool
     binary: str
     extra_args: list[str]
-    default_model: Optional[str] = None
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+    auth_mode: str = "oauth"
 
 
 @dataclass
@@ -53,9 +54,9 @@ class OpenCodeCompatConfig:
     binary: str
     port: int
     request_timeout_seconds: int
-    default_model: Optional[str] = None
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
+    active_turn_timeout_seconds: int = DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS
     # User's saved default provider from Settings → Backends → OpenCode.
     # Used as the ``providerID`` when a routed model string has no ``provider/``
     # prefix (most agents.opencode model entries are bare model IDs).
@@ -70,6 +71,7 @@ class AppCompatConfig:
     log_level: str
     ack_mode: str
     language: str
+    default_cwd: str
     platforms: dict = field(default_factory=lambda: {"enabled": ["slack"], "primary": "slack"})
     discord: Optional[DiscordConfig] = None
     telegram: Optional[TelegramConfig] = None
@@ -83,6 +85,10 @@ class AppCompatConfig:
     reply_enhancements: bool = True
     default_backend: str = DEFAULT_AGENT_BACKEND
     resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
+    # Mirrors ``V2Config.runtime.harness_prompt_echo``; read on the IM turn path, so
+    # it has to reach the controller's runtime config like ``resource_governance``.
+    harness_prompt_echo: bool = True
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def enabled_platforms(self) -> list[str]:
         enabled = self.platforms.get("enabled") if isinstance(self.platforms, dict) else None
@@ -103,7 +109,6 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         permission_mode="bypassPermissions",
         cwd=v2.runtime.default_cwd,
         system_prompt=None,
-        default_model=v2.agents.claude.default_model,
         cli_path=v2.agents.claude.cli_path,
         idle_timeout_seconds=v2.agents.claude.idle_timeout_seconds,
         # Forward V2Config auth fields so ``session_handler`` can inject the
@@ -121,8 +126,8 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             enabled=True,
             binary=v2.agents.codex.cli_path,
             extra_args=[],
-            default_model=v2.agents.codex.default_model,
             idle_timeout_seconds=v2.agents.codex.idle_timeout_seconds,
+            auth_mode=v2.agents.codex.auth_mode,
         )
     opencode = None
     if v2.agents.opencode.enabled:
@@ -131,9 +136,9 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
             binary=v2.agents.opencode.cli_path,
             port=4096,
             request_timeout_seconds=60,
-            default_model=v2.agents.opencode.default_model,
             default_reasoning_effort=v2.agents.opencode.default_reasoning_effort,
             error_retry_limit=v2.agents.opencode.error_retry_limit,
+            active_turn_timeout_seconds=v2.agents.opencode.active_turn_timeout_seconds,
             # Surface the user's saved provider choice so the OpenCode agent
             # adapter can prepend it as ``providerID`` for bare-model strings.
             default_provider=v2.agents.opencode.default_provider,
@@ -156,9 +161,12 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         log_level=v2.runtime.log_level,
         ack_mode=v2.ack_mode,
         language=v2.language,
+        default_cwd=v2.runtime.default_cwd,
         show_duration=v2.show_duration,
         include_time_info=v2.include_time_info,
         include_user_info=v2.include_user_info,
         reply_enhancements=v2.reply_enhancements,
         resource_governance=v2.runtime.resource_governance,
+        harness_prompt_echo=v2.runtime.harness_prompt_echo,
+        memory=v2.memory,
     )

@@ -3,6 +3,10 @@
 Status: proposal (awaiting confirmation). Branch: `fix/workbench-chat-page`.
 Supersedes the "refuse the 2nd concurrent message" behavior.
 
+> Historical proposal. The current message-priority and Send now contract is
+> defined in `docs/plans/agent-message-priority.md`; where this document describes
+> Send now as Stop/cancel, the current contract supersedes it.
+
 ## Background — what PR #359 already gives us
 
 PR #359 (`per-session inbox + unified typed message persistence + realtime

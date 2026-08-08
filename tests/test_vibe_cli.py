@@ -208,6 +208,63 @@ def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     assert payload["restart"]["error"] == "start command timed out after 30 seconds"
 
 
+def test_render_status_includes_internal_server_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_json(
+        paths.get_internal_server_status_path(),
+        {
+            "state": "error",
+            "error": "internal_server_unavailable",
+            "detail": "internal dispatch socket owner mismatch",
+        },
+    )
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["internal_server"] == {
+        "state": "error",
+        "error": "internal_server_unavailable",
+        "detail": "internal dispatch socket owner mismatch",
+    }
+
+
+def test_render_status_does_not_report_a_ready_internal_server_without_a_service(tmp_path, monkeypatch):
+    """A live "ready" with no service owner is stale, not a report.
+
+    The internal server runs on the service process's loop and owns a socket
+    that dies with it, so it cannot outlive its owner. A SIGKILL leaves no
+    shutdown path to correct the file, which would otherwise make `vibe status`
+    claim a ready internal server against a stopped service.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_json(paths.get_internal_server_status_path(), {"state": "ready"})
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["running"] is False
+    assert payload["internal_server"] == {"state": "stopped", "stale": True}
+
+
+def test_render_status_keeps_a_recorded_error_when_the_service_is_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_json(
+        paths.get_internal_server_status_path(),
+        {"state": "error", "error": "internal_server_unavailable"},
+    )
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    # A terminal state is why the service is gone; do not overwrite it.
+    assert payload["internal_server"]["state"] == "error"
+    assert "stale" not in payload["internal_server"]
+
+
 def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
     monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
 
@@ -590,6 +647,13 @@ def test_binary_architecture_omits_path_prefix_before_token_parsing(tmp_path, mo
     assert cli._architecture_token(output) == "x86_64"
 
 
+def _no_live_runtime_processes(monkeypatch):
+    """Keep cmd_start's process-reuse probes off the developer's real state."""
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+
+
 def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     calls = []
     config = SimpleNamespace(
@@ -597,6 +661,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
     )
 
+    _no_live_runtime_processes(monkeypatch)
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(
@@ -607,15 +672,22 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: calls.append(("start_ui", host, port)) or 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
+    )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
 
-    assert calls.index(("handover",)) < calls.index(("start_service", {"wait_for_ready": False}))
-    assert ("start_service", {"wait_for_ready": False}) in calls
-    assert ("start_ui", "127.0.0.1", 5123) in calls
+    service_call = next(call for call in calls if call[0] == "start_service")
+    ui_call = next(call for call in calls if call[0] == "start_ui")
+    assert calls.index(("handover",)) < calls.index(service_call)
+    assert service_call[1]["wait_for_ready"] is False
+    assert service_call[1]["memory_ui_secret"] == ui_call[3]["memory_ui_secret"]
+    assert ui_call[1:3] == ("127.0.0.1", 5123)
     assert not any(call == "stop" for call in calls)
 
 
@@ -691,7 +763,7 @@ def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: 5678)
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
@@ -708,12 +780,17 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
     )
 
+    _no_live_runtime_processes(monkeypatch)
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: calls.append(("start_ui", host, port)) or 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or 5678,
+    )
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 1234)
@@ -721,7 +798,10 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
 
     assert cli.cmd_start() == 0
 
-    assert calls.index(("start_service", {"wait_for_ready": False})) < calls.index(("start_ui", "127.0.0.1", 5123))
+    service_index = next(i for i, call in enumerate(calls) if call[0] == "start_service")
+    ui_index = next(i for i, call in enumerate(calls) if call[0] == "start_ui")
+    assert service_index < ui_index
+    assert calls[service_index][1]["memory_ui_secret"] == calls[ui_index][3]["memory_ui_secret"]
     assert ("runtime_status", ("starting", "waiting for service process", 1234, 5678)) in calls
     assert ("runtime_status", ("starting", "service process is still starting", 1234, 5678)) in calls
 
@@ -733,12 +813,13 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     )
     statuses = []
 
+    _no_live_runtime_processes(monkeypatch)
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: 5678)
+    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
     monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
@@ -748,6 +829,137 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
         cli.cmd_start()
 
     assert ("error", "service process exited before startup completed", 1234, 5678) in statuses
+
+
+def _memory_start_config(*, memory_enabled: bool = True, language: str = "en") -> SimpleNamespace:
+    return SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+        memory=SimpleNamespace(enabled=memory_enabled),
+        language=language,
+    )
+
+
+def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(monkeypatch):
+    calls = []
+    config = _memory_start_config()
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_ui",
+        lambda **kwargs: calls.append(("stop_ui", kwargs)) or True,
+    )
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
+    )
+    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+
+    assert cli.cmd_start() == 0
+
+    kinds = [call[0] for call in calls]
+    assert kinds == ["start_service", "stop_ui", "start_ui"]
+    assert calls[1][1] == {"stop_remote_access": False}
+    service_secret = calls[0][1]["memory_ui_secret"]
+    assert service_secret
+    assert calls[2][1]["memory_ui_secret"] == service_secret
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_warning"),
+    [
+        ("en", "Memory Settings content is unavailable"),
+        ("zh", "记忆设置内容暂不可用"),
+    ],
+)
+def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
+    monkeypatch,
+    capsys,
+    language,
+    expected_warning,
+):
+    calls = []
+    config = _memory_start_config(language=language)
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_ui",
+        lambda **kwargs: calls.append(("stop_ui", kwargs)) or True,
+    )
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 9012,
+    )
+    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+
+    assert cli.cmd_start() == 0
+
+    assert [call[0] for call in calls] == ["start_service", "start_ui"]
+    assert calls[1][1]["memory_ui_secret"] is None
+    output = capsys.readouterr().out
+    assert expected_warning in output
+    assert "vibe stop" in output
+
+
+def test_cmd_start_keeps_a_reused_pair_untouched(monkeypatch, capsys):
+    calls = []
+    config = _memory_start_config()
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_ui",
+        lambda **kwargs: calls.append(("stop_ui", kwargs)) or True,
+    )
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or 5678,
+    )
+    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+
+    assert cli.cmd_start() == 0
+
+    assert [call[0] for call in calls] == ["start_service", "start_ui"]
+    assert calls[1][1]["memory_ui_secret"] is None
+    assert "Memory Settings content is unavailable" not in capsys.readouterr().out
+
+
+def test_live_ui_server_pid_reads_only_a_verified_ui_process(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    cli.paths.get_runtime_ui_pid_path().parent.mkdir(parents=True, exist_ok=True)
+    cli.paths.get_runtime_ui_pid_path().write_text("4321\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: True)
+    assert cli._live_ui_server_pid() == 4321
+
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
+    assert cli._live_ui_server_pid() is None
 
 
 def test_service_lifecycle_doctor_warns_when_pidfile_missing_but_lock_owner_exists(monkeypatch, tmp_path):
@@ -896,6 +1108,77 @@ def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch
     assert result["stopped_pids"] == [2222]
 
 
+def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
+    """Wire _start_service_after_repair onto fakes and record what each side got."""
+
+    calls = {"service_secret": [], "ui_secret": [], "stopped_ui": 0}
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: live_ui_pid)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_service",
+        lambda *, memory_ui_secret=None, **kwargs: calls["service_secret"].append(memory_ui_secret) or 4321,
+    )
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": live_ui_pid})
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args, **kwargs: None)
+
+    def _stop_ui(*args, **kwargs):
+        calls["stopped_ui"] += 1
+
+    monkeypatch.setattr(cli.runtime, "stop_ui", _stop_ui)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(
+        cli,
+        "_ensure_config",
+        lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=5123)),
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, *, memory_ui_secret=None, **kwargs: calls["ui_secret"].append(memory_ui_secret) or 8765,
+    )
+    return calls
+
+
+def test_repair_restarts_surviving_ui_with_the_new_service_secret(monkeypatch):
+    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
+
+    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
+
+    assert result["status"] == "repaired"
+    # A bare CLI holds no process secret, so the replacement service must be
+    # given a freshly minted one and the surviving UI restarted onto the same
+    # value -- otherwise the pair verifies and signs with different secrets.
+    assert calls["stopped_ui"] == 1
+    assert calls["service_secret"] == calls["ui_secret"]
+    assert calls["service_secret"][0]
+
+
+def test_repair_leaves_the_ui_alone_when_none_is_running(monkeypatch):
+    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=None)
+
+    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
+
+    assert result["status"] == "repaired"
+    assert calls["stopped_ui"] == 0
+    assert calls["ui_secret"] == []
+
+
+def test_repair_still_reports_success_when_the_ui_restart_fails(monkeypatch):
+    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("port busy")),
+    )
+
+    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
+
+    # The service repair itself succeeded; a UI that cannot be realigned is
+    # logged, not escalated into a failed repair.
+    assert result["status"] == "repaired"
+    assert calls["service_secret"][0]
+
+
 def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatch):
     stopped = []
     refreshed = []
@@ -937,7 +1220,8 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
 
@@ -963,7 +1247,8 @@ def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(mon
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
 

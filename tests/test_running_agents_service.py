@@ -12,6 +12,7 @@ import types
 
 import pytest
 
+from core.message_context import build_context_turn_sink_key
 from core.services import running_agents
 
 
@@ -691,6 +692,37 @@ def test_end_claude_interrupts_disconnects_and_reaps_subprocess(monkeypatch):
     assert reap.called and res["process_killed"] is True and res["pid"] == 4321
 
 
+def test_end_claude_routes_registered_adapter_teardown(monkeypatch):
+    interrupt = _AsyncFlag()
+    cleanup = _AsyncFlag()
+    end_runtime = _AsyncFlag(ret=True)
+    client = types.SimpleNamespace(interrupt=interrupt, _fake_pid=4321)
+    session_handler = types.SimpleNamespace(
+        claude_sessions={"slack_1:/w": client},
+        cleanup_session=cleanup,
+    )
+    controller = _make_controller()
+    controller.session_handler = session_handler
+    controller.agent_service.agents["claude"] = types.SimpleNamespace(
+        end_runtime_session=end_runtime
+    )
+    reap = _AsyncFlag(ret=1)
+    monkeypatch.setattr("modules.agents.claude_process_reaper._reap_pid_set", reap)
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            composite_key="slack_1:/w",
+        )
+    )
+
+    assert res["ok"] is True
+    assert end_runtime.called
+    assert not interrupt.called and not cleanup.called
+    assert reap.called and res["process_killed"] is True
+
+
 def test_end_claude_session_not_live():
     session_handler = types.SimpleNamespace(claude_sessions={}, cleanup_session=_AsyncFlag())
     controller = _make_controller()
@@ -916,6 +948,9 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
         def _get_session_key(self, context):
             return f"{context.platform}::{context.channel_id}"
 
+        def _get_turn_sink_key(self, context):
+            return build_context_turn_sink_key(context, session_key=self._get_session_key(context))
+
         def bind_context_to_turn_sink(self, context, *, agent_session_id=None, backend_base_session_id=None):
             return self.session_turns.bind_context_to_turn_sink(
                 context,
@@ -936,7 +971,7 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
             "agent_session_id": session_id,
             "task_trigger_kind": "agent_run",
             "task_execution_id": "run-primary",
-            "coalesced_queue": {"execution_ids": ["run-coalesced"]},
+            "accepted_agent_run_ids": ["run-primary", "run-coalesced"],
             "agent_session_target": {
                 "id": session_id,
                 "agent_backend": "codex",
@@ -944,8 +979,11 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
             },
         },
     )
+    # Register under the key real dispatch would use, derived from the same context. A
+    # hardcoded literal here would stop proving that the REBUILT stop context lands on
+    # the dispatcher's key, which is the whole point of this test.
     controller.session_turns.register_turn_sink(
-        "slack::private-agent-run-scope",
+        controller._get_turn_sink_key(dispatch_context),
         on_chunk=lambda _envelope: None,
         done_event=sink_done,
         turn_token="sink-token",
@@ -967,10 +1005,18 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
     assert sink_done.is_set()
     stopped_context = seen["context"]
     assert controller._get_session_key(stopped_context) == "slack::private-agent-run-scope"
+    # The rebuilt stop context must carry the row's thread too, or it lands on a
+    # different sink key than the dispatch that registered the sink.
+    assert controller._get_turn_sink_key(stopped_context) == controller._get_turn_sink_key(
+        dispatch_context
+    )
     assert stopped_context.platform_specific["turn_token"] == "sink-token"
     assert stopped_context.platform_specific["task_trigger_kind"] == "agent_run"
     assert stopped_context.platform_specific["task_execution_id"] == "run-primary"
-    assert stopped_context.platform_specific["coalesced_queue"] == {"execution_ids": ["run-coalesced"]}
+    assert stopped_context.platform_specific["accepted_agent_run_ids"] == [
+        "run-primary",
+        "run-coalesced",
+    ]
     assert stopped_context.platform_specific["agent_session_target"]["session_anchor"] == base_session_id
 
 
@@ -1015,6 +1061,9 @@ def test_end_active_agent_run_does_not_settle_mismatched_turn_sink(monkeypatch):
         def _get_session_key(self, context):
             return f"{context.platform}::{context.channel_id}"
 
+        def _get_turn_sink_key(self, context):
+            return build_context_turn_sink_key(context, session_key=self._get_session_key(context))
+
         def bind_context_to_turn_sink(self, context, *, agent_session_id=None, backend_base_session_id=None):
             return self.session_turns.bind_context_to_turn_sink(
                 context,
@@ -1042,7 +1091,7 @@ def test_end_active_agent_run_does_not_settle_mismatched_turn_sink(monkeypatch):
         },
     )
     controller.session_turns.register_turn_sink(
-        "slack::private-agent-run-scope",
+        controller._get_turn_sink_key(newer_context),
         on_chunk=lambda _envelope: None,
         done_event=sink_done,
         turn_token="new-token",

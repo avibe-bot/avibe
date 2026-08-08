@@ -8,6 +8,7 @@ import { MAX_RESTORED_TABS, WINDOW_RESTORE_PARAM } from '../../lib/workbenchPers
 import { FilesApiError, contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
+import { IS_APPLE } from '../../lib/platform';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
@@ -76,10 +77,6 @@ type RecentOpenResult = 'opened' | 'gone' | 'unavailable';
 // (Monaco's detected insertSpaces / tabSize). Stored per tab so switching tabs shows the target
 // file's real values immediately, without waiting for its cursor to move.
 type PaneStatus = { line: number; col: number; insertSpaces: boolean; tabSize: number };
-
-const IS_APPLE =
-  typeof navigator !== 'undefined' &&
-  /Mac|iP(hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 
 type FontZoom = 'in' | 'out' | 'reset';
 function fontZoomIntent(e: KeyboardEvent): FontZoom | null {
@@ -407,7 +404,23 @@ export const EditorApp: React.FC<{
     if (p) {
       const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
       if (previewOverlayKind({ kind: 'file', name, size: null })) openPreview(p, name);
-      else openFile(p, name, typeof params?.mtime === 'number' ? params.mtime : null);
+      else {
+        const line = typeof params?.line === 'number' && Number.isInteger(params.line) && params.line > 0
+          ? params.line
+          : null;
+        const column = typeof params?.column === 'number' && Number.isInteger(params.column) && params.column >= 0
+          ? params.column
+          : 0;
+        const endColumn = typeof params?.endColumn === 'number' && Number.isInteger(params.endColumn) && params.endColumn >= column
+          ? params.endColumn
+          : column;
+        openFile(
+          p,
+          name,
+          typeof params?.mtime === 'number' ? params.mtime : null,
+          line ? { line, column, endColumn } : undefined,
+        );
+      }
       return;
     }
     const dir = typeof params?.newFileDir === 'string' ? params.newFileDir : null;

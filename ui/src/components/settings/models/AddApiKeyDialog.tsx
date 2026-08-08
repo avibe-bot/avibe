@@ -17,35 +17,20 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { cn } from '@/lib/utils';
-import { modelsApi } from './modelsApi';
+import { modelsApi, type Adoption } from './modelsApi';
+import { AdoptionNote } from './AdoptionNote';
+import { Field } from './dialogFields';
+import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
 import type { Source } from './types';
+import { errorMessage } from '@/lib/errorMessage';
+
+/** Nothing created yet. `skipped_by: null` rather than `[]` for the reason the
+ *  reader defaults it that way: 「nobody was left out」 is a claim, and no
+ *  creation has made it. */
+const NO_ADOPTION: Adoption = { adopted_by: [], skipped_by: null };
 
 type Phase = 'edit' | 'submitting' | 'done' | 'error';
-
-const FieldLabel: React.FC<{ mono?: boolean; children: React.ReactNode }> = ({ mono, children }) => (
-  <label
-    className={cn(
-      'text-muted',
-      mono
-        ? 'font-mono text-[11px] font-medium uppercase tracking-wide'
-        : 'text-[12px] font-semibold text-foreground',
-    )}
-  >
-    {children}
-  </label>
-);
-
-const IconField: React.FC<{
-  icon: React.ComponentType<{ className?: string }>;
-  children: React.ReactNode;
-}> = ({ icon: Icon, children }) => (
-  <div className="relative">
-    <Icon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted" />
-    {children}
-  </div>
-);
 
 export const AddApiKeyDialog: React.FC<{
   open: boolean;
@@ -58,6 +43,9 @@ export const AddApiKeyDialog: React.FC<{
   const [baseUrl, setBaseUrl] = React.useState('');
   const [phase, setPhase] = React.useState<Phase>('edit');
   const [discovered, setDiscovered] = React.useState(0);
+  // One state for both halves of the tail: the note and the auto-close timer each
+  // read both, and two states could hold one half of an older response.
+  const [adoption, setAdoption] = React.useState<Adoption>(NO_ADOPTION);
   const [error, setError] = React.useState<string | null>(null);
   const closeTimer = React.useRef<number | null>(null);
   // Bumped on every open/close so a test-and-add resolving after the dialog was
@@ -73,6 +61,7 @@ export const AddApiKeyDialog: React.FC<{
       setBaseUrl(DEFAULT_VENDOR.base_url ?? '');
       setPhase('edit');
       setDiscovered(0);
+      setAdoption(NO_ADOPTION);
       setError(null);
     }
     return () => {
@@ -93,7 +82,7 @@ export const AddApiKeyDialog: React.FC<{
     setPhase('submitting');
     setError(null);
     try {
-      const source = await modelsApi.createApiKeySource({
+      const { source, adopted_by, skipped_by } = await modelsApi.createApiKeySource({
         kind: 'api_key',
         vendor,
         base_url: baseUrl.trim() || null,
@@ -101,12 +90,27 @@ export const AddApiKeyDialog: React.FC<{
       });
       if (submitSeq.current !== seq) return; // dialog closed/reopened mid-request
       setDiscovered(source.models.length);
+      setAdoption({ adopted_by, skipped_by });
       setPhase('done');
       onAdded(source);
-      closeTimer.current = window.setTimeout(onClose, 1500);
-    } catch (e: any) {
+      // Auto-dismiss only when the note is pure confirmation. 「还没有 Agent
+      // 启用它」 is an instruction, and 1.5s is not long enough to read one — a
+      // dialog that closes itself over that sentence is how the user ends up
+      // believing a working key is in service.
+      //
+      // `covered` and nothing weaker: a non-empty adopter list does not rule out a
+      // `custom` backend that skipped the key, and that sentence is an instruction
+      // too. `skipped_by` is what makes `covered` reachable at all — a server that
+      // omits it leaves the verdict `indeterminate`, and the dialog waits, which is
+      // the same answer this site gave before the field existed.
+      if (adoptionVerdict(adopted_by, skipped_by).kind === 'covered')
+        closeTimer.current = window.setTimeout(onClose, 1500);
+    } catch (e) {
       if (submitSeq.current !== seq) return;
-      const code = e?.code || e?.message || 'discovery_failed';
+      // The engine reports a machine-readable `code`; fall back to the message
+      // and then to a generic key so the copy lookup always has something.
+      const rawCode = (e as { code?: unknown } | null | undefined)?.code;
+      const code = (typeof rawCode === 'string' ? rawCode : undefined) || errorMessage(e) || 'discovery_failed';
       setError(code === 'engine_down' ? (t('settings.models.errors.engineDown') as string) : code);
       setPhase('error');
     }
@@ -123,55 +127,67 @@ export const AddApiKeyDialog: React.FC<{
           <DialogDescription>{t('settings.models.addKey.subtitle')}</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-2">
-          <FieldLabel>{t('settings.models.addKey.vendorLabel')}</FieldLabel>
-          <Select value={vendor} onChange={(e) => onVendorChange(e.target.value)} className="h-11 text-[14px]">
-            {VENDOR_OPTIONS.map((v) => (
-              <option key={v.value} value={v.value}>
-                {t(v.labelKey)}
-              </option>
-            ))}
-          </Select>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.addKey.vendorHint')}</p>
-        </div>
+        <Field label={t('settings.models.addKey.vendorLabel')} hint={t('settings.models.addKey.vendorHint')}>
+          {(id) => (
+            <Select
+              id={id}
+              value={vendor}
+              onChange={(e) => onVendorChange(e.target.value)}
+              className="h-11 text-[14px]"
+            >
+              {VENDOR_OPTIONS.map((v) => (
+                <option key={v.value} value={v.value}>
+                  {t(v.labelKey)}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
 
-        <div className="flex flex-col gap-2">
-          <FieldLabel mono>{t('settings.models.addKey.keyLabel')}</FieldLabel>
-          <IconField icon={KeyRound}>
+        <Field label={t('settings.models.addKey.keyLabel')} mono icon={KeyRound}>
+          {(id) => (
             <Input
+              id={id}
               type="password"
               autoComplete="off"
               spellCheck={false}
-              placeholder="sk-…"
+              placeholder={t('settings.models.field.apiKeyPlaceholder')}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               className="h-11 pl-9 font-mono text-[14px]"
               disabled={phase === 'submitting' || phase === 'done'}
             />
-          </IconField>
-        </div>
+          )}
+        </Field>
 
-        <div className="flex flex-col gap-2">
-          <FieldLabel mono>{t('settings.models.addKey.baseUrlLabel')}</FieldLabel>
-          <IconField icon={Globe}>
+        <Field
+          label={t('settings.models.addKey.baseUrlLabel')}
+          mono
+          icon={Globe}
+          hint={t('settings.models.addKey.baseUrlHint')}
+        >
+          {(id) => (
             <Input
+              id={id}
               type="text"
               autoComplete="off"
               spellCheck={false}
-              placeholder="https://api.example.com/v1"
+              placeholder={t('settings.models.field.baseUrlPlaceholder')}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               className="h-11 pl-9 font-mono text-[14px]"
               disabled={phase === 'submitting' || phase === 'done'}
             />
-          </IconField>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.addKey.baseUrlHint')}</p>
-        </div>
+          )}
+        </Field>
 
         {phase === 'done' && (
-          <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
-            <CheckCircle2 className="size-4 shrink-0" />
-            <span>{t('settings.models.addKey.discovered', { count: discovered })}</span>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+              <CheckCircle2 className="size-4 shrink-0" />
+              <span>{t('settings.models.addKey.discovered', { count: discovered })}</span>
+            </div>
+            <AdoptionNote adoptedBy={adoption.adopted_by} skippedBy={adoption.skipped_by} />
           </div>
         )}
         {phase === 'error' && (
@@ -183,8 +199,11 @@ export const AddApiKeyDialog: React.FC<{
 
         <DialogFooter>
           <div className="flex items-center gap-2">
+            {/* 关闭, not 取消, once the source exists: after a successful add this
+                is the way out of a dialog that no longer auto-dismisses, and
+                「取消」 on a committed credential reads as an undo. */}
             <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={phase === 'submitting'}>
-              {t('common.cancel')}
+              {t(phase === 'done' ? 'common.close' : 'common.cancel')}
             </Button>
             <Button
               variant="brand"

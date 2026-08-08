@@ -85,7 +85,7 @@ def test_prepare_generates_unified_state(tmp_path: Path, monkeypatch: pytest.Mon
     assert config["agents"]["codex"]["enabled"] is True
     assert "default_backend" not in config["agents"]
     assert config["agents"]["opencode"]["cli_path"] == "opencode"
-    assert config["agents"]["opencode"]["default_model"] == "gpt-5.4"
+    assert "default_model" not in config["agents"]["opencode"]
     assert config["agents"]["opencode"]["default_provider"] == "openai"
 
     # UI host propagated

@@ -258,20 +258,17 @@ Important config payload shape:
       "enabled": true,
       "cli_path": "opencode",
       "default_agent": null,
-      "default_model": null,
       "default_reasoning_effort": null,
       "error_retry_limit": 1
     },
     "claude": {
       "enabled": true,
       "cli_path": "claude",
-      "default_model": null,
       "idle_timeout_seconds": 600
     },
     "codex": {
       "enabled": true,
       "cli_path": "codex",
-      "default_model": null,
       "idle_timeout_seconds": 600
     }
   },
@@ -297,6 +294,11 @@ Important config payload shape:
       "instance_secret": "",
       "session_secret": "",
       "cloudflared_path": "",
+      "transport_protocol": "auto",
+      "auto_recovery": true,
+      "optimization_profile": "balanced",
+      "edge_ip_version": "4",
+      "edge_bind_address": "",
       "dev_login_hint": ""
     }
   },
@@ -506,17 +508,28 @@ WeChat QR login is special: when login is confirmed and a token is returned, the
 
 These endpoints drive the managed `avibe.bot` tunnel that exposes the local Web UI to other devices. They are paired with the `remote_access.vibe_cloud` block under `/config`.
 
-- `GET /remote-access/status`
+- `GET /api/remote-access/status`
   - returns `enabled`, `paired`, `public_url`, `running` (tunnel up), `pid`, `pid_state`, plus `binary_found` / `binary_path` / `binary_version` for the resolved `cloudflared` executable. Use `running: true` to assert the tunnel is up.
-- `POST /remote-access/vibe-cloud/pair`
+- `POST /api/remote-access/vibe-cloud/pair`
   - payload: `{"pairing_key": "vrp_..."}`
   - exchanges the one-time key for an OIDC client, tunnel token, and persists the full `remote_access.vibe_cloud` block; on success Avibe launches the cloudflared tunnel
-- `POST /remote-access/start`
+- `POST /api/remote-access/start`
   - payload: `{}`
   - starts the cloudflared tunnel using the persisted pairing config
-- `POST /remote-access/stop`
+- `POST /api/remote-access/stop`
   - payload: `{}`
   - stops the cloudflared tunnel; configuration is preserved so `start` can resume later
+- `POST /api/remote-access/optimize-route`
+  - payload: `{}`
+  - starts one guarded make-before-break route evaluation; it does not override a pinned protocol
+- `GET /api/remote-access/network-interfaces`
+  - returns currently assigned, up, non-loopback local source addresses that may be selected for cloudflared
+- `POST /api/remote-access/settings`
+  - payload: `{"transport_protocol":"auto|quic|http2","auto_recovery":true,"optimization_profile":"stable|balanced|low_latency","edge_ip_version":"4|auto|6","edge_bind_address":""}`
+  - applies policy-only changes immediately; Connector-affecting changes start and verify a replacement before draining the previous Connector, and keep the previous persisted settings when the replacement cannot become ready
+- `POST /api/remote-access/diagnostics`
+  - payload: `{}`
+  - returns bounded DNS, TCP/HTTP2, and observed-active-QUIC reachability without exposing probe targets or local interface addresses
 - `GET /auth/callback`
   - OIDC redirect target used by avibe.bot during sign-in. Browser-driven; do not call directly from automation.
 - `GET /api/session`
@@ -776,11 +789,17 @@ Preferred CLI shape:
 - delegate to a visible sibling Session in the same scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - wait for an Agent result in the terminal: `vibe agent run --sync --agent '<agent-name>' --message '...'`
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
+- persist a new message and steer the exact FIFO head into the active Turn: `vibe agent run --session-id '<session-id>' --send-now --message '...'`
+- steer an already-queued exact head without adding a message: `vibe session send-now '<session-id>'`
+- inspect another Session's durable FIFO queue: `vibe session queue list '<session-id>'`
+- remove one exact queued message after inspecting its stable ID: `vibe session queue remove '<session-id>' '<message-id>'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork another explicit Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
 - recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`
 - one-off task for this conversation: `vibe task add --at '<ISO-8601>' --message '...'`
 - task that creates a visible sibling Session: `vibe task add --create-session --same-scope --cron '<expr>' --message '...'`
+- scheduled command with no Agent turn: `vibe task add --cron '<expr>' --shell '<command>'`
+- command task with AI failure triage: `vibe task add --cron '<expr>' --shell '<command>' --on-failure agent --message '<what to do>'`
 - immediate rerun: `vibe task run <id>`
 - managed background watch for this conversation: `vibe watch add --message '...' -- <cmd>` (or `--shell '<cmd>'` to pass a single shell string)
 - watch that creates a visible sibling Session: `vibe watch add --create-session --same-scope --message '...' -- <cmd>`
@@ -793,11 +812,16 @@ Targeting and callbacks:
 - In an Avibe-injected Agent shell, commands that operate on this conversation default to the current Agent Session. Omit the target when the work should continue here.
 - Use `--session-id <id>` only when the command should operate on a different existing Agent Session.
 - When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings.
+- When coordinating another Workbench Session, decide whether its current turn should finish or be preempted from the work dependency, urgency, and cost of discarding in-flight work. An explicit user request is one signal, not a prerequisite.
+- Add `--send-now` when a newly persisted Agent Run should also promote the exact FIFO head through same-turn steering. If older work is already queued, that older head is promoted first; the new message never leapfrogs it.
+- Use `vibe session send-now <session-id>` when a Session already has queued work and no new message should be added. This promotes the existing FIFO head.
+- Both send-now forms use the shared steering path for Workbench and IM Sessions. A refused or stale steer leaves the input durably queued and never falls back to Stop.
+- Use `vibe session queue list <session-id>` before changing another Workbench Session's queue. If an instruction is obsolete, contradictory, or duplicated, remove that exact stable row with `vibe session queue remove <session-id> <message-id>`. Never guess a message ID or delete another row to simulate reordering.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.
 - `--message` and `--message-file` are the user-message flags for task, watch, and agent-run commands.
-- `vibe task add` stores the message template and creates Agent Runs when the time trigger fires.
+- `vibe task add` stores a message template — or, with `--shell` / a trailing `-- <argv>`, a command — and creates Runs when the time trigger fires. A command task runs with no Agent turn: silent on success, a failure notice on failure, `--on-failure agent` to escalate failures to an Agent.
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state.
 - `--fork-self` forks this Session's native backend context. `--fork-session <id>` forks another explicit Session. Forks keep the source Session backend, scope, and cwd by default.
 - Fork overrides are intentionally narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same. Do not combine fork flags with existing-session or session-creation flags.
@@ -805,10 +829,11 @@ Targeting and callbacks:
 Operational guidance:
 
 - use `vibe task list` before editing or deleting an existing task; use `vibe watch list` before touching a managed watch
-- if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches accept additional flags like `--shell`, `--timeout` (per-cycle), `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay`
+- if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches and command tasks both accept `--shell` and `--timeout` (per-cycle for watches, per-run for tasks), while `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay` stay watch-only
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
+- read task/watch records from `definition` for detail commands and `definitions` for list commands; command-specific duplicate aliases are not emitted
 - use `--include-finished` for paginated task/watch one-shot history
 - both list commands hide successful one-shot definitions by default while failures stay visible; use `--include-finished` and follow `pagination.next_command` for bounded history
 - use `vibe task show <id>`, `vibe watch show <id>`, or `vibe runs show <run-id>` to inspect stored fields and runtime state
@@ -959,6 +984,7 @@ Screenshots:
 Scheduled tasks:
 
 - `vibe task add`, `vibe task update`, `vibe task list [--include-finished] [--page N] [--limit N]`, `vibe task show <id>`, `vibe task run <id>`, `vibe task pause <id>`, `vibe task resume <id>`, `vibe task remove <id>`
+- Switching a task between message and command form, or changing `--on-failure`, is rejected — remove and recreate.
 
 Agent runs:
 
@@ -969,7 +995,7 @@ Watches:
 
 - `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--include-finished] [--page N] [--limit N]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
 
-For any subcommand, prefer `<command> --help` before composing a new invocation. Harness commands default to this Agent Session inside an Avibe-injected Agent shell. Use `--session-id` only to target a different existing Session, `--same-scope` or `--scope-id` when creating a Session in a visible scope, and `--no-callback` only when an async Agent run will be inspected later through `vibe runs`. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--sync`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). Do not copy flags between task, watch, and agent-run commands without checking help.
+For any subcommand, prefer `<command> --help` before composing a new invocation. Harness commands default to this Agent Session inside an Avibe-injected Agent shell. Use `--session-id` only to target a different existing Session, `--same-scope` or `--scope-id` when creating a Session in a visible scope, and `--no-callback` only when an async Agent run will be inspected later through `vibe runs`. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--sync`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). `vibe task add` also accepts `--shell` or a command after `--`, plus `--on-failure {none,agent}` and a per-run `--timeout`; a pure command task takes no session, scope, or agent flags. Do not copy flags between task, watch, and agent-run commands without checking help.
 
 ## Troubleshooting
 

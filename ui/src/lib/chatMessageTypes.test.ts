@@ -1,6 +1,38 @@
 import { describe, expect, it } from 'vitest';
 
-import { isNotifyMessageType, isTerminalAgentMessage } from './chatMessageTypes';
+import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
+
+describe('isTranscriptMessage', () => {
+  it('shows the rows the transcript has always shown, and hides process log', () => {
+    for (const type of ['user', 'harness', 'result', 'notify', 'error']) {
+      expect(isTranscriptMessage({ type }), type).toBe(true);
+    }
+    for (const type of ['assistant', 'tool_call', 'draft', 'pending', 'silent', 'future_type']) {
+      expect(isTranscriptMessage({ type }), type).toBe(false);
+    }
+  });
+
+  it('shows an annotation, in either direction', () => {
+    expect(isTranscriptMessage({ type: 'annotation' })).toBe(true);
+  });
+
+  // The back door this replaced. A forward annotation carries
+  // ``metadata.source === 'show_page'`` from the moment it is queued, so the old
+  // predicate showed it as a delivered bubble while the very same row was still
+  // sitting in the queue strip waiting to be sent. Only the type changes when the
+  // flush lands, and the type is now the only thing consulted.
+  it('hides a queued annotation however it is dressed', () => {
+    const queued = {
+      type: 'queued',
+      author: 'harness',
+      source: 'harness',
+      author_name: 'show_annotation',
+      metadata: { source: 'show_page', show_event_type: 'human.annotation.created' },
+      content: { annotation: { direction: 'user', action: 'created' } },
+    };
+    expect(isTranscriptMessage(queued)).toBe(false);
+  });
+});
 
 describe('isNotifyMessageType', () => {
   it('renders current and legacy failure rows as notifications', () => {

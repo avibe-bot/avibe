@@ -132,7 +132,7 @@ const OrphanRow: React.FC<{ row: RunningAgent; onEnd: (r: RunningAgent) => Promi
       )}
       <span className="flex-1" />
       {row.elapsed_seconds != null && (
-        <span className="shrink-0 font-mono text-[10px] text-muted">{formatElapsed(row.elapsed_seconds)}</span>
+        <span className="shrink-0 font-mono text-[10px] text-muted">{formatElapsed(row.elapsed_seconds, t)}</span>
       )}
       <Button
         type="button"

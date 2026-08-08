@@ -25,15 +25,24 @@ from sqlalchemy.engine import Connection
 
 from config import paths
 from storage.agent_session_rows import (
-    SESSION_VISIBILITIES,
+    ASSIGNABLE_SESSION_VISIBILITIES,
+    WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
+    reserve_write_lock,
 )
 from storage.db import escape_sql_like
+from storage.session_reclaim import (
+    RECLAIM_DELETE,
+    reclaim_bound_definitions,
+    reconcile_explicit_overrides,
+    retire_session_delivery_owners,
+)
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
     agent_runs,
     agent_sessions,
+    message_deliveries,
     messages,
     run_definitions,
     scope_settings,
@@ -43,6 +52,9 @@ from storage.models import (
 )
 
 # Raw ``agent_runs.status`` values that are not yet terminal — archive cancels these.
+# Mirrors ``background.TEARDOWN_CONDEMNED_RUN_STATUSES``, which the compensating logic
+# for these cancels keys on (an escalation cancelled here owes its parent a failure
+# notice back); widen the two together, and do not narrow this one alone.
 _ACTIVE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 _PENDING_RUN_STATUSES = ("pending", "queued")
 
@@ -132,6 +144,12 @@ def list_sessions(
 
     ``title_query`` powers the chat composer ``#``-mention global search: a
     case-insensitive title LIKE match (LIKE metacharacters escaped).
+
+    The visibility predicate is POSITIVE (``== 'foreground'``), which is why the runtime's
+    ``system`` sessions need no exclusion of their own here: an ordinary session list
+    shows ordinary sessions, and anything the runtime owns has to opt IN to a surface
+    rather than be remembered as an exception. ``tests/test_workspace_system_session.py``
+    pins that, so it stays a property rather than an assumption.
     """
 
     query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
@@ -240,6 +258,9 @@ def list_sessions_page(
     ``<platform>::`` ``scope_id`` prefix (no join needed; see ``make_scope_id``).
     Fetches ``limit + 1`` rows so the caller learns whether a next page exists
     without a second COUNT query.
+
+    ``visibility == 'foreground'`` is positive for the reason ``list_sessions`` spells
+    out: runtime-owned ``system`` sessions are excluded without naming them.
     """
     request = PageRequest(page=max(int(page), 1), limit=max(int(limit), 1))
     query = select(agent_sessions).where(
@@ -304,7 +325,14 @@ def create_session(
             )
             .select_from(
                 scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
-                .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+                .outerjoin(
+                    agents,
+                    and_(
+                        agents.c.name == scope_settings.c.agent_name,
+                        agents.c.enabled == 1,
+                        agents.c.archived_at.is_(None),
+                    ),
+                )
             )
             .where(scopes.c.id == scope_id)
         ).mappings().first()
@@ -366,6 +394,30 @@ def create_session(
     return get_session(conn, session_id)
 
 
+class ReservedSessionError(PermissionError):
+    """Raised when a caller tries to tear down or edit a session the runtime reserves.
+
+    ``PermissionError`` by inheritance, deliberately: the session routes in
+    ``vibe/ui_server.py`` already map that to a refusal response, so a route that has
+    not learned this class yet answers a refusal rather than 500. ``code`` is the
+    machine half; the user-visible sentence is rendered at the HTTP boundary from
+    ``vibe/i18n``, because this layer has no way to know the caller's language (the
+    configured language lives in ``core.services.settings``, and importing core from
+    storage would invert the layering).
+
+    Raised from ``archive_session`` (teardown) and ``update_session`` (edit), both on
+    identity rather than row state — see each for why.
+    """
+
+    code = "reserved_session"
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(
+            f"Session {session_id} is reserved by the runtime and cannot be archived or modified"
+        )
+
+
 class SessionBackendLockedError(Exception):
     """Raised when a caller tries to switch the backend of a session that already
     has a native conversation (pinned for life: the native can only be resumed by
@@ -384,6 +436,24 @@ class SessionBackendLockedError(Exception):
         )
 
 
+class SessionArchivedError(Exception):
+    """Raised when a caller tries to mutate an archived session.
+
+    Archive is terminal: an archived transcript stays readable forever but can
+    never be re-routed, renamed, re-scoped or resumed. ``archive_session`` writes
+    the row directly (not through ``update_session``), so archiving itself can
+    never trip this guard. Callers map it to ``409 {"code": "session_archived"}``,
+    matching the message-append routes.
+
+    Raised from TWO places in ``update_session``: the fast-path read at the top,
+    and the rowcount-0 branch of the UPDATE itself (whose ``status != 'archived'``
+    predicate is the actual guard — see there)."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(f"Session {session_id} is archived and cannot be modified.")
+
+
 def update_session(
     conn: Connection,
     session_id: str,
@@ -400,6 +470,25 @@ def update_session(
     pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
 ) -> dict[str, Any]:
+    """Apply a caller's edits to one session row.
+
+    THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED HERE TOO, for the same reason
+    ``archive_session`` refuses it and on the same IDENTITY test (so the answer does not
+    depend on whether the lazily-created row exists yet). That row is D5 rung (5)'s home
+    and its ``system`` visibility IS the projection: hidden from ordinary session lists,
+    admitted to the inbox. An unguarded write could move it off that value — ``visibility
+    = 'background'`` mutes the notice outright, ``foreground`` re-materializes a
+    machine-owned chat in every user's session list — and also ``scope_id``, which would
+    mint a fake project row and put the session inside a scoped clear's reach. Each of
+    those is silent until the next notice's heal, so an ack could be earned against a
+    surface showing nothing in between.
+
+    ``system`` itself is not assignable in the other direction either: see the
+    ``visibility`` branch below.
+    """
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+        raise ReservedSessionError(str(session_id))
+    reserve_write_lock(conn)
     existing = conn.execute(
         select(
             agent_sessions.c.id,
@@ -408,10 +497,20 @@ def update_session(
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
             agent_sessions.c.metadata_json,
+            agent_sessions.c.status,
         ).where(agent_sessions.c.id == session_id)
     ).first()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+    # THIS READ IS A FAST PATH, NOT THE GUARD. It reserves nothing — pysqlite
+    # opens no transaction for a bare SELECT, so SQLite only takes the write lock
+    # at the UPDATE below — meaning an archive can commit after it and before the
+    # write. The ``status != 'archived'`` predicate ON the UPDATE is what makes
+    # the terminal archive hold; this read only spares an already-lost caller the
+    # rest of the work (and answers the common case before the metadata/scope
+    # reads). Same split as ``sessions_service.bind_agent_session_by_id``.
+    if existing.status == "archived":
+        raise SessionArchivedError(session_id)
 
     derived_backend = False
     if agent_name is not _UNSET and agent_backend is _UNSET:
@@ -484,7 +583,11 @@ def update_session(
         values["reasoning_effort"] = reasoning_effort or None
     if visibility is not _UNSET:
         visibility_value = str(visibility or "").strip()
-        if visibility_value not in SESSION_VISIBILITIES:
+        # ASSIGNABLE, not the full storage vocabulary: ``system`` is a runtime
+        # classification of a runtime-owned row, so no caller may label an ordinary
+        # chat with it (that would hide the chat from every session list while leaving
+        # it delivering into the inbox — a session the user can no longer reach).
+        if visibility_value not in ASSIGNABLE_SESSION_VISIBILITIES:
             raise ValueError(f"invalid session visibility: {visibility!r}")
         values["visibility"] = visibility_value
     if pinned is not _UNSET:
@@ -528,7 +631,38 @@ def update_session(
                 else f"{target_scope.platform}_{target_scope.native_id}:session_{session_id}"
             )
 
-    stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
+    # A PRESENT ``model`` / ``reasoning_effort`` -- any value, including ``None``
+    # -- replaces whatever this session pinned, so its explicit-override marker
+    # must go with it. The Chat header's "Default" item sends present nulls for
+    # the whole route; a marker left behind keeps telling dispatch that this
+    # session pins NULL on purpose, and "Default" then persists and displays a
+    # cleared model while the turn still runs without the Agent's default. Written
+    # LAST and composed onto the same ``existing_metadata`` the title / scope-move
+    # branches above already edited, so one UPDATE carries every metadata change
+    # and an unrelated edit leaves untouched marker entries alone.
+    replaced_settings = [
+        name
+        for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+        if value is not _UNSET
+    ]
+    if replaced_settings:
+        existing_metadata = reconcile_explicit_overrides(existing_metadata, cleared=replaced_settings)
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
+
+    # Re-assert the terminal archive INSIDE the UPDATE, for exactly the reason the
+    # backend lock does just below: the status check at the top of this function is
+    # read-then-write and reserves nothing, and an archive is precisely what
+    # another connection commits in that window — ``archive_session`` cannot cancel
+    # an in-flight turn inside its transaction, so the DELETE route commits the
+    # archive FIRST and cancels best-effort afterwards, which is the window a stale
+    # PATCH lands in. Without this predicate that PATCH would rename or re-route an
+    # already-archived row and break "archive is terminal". Unconditional: every
+    # write this function makes must carry it, not just the backend-changing one.
+    stmt = (
+        update(agent_sessions)
+        .where(agent_sessions.c.id == session_id)
+        .where(agent_sessions.c.status != "archived")
+    )
     if backend_changes:
         # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
         # write, and a turn start / native bind can commit in between (the
@@ -550,10 +684,26 @@ def update_session(
         )
     result = conn.execute(stmt.values(**values))
     if result.rowcount == 0:
+        # Two independent predicates now share one statement, so a rowcount of 0 no
+        # longer names which one refused: re-read the row and decide from its
+        # current state.
+        #
+        # ARCHIVE WINS when both apply. Archive is terminal while the backend lock
+        # is retryable, and answering the retryable code for a permanently dead row
+        # is the exact defect round 5d fixed in the route (a client told
+        # ``backend_locked`` retries forever instead of converging on the archive).
+        # That ordering has to hold here too, or the route's precedence is undone by
+        # the service underneath it.
         current = conn.execute(
-            select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+            select(agent_sessions.c.status, agent_sessions.c.agent_backend).where(
+                agent_sessions.c.id == session_id
+            )
         ).first()
-        if current is None or not backend_changes:
+        if current is None:
+            raise LookupError(f"Session not found: {session_id}")
+        if current.status == "archived":
+            raise SessionArchivedError(session_id)
+        if not backend_changes:
             raise LookupError(f"Session not found: {session_id}")
         raise SessionBackendLockedError(
             session_id=session_id,
@@ -569,6 +719,46 @@ def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
         return ""
     backend = conn.execute(select(agents.c.backend).where(agents.c.name == cleaned)).scalar_one_or_none()
     return str(backend or "")
+
+
+def require_enabled_agent_backend(conn: Connection, agent_name: str) -> str:
+    """Validate a newly assigned Agent and return its backend."""
+
+    cleaned = str(agent_name or "").strip()
+    if not cleaned:
+        return ""
+    return require_enabled_agent_identity(conn, agent_name=cleaned)["backend"]
+
+
+def require_enabled_agent_identity(
+    conn: Connection,
+    *,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+) -> dict[str, str]:
+    """Resolve one enabled Agent while requiring every supplied identity field to match."""
+
+    from core.vibe_agents import normalize_agent_name
+
+    cleaned_id = str(agent_id or "").strip()
+    cleaned_name = str(agent_name or "").strip()
+    stmt = (
+        select(agents.c.id, agents.c.name, agents.c.backend)
+        .where(agents.c.enabled == 1)
+        .where(agents.c.archived_at.is_(None))
+    )
+    if cleaned_id:
+        stmt = stmt.where(agents.c.id == cleaned_id)
+    if cleaned_name:
+        try:
+            normalized_name = normalize_agent_name(cleaned_name)
+        except ValueError as exc:
+            raise LookupError(f"Agent not found or disabled: {cleaned_name}") from exc
+        stmt = stmt.where(agents.c.normalized_name == normalized_name)
+    row = conn.execute(stmt.limit(1)).mappings().first() if cleaned_id or cleaned_name else None
+    if row is None:
+        raise LookupError(f"Agent not found or disabled: {cleaned_name or cleaned_id}")
+    return {"id": str(row["id"]), "name": str(row["name"]), "backend": str(row["backend"])}
 
 
 def derive_backend_for_agent_name(conn: Connection, agent_name: str) -> str:
@@ -681,18 +871,12 @@ def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
         ).scalar()
         or 0
     )
-    # Send-while-busy queued prompts are user-entered text that archive discards;
-    # surface them so the confirm dialog doesn't say "nothing linked" while
-    # silently dropping them. (PENDING reservations are transient dispatch state,
-    # not user-visible, so they're not counted here.)
-    from storage.messages_service import QUEUED_TYPE
-
     queued = (
         conn.execute(
             select(func.count())
-            .select_from(messages)
-            .where(messages.c.session_id == session_id)
-            .where(messages.c.type == QUEUED_TYPE)
+            .select_from(message_deliveries)
+            .where(message_deliveries.c.session_id == session_id)
+            .where(message_deliveries.c.state == "queued")
         ).scalar()
         or 0
     )
@@ -917,7 +1101,26 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
 
     Returns the archived session payload plus a ``reclaimed`` summary
     (``{tasks, watches, runs}``) for the confirm-dialog / post-archive notice.
+
+    THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED, and the refusal is on IDENTITY
+    rather than on row state, so a race that removes the row cannot turn it into a
+    404-and-then-archive. That row is D5 rung (5)'s home (see
+    ``storage.agent_session_rows.resolve_workspace_notice_session``); it is ``system``,
+    so it is NOT one click from a session list any more — but it is still one ``DELETE
+    /api/sessions/ses-workspace-notices`` from anyone holding the id (the inbox card
+    carries it), and archiving it fails SILENTLY. Everything downstream disagrees about
+    what archived means: ``_session_row`` has no status filter so a later notice still
+    persists and still earns its receipt — the notice is stamped ``sent`` — while
+    ``list_inbox_sessions`` excludes archived sessions, so no card, no realtime event and
+    no push. Every subsequent caller-less failure would be recorded as delivered into a
+    surface nothing displays. Hiding the row from the lists narrows the blast radius; it
+    does not replace this guard, which is why both exist.
+
+    Checked BEFORE the existence lookup so the answer is the same on every install,
+    whether or not the lazily-created row exists yet.
     """
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+        raise ReservedSessionError(str(session_id))
     existing = conn.execute(
         select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
     ).scalar_one_or_none()
@@ -948,17 +1151,30 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     # 2) Soft-delete bound scheduled tasks + watches (same table, distinguished by
     #    ``definition_type``). Deleting — not pausing — is deliberate: a paused
     #    definition could be re-enabled later and would then target a dead session.
-    conn.execute(
-        update(run_definitions)
-        .where(run_definitions.c.session_id == session_id)
-        .where(run_definitions.c.deleted_at.is_(None))
-        .values(deleted_at=now, updated_at=now)
+    #    Shared with the hard-delete teardown path, which passes ``pause`` instead
+    #    (``/new`` is an everyday command, archive is terminal); the mode is
+    #    required so a new caller cannot inherit this branch by omission.
+    reclaim_bound_definitions(
+        conn,
+        session_id,
+        mode=RECLAIM_DELETE,
+        reason=f"archive_session:{session_id}",
     )
 
     # 3) Cancel not-yet-terminal runs for this session. Flag every active run as
     #    cancel-requested (the executor honors it for in-flight ones) and
     #    terminalize the ones that haven't started.
     if reclaimed["runs"]:
+        # BEFORE the cancel, and in this same transaction: a queued command-task
+        # escalation is the only user-visible report of a failure whose own notice it
+        # suppressed, so cancelling it silently would leave that failure reported by
+        # nothing. This hands it back to the notice ladder, which does not need the
+        # session being torn down.
+        from storage.background import (
+            rearm_notices_for_escalations_canceled_with_session,
+        )
+
+        rearm_notices_for_escalations_canceled_with_session(conn, session_id, now=now)
         conn.execute(
             update(agent_runs)
             .where(agent_runs.c.session_id == session_id)
@@ -972,11 +1188,10 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
             .values(status="canceled", completed_at=now)
         )
 
-    # 3b) Reclaim all unsent user input so the terminal session retains none:
-    #     queued prompts (flushed on completion / send-now), ``pending`` rows a
-    #     concurrent send reserved just before this committed (``promote_pending``
-    #     then no-ops on that in-flight send), and the saved composer draft.
-    from storage.messages_service import clear_draft, clear_pending, clear_queued
+    # 3b) Retire only submissions proven not written. Native start/steer/control
+    #     ambiguity remains durable and can still materialize positive evidence
+    #     after archive; the archived admission guard prevents any new work.
+    from storage import message_deliveries as delivery_store
     from storage.vault_service import (
         ACTIVE_GRANT_STATES,
         agent_release_scopes_after_rows,
@@ -985,9 +1200,8 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
         vault_grants,
     )
 
-    clear_queued(conn, session_id)
-    clear_pending(conn, session_id)
-    clear_draft(conn, session_id)
+    retire_session_delivery_owners(conn, session_id)
+    delivery_store.set_draft(conn, session_id, None)
     revoked_vault_grant_rows = [
         dict(row)
         for row in conn.execute(
@@ -1046,21 +1260,3 @@ def set_agent_status(conn: Connection, session_id: str, status: str) -> bool:
         update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_status=status)
     )
     return True
-
-
-def reset_running_agent_status(conn: Connection) -> int:
-    """Reset every ``running`` session to ``idle`` (startup crash recovery).
-
-    No turn survives a controller restart, so a ``running`` left in the table
-    is stale. Returns the number of rows reset. The browser reconciles the reset
-    by refetching sessions when its inbox-event stream (re)connects, NOT from a
-    broadcast — this runs in ``Controller.__init__`` before any event subscriber
-    exists, so a broadcast here would be dropped.
-    """
-
-    result = conn.execute(
-        update(agent_sessions)
-        .where(agent_sessions.c.agent_status == "running")
-        .values(agent_status="idle")
-    )
-    return result.rowcount or 0

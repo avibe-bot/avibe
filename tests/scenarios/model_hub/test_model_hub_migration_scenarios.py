@@ -467,6 +467,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     before = _tree_digest(native_home)
 
     service, store, adapter = _service(tmp_path)
+    store.config.agents["codex"].sources.policy = "custom"
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -497,7 +498,26 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert adapter.revoked == []
     assert before == _tree_digest(native_home)
     by_id = {source.id: source for source in store.config.sources}
-    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order)
+    imported_ids = set(by_id)
+    assert store.config.agents["claude"].sources.order == []
+    assert store.config.agents["codex"].sources.order == []
+    assert store.config.agents["opencode"].sources.order == []
+    assert set(store.config.effective_source_order("claude")) == imported_ids
+    assert store.config.effective_source_order("codex") == []
+    assert set(store.config.effective_source_order("opencode")) == imported_ids
+    codex_payload = next(
+        agent for agent in service.list_agents() if agent["backend"] == "codex"
+    )
+    assert codex_payload["sources"]["order"] == []
+    assert {
+        item["source_id"]
+        for item in codex_payload["sources"]["eligibility"]
+        if item["eligible"]
+    } == imported_ids
+    assert all(
+        by_id[source_id].billing == "metered"
+        for source_id in store.config.effective_source_order("opencode")
+    )
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
@@ -952,7 +972,7 @@ def test_failed_batch_revokes_every_provisioned_credential(
     assert error.value.code == "engine_down"
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
-    assert store.config.priority_order == []
+    assert all(agent.sources.order == [] for agent in store.config.agents.values())
 
 
 def test_failed_persist_sync_restores_config_and_revokes_credentials(
@@ -971,7 +991,7 @@ def test_failed_persist_sync_restores_config_and_revokes_credentials(
     assert error.value.code == "engine_down"
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
-    assert store.config.priority_order == []
+    assert all(agent.sources.order == [] for agent in store.config.agents.values())
 
 
 def test_failed_revoke_survives_retry_with_same_source_id(

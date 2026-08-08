@@ -164,7 +164,7 @@ def test_sqlite_background_store_publishes_run_updates(tmp_path):
     assert failed[1]["status"] == "failed"
 
 
-def test_sqlite_background_store_bridges_run_updates_without_local_subscribers(tmp_path, monkeypatch):
+def test_hfr_156_sqlite_commit_bridges_run_update_to_controller(tmp_path, monkeypatch):
     from core import inbox_events
     from storage.background import SQLiteBackgroundTaskStore
 
@@ -202,6 +202,36 @@ def test_sqlite_background_store_bridges_run_updates_without_local_subscribers(t
             {"timeout": 1.5},
         )
     ]
+
+
+def test_hfr_156_bridge_failure_does_not_rollback_committed_run(tmp_path, monkeypatch):
+    from core import inbox_events
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", False)
+
+    def _fail_bridge(*_args, **_kwargs):
+        raise OSError("dispatch socket unavailable")
+
+    monkeypatch.setattr("vibe.internal_client.publish_event_sync", _fail_bridge)
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    try:
+        store.enqueue_run(
+            {
+                "id": "run_evt_bridge_failure",
+                "request_type": "agent_run",
+                "status": "queued",
+                "message": "hello",
+                "created_at": "2026-07-04T00:00:00+00:00",
+                "updated_at": "2026-07-04T00:00:00+00:00",
+            }
+        )
+        persisted = store.get_run("run_evt_bridge_failure")
+    finally:
+        store.close()
+
+    assert persisted is not None
+    assert persisted["status"] == "queued"
 
 
 def test_sqlite_background_store_does_not_bridge_controller_self_updates(tmp_path, monkeypatch):

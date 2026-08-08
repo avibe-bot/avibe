@@ -2,6 +2,8 @@ import clsx from 'clsx';
 import { Loader2, Pin } from 'lucide-react';
 import type { MouseEventHandler } from 'react';
 
+import { SESSION_ROW_ACTION_BUTTON_CLASS, SESSION_ROW_PIN_POSITION_CLASS } from './sessionRowLayout';
+
 interface SessionPinActionProps {
   pinned: boolean;
   pending: boolean;
@@ -11,27 +13,8 @@ interface SessionPinActionProps {
   className?: string;
 }
 
-interface SessionPinIndicatorProps {
-  pinned: boolean;
-  label: string;
-  className?: string;
-}
-
-export const SessionPinIndicator: React.FC<SessionPinIndicatorProps> = ({ pinned, label, className }) => {
-  if (!pinned) return null;
-
-  return (
-    <span
-      role="img"
-      aria-label={label}
-      title={label}
-      className={clsx('flex shrink-0 text-cyan', className)}
-    >
-      <Pin className="size-3" aria-hidden="true" />
-    </span>
-  );
-};
-
+// Direct pin control for desktop sidebar rows. The shared session action model
+// still owns persistence; this component only restores the compact row affordance.
 export const SessionPinAction: React.FC<SessionPinActionProps> = ({
   pinned,
   pending,
@@ -47,7 +30,7 @@ export const SessionPinAction: React.FC<SessionPinActionProps> = ({
   };
 
   return (
-    <span className={clsx('absolute inset-y-0 right-2 flex items-center', className)}>
+    <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_PIN_POSITION_CLASS, className)}>
       <button
         type="button"
         disabled={pending}
@@ -56,7 +39,8 @@ export const SessionPinAction: React.FC<SessionPinActionProps> = ({
         title={label}
         onClick={handleClick}
         className={clsx(
-          'group/pin grid size-6 shrink-0 place-items-center rounded-md transition-[opacity,transform,background-color,color,box-shadow] duration-150 ease-out',
+          'group/pin grid shrink-0 place-items-center transition-[opacity,transform,background-color,color,box-shadow] duration-150 ease-out',
+          SESSION_ROW_ACTION_BUTTON_CLASS,
           'hover:-translate-y-px hover:scale-105 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 motion-reduce:transform-none',
           pending
             ? 'cursor-wait text-muted opacity-100 hover:translate-y-0 hover:scale-100'

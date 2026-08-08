@@ -41,6 +41,9 @@ class MessageContext:
     message_id: Optional[str] = None
     platform_specific: Optional[Dict[str, Any]] = None
     files: Optional[List[FileAttachment]] = None  # List of file attachments
+    # Inbound adapters set this only after classifying their native event.
+    # None is intentionally fail-closed for Memory capture and commands.
+    is_ordinary_text: Optional[bool] = None
 
 
 @dataclass

@@ -47,6 +47,7 @@ class OpenCodeSessionManager:
         self._agent_name = agent_name
 
         self._request_sessions: Dict[str, RequestSessionTuple] = {}
+        self._agent_session_ids: Dict[str, str] = {}
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._initialized_sessions: set[str] = set()
 
@@ -67,7 +68,22 @@ class OpenCodeSessionManager:
         )
 
     def pop_request_session(self, base_session_id: str) -> Optional[RequestSessionTuple]:
+        self._agent_session_ids.pop(base_session_id, None)
         return self._request_sessions.pop(base_session_id, None)
+
+    def set_agent_session_id(
+        self,
+        base_session_id: str,
+        agent_session_id: Optional[str],
+    ) -> None:
+        normalized = str(agent_session_id or "").strip()
+        if normalized:
+            self._agent_session_ids[base_session_id] = normalized
+        else:
+            self._agent_session_ids.pop(base_session_id, None)
+
+    def get_agent_session_id(self, base_session_id: str) -> Optional[str]:
+        return self._agent_session_ids.get(base_session_id)
 
     def pop_all_for_session_key(self, session_key: str) -> Dict[str, RequestSessionTuple]:
         matches: Dict[str, RequestSessionTuple] = {}

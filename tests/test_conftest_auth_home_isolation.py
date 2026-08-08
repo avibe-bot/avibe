@@ -14,14 +14,32 @@ that tests must never mutate live user state.
 
 from __future__ import annotations
 
-import os
+import ast
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-from tests.conftest import REAL_USER_HOME
+import pytest
+
+from tests.conftest import REAL_USER_HOME, _is_default_sqlite_call
 from vibe import claude_config, codex_config, opencode_config
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("api._vault_engine()", True),
+        ("cli._open_vault_engine()", True),
+        ("config_paths.get_sqlite_state_path()", True),
+        ("storage.ensure_sqlite_state()", True),
+        ("storage.ensure_sqlite_state(db_path=path)", False),
+    ],
+)
+def test_sqlite_default_state_detector_handles_indirect_calls(source: str, expected: bool) -> None:
+    call = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call))
+    assert _is_default_sqlite_call(call) is expected
 
 
 def test_backend_credential_homes_are_isolated_from_real_home() -> None:

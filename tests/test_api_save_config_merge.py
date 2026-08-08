@@ -5,10 +5,12 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_config import UiConfig, V2Config
-from vibe import api
+from vibe import api, remote_access
 
 
 def _full_config_payload() -> dict:
@@ -52,6 +54,7 @@ def _full_config_payload() -> dict:
                 "default_model": None,
                 "default_reasoning_effort": None,
                 "error_retry_limit": 1,
+                "active_turn_timeout_seconds": 7200,
             },
             "claude": {
                 "enabled": True,
@@ -93,6 +96,10 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
     assert original.show_duration is True
     assert original.include_time_info is True
     assert original.update.auto_update is False
+    assert all(
+        not hasattr(getattr(original.agents, backend), "default_model")
+        for backend in ("claude", "codex", "opencode")
+    )
 
     updated = api.save_config({"show_duration": False, "include_time_info": False, "update": {"auto_update": True}})
 
@@ -105,7 +112,7 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
     assert updated.runtime.default_cwd == "/tmp/workdir"
 
 
-def test_save_config_seeds_default_for_partial_payload_on_fresh_install(monkeypatch, tmp_path):
+def test_save_config_seeds_default_and_drops_retired_model_key(monkeypatch, tmp_path):
     """Regression: a fresh install (no config file yet) must accept the wizard's
     reused provider-config modal POSTing only ``{"agents": ...}``.
 
@@ -127,7 +134,7 @@ def test_save_config_seeds_default_for_partial_payload_on_fresh_install(monkeypa
     # The partial save merges onto the workbench-only default and persists.
     assert created.mode == "self_host"
     assert created.agents.claude.enabled is True
-    assert created.agents.claude.default_model == "sonnet"
+    assert not hasattr(created.agents.claude, "default_model")
     # Configuring a provider mid-wizard must not complete setup...
     assert created.setup_completed is False
     assert created.setup_state()["needs_setup"] is True
@@ -164,6 +171,210 @@ def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path):
     updated = api.save_config({**_full_config_payload(), "ack_mode": "typing"})
 
     assert updated.ack_mode == "typing"
+
+
+def test_remote_access_transport_protocol_is_normalized_and_validated() -> None:
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "vibe_cloud": {
+            "transport_protocol": " HTTP2 ",
+            "auto_recovery": "false",
+            "optimization_profile": " LOW_LATENCY ",
+            "edge_ip_version": " 4 ",
+            "edge_bind_address": " 192.0.2.10 ",
+        }
+    }
+
+    config = V2Config.from_payload(payload)
+
+    assert config.remote_access.vibe_cloud.transport_protocol == "http2"
+    assert config.remote_access.vibe_cloud.auto_recovery is False
+    assert config.remote_access.vibe_cloud.optimization_profile == "low_latency"
+    assert config.remote_access.vibe_cloud.edge_ip_version == "4"
+    assert config.remote_access.vibe_cloud.edge_bind_address == "192.0.2.10"
+
+    payload["remote_access"]["vibe_cloud"]["transport_protocol"] = "tcp"
+    with pytest.raises(ValueError, match="transport_protocol"):
+        V2Config.from_payload(payload)
+
+    payload["remote_access"]["vibe_cloud"]["transport_protocol"] = "auto"
+    payload["remote_access"]["vibe_cloud"]["optimization_profile"] = "fastest"
+    with pytest.raises(ValueError, match="optimization_profile"):
+        V2Config.from_payload(payload)
+
+    payload["remote_access"]["vibe_cloud"]["optimization_profile"] = "balanced"
+    payload["remote_access"]["vibe_cloud"]["edge_bind_address"] = "wifi"
+    with pytest.raises(ValueError, match="edge_bind_address"):
+        V2Config.from_payload(payload)
+
+
+def test_remote_access_legacy_config_keeps_cloudflared_ipv4_default() -> None:
+    payload = _full_config_payload()
+    payload["remote_access"] = {"vibe_cloud": {"transport_protocol": "auto"}}
+
+    config = V2Config.from_payload(payload)
+
+    assert config.remote_access.vibe_cloud.edge_ip_version == "4"
+
+
+def test_save_config_rejects_unassigned_remote_access_bind_address(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: {
+            "ok": True,
+            "interfaces": [
+                {
+                    "id": "en0:192.0.2.10",
+                    "name": "en0",
+                    "address": "192.0.2.10",
+                    "ip_version": "4",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="active network interface"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {
+                        "edge_ip_version": "4",
+                        "edge_bind_address": "192.0.2.20",
+                    }
+                }
+            }
+        )
+
+    assert V2Config.load().remote_access.vibe_cloud.edge_bind_address == ""
+
+
+def test_save_config_rejects_remote_access_bind_family_mismatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: {
+            "ok": True,
+            "interfaces": [
+                {
+                    "id": "en0:192.0.2.10",
+                    "name": "en0",
+                    "address": "192.0.2.10",
+                    "ip_version": "4",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="must match"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {
+                        "edge_ip_version": "6",
+                        "edge_bind_address": "192.0.2.10",
+                    }
+                }
+            }
+        )
+
+    saved = V2Config.load().remote_access.vibe_cloud
+    assert saved.edge_ip_version == "4"
+    assert saved.edge_bind_address == ""
+
+
+def test_generic_config_save_rejects_connector_control_changes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.save_config(_full_config_payload())
+
+    with pytest.raises(ValueError, match="/api/remote-access/settings"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {"transport_protocol": "http2"}
+                }
+            },
+            generic_remote_access=True,
+        )
+
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
+
+
+def test_generic_runtime_save_validates_an_unchanged_stale_bind_address(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {
+            "enabled": True,
+            "public_url": "https://old.avibe.bot",
+            "edge_bind_address": "192.0.2.10",
+        },
+    }
+    V2Config.from_payload(payload).save()
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: {"ok": True, "interfaces": []},
+    )
+
+    with pytest.raises(ValueError, match="active network interface"):
+        api.save_config(
+            {
+                "remote_access": {
+                    "vibe_cloud": {"public_url": "https://new.avibe.bot"}
+                }
+            },
+            generic_remote_access=True,
+        )
+
+    assert V2Config.load().remote_access.vibe_cloud.public_url == "https://old.avibe.bot"
+
+
+def test_generic_policy_save_does_not_validate_an_unchanged_stale_bind_address(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {
+            "enabled": True,
+            "edge_bind_address": "192.0.2.10",
+        },
+    }
+    V2Config.from_payload(payload).save()
+    monkeypatch.setattr(
+        remote_access,
+        "network_interfaces",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("policy-only saves must not validate Connector binding")
+        ),
+    )
+
+    updated = api.save_config(
+        {"remote_access": {"vibe_cloud": {"auto_recovery": False}}},
+        generic_remote_access=True,
+    )
+
+    assert updated.remote_access.vibe_cloud.auto_recovery is False
 
 
 def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
@@ -288,6 +499,33 @@ def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatc
     assert updated.agent_status_heartbeat_ms == 12000
     assert payload["agent_progress_style"] == "verbose"
     assert payload["agent_status_heartbeat_ms"] == 12000
+
+
+def test_save_config_preserves_harness_runtime_knobs_on_partial_save(monkeypatch, tmp_path):
+    """The config-only Harness knobs must survive an unrelated UI save (Codex P1).
+
+    ``config_to_payload`` is the deep-merge base for every ``/api/config`` save, so a
+    ``runtime`` key it omits is absent from the merged payload and ``from_payload``
+    rebuilds it from the dataclass default: a ``harness_prompt_echo: false`` opt-out
+    came back enabled after any unrelated settings change. Same shape as the
+    status-bubble regression above.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    full = _full_config_payload()
+    full["runtime"]["harness_prompt_echo"] = False
+    full["runtime"]["harness_run_queued_ttl_seconds"] = 4242
+    created = api.save_config(full)
+    assert created.runtime.harness_prompt_echo is False
+    assert created.runtime.harness_run_queued_ttl_seconds == 4242
+
+    updated = api.save_config({"show_duration": False})
+    payload = api.config_to_payload(updated)
+
+    assert updated.runtime.harness_prompt_echo is False
+    assert updated.runtime.harness_run_queued_ttl_seconds == 4242
+    assert payload["runtime"]["harness_prompt_echo"] is False
+    assert payload["runtime"]["harness_run_queued_ttl_seconds"] == 4242
 
 
 def test_config_load_defaults_missing_show_pages_prompt_to_enabled():
@@ -830,6 +1068,7 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path)
         assert top_level <= set(payload), f"{label} top-level missing: {top_level - set(payload)}"
         assert ui_field_names <= set(payload["ui"]), f"{label} ui missing: {ui_field_names - set(payload['ui'])}"
         assert agents <= set(payload["agents"]), f"{label} agents missing: {agents - set(payload['agents'])}"
+        assert payload["agents"]["opencode"]["active_turn_timeout_seconds"] == 7200
 
     _assert_complete("config_to_payload", api.config_to_payload(config))
 

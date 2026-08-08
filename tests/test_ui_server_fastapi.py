@@ -1,5 +1,8 @@
+import asyncio
 import gzip
 import json
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +35,64 @@ def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None)
     return response, body
 
 
+def test_archive_definition_wakes_do_not_block_the_asgi_loop(monkeypatch):
+    published: list[tuple[int, str]] = []
+
+    def _publish(*, definition_type: str) -> None:
+        published.append((threading.get_ident(), definition_type))
+
+    monkeypatch.setattr(
+        "core.inbox_events.publish_definitions_updated",
+        _publish,
+    )
+
+    async def _exercise() -> int:
+        loop_thread = threading.get_ident()
+        await ui_server._archive_publish_definition_updates(
+            {"tasks": 1, "watches": 1}
+        )
+        return loop_thread
+
+    loop_thread = asyncio.run(_exercise())
+
+    assert {definition_type for _, definition_type in published} == {
+        "scheduled",
+        "watch",
+    }
+    assert all(thread_id != loop_thread for thread_id, _ in published)
+
+
+def test_hfr_283_archive_run_cancellations_wake_runtime_consumers(monkeypatch):
+    published: list[tuple[str, dict[str, str], float]] = []
+
+    async def _publish(event_type, data, *, timeout):  # noqa: ANN001, ANN202
+        published.append((event_type, data, timeout))
+        return {"ok": True}
+
+    monkeypatch.setattr("vibe.internal_client.publish_event", _publish)
+
+    asyncio.run(
+        ui_server._archive_publish_run_updates(
+            "session-a",
+            {"runs": 2},
+        )
+    )
+    asyncio.run(
+        ui_server._archive_publish_run_updates(
+            "session-b",
+            {"runs": 0},
+        )
+    )
+
+    assert published == [
+        (
+            "runs.updated",
+            {"session_id": "session-a", "reason": "session_archived"},
+            1.5,
+        )
+    ]
+
+
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 
@@ -57,6 +118,32 @@ def test_fastapi_schema_routes_are_not_exposed():
     docs_response = client.get("/docs")
     assert b"swagger-ui" not in docs_response.content.lower()
     assert client.get("/openapi.json").status_code != 200
+
+
+def test_backend_auth_test_routes_through_controller_runtime(monkeypatch):
+    from vibe import internal_client
+
+    calls = []
+
+    async def _test_backend_auth(backend, *, model=None):
+        calls.append((backend, model))
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "excerpt": "hello"},
+        }
+
+    monkeypatch.setattr(internal_client, "test_backend_auth", _test_backend_auth)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/backend/codex/auth/test",
+        json={"model": "gpt-5.4-mini"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "excerpt": "hello"}
+    assert calls == [("codex", "gpt-5.4-mini")]
 
 
 def test_thread_settings_routes_use_native_fastapi(monkeypatch):
@@ -113,6 +200,94 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     assert deleted.status_code == 200
     assert deleted.get_json() == {"ok": True, "removed": True}
     assert deleted_scopes == [("telegram", "-1001", "42")]
+
+
+def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(monkeypatch):
+    from core.services import settings as settings_service
+    from storage.settings_service import StaleScopeAgentBindingError
+    from vibe import api
+
+    def stale(*_args, **_kwargs):
+        raise StaleScopeAgentBindingError(scope_id="slack::channel::C1")
+
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+    monkeypatch.setattr(api, "save_settings", stale)
+    monkeypatch.setattr(api, "save_thread_settings", stale)
+    monkeypatch.setattr(api, "save_users", stale)
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    responses = (
+        client.post("/api/settings", json={"platform": "slack"}, headers=headers),
+        client.post(
+            "/api/settings/thread",
+            json={"platform": "telegram", "channel_id": "C1", "thread_id": "T1", "settings": {}},
+            headers=headers,
+        ),
+        client.post("/api/users", json={"platform": "slack", "users": {}}, headers=headers),
+    )
+
+    for response in responses:
+        assert response.status_code == 409
+        assert response.get_json() == {
+            "ok": False,
+            "code": "settings_conflict",
+            "message": "这些设置打开后，Agent 路由已发生变化。",
+            "error": {
+                "code": "settings_conflict",
+                "message": "这些设置打开后，Agent 路由已发生变化。",
+            },
+            "hint": "请重新加载设置后再次修改。",
+            "details": {"scope_id": "slack::channel::C1"},
+        }
+
+
+def test_scope_settings_routes_localize_unavailable_agent_errors(monkeypatch):
+    from core.services import settings as settings_service
+    from storage.settings_service import ScopeAgentUnavailableError
+    from vibe import api
+
+    def unavailable(*_args, **_kwargs):
+        raise ScopeAgentUnavailableError(agent_name="pm")
+
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+    monkeypatch.setattr(api, "save_settings", unavailable)
+    monkeypatch.setattr(api, "save_thread_settings", unavailable)
+    monkeypatch.setattr(api, "save_users", unavailable)
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    responses = (
+        client.post("/api/settings", json={"platform": "slack"}, headers=headers),
+        client.post(
+            "/api/settings/thread",
+            json={"platform": "telegram", "channel_id": "C1", "thread_id": "T1", "settings": {}},
+            headers=headers,
+        ),
+        client.post("/api/users", json={"platform": "slack", "users": {}}, headers=headers),
+    )
+
+    for response in responses:
+        assert response.status_code == 400
+        assert response.get_json() == {
+            "ok": False,
+            "code": "agent_unavailable",
+            "message": "Agent `pm` 无法用于此路由。",
+            "error": {
+                "code": "agent_unavailable",
+                "message": "Agent `pm` 无法用于此路由。",
+            },
+            "hint": "请选择一个已启用的 Agent 后重新保存。",
+            "details": {"agent_name": "pm"},
+        }
 
 
 def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
@@ -189,6 +364,715 @@ def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path
 
     assert client.get(f"/api/sessions/{sid}/activity?group_id=nope").status_code == 404
     assert client.get("/api/sessions/ses_missing/activity").status_code == 404
+
+
+def _seed_search_corpus(tmp_path, monkeypatch):
+    """One active + one archived session, each with a matching message."""
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-06-01T10:00:00Z"
+    with engine.begin() as conn:
+        scope = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_search", now=now)
+        for sid, status in (("ses_search_live", "active"), ("ses_search_arch", "archived")):
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=sid,
+                    scope_id=scope,
+                    agent_backend="claude",
+                    agent_variant="default",
+                    session_anchor="anchor_" + sid,
+                    native_session_id="",
+                    status=status,
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+            conn.execute(
+                messages.insert().values(
+                    id="msg_" + sid,
+                    scope_id=scope,
+                    session_id=sid,
+                    platform="avibe",
+                    author="user",
+                    type="user",
+                    source="user",
+                    content_text="deploy the searchable thing",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return engine
+
+
+def test_search_messages_route_plumbs_include_archived(monkeypatch, tmp_path):
+    """GET /api/search/messages excludes archived sessions by default and opts
+    them in for ``include_archived=1``, marking each group with ``archived``."""
+    _seed_search_corpus(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    default = client.get("/api/search/messages?q=deploy")
+    explicit_off = client.get("/api/search/messages?q=deploy&include_archived=0")
+    included = client.get("/api/search/messages?q=deploy&include_archived=1")
+
+    assert default.status_code == 200
+    assert [s["session_id"] for s in default.get_json()["sessions"]] == ["ses_search_live"]
+    assert default.get_json()["sessions"][0]["archived"] is False
+    # Anything that is not 1/true/yes stays opt-out.
+    assert explicit_off.get_json() == default.get_json()
+
+    assert included.status_code == 200
+    flags = {s["session_id"]: s["archived"] for s in included.get_json()["sessions"]}
+    assert flags == {"ses_search_live": False, "ses_search_arch": True}
+
+
+def _ui_error_code(body: dict):
+    """The Web UI parser's own precedence rule, in its three lines.
+
+    ``selectApiErrorFields`` (``ui/src/context/ApiContext.tsx``): take ``error`` if
+    present, else a top-level ``{code, message}`` — and a STRING ``error`` *is* the
+    code. Replicated here (mirrored by ui/src/context/ApiErrorParse.test.ts, which runs
+    the real function) so a route that regresses to the flat coded shape fails on the
+    server side, where the body is authored, instead of shipping a mangled
+    ``ApiError.code`` and raw English to every locale.
+    """
+    raw = body.get("error") or ({"code": body["code"], "message": body.get("message")} if body.get("code") else None)
+    return raw if isinstance(raw, str) else (raw or {}).get("code")
+
+
+def _machine_coded_error_builders():
+    """Every ``vibe/ui_server.py`` helper that answers with a MACHINE-READABLE code.
+
+    One table, one assertion loop: the next coded route is covered by adding its
+    builder here, not by writing another near-duplicate test — and the structural guard
+    below fails for any coded body that skips the shared builder entirely, so a route
+    cannot quietly opt out of this list.
+    """
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SessionForkError,
+    )
+    from storage.workbench_sessions_service import SessionBackendLockedError
+
+    class _Coded(Exception):
+        def __init__(self, message: str, code: str) -> None:
+            super().__init__(message)
+            self.code = code
+
+    locked = SessionBackendLockedError(
+        session_id="ses_1", current_backend="claude", requested_backend="codex"
+    )
+    return [
+        # The archived 409 the whole read-only convergence hangs off (PATCH + messages POST).
+        ("session_archived", lambda: ui_server._session_archived_response(), "session_archived", 409),
+        # Round 5d: terminal archive vs retryable lock, on the same route. A client can
+        # only tell them apart if BOTH codes survive.
+        ("backend_locked", lambda: ui_server._backend_locked_response(locked), "backend_locked", 409),
+        # The runtime-reserved workspace-notifications row: one code, three verbs, so the
+        # per-verb sentence is the only thing that varies and BOTH must keep the code.
+        (
+            "reserved_session_protected",
+            lambda: ui_server._reserved_session_response(ui_server.RESERVED_SESSION_PROTECTED_I18N_KEY),
+            "reserved_session",
+            403,
+        ),
+        (
+            "reserved_session_read_only",
+            lambda: ui_server._reserved_session_response(ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY),
+            "reserved_session",
+            403,
+        ),
+        # Fork — every branch, since they share one body builder (this round's finding).
+        (
+            "fork_archived",
+            lambda: ui_server._session_fork_error_response(SessionForkError("agent session is archived: ses_1")),
+            "session_archived",
+            409,
+        ),
+        (
+            "fork_not_found",
+            lambda: ui_server._session_fork_error_response(SessionForkError("agent session id not found: ses_1")),
+            "session_not_found",
+            404,
+        ),
+        (
+            "fork_not_bound",
+            lambda: ui_server._session_fork_error_response(
+                SessionForkError("agent session has no native session id to fork: ses_1")
+            ),
+            "session_not_bound",
+            409,
+        ),
+        (
+            "fork_backend_unsupported",
+            lambda: ui_server._session_fork_error_response(SessionForkError("session backend cannot be forked: x")),
+            "session_backend_unsupported",
+            409,
+        ),
+        (
+            "fork_backend_mismatch",
+            lambda: ui_server._session_fork_error_response(SessionForkError("session backend does not match: x")),
+            "session_backend_mismatch",
+            409,
+        ),
+        (
+            "fork_agent_unavailable",
+            lambda: ui_server._session_fork_error_response(
+                SessionForkError(
+                    "source session Agent is unavailable",
+                    code=SESSION_AGENT_UNAVAILABLE_CODE,
+                    details={"source_session_id": "ses_1"},
+                )
+            ),
+            SESSION_AGENT_UNAVAILABLE_CODE,
+            409,
+        ),
+        (
+            "fork_failed",
+            lambda: ui_server._session_fork_error_response(SessionForkError("something else broke")),
+            "session_fork_failed",
+            400,
+        ),
+        # Show Page / Dock / icon families — already structured; pinned so the shared
+        # builder they now delegate to cannot regress them either.
+        (
+            "show_page",
+            lambda: ui_server._show_page_error_response(_Coded("nope", "session_archived")),
+            "session_archived",
+            400,
+        ),
+        (
+            "show_page_conflict",
+            lambda: ui_server._show_page_error_response(_Coded("taken", "share_id_taken")),
+            "share_id_taken",
+            409,
+        ),
+        ("dock", lambda: ui_server._dock_error_response(_Coded("nope", "show_page_not_found")), "show_page_not_found", 404),
+        (
+            "show_page_icon",
+            lambda: ui_server._show_page_icon_upload_error("session_archived", "nope"),
+            "session_archived",
+            400,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "label,build,expected_code,expected_status",
+    [pytest.param(*case, id=case[0]) for case in _machine_coded_error_builders()],
+)
+def test_machine_coded_error_bodies_survive_the_ui_error_parse(
+    monkeypatch, tmp_path, label, build, expected_code, expected_status
+):
+    """Every machine-coded error body must hand the Web UI back its CODE, not a sentence.
+
+    This is the contract round 4b established for the PATCH 409 and round 6 found
+    violated on ``POST /api/sessions/<id>/fork``: the parser reads ``error`` first and a
+    string there *is* the code, so the flat ``{"error": "<sentence>", "code": "<code>"}``
+    shape destroys it. Asserting only the top-level ``code`` — which is what these
+    routes' existing tests do — passes while every client branch keyed on the code is
+    dead, which is exactly how the fork body survived two review rounds.
+
+    Parametrized over the builders rather than duplicated per route so the next coded
+    route inherits the assertion by adding one table row.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    response, status = build()
+    body = json.loads(response.body)
+
+    assert status == expected_status, label
+    # What the Web UI actually resolves ``errors.<code>`` and its branches from.
+    assert _ui_error_code(body) == expected_code, label
+    assert isinstance(body["error"], dict), label
+    # And the flat top-level fields the CLI / direct consumers read stay put.
+    assert body["code"] == expected_code, label
+    assert isinstance(body["message"], str) and body["message"], label
+    assert body["error"]["message"] == body["message"], label
+
+
+def test_session_fork_agent_unavailable_message_follows_configured_language(monkeypatch, tmp_path):
+    from config import paths
+    from core.services.session_fork import (
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
+        SessionForkError,
+    )
+    from core.services.settings import default_config
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.language = "zh"
+    config.save(paths.get_config_path())
+    error = SessionForkError(
+        "source session Agent is unavailable; choose an enabled Agent override",
+        code=SESSION_AGENT_UNAVAILABLE_CODE,
+        details={"source_session_id": "ses_1"},
+    )
+
+    response, status = ui_server._session_fork_error_response(error)
+    body = json.loads(response.body)
+    expected_message = i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.message", "zh")
+    expected_hint = i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.hint", "zh")
+
+    assert status == 409
+    assert body["code"] == SESSION_AGENT_UNAVAILABLE_CODE
+    assert body["message"] == expected_message
+    assert body["message"] != str(error)
+    assert body["hint"] == expected_hint
+    assert body["source_session_id"] == "ses_1"
+
+
+# Coded bodies that deliberately keep the flat shape, each with the reason it cannot
+# reach the Web UI's shared parser. Keyed by enclosing function so line churn can't
+# silently widen the exemption.
+_FLAT_CODED_BODY_EXEMPTIONS = {
+    # POST /api/control — StatusContext.control() uses a raw ``apiFetch`` and reads the
+    # top-level ``body.code`` itself, exactly like ChatPage's messages POST.
+    "control",
+    # Public Show Page document + its annotation overlay: a SEPARATE document with its
+    # own fetch and React tree, so no host ``ApiProvider`` ever parses these bodies
+    # (round 5's "out of reach" row).
+    "_show_session_event_error_response",
+    "_show_event_response_from_payload",
+    "serve_public_show_page",
+}
+
+
+def test_no_route_hand_rolls_the_flat_coded_error_body():
+    """Structural guard: a NEW coded route can't reintroduce the flat shape unnoticed.
+
+    Three review rounds spent on the same one-line defect (the PATCH body in 4b, the
+    fork body in round 6) because each was found by reading rather than by a test. The
+    anti-shape is mechanically detectable — a ``jsonify`` dict literal carrying both a
+    machine ``code`` and a non-object ``error`` — so detect it, and require any new
+    instance to be either routed through ``_coded_error_response`` or added to the
+    exemption set with a reason. That is the by-construction half of the coverage; the
+    parametrized test above is the positive half.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(ui_server.__file__).read_text()
+    tree = ast.parse(source)
+
+    # Widest spans first so an inner handler overwrites its enclosing route function:
+    # the exemption should name the function that actually authors the body.
+    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    owner_by_line: dict[int, str] = {}
+    for node in sorted(functions, key=lambda n: (n.end_lineno or n.lineno) - n.lineno, reverse=True):
+        for line in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+            owner_by_line[line] = node.name
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "jsonify"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Dict):
+            continue
+        payload = node.args[0]
+        if not all(isinstance(key, ast.Constant) for key in payload.keys):
+            continue
+        keys = [key.value for key in payload.keys]
+        if "code" not in keys or "error" not in keys:
+            continue
+        if isinstance(payload.values[keys.index("error")], ast.Dict):
+            continue
+        owner = owner_by_line.get(node.lineno, "<module>")
+        if owner not in _FLAT_CODED_BODY_EXEMPTIONS:
+            offenders.append(f"{owner} (line {node.lineno})")
+
+    assert not offenders, (
+        "These responses pair a machine code with a flat string ``error``, which the Web UI's "
+        "parser reads as the code itself — route them through ``_coded_error_response`` or add "
+        f"them to _FLAT_CODED_BODY_EXEMPTIONS with the reason they can't reach it: {offenders}"
+    )
+
+
+def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
+    """Archive is terminal — PATCH /api/sessions/<id> on an archived row answers
+    409 ``session_archived`` (the backstop the read-only chat UI relies on).
+
+    The body must use the STRUCTURED error shape. The Web UI's shared parser
+    (``selectApiErrorFields`` in ``ui/src/context/ApiContext.tsx``) reads ``error``
+    before the top-level ``code`` and treats a string ``error`` as the machine code,
+    so a flat ``{"error": "session is archived", "code": ...}`` hands callers
+    ``ApiError.code == "session is archived"``, never resolves
+    ``errors.session_archived``, and renders that English sentence under every
+    locale. Asserting only ``body["code"]`` passed while that was broken — the field
+    the frontend consumes is the nested one, so pin both.
+
+    The ``message`` must also come from ``vibe/i18n`` rather than a literal in the
+    route (AGENTS.md §6): direct API/CLI consumers read it verbatim, and a Web UI
+    client missing ``errors.session_archived`` renders it as the fallback.
+    """
+    from core.services.sessions import SESSION_ARCHIVED_I18N_KEY, session_archived_message
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session, get_session
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Before")["id"]
+
+    client = app.test_client()
+    ok = client.patch(f"/api/sessions/{sid}", json={"title": "Live rename"}, headers=csrf_headers(client))
+    assert ok.status_code == 200
+
+    with engine.begin() as conn:
+        archive_session(conn, sid)
+
+    blocked = client.patch(f"/api/sessions/{sid}", json={"title": "Nope"}, headers=csrf_headers(client))
+    assert blocked.status_code == 409
+    body = blocked.get_json()
+    # Sourced from the i18n bundle, NOT a literal in the route. Resolving the key
+    # here (rather than pinning the English sentence) is what makes a hardcoded
+    # regression fail: an inlined string would no longer equal the bundle value.
+    expected_message = i18n_t(SESSION_ARCHIVED_I18N_KEY, "en")
+    assert expected_message != SESSION_ARCHIVED_I18N_KEY  # the key really resolves
+    assert body["message"] == expected_message == session_archived_message("en")
+    # ...and the pre-fix literal is gone for good.
+    assert body["message"] != "session is archived"
+    # What the Web UI parser consumes: a nested object carrying the machine code.
+    assert body["error"] == {"code": "session_archived", "message": expected_message}
+    # Kept flat as well for the CLI / any direct consumer.
+    assert body["code"] == "session_archived"
+    assert body["ok"] is False
+    # Whatever the shape, ``error`` must never be a bare string here — that is the
+    # exact form the parser mis-reads as the code.
+    assert not isinstance(body["error"], str)
+    with engine.connect() as conn:
+        assert get_session(conn, sid)["title"] == "Live rename"
+
+
+def test_sessions_patch_archived_message_follows_configured_language(monkeypatch, tmp_path):
+    """The 409 ``message`` is localized, not just centralized.
+
+    A direct API/CLI consumer reads this field verbatim, and a Web UI client without
+    the ``errors.session_archived`` key falls back to it — so under a ``zh`` config
+    it must not be English. Guards the whole path (config language → ``vibe/i18n``
+    → response body), which is what a hardcoded literal or a hardwired ``lang="en"``
+    would break.
+    """
+    from config import paths
+    from core.services.sessions import session_archived_message
+    from core.services.settings import default_config
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    config = default_config()
+    config.language = "zh"
+    config.save(paths.get_config_path())
+
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Before")["id"]
+        archive_session(conn, sid)
+
+    client = app.test_client()
+    blocked = client.patch(f"/api/sessions/{sid}", json={"title": "Nope"}, headers=csrf_headers(client))
+    assert blocked.status_code == 409
+    body = blocked.get_json()
+    assert body["message"] == session_archived_message("zh")
+    assert body["message"] != session_archived_message("en")
+    assert body["error"]["message"] == body["message"]
+
+
+def test_messages_post_into_the_reserved_system_session_dispatches_nothing(monkeypatch, tmp_path):
+    """The workspace-notifications row accepts NO turn — the third and last door.
+
+    ``visibility='system'`` deliberately keeps the reserved row in the Inbox, so its card
+    is a clickable chat (``ui/src/components/workbench/InboxPage.tsx``) — while
+    ``archive_session`` / ``update_session`` are the only writes that refused it. That
+    left ``POST /api/sessions/ses-workspace-notices/messages``, which checked archived
+    status only: a user could type into the workspace-notifications card and dispatch a
+    real agent turn into a machine-owned row whose ``agent_backend`` is empty, mixing
+    their conversation into the failure-notice transcript and breaking the accepted
+    plan's "no backend and no turns" contract
+    (``docs/plans/harness-run-reliability.md``).
+
+    Pinned by what the CONTROLLER saw, not just by the status code: the refusal has to
+    happen before dispatch and before the row is reserved, so the assertions are
+    ``dispatch_async`` await count plus an unchanged message count. The ordinary session
+    is the positive control — the guard must not make every send a 403.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy import func, select
+
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+    from storage.db import create_sqlite_engine
+    from storage.models import messages as messages_table
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import create_session
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        ordinary = create_session(
+            conn, scope_id=project["scope_id"], agent_backend="claude", title="Live"
+        )["id"]
+        assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
+            WORKSPACE_NOTICE_SESSION_ID
+        )
+
+    def _message_count(session_id: str) -> int:
+        with engine.connect() as conn:
+            return conn.execute(
+                select(func.count())
+                .select_from(messages_table)
+                .where(messages_table.c.session_id == session_id)
+            ).scalar_one()
+
+    assert _message_count(WORKSPACE_NOTICE_SESSION_ID) == 0
+    client = app.test_client()
+    headers = csrf_headers(client)
+    dispatch = AsyncMock(return_value={"status_code": 202, "body": {}})
+
+    with patch("vibe.internal_client.dispatch_async", dispatch):
+        blocked = client.post(
+            f"/api/sessions/{WORKSPACE_NOTICE_SESSION_ID}/messages",
+            json={"text": "hello?"},
+            headers=headers,
+        )
+        # Positive control: an ordinary session still dispatches its turn.
+        accepted = client.post(
+            f"/api/sessions/{ordinary}/messages",
+            json={"text": "hello?"},
+            headers=headers,
+        )
+
+    assert blocked.status_code == 403
+    body = blocked.get_json()
+    # The code the Web UI resolves ``errors.reserved_session`` from, in BOTH the nested
+    # object the shared parser reads and the flat field the CLI reads.
+    assert _ui_error_code(body) == "reserved_session"
+    assert body["code"] == "reserved_session"
+    assert not isinstance(body["error"], str)
+    # Copy from ``vibe/i18n``, and the SEND-specific sentence rather than the
+    # archive/edit one ("cannot be archived or modified" answers a different question).
+    expected = i18n_t(ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY, "en")
+    assert expected != ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY  # the key resolves
+    assert body["message"] == body["error"]["message"] == expected
+    assert expected != i18n_t(ui_server.RESERVED_SESSION_PROTECTED_I18N_KEY, "en")
+    # Refused BEFORE the reservation and BEFORE the controller: no row, no turn.
+    assert _message_count(WORKSPACE_NOTICE_SESSION_ID) == 0
+    assert dispatch.await_count == 1
+    assert accepted.status_code == 202
+    assert _message_count(ordinary) == 0
+
+
+def test_messages_post_reserved_refusal_follows_configured_language(monkeypatch, tmp_path):
+    """The 403 ``message`` is localized, like the archived 409's.
+
+    A direct API/CLI consumer reads it verbatim, and a Web UI client without the
+    ``errors.reserved_session`` key falls back to it — so a hardwired ``lang="en"`` in the
+    shared ``_reserved_session_response`` would ship English into a Chinese install.
+    """
+    from config import paths
+    from core.services.settings import default_config
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ID,
+        resolve_workspace_notice_session,
+    )
+    from storage.db import create_sqlite_engine
+    from vibe.i18n import t as i18n_t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    config = default_config()
+    config.language = "zh"
+    config.save(paths.get_config_path())
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resolve_workspace_notice_session(conn, title="工作区通知")
+
+    client = app.test_client()
+    blocked = client.post(
+        f"/api/sessions/{WORKSPACE_NOTICE_SESSION_ID}/messages",
+        json={"text": "hello?"},
+        headers=csrf_headers(client),
+    )
+    assert blocked.status_code == 403
+    key = ui_server.RESERVED_SESSION_READ_ONLY_I18N_KEY
+    assert blocked.get_json()["message"] == i18n_t(key, "zh") != i18n_t(key, "en")
+
+
+def test_sessions_patch_archived_outranks_the_backend_lock_preflight(monkeypatch, tmp_path):
+    """Archive is TERMINAL, so it must win over the transient backend lock.
+
+    ``archive_session`` cannot cancel an in-flight chat turn inside its transaction
+    (the turn lives in the controller process), so the DELETE route commits the
+    archive first and cancels best-effort afterwards. A stale cross-backend PATCH
+    landing in that window used to hit the controller-consulting preflight first and
+    come back ``409 backend_locked`` — a retryable code that masked the terminal
+    state, so the client could never recognize ``session_archived`` and converge.
+
+    Pinned two ways: the archived row answers ``session_archived`` AND the controller
+    is never consulted at all; the live row keeps its existing ``backend_locked``
+    answer, so the ordering change is scoped to archived sessions only.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        live = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Live")["id"]
+        archived = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Gone")["id"]
+        archive_session(conn, archived)
+
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    in_flight = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
+
+    with patch("vibe.internal_client.turn_state", in_flight):
+        # Positive control: an ACTIVE session with a live turn still refuses the
+        # cross-backend switch with the transient lock, via the controller.
+        locked = client.patch(f"/api/sessions/{live}", json={"agent_name": "reviewer"}, headers=headers)
+        assert locked.status_code == 409
+        assert locked.get_json()["code"] == "backend_locked"
+        assert in_flight.await_count == 1
+
+        blocked = client.patch(f"/api/sessions/{archived}", json={"agent_name": "reviewer"}, headers=headers)
+
+    assert blocked.status_code == 409
+    body = blocked.get_json()
+    assert body["code"] == "session_archived"
+    assert body["error"]["code"] == "session_archived"
+    # Short-circuited BEFORE the controller: no extra turn-state call was made.
+    assert in_flight.await_count == 1
+
+
+def test_sessions_patch_missing_session_is_still_404(monkeypatch, tmp_path):
+    """The archived short-circuit must not swallow the not-found case.
+
+    ``is_session_archived`` is "exists AND archived", so an unknown id falls through
+    to the 404 the route always returned.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    client = app.test_client()
+    missing = client.patch("/api/sessions/ses_nope", json={"title": "x"}, headers=csrf_headers(client))
+    assert missing.status_code == 404
+    # And an empty patch is still a 400 (validated before any row read).
+    empty = client.patch("/api/sessions/ses_nope", json={}, headers=csrf_headers(client))
+    assert empty.status_code == 400
+
+
+def test_sessions_patch_archived_conflict_survives_ui_error_parse(monkeypatch, tmp_path):
+    """Apply the Web UI parser's own precedence rule to the real 409 body.
+
+    ``selectApiErrorFields`` (ApiContext.tsx) is: take ``error`` if present, else a
+    top-level ``{code, message}``; a STRING ``error`` *is* the code. Replicated here
+    — kept to those three lines, and mirrored by ui/src/context/ApiErrorParse.test.ts
+    which runs the real function — so a route that regresses to the flat shape fails
+    on the server side too, instead of shipping raw English to every locale.
+    """
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Before")["id"]
+        archive_session(conn, sid)
+
+    client = app.test_client()
+
+    # Both mutation kinds a stale tab can attempt: a rename, and an agent re-route.
+    for payload in ({"title": "Nope"}, {"agent_name": "codex"}):
+        res = client.patch(f"/api/sessions/{sid}", json=payload, headers=csrf_headers(client))
+        assert res.status_code == 409, payload
+        assert _ui_error_code(res.get_json()) == "session_archived", payload
+
+
+def test_sessions_fork_on_archived_source_survives_ui_error_parse(monkeypatch, tmp_path):
+    """Fork refuses an archived source — and must say so in a way the Web UI can read.
+
+    ``askInNewSession`` (Quote -> "Ask in a new session") goes through the shared JSON
+    helpers, so its 409 reaches ``handleApiError`` and is the *first* rejected action a
+    stale tab can take. With the flat body this route used to return, the parser took
+    the human sentence as the code, ``archivedConflictSessionId`` returned null, the
+    ``onSessionArchived`` subscription never fired, and the chat stayed fully writable
+    after a permanent refusal.
+
+    Refusal itself is unchanged (archive is terminal, fork stays forbidden) — only the
+    body shape is.
+    """
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Source")["id"]
+        archive_session(conn, sid)
+
+    client = app.test_client()
+    res = client.post(f"/api/sessions/{sid}/fork", json={}, headers=csrf_headers(client))
+
+    assert res.status_code == 409
+    body = res.get_json()
+    assert _ui_error_code(body) == "session_archived"
+    # The nested object is what the parser reads; a bare string there is the defect.
+    assert isinstance(body["error"], dict)
+    # Flat top-level code/message stay for the CLI and any direct consumer.
+    assert body["code"] == "session_archived"
+    assert isinstance(body.get("message"), str) and body["message"]
 
 
 def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
@@ -313,8 +1197,8 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     client = app.test_client()
     legacy_tasks = client.get("/api/harness/tasks").get_json()
     legacy_watches = client.get("/api/harness/watches").get_json()
-    tasks = client.get("/api/harness/tasks?status=enabled&page=1&limit=2").get_json()
-    watches = client.get("/api/harness/watches?status=disabled&query=deploy&page=1&limit=2").get_json()
+    tasks = client.get("/api/harness/tasks?status=waiting&page=1&limit=2").get_json()
+    watches = client.get("/api/harness/watches?status=paused&query=deploy&page=1&limit=2").get_json()
     runs = client.get("/api/harness/runs?page=1&limit=2").get_json()
     counts = client.get("/api/harness/counts").get_json()
 
@@ -323,21 +1207,39 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert len(legacy_watches["watches"]) == 6
     assert legacy_watches["has_more"] is False
     assert [item["id"] for item in tasks["tasks"]] == ["task-2", "task-1"]
-    assert tasks["counts"] == {"all": 5, "enabled": 3, "disabled": 2}
+    assert tasks["counts"] == {"total": 5, "running": 0, "waiting": 3, "paused": 2, "finished": 0}
     assert tasks["total"] == 3
     assert tasks["has_more"] is True
     assert [item["id"] for item in watches["watches"]] == ["watch-5", "watch-4"]
-    assert watches["counts"] == {"all": 6, "enabled": 1, "disabled": 5}
+    assert watches["counts"] == {"total": 6, "running": 0, "waiting": 1, "paused": 5, "finished": 0}
     assert watches["total"] == 5
     assert watches["has_more"] is True
+    # The default view spans two states, so its total is a sum rather than a
+    # count key — the one place a wrong "total" would show a number the list
+    # cannot produce.
+    active = client.get("/api/harness/watches?status=active&page=1&limit=10").get_json()
+    assert active["total"] == 1
+    assert len(active["watches"]) == 1
+    # The frozen row contract (plan §3) reaches the client over HTTP, not just
+    # out of the store.
+    assert active["watches"][0]["lifecycle_state"] == "waiting"
+    assert active["watches"][0]["lifecycle_detail"] is None
+    assert active["watches"][0]["process_alive"] is None
+    assert tasks["tasks"][0]["next_run_at"]
     assert [item["id"] for item in runs["runs"]] == ["run-3", "run-2"]
     assert runs["total"] == 4
+    # The type facet, so the selector can offer a type the UI has no name for.
+    # Asserted on both endpoints because the Runs tab loads through either one
+    # and a facet present on only one of them is a selector that comes and goes.
+    assert runs["run_types"] == ["watch"]
+    bootstrap_runs = client.get("/api/harness/bootstrap?tab=runs&page=1&limit=2").get_json()
+    assert bootstrap_runs["page"]["run_types"] == runs["run_types"]
     assert runs["counts"]["queued"] == 1
     assert runs["counts"]["running"] == 1
     assert runs["counts"]["succeeded"] == 1
     assert runs["counts"]["failed"] == 1
-    assert counts["tasks"]["all"] == 5
-    assert counts["watches"]["disabled"] == 5
+    assert counts["tasks"]["total"] == 5
+    assert counts["watches"]["paused"] == 5
     assert counts["runs"]["all"] == 4
 
 
@@ -376,12 +1278,18 @@ def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_pat
         store.close()
 
     client = app.test_client()
-    response = client.get("/api/harness/bootstrap?tab=tasks&status=enabled&page=1&limit=1")
+    response = client.get("/api/harness/bootstrap?tab=tasks&status=waiting&page=1&limit=1")
 
     assert response.status_code == 200
     assert response.headers["X-Vibe-Request-Ms"]
     payload = response.get_json()
-    assert payload["counts"]["tasks"] == {"all": 4, "enabled": 2, "disabled": 2}
+    assert payload["counts"]["tasks"] == {
+        "total": 4,
+        "running": 0,
+        "waiting": 2,
+        "paused": 2,
+        "finished": 0,
+    }
     assert payload["counts"]["runs"]["all"] == 2
     assert payload["page"]["tasks"][0]["id"] == "task-1"
     assert payload["page"]["total"] == 2
@@ -418,6 +1326,125 @@ def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatc
     page = payload["sessions"][project_a["id"]]
     assert len(page["sessions"]) == 1
     assert page["next_before_id"] == page["sessions"][0]["id"]
+
+
+def test_project_patch_rejects_stale_agent_route_after_archive(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from core.services import settings as settings_service
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.models import scope_settings
+    from storage.projects_service import create_project, update_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    folder = tmp_path / "project"
+    folder.mkdir()
+    store = VibeAgentStore()
+    try:
+        store.create(name="pm", backend="claude")
+        store.create(name="zz-fallback", backend="claude")
+        with engine.begin() as conn:
+            project = create_project(conn, str(folder), display_name="Project")
+            update_project(conn, project["id"], agent_name="pm")
+        archived = store.archive("pm")
+        assert archived is not None
+
+        client = app.test_client()
+        response = client.patch(
+            f"/api/projects/{project['id']}",
+            json={"agent_name": "pm"},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 400
+        assert response.get_json() == {
+            "ok": False,
+            "code": "project_agent_unavailable",
+            "message": "Agent `pm` 无法用于此项目。",
+            "error": {
+                "code": "project_agent_unavailable",
+                "message": "Agent `pm` 无法用于此项目。",
+            },
+            "hint": "请选择一个已启用的 Agent 后重新保存项目设置。",
+            "details": {"agent_name": "pm"},
+        }
+        with engine.connect() as conn:
+            stored_name = conn.execute(
+                select(scope_settings.c.agent_name).where(
+                    scope_settings.c.scope_id == project["scope_id"]
+                )
+            ).scalar_one()
+        assert stored_name == archived.archived_name
+    finally:
+        store.close()
+        engine.dispose()
+
+
+def test_project_patch_forwards_stable_agent_ids_and_localizes_conflicts(monkeypatch):
+    from core.services import settings as settings_service
+    from storage import projects_service
+
+    captured: dict[str, object] = {}
+
+    def stale(_conn, project_id, **kwargs):
+        captured.update({"project_id": project_id, **kwargs})
+        raise projects_service.StaleProjectAgentBindingError(
+            project_id=project_id,
+            expected_agent_id="agent-original",
+            current_agent_id="agent-replacement",
+        )
+
+    monkeypatch.setattr(projects_service, "update_project", stale)
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/projects/proj-stale",
+        json={
+            "agent_id": "agent-original",
+            "expected_agent_id": "agent-original",
+            "agent_name": "pm",
+            "model": "updated-model",
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert captured == {
+        "project_id": "proj-stale",
+        "display_name": None,
+        "folder_path": None,
+        "agent_id": "agent-original",
+        "expected_agent_id": "agent-original",
+        "agent_name": "pm",
+        "model": "updated-model",
+    }
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "code": "project_agent_conflict",
+        "message": "项目设置打开后，该项目的 Agent 已发生变化。",
+        "error": {
+            "code": "project_agent_conflict",
+            "message": "项目设置打开后，该项目的 Agent 已发生变化。",
+        },
+        "hint": "请重新加载项目设置后再次修改。",
+        "details": {
+            "project_id": "proj-stale",
+            "expected_agent_id": "agent-original",
+            "current_agent_id": "agent-replacement",
+        },
+    }
 
 
 def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, tmp_path):
@@ -459,6 +1486,69 @@ def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path
     assert response.status_code == 200
     assert len(monitoring) == 1
     assert monitoring[0].version == "v2"
+
+
+def test_config_post_policy_only_save_does_not_start_a_stopped_tunnel(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from config.v2_config import V2Config
+    from vibe import api
+
+    payload = _full_config_payload()
+    payload["remote_access"] = {
+        "provider": "vibe_cloud",
+        "vibe_cloud": {"enabled": True, "auto_recovery": True},
+    }
+    api.save_config(payload)
+    monkeypatch.setattr(
+        remote_access,
+        "reconcile",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("policy-only save must not start the Connector")
+        ),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"remote_access": {"vibe_cloud": {"auto_recovery": False}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert V2Config.load().remote_access.vibe_cloud.auto_recovery is False
+    assert "remote_access_runtime" not in response.get_json()
+
+
+def test_config_post_rejects_connector_controls_that_require_make_before_break(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from config.v2_config import V2Config
+    from vibe import api
+
+    api.save_config(_full_config_payload())
+    monkeypatch.setattr(
+        remote_access,
+        "reconcile",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("rejected Connector controls must not reconcile")
+        ),
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"remote_access": {"vibe_cloud": {"transport_protocol": "http2"}}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert "/api/remote-access/settings" in response.get_json()["error"]
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
 
 
 def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path):
@@ -1819,3 +2909,127 @@ def test_sessions_create_preserves_metadata_without_web_push_owner(monkeypatch, 
     metadata = response.get_json()["metadata"]
     assert metadata["client"] == "test"
     assert "_web_push_user_key" not in metadata
+
+
+def test_sessions_create_locks_before_agent_validation(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    route_engine = create_sqlite_engine()
+    agent_store = VibeAgentStore()
+    competitor = VibeAgentStore()
+    try:
+        agent_store.create(name="pm", backend="codex")
+        project_dir = tmp_path / "locked-create-project"
+        project_dir.mkdir()
+        with route_engine.begin() as conn:
+            project = create_project(conn, str(project_dir), display_name="Project")
+
+        race = {"fired": 0, "refused": 0, "committed": 0}
+
+        @event.listens_for(competitor.engine, "checkout")
+        def _no_wait(dbapi_connection, *_args) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA busy_timeout = 0")
+            cursor.close()
+
+        @event.listens_for(route_engine, "after_cursor_execute")
+        def _archive_on_agent_read(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ) -> None:
+            if race["fired"] or "FROM agents" not in " ".join(statement.split()):
+                return
+            race["fired"] = 1
+            try:
+                competitor.archive("pm")
+            except OperationalError:
+                race["refused"] = 1
+            else:
+                race["committed"] = 1
+
+        monkeypatch.setattr(ui_server, "_projects_engine", lambda: route_engine)
+        client = app.test_client()
+        response = client.post(
+            "/api/sessions",
+            json={"project_id": project["id"], "agent_name": "pm", "agent_backend": "codex"},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 201
+        assert response.get_json()["agent_name"] == "pm"
+        assert race == {"fired": 1, "refused": 1, "committed": 0}
+    finally:
+        competitor.close()
+        agent_store.close()
+        route_engine.dispose()
+
+
+def test_sessions_patch_locks_before_agent_validation(monkeypatch, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    route_engine = create_sqlite_engine()
+    agent_store = VibeAgentStore()
+    competitor = VibeAgentStore()
+    try:
+        agent_store.create(name="pm", backend="codex")
+        agent_store.create(name="reviewer", backend="codex")
+        project_dir = tmp_path / "locked-patch-project"
+        project_dir.mkdir()
+        with route_engine.begin() as conn:
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session = create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_name="pm",
+                agent_backend="codex",
+            )
+
+        race = {"fired": 0, "refused": 0, "committed": 0}
+
+        @event.listens_for(competitor.engine, "checkout")
+        def _no_wait(dbapi_connection, *_args) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA busy_timeout = 0")
+            cursor.close()
+
+        @event.listens_for(route_engine, "after_cursor_execute")
+        def _archive_on_agent_read(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ) -> None:
+            if race["fired"] or "FROM agents" not in " ".join(statement.split()):
+                return
+            race["fired"] = 1
+            try:
+                competitor.archive("reviewer")
+            except OperationalError:
+                race["refused"] = 1
+            else:
+                race["committed"] = 1
+
+        monkeypatch.setattr(ui_server, "_projects_engine", lambda: route_engine)
+        client = app.test_client()
+        response = client.patch(
+            f"/api/sessions/{session['id']}",
+            json={"agent_name": "reviewer", "agent_backend": "codex"},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 200
+        assert response.get_json()["agent_name"] == "reviewer"
+        assert race == {"fired": 1, "refused": 1, "committed": 0}
+    finally:
+        competitor.close()
+        agent_store.close()
+        route_engine.dispose()

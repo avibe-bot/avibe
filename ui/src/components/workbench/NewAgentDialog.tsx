@@ -14,6 +14,7 @@ import { Input } from '../ui/input';
 import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Button } from '../ui/button';
+import { errorMessage } from '@/lib/errorMessage';
 
 type BackendKey = 'claude' | 'opencode' | 'codex';
 
@@ -137,8 +138,8 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         onCreated(result.agent);
         onClose();
       }
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
     } finally {
       setSubmitting(false);
     }

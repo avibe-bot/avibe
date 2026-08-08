@@ -260,4 +260,15 @@ observations:
       with the Activity case where somebody else genuinely owns the row. Where an
       identical emit is copied across backends, the guard has to be cross-backend too
       -- one behavior test pins one backend and lets the other two regress.
-
+  - id: HFR-OBS-022
+    date: 2026-08-06
+    source: issue #1190 runtime evidence plus deterministic shared-runtime simulation
+    result: confirmed
+    detail: >-
+      OpenCode can accept a prompt while its provider runtime keeps the assistant
+      message incomplete and retries indefinitely. Avibe's poll owner then retains
+      the Turn without any terminal evidence. The OpenCode server is shared across
+      Vibe Agents, so native abort is the release action for provider-level blocking;
+      the failed terminal result is the existing release action for Avibe's per-Session
+      runtime gate and durable Run. Timeout must perform them in that order and must
+      not fall through to the empty successful-result path.

@@ -6,6 +6,7 @@ import { AlertCircle, ChevronLeft, Loader2, Search, X } from 'lucide-react';
 import { useMessageSearch } from '../../lib/useMessageSearch';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { Switch } from '../ui/switch';
 import { AppSearchResultSection } from './search/AppSearchResults';
 import { SearchResultGroup } from './search/SearchResultGroup';
 import { useAppSearchResults, useOpenSearchApp } from './search/useAppSearch';
@@ -28,7 +29,12 @@ export const SearchPage: React.FC = () => {
   // input from the param on mount and mirror every keystroke back into it.
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState(() => searchParams.get('q') ?? '');
-  const { results, loading, error } = useMessageSearch(query);
+  // The archived opt-in rides the URL for the same reason ?q= does: opening a
+  // result and coming back must restore the toggle. It is deliberately NOT
+  // persisted anywhere else — a silently sticky opt-in would change the default
+  // result set for every later search.
+  const includeArchived = searchParams.get('archived') === '1';
+  const { results, loading, error } = useMessageSearch(query, { includeArchived });
   const { results: appResults, loading: appsLoading } = useAppSearchResults(query);
   const openSearchApp = useOpenSearchApp();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -44,6 +50,20 @@ export const SearchPage: React.FC = () => {
         const params = new URLSearchParams(prev);
         if (next) params.set('q', next);
         else params.delete('q');
+        return params;
+      },
+      { replace: true },
+    );
+  };
+
+  // Same in-place URL write as the query: flipping the opt-in must not push a
+  // history entry the Back gesture would have to step through.
+  const updateIncludeArchived = (next: boolean) => {
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        if (next) params.set('archived', '1');
+        else params.delete('archived');
         return params;
       },
       { replace: true },
@@ -133,6 +153,15 @@ export const SearchPage: React.FC = () => {
       {/* Body — own scroll surface. Empty-query hint / no-results / grouped
           results, mirroring the desktop palette's states. */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-3">
+        {/* Archived opt-in — off by default; archived hits open read-only. */}
+        <label className="flex items-center gap-2 px-2.5 pb-1 text-[12px] font-medium text-muted">
+          <Switch
+            checked={includeArchived}
+            onCheckedChange={updateIncludeArchived}
+            label={t('workbench.search.includeArchived')}
+          />
+          {t('workbench.search.includeArchived')}
+        </label>
         {showHint && (
           <div className="px-2.5 py-12 text-center text-[13px] text-muted">
             {t('workbench.search.hint')}

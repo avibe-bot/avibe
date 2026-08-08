@@ -1,4 +1,23 @@
-"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.2 (2026-07-23 11:12 +08:00).
+"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.5 (2026-07-31).
+
+v1.5 changelog (honest lazy-start health):
+- ``EngineHealth.NOT_STARTED`` distinguishes an installed runtime that has not
+  been demanded in this service lifetime from one that started and went down.
+
+v1.4 changelog (ref-keyed cleanup convergence):
+- ``cleanup_orphaned_oauth_material`` treats an absent credential ref as an
+  already-converged cleanup, making journal replay idempotent across crashes.
+
+v1.3 changelog (owner-approved channel class pass):
+- ``OAuthFlowState.channel`` makes Hub and native CLI success semantics explicit:
+  Hub success carries an engine credential ref; native success never does.
+- Hub flows expose a total five-way retained-material disposition for repair
+  decisions. Native flows pin that disposition to ``none`` because CLI-owned
+  login material never crosses this engine seam.
+- Retained refs are exposed only for flow-owned or orphaned material. Foreign
+  and unknown placements deliberately expose no actionable handle.
+- ``cleanup_orphaned_oauth_material`` is the ref-keyed retry seam: it confirms
+  both auth-file deletions before revoking the only retained handle.
 
 v1.2 changelog (L1 implementation findings — credential & model lifecycle):
 - Secret provisioning path closed: ``provision_credential`` moves an API-key
@@ -14,9 +33,10 @@ v1.2 changelog (L1 implementation findings — credential & model lifecycle):
 
 v1.1 changelog (L1 review findings, routed via orchestrator):
 - OAuth surface added with DETERMINISTIC source binding: ``start_oauth`` takes
-  the pre-created (pending) ``source_id``; a ``success`` ``OAuthFlowState``
-  carries the resulting opaque ``credential_ref``. Concurrent same-vendor
-  flows can never cross-bind.
+  the pre-created (pending) ``source_id``; a Hub-channel ``success``
+  ``OAuthFlowState`` carries the resulting opaque ``credential_ref``. The
+  later native channel uses the same flow state without an engine ref.
+  Concurrent same-vendor flows can never cross-bind.
 - Client binding made enforceable at the engine boundary:
   ``SourceBinding.allowed_origins`` + ``invoke(origin=...)`` +
   ``OriginNotAllowedError`` (adapter-side backstop; L2's resolver filters
@@ -42,13 +62,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
 
 
 class EngineHealth(str, Enum):
     OK = "ok"
     DEGRADED = "degraded"
     DOWN = "down"
+    NOT_STARTED = "not_started"
     NOT_INSTALLED = "not_installed"
 
 
@@ -107,14 +128,38 @@ class RawCallOutcome:
     source_id: str
 
 
+class RetainedMaterialDisposition(str, Enum):
+    NONE = "none"
+    FLOW_SOURCE_REF = "flow_source_ref"
+    ORPHAN_REF = "orphan_ref"
+    FOREIGN_SOURCE_REF = "foreign_source_ref"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class OAuthFlowState:
-    """Engine-held (experimental hub-channel) subscription OAuth flow state.
+    """Channel-aware subscription OAuth flow state.
 
     Deterministic binding: the flow is created FOR a pre-existing pending
-    ``source_id`` and, on ``state == "success"``, carries the opaque
-    ``credential_ref`` of the auth record the engine created — L2 binds it to
-    that source and never guesses, even with concurrent same-vendor flows.
+    ``source_id``. On the Hub branch, ``credential_ref`` is non-null exactly
+    on success and names the engine auth record L2 binds to that source. On the
+    native CLI branch it is null at every state, including success, because the
+    sanctioned CLI owns its login material. This split mirrors shipped truth in
+    ``core/handlers/model_hub/native_oauth.py:252-289`` and
+    ``tests/test_model_hub_api.py:1147-1149``.
+
+    ``retained_material_disposition`` is total across every state. For Hub
+    terminal states it reports where grant material written by THIS flow
+    remains: ``none`` means cleanup was confirmed or nothing was written;
+    ``flow_source_ref`` names the flow source's ref; ``orphan_ref`` retains a
+    minted cleanup handle; ``foreign_source_ref`` means the single existing ref
+    belongs to another source; and ``unknown`` is the corrupt/ambiguous-state
+    floor, never a default. ``retained_credential_ref`` is non-null exactly for
+    ``flow_source_ref`` and ``orphan_ref``. Foreign and unknown placements
+    deliberately withhold a ref so consumers cannot act on another source or
+    guess among candidates. Hub success pins ``flow_source_ref`` and equality
+    of both refs. Native pins ``none`` and a null retained ref by construction.
+
     Mirrors ``oauth-flow.schema.json`` presentation semantics
     (runtime-declared; UI renders from ``expects``).
     """
@@ -129,7 +174,13 @@ class OAuthFlowState:
     instructions_key: str | None
     error_key: str | None
     expires_at_iso: str | None
-    credential_ref: str | None  # set iff state == "success"
+    credential_ref: str | None
+    # Defaults preserve pre-v1.3 call sites until the follow-up service-consumer
+    # lane supplies the discriminator explicitly. Channel-aware producers MUST
+    # set all three fields.
+    channel: Literal["hub", "native_cli"] = "hub"
+    retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
+    retained_credential_ref: str | None = None
 
 
 class InvokeHandle(Protocol):
@@ -159,8 +210,11 @@ class EngineAdapter(Protocol):
 
     # --- gateway ---------------------------------------------------------
     async def gateway_token(self) -> str:
-        """Local gateway token for backend injection (the ONLY credential
-        backends ever receive)."""
+        """Local gateway token for Hub-channel backend injection.
+
+        This is the only credential the managed engine injects. Native-channel
+        turns bypass this gateway and use the sanctioned CLI's own login.
+        """
         ...
 
     # --- credential provisioning (engine-owned store) ---------------------
@@ -175,13 +229,29 @@ class EngineAdapter(Protocol):
         return the opaque ``credential_ref``.
 
         ``secret`` is transient: the adapter must never log it; L2 must never
-        persist it (config stores refs only). OAuth credentials never pass
+        persist it (config stores refs only). Hub OAuth credentials never pass
         through here — they are created engine-side by the OAuth flow and
-        surfaced via ``OAuthFlowState.credential_ref``."""
+        surfaced via ``OAuthFlowState.credential_ref``. Native OAuth material
+        remains CLI-owned and has no ref on this seam."""
         ...
 
     async def revoke_credential(self, credential_ref: str) -> None:
         """Release the stored credential (source deletion / key replacement)."""
+        ...
+
+    async def cleanup_orphaned_oauth_material(self, credential_ref: str) -> bool:
+        """Retry cleanup for an ``orphan_ref`` without exposing a filename.
+
+        Return true only after the running-engine auth-file delete (when an
+        engine is running), the local auth-file delete, and ref revocation are
+        all confirmed, or when ``credential_ref`` no longer resolves. Absence
+        is convergence, not a lenient fallback: this operation's ordering
+        invariant revokes the ref only after both auth-file deletions are
+        confirmed, so an absent ref proves that no material remains behind it.
+        A never-created ref satisfies the same postcondition vacuously. Return
+        false on any partial failure and retain the ref for a later retry. The
+        handle must never be destroyed while material may remain behind it.
+        """
         ...
 
     # --- source registry (L2 calls on every config change) ---------------
@@ -199,7 +269,7 @@ class EngineAdapter(Protocol):
         sync); does not require or create a source binding."""
         ...
 
-    # --- engine-held subscription OAuth (experimental flag only) ----------
+    # --- subscription OAuth (channel-specific ownership) ------------------
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState: ...
 
     async def oauth_status(self, flow_id: str) -> OAuthFlowState: ...

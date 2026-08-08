@@ -44,7 +44,7 @@ class MessageDeliveryController(ScenarioControllerBase):
             ),
         )
         self.session_turns = SimpleNamespace(
-            on_terminal_result=lambda context, is_error: setattr(
+            on_terminal_result=lambda context, is_error, **_kwargs: setattr(
                 self,
                 "turn_terminal_calls",
                 self.turn_terminal_calls + 1,
@@ -71,6 +71,9 @@ class MessageDeliveryHarness(BaseScenarioHarness):
         self.context.thread_id = thread_id
         self.context.platform = platform
         self.dispatcher = ConsolidatedMessageDispatcher(self.controller)
+
+    async def emit_harness_prompt(self, text: str):
+        return await self.dispatcher.emit_harness_prompt(self.context, text)
 
     async def emit_result(self, text: str):
         return await self.dispatcher.emit_agent_message(self.context, "result", text)
