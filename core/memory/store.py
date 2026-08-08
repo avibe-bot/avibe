@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
-from core.memory.observations import FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
+from core.memory.observations import (
+    FlushPreSubmission,
+    FlushRejected,
+    FlushResult,
+    FlushSucceeded,
+    FlushUnknown,
+)
 from core.memory.types import (
     MemoryErrorCode,
     MemoryFlushToken,
@@ -756,7 +762,7 @@ class MemoryStore:
                     conn,
                     MemorySettlementRecord(
                         provider_session_ref=provider_session_ref,
-                        generation=state.generation,
+                        generation=row.flush_generation,
                         fence_epoch=state.fence_epoch,
                         operation_id=operation_id,
                         operation_kind="add",
@@ -794,7 +800,7 @@ class MemoryStore:
                     conn.execute(
                         """
                         UPDATE memory_session_flush_state
-                        SET generation = generation + 1, first_unflushed_at = ?,
+                        SET generation = MAX(generation, ? + 1), first_unflushed_at = ?,
                             last_add_ack_at = ?, watermark = ?,
                             due_at = NULL, next_attempt_at = NULL,
                             flush_state = 'not_due', fence_operation_id = NULL,
@@ -802,6 +808,7 @@ class MemoryStore:
                         WHERE provider_session_ref = ?
                         """,
                         (
+                            row.flush_generation,
                             first_unflushed_at,
                             now,
                             watermark_after,
@@ -1047,7 +1054,9 @@ class MemoryStore:
             "extracted",
             "no_extraction",
         }
-        retryable_rejection = isinstance(result, FlushRejected) and result.retryable
+        retryable_rejection = (
+            isinstance(result, FlushRejected) and result.retryable
+        ) or isinstance(result, FlushPreSubmission)
         if valid_success:
             observation = "succeeded"
             status = result.status
@@ -1058,6 +1067,15 @@ class MemoryStore:
             status = None
             error_code = result.error_code
             request_id = result.request_id
+        elif isinstance(result, FlushPreSubmission):
+            observation = "rejected"
+            status = None
+            error_code = (
+                "memory_provider_timeout"
+                if result.reason == "timeout"
+                else "memory_sidecar_unavailable"
+            )
+            request_id = None
         elif isinstance(result, FlushSucceeded):
             observation = "unknown"
             status = None
@@ -1103,7 +1121,9 @@ class MemoryStore:
             ).fetchone()
             if candidate is None:
                 return 0
-            if not valid_success and not isinstance(result, FlushRejected):
+            if not valid_success and not isinstance(
+                result, (FlushRejected, FlushPreSubmission)
+            ):
                 observation = "unknown"
                 status = None
             updated = conn.execute(
@@ -2239,6 +2259,13 @@ class MemoryStore:
             DELETE FROM memory_capture_queue
             WHERE state IN ('delivered', 'dead')
               AND (flush_observation IS NULL OR flush_observation != 'in_flight')
+              AND NOT EXISTS (
+                  SELECT 1 FROM memory_session_flush_state AS s
+                  WHERE s.epoch = memory_capture_queue.epoch
+                    AND s.provider_session_ref = memory_capture_queue.provider_session_ref
+                    AND s.flush_state = 'due'
+                    AND s.generation = memory_capture_queue.flush_generation
+              )
               AND COALESCE(flush_observed_at, completed_at) IS NOT NULL
               AND COALESCE(flush_observed_at, completed_at) < ?
             """,
@@ -2255,10 +2282,17 @@ class MemoryStore:
                 """
                 DELETE FROM memory_capture_queue
                 WHERE source_message_digest IN (
-                    SELECT source_message_digest FROM memory_capture_queue
-                    WHERE state IN ('delivered', 'dead')
-                      AND (flush_observation IS NULL OR flush_observation != 'in_flight')
-                      ORDER BY COALESCE(flush_observed_at, completed_at), source_message_digest
+                    SELECT q.source_message_digest FROM memory_capture_queue AS q
+                    WHERE q.state IN ('delivered', 'dead')
+                      AND (q.flush_observation IS NULL OR q.flush_observation != 'in_flight')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_session_flush_state AS s
+                          WHERE s.epoch = q.epoch
+                            AND s.provider_session_ref = q.provider_session_ref
+                            AND s.flush_state = 'due'
+                            AND s.generation = q.flush_generation
+                      )
+                      ORDER BY COALESCE(q.flush_observed_at, q.completed_at), q.source_message_digest
                     LIMIT ?
                 )
                 """,

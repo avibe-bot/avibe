@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from core.memory.everos import (
     AddAck,
+    FlushPreSubmission,
     FlushRejected,
     FlushResult,
     FlushSucceeded,
@@ -349,9 +350,22 @@ class MemoryWorker:
             raise
         except Exception:
             result = FlushUnknown(reason="transport")
-        if not isinstance(result, (FlushSucceeded, FlushRejected, FlushUnknown)):
+        if not isinstance(
+            result, (FlushSucceeded, FlushRejected, FlushUnknown, FlushPreSubmission)
+        ):
             result = FlushUnknown(reason="transport")
         returned_result = result
+        if isinstance(result, FlushPreSubmission):
+            returned_result = FlushRejected(
+                request_id=None,
+                error_code=(
+                    "memory_provider_timeout"
+                    if result.reason == "timeout"
+                    else "memory_sidecar_unavailable"
+                ),
+                server_fault=False,
+                retryable=True,
+            )
         if isinstance(result, FlushSucceeded) and result.status not in {
             "extracted",
             "no_extraction",

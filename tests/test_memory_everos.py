@@ -11,6 +11,7 @@ import pytest
 from core.memory.everos import (
     AddAck,
     EverOSPort,
+    FlushPreSubmission,
     FlushRejected,
     FlushSucceeded,
     FlushUnknown,
@@ -289,6 +290,16 @@ def test_flush_maps_timeout_and_transport_to_unknown(failure_type, expected) -> 
         result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush("session", PROJECT))
 
     assert result == expected
+
+
+def test_flush_maps_connect_timeout_to_pre_submission() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timeout", request=request)
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush("session", PROJECT))
+
+    assert result == FlushPreSubmission(reason="timeout")
 
 
 def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> None:

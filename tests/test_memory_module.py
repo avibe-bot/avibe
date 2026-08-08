@@ -16,6 +16,7 @@ from config import paths
 from core.memory.everos import (
     AddAck,
     FakeMemoryProvider,
+    FlushPreSubmission,
     FlushRejected,
     FlushSucceeded,
     FlushUnknown,
@@ -503,6 +504,46 @@ async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breake
     assert fault.processing_fault_kind == "engine"
     assert fault.processing_fault_since == "2026-01-01T00:00:00.000Z"
     assert fault.processing_alert_active is True
+
+
+async def test_pre_submission_flush_retries_without_a_manual_fence(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="pre-submit-flush")) == CaptureAccepted()
+    provider.flush_results.append(FlushPreSubmission(reason="timeout"))
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="pre-submit-flush-worker",
+        now=lambda: current,
+    )
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert (state.flush_state, state.flush_retry_count, state.next_attempt_at) == (
+        "due",
+        1,
+        "2026-01-01T00:00:30.000Z",
+    )
+    assert store.ensure_meta().processing_fault_since is None
+
+    current += timedelta(seconds=31)
+    assert await worker.drain_once() == 0
+    row = store.list_queue_rows()[0]
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert (row.flush_observation, state.flush_state, state.generation) == (
+        "succeeded",
+        "not_due",
+        1,
+    )
+    assert [record.outcome for record in store.list_flush_settlements(row.provider_session_ref)] == [
+        "rejected",
+        "succeeded",
+    ]
 
 
 async def test_processing_breaker_survives_restart_and_half_open_admits_one_capture(tmp_path: Path) -> None:

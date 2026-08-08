@@ -31,4 +31,11 @@ class FlushUnknown:
     reason: Literal["timeout", "transport"]
 
 
-FlushResult: TypeAlias = FlushSucceeded | FlushRejected | FlushUnknown
+@dataclass(frozen=True)
+class FlushPreSubmission:
+    """A flush connection failed before the provider could receive the write."""
+
+    reason: Literal["timeout", "transport"]
+
+
+FlushResult: TypeAlias = FlushSucceeded | FlushRejected | FlushUnknown | FlushPreSubmission

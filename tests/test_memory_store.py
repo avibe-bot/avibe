@@ -353,6 +353,47 @@ def test_extracted_add_records_generation_settlement_and_advances_watermark(tmp_
     ) == ("add", 0, "succeeded", 2_000)
 
 
+def test_extracted_add_settles_its_pinned_next_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "first", session_ref="generation-natural")
+    token = _flush_claim(store, provider_session_ref)
+    assert store.enqueue_request(
+        source_message_id="next-generation",
+        session_id="generation-natural",
+        principal_id=provider_session_ref.principal_id,
+        project_ref=provider_session_ref.project_ref,
+        provenance="user_input",
+        payload_text="next generation payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    ).row.flush_generation == token.generation + 1
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("rejected", "INVALID_INPUT", server_fault=False, retryable=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    row = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:03.000Z")
+    assert row is not None
+    assert row.flush_generation == token.generation + 1
+    assert store.settle(
+        row,
+        Delivered(add_request_id="add-next", add_status="extracted"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:04.000Z"),
+    ).settled
+
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert (state.generation, state.flush_state) == (2, "not_due")
+    add_settlement = next(
+        item
+        for item in store.list_flush_settlements(provider_session_ref)
+        if item.operation_kind == "add"
+    )
+    assert (add_settlement.generation, add_settlement.outcome) == (1, "succeeded")
+
+
 def test_claim_and_admission_respect_session_flush_fences(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "delivered", session_ref="fenced-session")
@@ -667,6 +708,36 @@ def test_compaction_preserves_in_flight_flush_evidence(tmp_path: Path) -> None:
     row = _row_for_source(store, "in-flight-compaction")
     assert row is not None
     assert row.flush_observation == "in_flight"
+
+
+def test_compaction_preserves_due_flush_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "due-compaction")
+    token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("retry", "CONFLICT", server_fault=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    monkeypatch.setattr("core.memory.store.TERMINAL_TOMBSTONE_LIMIT", 0)
+
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET completed_at = ?, flush_observed_at = ?
+            WHERE source_message_digest = 'due-compaction'
+            """,
+            (old.isoformat().replace("+00:00", "Z"), old.isoformat().replace("+00:00", "Z")),
+        )
+
+    reference = old + TERMINAL_TOMBSTONE_RETENTION + timedelta(seconds=1)
+    assert store.compact_terminal_tombstones(now=reference) == 0
+    row = _row_for_source(store, "due-compaction")
+    assert row is not None
+    assert row.flush_observation == "rejected"
+    assert store.get_session_flush_state(provider_session_ref).flush_state == "due"
 
 
 def test_malformed_flush_success_is_recorded_as_manual_required(tmp_path: Path) -> None:

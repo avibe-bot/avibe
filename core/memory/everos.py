@@ -27,6 +27,7 @@ from core.memory.types import (
 )
 from core.memory.observations import (
     AddAck,
+    FlushPreSubmission,
     FlushRejected,
     FlushResult,
     FlushSucceeded,
@@ -222,6 +223,12 @@ class EverOSPort:
                     "project_id": project_id,
                 },
                 timeout_seconds=self._flush_timeout_seconds,
+            )
+        except MemoryProviderPreSubmissionFailure as failure:
+            return FlushPreSubmission(
+                reason="timeout"
+                if failure.error == "memory_provider_timeout"
+                else "transport"
             )
         except MemoryProviderSystemFailure:
             return FlushUnknown(reason="transport")
