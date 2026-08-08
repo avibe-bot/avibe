@@ -669,6 +669,17 @@
     "apiUpgrade": "此 Runtime 由 Avibe 桌面应用管理。",
     "backendUpgrade": "此 Codex 后端属于旧版 Avibe 桌面 Runtime，无法原地更新。请重新打开当前桌面应用，将其安装为私有后端。"
   },
+  "desktopBackendInstall": {
+    "success": "{backend} 安装成功。",
+    "unknownBackend": "未知的桌面后端：{backend}。",
+    "toolchainUnavailable": "桌面后端安装器当前不可用。",
+    "installLocked": "另一个 {backend} 安装任务正在运行。",
+    "installFailed": "无法安装 {backend}。",
+    "invalidInstall": "已安装的 {backend} 软件包无效。",
+    "unsupportedPlatform": "当前桌面平台不支持 {backend}。",
+    "timedOut": "安装 {backend} 超时。",
+    "probeFailed": "无法验证已安装的 {backend} 可执行文件。"
+  },
   "telegram": {
     "commandMenu": {
       "start": "打开主菜单",

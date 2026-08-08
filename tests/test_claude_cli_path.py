@@ -15,7 +15,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.handlers.session_handler as session_handler_module
 from config.v2_compat import to_app_config
-from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
+from config.v2_config import (
+    AgentsConfig,
+    ClaudeConfig,
+    CodexConfig,
+    OpenCodeConfig,
+    RuntimeConfig,
+    SlackConfig,
+    V2Config,
+)
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
@@ -152,6 +160,41 @@ def test_to_app_config_preserves_claude_cli_path() -> None:
     compat = to_app_config(v2)
 
     assert compat.claude.cli_path == "/usr/local/bin/claude-proxy"
+
+
+def test_to_app_config_resolves_all_desktop_backend_executables(monkeypatch, tmp_path: Path) -> None:
+    binaries = {
+        "claude": tmp_path / ".local" / "bin" / "claude",
+        "codex": tmp_path / ".local" / "bin" / "codex",
+        "opencode": tmp_path / ".opencode" / "bin" / "opencode",
+    }
+    for binary in binaries.values():
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        binary.chmod(0o755)
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
+    v2 = V2Config(
+        mode="self_host",
+        version="2",
+        slack=SlackConfig(),
+        runtime=RuntimeConfig(default_cwd="/tmp/workdir"),
+        agents=AgentsConfig(
+            claude=ClaudeConfig(cli_path="claude"),
+            codex=CodexConfig(cli_path="codex"),
+            opencode=OpenCodeConfig(cli_path="opencode"),
+        ),
+    )
+
+    compat = to_app_config(v2)
+
+    assert compat.claude.cli_path == str(binaries["claude"])
+    assert compat.codex is not None
+    assert compat.codex.binary == str(binaries["codex"])
+    assert compat.opencode is not None
+    assert compat.opencode.binary == str(binaries["opencode"])
 
 
 def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path: Path) -> None:

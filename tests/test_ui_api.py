@@ -1609,9 +1609,32 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
     assert result["ok"] is True
     assert result["managed_by"] == "desktop"
     assert result["path"] == str(installed)
+    assert result["message"] == "Codex installed successfully."
     assert config.agents.codex.cli_path == str(installed)
     assert config.saved == 1
     assert invalidated == ["codex"]
+
+
+def test_desktop_backend_install_localizes_structured_failure(monkeypatch):
+    monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(language="zh"))
+
+    def fail_install(*_args, **_kwargs):
+        raise api.DesktopBackendError(
+            "Desktop backend install failed (exit code 1)",
+            code="npm_install_failed",
+            output="npm failed",
+        )
+
+    monkeypatch.setattr(api, "install_desktop_backend", fail_install)
+
+    result = api._run_desktop_backend_install("claude", lambda output: output)
+
+    assert result == {
+        "ok": False,
+        "code": "npm_install_failed",
+        "message": "无法安装 Claude Code。",
+        "output": "npm failed",
+    }
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

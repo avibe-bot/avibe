@@ -56,8 +56,8 @@ export interface BackendRuntimeState {
   /** Optimistically flip ``enabled`` + persist; rolls back on save failure. */
   toggleEnabled: () => void;
   /**
-   * Pass to ``BackendLifecycleChip.onChanged``. Updates ``cliPath`` when
-   * the chip reports a fresh install path and re-runs detect.
+   * Pass to ``BackendLifecycleChip.onChanged``. Adopts the persisted install
+   * path as both the current and saved value, then re-runs detect.
    */
   handleLifecycleChanged: (info: { installedPath?: string | null } | undefined | null) => Promise<void>;
 }
@@ -184,7 +184,10 @@ export function useBackendRuntime({
         typeof result.path === 'string' && result.path ? result.path : null;
       setInstallResult({ ok: result.ok, message: result.message, output: result.output });
       if (result.ok) {
-        if (installedPath) setCliPath(installedPath);
+        if (installedPath) {
+          setCliPath(installedPath);
+          setSavedCliPath(installedPath);
+        }
         await detect(installedPath || cliPath);
         showToast(result.message || t('agentDetection.installAgent'), 'success');
       } else {
@@ -257,7 +260,13 @@ export function useBackendRuntime({
   const handleLifecycleChanged = useCallback(
     async (info: { installedPath?: string | null } | undefined | null) => {
       const installedPath = info?.installedPath || null;
-      if (installedPath) setCliPath(installedPath);
+      if (installedPath) {
+        // The install endpoint has already persisted and hot-reconciled this
+        // exact path. Mirroring both values prevents a false Save affordance
+        // and a redundant second backend restart.
+        setCliPath(installedPath);
+        setSavedCliPath(installedPath);
+      }
       await detect(installedPath || cliPath);
     },
     [cliPath, detect],

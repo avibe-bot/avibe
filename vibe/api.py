@@ -53,9 +53,18 @@ from vibe.desktop_backends import (
     desktop_backend_toolchain,
     install_desktop_backend,
     is_desktop_backend_path,
-    resolve_published_desktop_backend,
 )
 from vibe.desktop_runtime import is_private_desktop_runtime_path
+from vibe.cli_paths import (
+    _candidate_cli_paths,
+    _command_env_for,
+    _is_executable_file,
+    _npm_binary_candidates_for_prefix,
+    _npm_global_binary_candidates,
+    _npm_prefix_for,
+    _windows_executable_candidates,
+    resolve_cli_path as _resolve_cli_path,
+)
 from vibe.upgrade import (
     build_upgrade_plan,
     get_latest_version_info,
@@ -167,247 +176,14 @@ def _ensure_builtin_default_agents(config: Optional[V2Config] = None) -> None:
         store.close()
 
 
-def _is_executable_file(path: Path) -> bool:
-    return path.exists() and path.is_file() and os.access(path, os.X_OK)
-
-
-_NVM_VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$")
-_NVM_SUFFIX_TOKEN_RE = re.compile(r"\d+|\D+")
-
-
-def _nvm_suffix_tokens(suffix: str) -> tuple[tuple[int, int, str], ...]:
-    # Tokenize the prerelease suffix into (kind, num, text) triples so all
-    # tokens are structurally identical and comparable. kind=0 marks numeric
-    # tokens (compared by num) and kind=1 marks alphanumeric tokens (compared
-    # by text). Numeric tokens compare numerically, so "-rc.10" beats
-    # "-rc.2"; cross-kind tokens never compare int-vs-str, ruling out
-    # TypeError for arbitrary suffix shapes.
-    triples: list[tuple[int, int, str]] = []
-    for tok in _NVM_SUFFIX_TOKEN_RE.findall(suffix):
-        if tok.isdigit():
-            triples.append((0, int(tok), ""))
-        else:
-            triples.append((1, 0, tok))
-    return tuple(triples)
-
-
-def _nvm_version_sort_key(entry: Path) -> tuple:
-    # Returns (major, minor, patch, is_released, suffix_tokens). is_released
-    # is True for plain "vX.Y.Z" and False for any "-suffix"; with reverse=True
-    # released versions outrank pre-releases of the same triple. Within
-    # pre-releases, suffix_tokens compares numerically where digits appear.
-    m = _NVM_VERSION_RE.match(entry.name)
-    if not m:
-        return (-1, -1, -1, False, ())
-    major = int(m.group(1))
-    minor = int(m.group(2)) if m.group(2) else 0
-    patch = int(m.group(3)) if m.group(3) else 0
-    suffix = m.group(4) or ""
-    return (major, minor, patch, not suffix, _nvm_suffix_tokens(suffix))
-
-
-def _nvm_binary_candidates(binary: str) -> list[Path]:
-    versions_dir = Path.home() / ".nvm" / "versions" / "node"
-    if not versions_dir.exists():
-        return []
-
-    valid: list[Path] = []
-    for entry in versions_dir.iterdir():
-        # Skip non-directory entries (e.g. macOS .DS_Store) and non-version
-        # dirs (e.g. nvm's "system" alias) before sorting.
-        if not entry.is_dir():
-            continue
-        if not _NVM_VERSION_RE.match(entry.name):
-            continue
-        valid.append(entry)
-
-    candidates: list[Path] = []
-    for version_dir in sorted(valid, key=_nvm_version_sort_key, reverse=True):
-        candidate = version_dir / "bin" / binary
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
-
-
-def _npm_global_binary_candidates(binary: str) -> list[Path]:
-    if not binary or binary == "npm":
-        return []
-
-    npm_paths: list[Path] = []
-    for candidate in _candidate_cli_paths("npm"):
-        if _is_executable_file(candidate) and candidate not in npm_paths:
-            npm_paths.append(candidate)
-
-    which_npm = shutil.which("npm")
-    if which_npm:
-        npm_candidate = Path(which_npm)
-        if npm_candidate not in npm_paths:
-            npm_paths.append(npm_candidate)
-
-    candidates: list[Path] = []
-    for npm_path in npm_paths:
-        prefix_path = _npm_prefix_for(npm_path)
-        if prefix_path is None:
-            continue
-
-        for candidate in _npm_binary_candidates_for_prefix(prefix_path, binary):
-            if candidate not in candidates:
-                candidates.append(candidate)
-
-    return candidates
-
-
-def _npm_prefix_for(npm_path: str | Path) -> Path | None:
-    try:
-        result = subprocess.run(
-            [str(npm_path), "config", "get", "prefix"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=_command_env_for(str(npm_path)),
-        )
-    except Exception:
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    prefix = (result.stdout or "").strip().splitlines()
-    if not prefix:
-        return None
-
-    return Path(os.path.expanduser(prefix[-1]))
-
-
-def _npm_binary_candidates_for_prefix(prefix_path: Path, binary: str) -> list[Path]:
-    derived_candidates = [
-        prefix_path / "bin" / binary,
-        prefix_path / binary,
-        prefix_path / "node_modules" / ".bin" / binary,
-    ]
-    if os.name == "nt":
-        derived_candidates.extend(
-            [
-                prefix_path / f"{binary}.cmd",
-                prefix_path / f"{binary}.exe",
-                prefix_path / "node_modules" / ".bin" / f"{binary}.cmd",
-            ]
-        )
-    return derived_candidates
-
-
-def _windows_executable_candidates(candidates: list[Path]) -> list[Path]:
-    result: list[Path] = []
-    for candidate in candidates:
-        result.append(candidate)
-        if candidate.suffix.lower() not in {".cmd", ".exe"}:
-            result.extend(
-                [
-                    candidate.with_name(f"{candidate.name}.exe"),
-                    candidate.with_name(f"{candidate.name}.cmd"),
-                ]
-            )
-    return result
-
-
-def _candidate_cli_paths(binary: str) -> list[Path]:
-    if not binary:
-        return []
-
-    expanded = Path(os.path.expanduser(binary))
-    has_path_separator = os.sep in binary or (os.altsep is not None and os.altsep in binary)
-    if expanded.is_absolute() or has_path_separator:
-        return [expanded]
-
-    home = Path.home()
-    candidates: list[Path] = []
-    if binary == "claude":
-        candidates.append(home / ".claude" / "local" / "claude")
-    elif binary == "opencode":
-        candidates.extend(
-            [
-                home / ".opencode" / "bin" / "opencode",
-                home / ".local" / "bin" / "opencode",
-            ]
-        )
-
-    common_candidates = [
-        home / ".local" / "bin" / binary,
-        home / ".bun" / "bin" / binary,
-        Path("/opt/homebrew/bin") / binary,
-        Path("/usr/local/bin") / binary,
-    ]
-    if os.name == "nt":
-        common_candidates = _windows_executable_candidates(common_candidates)
-    for candidate in common_candidates + _nvm_binary_candidates(binary) + _npm_global_binary_candidates(binary):
-        if candidate not in candidates:
-            candidates.append(candidate)
-
-    return candidates
-
-
 def resolve_cli_path(binary: str) -> str | None:
-    for candidate in _candidate_cli_paths(binary):
-        if _is_executable_file(candidate):
-            return str(candidate)
-
-    path = shutil.which(os.path.expanduser(binary)) if binary else None
-    if path:
-        return path
-
-    # App-private backends are a final fallback. A system/user installation
-    # discovered above always wins when the config still uses the default
-    # backend name.
-    if binary in {"claude", "codex", "opencode"}:
-        managed_path = resolve_published_desktop_backend(binary)
-        if managed_path:
-            return managed_path
-
-    # The stored cli_path was an absolute path that no longer exists. Most
-    # common cause: an upstream installer moved the binary out from under us.
-    # Real-world example: Claude Code's official ``install.sh`` puts the
-    # native binary at ``~/.local/bin/claude`` (via ``~/.local/share/claude/
-    # versions/<ver>``), while the legacy ``npm install -g
-    # @anthropic-ai/claude-code`` install used ``/usr/local/bin/claude``.
-    # After clicking "Upgrade" in the UI, V2Config still points at the
-    # /usr/local/bin path, so the runtime probe reports ``installed=false``
-    # and the chip flips to "not installed". Fall back to discovery using
-    # only the basename — if a binary with that name is on any of the
-    # standard candidate paths (~/.local/bin, /opt/homebrew/bin, npm/nvm/bun
-    # globals, etc.) we treat that as the live install. The basename
-    # restriction means custom callers passing ``"/path/to/my-claude"``
-    # don't get silently redirected to the system claude.
-    if not binary:
-        return None
-    expanded = Path(os.path.expanduser(binary))
-    has_path_separator = os.sep in binary or (os.altsep is not None and os.altsep in binary)
-    if expanded.is_absolute() or has_path_separator:
-        basename = expanded.name
-        if basename and basename != binary:
-            for candidate in _candidate_cli_paths(basename):
-                if _is_executable_file(candidate):
-                    logger.info(
-                        "resolve_cli_path: stored path %s missing; falling back to %s",
-                        binary,
-                        candidate,
-                    )
-                    return str(candidate)
-            if basename in {"claude", "codex", "opencode"}:
-                managed_path = resolve_published_desktop_backend(basename)
-                if managed_path:
-                    return managed_path
-    return None
-
-
-def _command_env_for(binary_path: str | None) -> dict[str, str]:
-    env = {**os.environ, "PATH": os.environ.get("PATH", "")}
-    if not binary_path:
-        return env
-
-    binary_dir = str(Path(binary_path).expanduser().resolve().parent)
-    path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != binary_dir]
-    env["PATH"] = os.pathsep.join([binary_dir, *path_entries])
-    return env
+    # Keep the API-level seam injectable for existing dependency/install tests,
+    # while sharing the actual discovery contract with desktop runtime config.
+    return _resolve_cli_path(
+        binary,
+        candidate_paths=_candidate_cli_paths,
+        is_executable_file=_is_executable_file,
+    )
 
 
 def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str]:
@@ -6225,6 +6001,43 @@ def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = 
     return None
 
 
+_DESKTOP_BACKEND_LABELS = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "opencode": "OpenCode",
+}
+_DESKTOP_BACKEND_ERROR_I18N_KEYS = {
+    "unknown_backend": "desktopBackendInstall.unknownBackend",
+    "desktop_toolchain_unavailable": "desktopBackendInstall.toolchainUnavailable",
+    "install_locked": "desktopBackendInstall.installLocked",
+    "npm_install_failed": "desktopBackendInstall.installFailed",
+    "desktop_install_failed": "desktopBackendInstall.installFailed",
+    "invalid_backend_root": "desktopBackendInstall.invalidInstall",
+    "invalid_package": "desktopBackendInstall.invalidInstall",
+    "native_executable_missing": "desktopBackendInstall.invalidInstall",
+    "invalid_executable": "desktopBackendInstall.invalidInstall",
+    "unsupported_platform": "desktopBackendInstall.unsupportedPlatform",
+    "install_timeout": "desktopBackendInstall.timedOut",
+    "executable_probe_failed": "desktopBackendInstall.probeFailed",
+}
+
+
+def _configured_backend_language() -> str:
+    try:
+        return str(getattr(load_config(), "language", "en") or "en")
+    except (FileNotFoundError, OSError, ValueError):
+        return "en"
+
+
+def _desktop_backend_install_message(name: str, code: str) -> str:
+    key = _DESKTOP_BACKEND_ERROR_I18N_KEYS.get(code, "desktopBackendInstall.installFailed")
+    return backend_t(
+        key,
+        _configured_backend_language(),
+        backend=_DESKTOP_BACKEND_LABELS.get(name, name),
+    )
+
+
 def _run_desktop_backend_install(name: str, truncate_output) -> dict:
     def _activate(installed_path: str) -> None:
         _persist_agent_cli_path(name, installed_path, required=True)
@@ -6235,13 +6048,17 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
         return {
             "ok": False,
             "code": exc.code,
-            "message": str(exc),
+            "message": _desktop_backend_install_message(name, exc.code),
             "output": truncate_output(exc.output) if exc.output else None,
         }
     _invalidate_version_cache(name)
     return {
         "ok": True,
-        "message": f"{name} installed successfully",
+        "message": backend_t(
+            "desktopBackendInstall.success",
+            _configured_backend_language(),
+            backend=_DESKTOP_BACKEND_LABELS.get(name, name),
+        ),
         "path": result.path,
         "version": result.version,
         "managed_by": "desktop",
@@ -6309,7 +6126,7 @@ def install_agent(name: str) -> dict:
             return {
                 "ok": False,
                 "code": "desktop_managed_backend",
-                "message": backend_t("desktopRuntime.backendUpgrade"),
+                "message": backend_t("desktopRuntime.backendUpgrade", _configured_backend_language()),
                 "output": None,
                 "path": existing_path,
             }

@@ -19,10 +19,14 @@ backends are installed only after the user requests one.
    first through the current platform resolver.
 3. Only when external discovery fails may Avibe resolve an app-private backend
    recorded under the desktop backend root.
-4. Installing a missing backend in a desktop-managed Runtime uses the bundled
+4. A desktop Runtime projects every configured backend selector through the
+   same resolver used by Settings before constructing Claude, Codex, or
+   OpenCode runtime configuration. GUI-process `PATH` inheritance is never a
+   second source of truth for whether an installed backend can launch.
+5. Installing a missing backend in a desktop-managed Runtime uses the bundled
    Node.js and npm. It never requires or mutates system Node.js, npm, or global
    package state.
-5. Non-desktop installations retain the existing global one-click installer
+6. Non-desktop installations retain the existing global one-click installer
    behavior.
 
 ## Private Install Contract
@@ -72,6 +76,10 @@ installed SDK contains no bundled Claude executable before packaging.
 
 - A private backend reports `managed_by: "desktop"`, but remains independently
   updateable from the Settings UI.
+- A successful install path is already persisted and hot-reconciled. Settings
+  adopts it as both the displayed and saved value, so it never offers a second
+  Save action for the same activation.
+- Install completion and failure messages use the configured Avibe language.
 - Backend update checks continue to compare the installed version with the
   package registry version.
 - Desktop application updates replace the signed Runtime bundle but do not
