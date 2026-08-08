@@ -3962,6 +3962,34 @@ scenarios:
     # an explicit turn_failure_notification contract admits the Turn fallback lane.
     # Definition-level suppression therefore remains active for generic failures.
     test: tests/test_harness_failure_visibility.py::test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane
+  - id: HFR-443
+    name: deferred callback participant blocks the Turn fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Turn membership is read from either an active owed notice or a deferred
+    # terminal intent. A pending callback on the deferred participant therefore
+    # blocks an immediately settled sibling from sending the same result.
+    test: tests/test_harness_failure_visibility.py::test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback
+  - id: HFR-444
+    name: first in-flight waiter health remains unknown
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    # A cycle start is not a waiter outcome. Until a finish, exit code, or error is
+    # recorded, the first cycle cannot project a healthy verdict.
+    test: tests/test_harness_failure_visibility.py::test_hfr_444_first_in_flight_waiter_health_remains_unknown
+  - id: HFR-445
+    name: suppressed history promotion adopts the visible target Session
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The guarded post-send promotion preserves the stable native identity while
+    # rebinding the Message row from its hidden source Session to the visible target.
+    test: tests/test_harness_failure_visibility.py::test_visible_send_promotes_the_stable_suppressed_history_row
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

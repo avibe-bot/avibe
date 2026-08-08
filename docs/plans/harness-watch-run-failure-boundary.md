@@ -48,14 +48,20 @@ transaction.
 Persistence caused only by `suppress_delivery` is local history, not delivery
 evidence. It is tagged as suppressed, rejected by outward receipt lookup, and
 promoted under its stable native identity only after a later user-visible send
-succeeds. Its local Message row id is not written into the Run's transport
-receipts. It leaves the Turn notification unacknowledged so the durable fallback
-can route the failure to a user-visible target.
+succeeds. Promotion rebinds the row to that visible target Session. Its local
+Message row id is not written into the Run's transport receipts. It leaves the
+Turn notification unacknowledged so the durable fallback can route the failure
+to a user-visible target.
 
 A callback delivers the terminal result for its whole Turn. One effective callback
 receipt suppresses every linked Run fallback, while one pending callback defers the
 Turn fallback until its delivery outcome is known. The aggregate is read from one
-SQLite snapshot.
+SQLite snapshot and includes participants whose Turn attribution is still held in
+a deferred terminal intent.
+
+Waiter health is observed only from completed outcome fields. Starting the first
+cycle does not prove success, so a Watch with no prior exit, finish, or error remains
+unknown while that waiter is in flight.
 
 Turn execution provenance alone does not enter this ownership lane. A terminal
 output must carry the explicit `turn_failure_notification` contract; direct error
@@ -111,6 +117,12 @@ does not claim that an event was detected.
   later outward receipt, including in a foreground callback target Session.
 - `HFR-442`: bare Turn provenance without a notification contract does not
   bypass definition-level failure-notice suppression.
+- `HFR-443`: a deferred participant's pending callback remains part of the Turn
+  callback aggregate and blocks an immediate sibling fallback.
+- `HFR-444`: a Watch in its first in-flight waiter cycle reports unknown waiter
+  health until an outcome exists.
+- `HFR-445`: promoting suppressed history rebinds the stable row to the visible
+  target Session after delivery.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

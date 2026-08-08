@@ -2326,17 +2326,36 @@ def test_suppressed_history_cannot_shadow_a_later_visible_receipt() -> None:
 
 
 def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path) -> None:
-    """The post-send commit keeps identity while removing local-only semantics."""
+    """HFR-445 — promotion keeps identity and adopts the visible target Session."""
 
     from storage import messages_service
+    from storage.models import agent_sessions
 
     sqlite, _requests = _store(tmp_path)
+    _callback_session(sqlite)
+    now = "2026-07-27T00:00:00+00:00"
     with sqlite.engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-suppressed-source",
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="suppressed-source",
+                native_session_id="native-suppressed-source",
+                status="active",
+                visibility="background",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
         local = messages_service.append(
             conn,
             scope_id=None,
-            session_id=None,
-            platform="slack",
+            session_id="ses-suppressed-source",
+            platform="avibe",
             author="agent",
             source="agent",
             message_type="notify",
@@ -2346,8 +2365,9 @@ def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path)
         )
         promoted = messages_service.promote_suppressed_native_message(
             conn,
-            platform="slack",
+            platform="avibe",
             scope_id=None,
+            session_id="ses-callback-target",
             native_message_id="agent-output:codex:run-promote:failure",
             message_type="notify",
             text="visible fallback",
@@ -2356,6 +2376,7 @@ def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path)
 
     assert promoted is not None
     assert promoted["id"] == local["id"]
+    assert promoted["session_id"] == "ses-callback-target"
     assert promoted["text"] == "visible fallback"
     assert promoted["metadata"] == {"run_id": "run-promote"}
 
@@ -7302,6 +7323,63 @@ def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
         assert stored["skip_reason"] == "delivered_by_callback"
 
 
+def test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """A deferred participant remains part of the Turn callback snapshot."""
+
+    from sqlalchemy import update as sa_update
+
+    import core.scheduled_tasks as scheduled_tasks
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-immediate-notice", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-deferred-callback", deliver_key="slack::channel::C123")
+    _callback_session(sqlite)
+    immediate = requests.enqueue_task_run("watch-immediate-notice")
+    deferred = requests.enqueue_task_run("watch-deferred-callback")
+    for run in (immediate, deferred):
+        assert requests.claim(run.id) is not None
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == deferred.id)
+            .values(
+                callback_session_id="ses-callback-target",
+                callback_status="pending",
+            )
+        )
+
+    turn_id = "turn-deferred-callback"
+    sqlite.record_turn_run_outputs(
+        [immediate.id, deferred.id],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": deferred.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[deferred.id],
+    )
+
+    assert sqlite.get_run(deferred.id)["status"] == "running"
+    assert sqlite.turn_callback_state(turn_id) == "pending"
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == []
+    assert sqlite.owed_failure_notice(immediate.id)["state"] == "pending"
+
+
 @pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])
 def test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane(
     tmp_path: Path,
@@ -8272,6 +8350,27 @@ def test_a_watch_reports_processing_health_separately_from_waiter_health(capsys)
     assert entry["consecutive_failures"] == 0
     assert entry["processing_health"] == "failing"
     assert entry["processing_consecutive_failures"] == 1
+
+
+def test_hfr_444_first_in_flight_waiter_health_remains_unknown(tmp_path: Path) -> None:
+    """Starting a cycle is not evidence that its waiter succeeded."""
+
+    sqlite, _requests = _store(tmp_path)
+    _watch(
+        sqlite,
+        "watch-first-cycle",
+        last_started_at="2026-08-08T05:00:00+00:00",
+        last_finished_at=None,
+        last_exit_code=None,
+        last_error=None,
+    )
+
+    projected = sqlite.get_watch("watch-first-cycle")
+
+    assert projected is not None
+    assert projected["health"] == "unknown"
+    assert projected["consecutive_failures"] == 0
+    assert projected["recent_failures"] == 0
 
 
 def test_storage_interruption_reasons_mirror_the_settlement_vocabulary() -> None:

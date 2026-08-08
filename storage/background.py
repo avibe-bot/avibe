@@ -4084,7 +4084,11 @@ class SQLiteBackgroundTaskStore:
         )
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
-            statement = statement.where(func.json_valid(parent.c.metadata_json) == 1).where(
+            # Turn membership has two durable phases: settled Runs carry an owed
+            # notice, while Activity-owned Runs keep the same attribution in their
+            # deferred terminal intent until settlement moves it into metadata.
+            active_turn = and_(
+                func.json_valid(parent.c.metadata_json) == 1,
                 cast(
                     func.json_extract(
                         parent.c.metadata_json,
@@ -4092,8 +4096,20 @@ class SQLiteBackgroundTaskStore:
                     ),
                     Text,
                 )
-                == normalized_turn_id
+                == normalized_turn_id,
             )
+            deferred_turn = and_(
+                func.json_valid(parent.c.result_payload_json) == 1,
+                cast(
+                    func.json_extract(
+                        parent.c.result_payload_json,
+                        f"$.{DEFERRED_TERMINAL_METADATA_KEY}.turn_id",
+                    ),
+                    Text,
+                )
+                == normalized_turn_id,
+            )
+            statement = statement.where(or_(active_turn, deferred_turn))
         else:
             statement = statement.where(parent.c.id == str(run_id or ""))
         with self.engine.connect() as conn:
@@ -7272,9 +7288,9 @@ class SQLiteBackgroundTaskStore:
                 retry_codes = row.get("retry_exit_codes")
                 retry_codes = retry_codes if isinstance(retry_codes, list) else []
                 exit_code = row.get("last_exit_code")
+                # A start timestamp is lifecycle evidence, not a waiter verdict.
                 waiter_observed = bool(
-                    row.get("last_started_at")
-                    or row.get("last_finished_at")
+                    row.get("last_finished_at")
                     or exit_code is not None
                     or str(row.get("last_error") or "").strip()
                 )

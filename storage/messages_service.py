@@ -586,6 +586,7 @@ def promote_suppressed_native_message(
     *,
     platform: str,
     scope_id: str | None,
+    session_id: str | None,
     native_message_id: str,
     message_type: str,
     text: str,
@@ -598,7 +599,8 @@ def promote_suppressed_native_message(
     outward receipt. A later visible replay keeps the same native identity, so its
     post-send persistence hits the unique constraint. This guarded update is that
     replay's commit point: it removes the suppression marker only after the caller
-    has delivered, refreshes the accepted body, and returns the now-valid receipt.
+    has delivered, rebinds the row to that visible target Session, refreshes the
+    accepted body, and returns the now-valid receipt.
     """
 
     platform = str(platform or "").strip()
@@ -624,6 +626,7 @@ def promote_suppressed_native_message(
         .where(func.json_valid(messages.c.metadata_json) == 1)
         .where(func.json_extract(messages.c.metadata_json, "$.delivery_suppressed") == 1)
         .values(
+            session_id=session_id,
             type=message_type,
             content_text=text,
             content_json=json.dumps(body),

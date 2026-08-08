@@ -432,6 +432,7 @@ def persist_agent_message(
                         conn,
                         platform=context.platform,
                         scope_id=scope_id,
+                        session_id=row_session_id,
                         native_message_id=native_message_id,
                         message_type=message_type,
                         text=text,
