@@ -163,11 +163,16 @@ class MemoryWorker:
                     break
                 processed += 1
                 delivered = await self._deliver_row(row)
-                if not delivered:
+                if delivered is None:
                     if half_open:
                         await self._reopen_processing_fault()
                         break
                     if self._system_paused:
+                        break
+                    continue
+                if delivered.status == "extracted":
+                    if half_open:
+                        await self._close_processing_fault()
                         break
                     continue
 
@@ -228,11 +233,11 @@ class MemoryWorker:
                 return False
         return True
 
-    async def _deliver_row(self, row: QueueRow) -> bool:
+    async def _deliver_row(self, row: QueueRow) -> AddAck | None:
         meta = await self._store_call(self._store.get_meta)
         if meta is None or meta.epoch != row.epoch or row.payload_text is None:
             await self._return_system_failure(row, "memory_processing_failed")
-            return False
+            return None
 
         attachments = decode_capture_attachments(row.payload_attachments)
         if attachments is None:
@@ -241,7 +246,7 @@ class MemoryWorker:
                 "memory_invalid_input",
                 retryable=False,
             )
-            return False
+            return None
 
         capture = ProviderCapture(
             principal_id=row.principal_id,
@@ -258,13 +263,13 @@ class MemoryWorker:
             )
         except asyncio.TimeoutError:
             await self._manual_required(row, "memory_provider_timeout")
-            return False
+            return None
         except MemoryProviderSystemFailure as failure:
             await self._return_system_failure(
                 row,
                 _provider_error_code(failure, "memory_sidecar_unavailable"),
             )
-            return False
+            return None
         except MemoryProviderFailure as failure:
             error = _provider_error_code(failure, "memory_processing_failed")
             if error == "memory_provider_timeout":
@@ -275,10 +280,10 @@ class MemoryWorker:
                     error,
                     retryable=failure.retryable,
                 )
-            return False
+            return None
         except Exception:
             await self._manual_required(row, "memory_processing_failed")
-            return False
+            return None
 
         if not isinstance(ack, AddAck) or ack.status not in {"accumulated", "extracted"}:
             await self._manual_required(
@@ -286,7 +291,7 @@ class MemoryWorker:
                 "memory_provider_response_invalid",
                 request_id=ack.request_id if isinstance(ack, AddAck) else None,
             )
-            return False
+            return None
         settled = await self._store_call(
             self._store.settle,
             row,
@@ -294,7 +299,7 @@ class MemoryWorker:
             lease_owner=self._boot_id,
             now=self._current_time(),
         )
-        return settled.settled
+        return ack if settled.settled else None
 
     async def _flush_session(self, provider_session_ref: ProviderSessionRef) -> FlushResult:
         token = await self._store_call(

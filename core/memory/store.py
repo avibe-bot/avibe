@@ -665,13 +665,18 @@ class MemoryStore:
                     next_retry_at = NULL,
                     lease_owner = NULL, lease_at = NULL, last_error = NULL,
                     completed_at = ?, add_request_id = ?,
-                    flush_observation = 'not_attempted'
+                    flush_observation = ?, flush_status = ?,
+                    flush_error_code = NULL, flush_request_id = NULL,
+                    flush_observed_at = ?
                 WHERE source_message_digest = ? AND epoch = ?
                   AND state = 'processing' AND lease_owner = ?
                 """,
                 (
                     now,
                     _bounded_opaque_text(add_request_id),
+                    "succeeded" if add_status == "extracted" else "not_attempted",
+                    "extracted" if add_status == "extracted" else None,
+                    now if add_status == "extracted" else None,
                     row.source_message_digest,
                     row.epoch,
                     lease_owner,

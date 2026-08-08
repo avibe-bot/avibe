@@ -358,6 +358,26 @@ async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
     assert store.ensure_meta().last_success_at is not None
 
 
+async def test_natural_boundary_extraction_skips_redundant_flush(tmp_path: Path) -> None:
+    class NaturalBoundaryProvider(FakeMemoryProvider):
+        async def add(self, capture):
+            self.captures.append(capture)
+            return AddAck(request_id="natural-add", status="extracted")
+
+    provider = NaturalBoundaryProvider()
+    module, store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request(source="natural")) == CaptureAccepted()
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert (row.flush_observation, row.flush_status) == ("succeeded", "extracted")
+    assert provider.flushes == []
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert (state.generation, state.flush_state) == (1, "not_due")
+
+
 async def test_malformed_add_ack_retains_payload_and_sets_manual_required_fence(
     tmp_path: Path,
 ) -> None:

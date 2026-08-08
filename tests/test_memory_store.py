@@ -335,6 +335,8 @@ def test_extracted_add_records_generation_settlement_and_advances_watermark(tmp_
         now=_dt("2026-01-01T00:00:01.000Z"),
     ).settled
 
+    delivered = _row_for_source(store, "natural-boundary")
+    assert (delivered.flush_observation, delivered.flush_status) == ("succeeded", "extracted")
     state = store.get_session_flush_state(row.provider_session_ref)
     assert state is not None
     assert (state.generation, state.watermark, state.flush_state) == (1, 2_000, "not_due")
