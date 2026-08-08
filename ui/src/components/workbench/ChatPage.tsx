@@ -165,6 +165,7 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
 // detach the live tail (historical-window) instead of growing the DOM with rows
 // below the viewport.
 const MAX_RETAINED_MESSAGES = 300;
+const VAULT_ANCHOR_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 
 // Display label for the archive chord (⇧⌘D / Ctrl+Shift+D). Resolved once at
 // module load — the platform can't change mid-session — and shown as the archive
@@ -420,6 +421,9 @@ export const ChatPage: React.FC = () => {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const vaultAnchorFetchesRef = useRef<Set<string>>(new Set());
+  const vaultAnchorRetryAttemptsRef = useRef<Map<string, number>>(new Map());
+  const vaultAnchorRetryExhaustedRef = useRef<Set<string>>(new Set());
+  const vaultAnchorRetryWaitingRef = useRef<Set<string>>(new Set());
   const vaultAnchorInFlightRef = useRef(false);
   const vaultAnchorMergeRef = useRef<{
     anchorMessageId: string;
@@ -430,6 +434,11 @@ export const ChatPage: React.FC = () => {
   const [vaultAnchorCycle, setVaultAnchorCycle] = useState(0);
   const markVaultRequestHidden = useCallback((requestId: string) => {
     hiddenVaultRequestIdsRef.current.add(requestId);
+    // A user dismissal is an explicit retry boundary for deferred or exhausted
+    // anchors, so a later request can try again immediately.
+    vaultAnchorRetryAttemptsRef.current.clear();
+    vaultAnchorRetryExhaustedRef.current.clear();
+    vaultAnchorRetryWaitingRef.current.clear();
     // A deferred request is intentionally left un-fetched while another card
     // owns the visible historical window. Hiding that card is the state change
     // that makes the deferred request eligible for its next anchor attempt.
@@ -721,6 +730,8 @@ export const ChatPage: React.FC = () => {
       return (
         Boolean(anchorKey) &&
         !hiddenVaultRequestIdsRef.current.has(candidate.id) &&
+        !vaultAnchorRetryExhaustedRef.current.has(`${candidate.id}:${anchorKey}`) &&
+        !vaultAnchorRetryWaitingRef.current.has(`${candidate.id}:${anchorKey}`) &&
         !vaultAnchorFetchesRef.current.has(`${candidate.id}:${anchorKey}`)
       );
     });
@@ -744,11 +755,14 @@ export const ChatPage: React.FC = () => {
     const fetchKey = `${request.id}:${anchorKey}`;
     vaultAnchorFetchesRef.current.add(fetchKey);
     vaultAnchorInFlightRef.current = true;
-    let retryableFailure = false;
+    let retryDelayMs: number | null = null;
     let deferredByVisibleAnchor = false;
     const loadedSource = messageAnchorId
       ? messagesRef.current.find(
-        (message) => message.id === messageAnchorId || message.native_message_id === messageAnchorId,
+        (message) => message.id === messageAnchorId || (
+          message.native_message_id === messageAnchorId &&
+          (!sourcePlatform || message.platform === sourcePlatform)
+        ),
       )
       : undefined;
     const fetchAnchorWindow = async () => {
@@ -801,6 +815,9 @@ export const ChatPage: React.FC = () => {
           vaultAnchorFetchesRef.current.delete(fetchKey);
           return;
         }
+        vaultAnchorRetryAttemptsRef.current.delete(fetchKey);
+        vaultAnchorRetryExhaustedRef.current.delete(fetchKey);
+        vaultAnchorRetryWaitingRef.current.delete(fetchKey);
         const incoming = res.messages.filter(isTranscriptMessage);
         if (incoming.length === 0) return;
         const existing = messagesRef.current;
@@ -861,18 +878,28 @@ export const ChatPage: React.FC = () => {
         }
       })
       .catch(() => {
-        // Re-arm transient failures, but delay the next cycle so an unavailable
-        // backend cannot turn one pending card into a tight request loop.
-        retryableFailure = true;
+        // Retry transient failures with bounded exponential backoff. Once the
+        // budget is exhausted, wait for an explicit reload/dismissal boundary
+        // instead of polling an unavailable backend for the life of the chat.
+        const attempt = vaultAnchorRetryAttemptsRef.current.get(fetchKey) ?? 0;
+        if (attempt < VAULT_ANCHOR_RETRY_DELAYS_MS.length) {
+          vaultAnchorRetryAttemptsRef.current.set(fetchKey, attempt + 1);
+          vaultAnchorRetryWaitingRef.current.add(fetchKey);
+          retryDelayMs = VAULT_ANCHOR_RETRY_DELAYS_MS[attempt];
+        } else {
+          vaultAnchorRetryAttemptsRef.current.delete(fetchKey);
+          vaultAnchorRetryExhaustedRef.current.add(fetchKey);
+        }
         vaultAnchorFetchesRef.current.delete(fetchKey);
       })
       .finally(() => {
         if (sessionId !== sessionIdRef.current) return;
         vaultAnchorInFlightRef.current = false;
-        if (retryableFailure) {
+        if (retryDelayMs !== null) {
           window.setTimeout(() => {
+            vaultAnchorRetryWaitingRef.current.delete(fetchKey);
             if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
-          }, 1000);
+          }, retryDelayMs);
         } else if (!deferredByVisibleAnchor) {
           setVaultAnchorCycle((cycle) => cycle + 1);
         }
@@ -1143,6 +1170,9 @@ export const ChatPage: React.FC = () => {
       // A deliberate return to the live tail is the retry boundary for requests
       // deferred while another disjoint anchor window was visible.
       vaultAnchorFetchesRef.current.clear();
+      vaultAnchorRetryAttemptsRef.current.clear();
+      vaultAnchorRetryExhaustedRef.current.clear();
+      vaultAnchorRetryWaitingRef.current.clear();
       deepLinkWindowHandledRef.current = false;
       // Returning to the live tail from a historical window: activity ingestion was
       // suppressed while scrolled away, so resync groups from storage — a turn that
@@ -1323,6 +1353,9 @@ export const ChatPage: React.FC = () => {
     setSession(null);
     setMessages([]);
     vaultAnchorFetchesRef.current.clear();
+    vaultAnchorRetryAttemptsRef.current.clear();
+    vaultAnchorRetryExhaustedRef.current.clear();
+    vaultAnchorRetryWaitingRef.current.clear();
     vaultAnchorInFlightRef.current = false;
     deepLinkWindowHandledRef.current = false;
     hiddenVaultRequestIdsRef.current.clear();

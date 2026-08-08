@@ -188,6 +188,32 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored).toEqual([]);
   });
 
+  it('scopes native requester matching to the originating platform', () => {
+    const webSource = {
+      ...message('web-source', '2026-07-30T10:00:00Z', 'user'),
+      platform: 'web',
+      native_message_id: 'shared-source',
+    };
+    const webReply = { ...message('web-reply', '2026-07-30T10:01:00Z'), platform: 'web' };
+    const slackSource = {
+      ...message('slack-source', '2026-07-30T10:02:00Z', 'user'),
+      platform: 'slack',
+      native_message_id: 'shared-source',
+    };
+    const slackReply = { ...message('slack-reply', '2026-07-30T10:03:00Z'), platform: 'slack' };
+    const placed = placeVaultProvisionRequests(
+      [webSource, webReply, slackSource, slackReply],
+      [request('native-platform', 'provision', '2026-07-30T10:04:00Z', null, {
+        message_id: 'shared-source',
+        platform: 'slack',
+      })],
+    );
+
+    expect(placed.byMessageId.get(slackReply.id)?.map((item) => item.id)).toEqual(['native-platform']);
+    expect(placed.byMessageId.has(webReply.id)).toBe(false);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('uses a resolved durable source override for stable turn identities', () => {
     const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
     const reply = message('owner-reply', '2026-07-30T10:01:00Z', 'agent');

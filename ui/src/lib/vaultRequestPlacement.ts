@@ -95,9 +95,13 @@ function inferReplyFromSourceMessage(
   messages: WorkbenchMessage[],
   sourceMessageId: string,
   requestTime: number,
+  sourcePlatform: string | null,
 ): WorkbenchMessage | undefined {
   const sourceIndex = messages.findIndex(
-    (message) => message.id === sourceMessageId || message.native_message_id === sourceMessageId,
+    (message) => message.id === sourceMessageId || (
+      message.native_message_id === sourceMessageId &&
+      (!sourcePlatform || message.platform === sourcePlatform)
+    ),
   );
   if (sourceIndex < 0) return undefined;
   let replyBeforeRequest: WorkbenchMessage | undefined;
@@ -160,8 +164,12 @@ export function placeVaultProvisionRequests(
     // Newer requesters carry the input message id; use that identity first.
     const explicitSource = vaultRequestSourceMessageId(request);
     const fromSource = explicitSource ?? sourceMessageIds.get(request.id) ?? null;
+    const sourcePlatform = vaultRequestSourcePlatform(request);
     const sourceResolved = Boolean(fromSource && messages.some(
-      (message) => message.id === fromSource || message.native_message_id === fromSource,
+      (message) => message.id === fromSource || (
+        message.native_message_id === fromSource &&
+        (!sourcePlatform || message.platform === sourcePlatform)
+      ),
     ));
     const sourceUnresolved = Boolean(explicitSource && !sourceResolved);
     // Do not guess when the request predates the retained message window: its
@@ -169,7 +177,7 @@ export function placeVaultProvisionRequests(
     // later reply would move the card to an unrelated turn.
     const windowCoversRequest = Number.isNaN(firstLoadedTime) || firstLoadedTime <= requestTime;
     const fromSourceReply = fromSource
-      ? inferReplyFromSourceMessage(messages, fromSource, requestTime)
+      ? inferReplyFromSourceMessage(messages, fromSource, requestTime, sourcePlatform)
       : undefined;
     const inferred = sameTurn ?? fromSourceReply
       ?? (sourceUnresolved || Number.isNaN(requestTime) || !windowCoversRequest
