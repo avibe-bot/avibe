@@ -347,10 +347,11 @@ local login and ChatGPT stays in Codex's local login. Native supply leads that b
 recommended Follow resolution. A Custom chain remains authoritative and may put a Hub
 hop first with no hidden native pre-pass. When the leading native hop reports quota
 exhaustion or cooldown before any output starts, the same turn automatically continues
-through the first runnable Gateway provider in that chain. If native output has already
-streamed, the interrupted turn ends without retry and the next turn uses Gateway while
-native remains cooling. After native supply recovers, subsequent Follow turns return to
-it automatically.
+to the next runnable hop in that chain. A later native hop remains native; selecting Hub
+is the Gateway takeover. If native output has already streamed, the interrupted turn
+ends without retry and the next turn selects the next runnable candidate while native
+remains cooling. After native supply recovers, subsequent Follow turns return to it
+automatically.
 
 Users may explicitly add either a Claude or ChatGPT subscription as a Hub-held Source.
 Once added, that Source may supply any configured backend and may appear in a
@@ -391,9 +392,10 @@ Subscription custody is vendor-specific:
   client. Neither `subscription_hub_experimental` nor per-Source consent survives.
 
 When a native subscription leads the effective chain, pre-stream quota exhaustion or
-cooldown still triggers same-turn Gateway takeover; after streamed output begins, the
-turn is not replayed. The first automatic native-to-Gateway takeover in a conversation
-may emit one lightweight informational notice when the default-on
+cooldown advances to the next runnable chain hop regardless of channel; after streamed
+output begins, the turn is not replayed. A later native hop remains native, while the
+first selected Hub hop is the Gateway takeover. The first such native-to-Gateway
+takeover in a conversation may emit one lightweight informational notice when the default-on
 `native_takeover_notice_enabled` setting is enabled. This is active-conversation copy,
 not a warning, risk prompt, resolution-event delivery, or proactive push system; the
 2026-07-29 proactive-push cut remains in force.

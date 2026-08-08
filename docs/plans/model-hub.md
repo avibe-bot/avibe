@@ -42,11 +42,13 @@ path. ChatGPT subscriptions are recommended and defaulted to a Gateway-held Sour
 native Codex login remains supported but is neither recommended nor the default
 add-flow guidance. When a supported native source leads a chain and its quota is
 exhausted or cooling, a failure observed before output starts falls through in that
-same turn to the first runnable Gateway upstream, then automatically returns to native
-after recovery. If native output has already started, the turn stops honestly and the
-next turn uses the Gateway; Avibe never duplicates a partial response. This handoff is
-a first-class product story, not an escape hatch or implementation detail. It is not an
-invisible pre-pass: the stored Follow projection or Custom order remains authoritative.
+same turn to the next runnable chain hop. A later native hop remains native; selecting
+the first Hub hop is the Gateway takeover. After recovery, Follow returns to the leading
+native source automatically. If native output has already started, the turn stops
+honestly and the next turn selects the next runnable candidate; Avibe never duplicates
+a partial response. This handoff is a first-class product story, not an escape hatch or
+implementation detail. It is not an invisible pre-pass: the stored Follow projection
+or Custom order remains authoritative.
 
 A user may explicitly add either subscription as a Gateway-held upstream, and a
 Gateway-held subscription may participate in a cross-vendor custom chain. The only
@@ -95,10 +97,11 @@ base URLs, protocol conversion, account pools or routers.
 2. **Subscription custody is vendor-specific, and native takeover stays seamless.**
    Claude recommends its compliant native login; ChatGPT recommends a Gateway-held
    Source. Whenever a supported native subscription leads the chain and its quota
-   fails before output starts, the same turn uses the first runnable Gateway upstream;
-   after a partial streamed response, the next turn does. Recovery returns subsequent
-   Follow turns to native automatically. An explicit Custom chain may put any eligible
-   Hub hop first, and Avibe honors that user-owned order.
+   fails before output starts, the same turn advances to the next runnable chain hop;
+   a later native hop remains native, while selecting Hub is the Gateway takeover.
+   After a partial streamed response, the next turn selects the next candidate instead.
+   Recovery returns subsequent Follow turns to native automatically. An explicit Custom
+   chain may put any eligible Hub hop first, and Avibe honors that user-owned order.
 3. **Routing has two explicit grains.** Each backend owns a global Source order.
    Each menu model follows the chain projected from that order by default, or the
    user gives that `(backend, menu model)` an exact custom ordered chain of
@@ -179,10 +182,18 @@ The Source workflow is complete at both entry points:
   item has `{id, origin: "discovered" | "manual", reasoning_effort}`; discovery creates
   `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
   `reasoning_effort` is a required nullable string, where `null` means the upstream
-  default and a non-null value is adapter-validated for that model. This property
-  belongs to Source model inventory, not the deferred Configure Agents module: it
+  default and a non-null value is adapter-validated for that model. Existing optional
+  `display_name` and `discovered_at` metadata remain part of the entry and survive
+  migration and refresh. This property belongs to Source model inventory, not the
+  deferred Configure Agents module: it
   describes how that exact
   upstream model is called, not which model an Agent selects.
+  Editing a manual entry's reasoning effort uses the atomic
+  `PATCH /api/models/custom-models` mutation with
+  `{source_id, model_id, reasoning_effort}`; the adapter validates that the entry is
+  manual and re-echoes the canonical stored value as `{source: Source}`. Discovered
+  entries are not changed through this route, and the mutation never edits a route
+  chain.
 
 The user-selected `protocol` is authoritative. Neither the connectivity test nor model
 discovery guesses, changes, or backfills it; a wrong choice is reported as the resulting
@@ -320,9 +331,12 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    login), with zero Gateway credential injection while healthy. If that native source
    is exhausted,
    cooling, or unavailable in this process **before output starts**, continue within
-   the same turn to the first runnable `hub` hop in that chain. If any output was
-   already streamed, do not replay the request: end with §4.5's interrupted-turn copy,
-   keep native cooling, and let the next turn select the Gateway hop. Once the native
+   the same turn to the **next runnable hop in the capability chain, regardless of
+   channel**. If that hop is Hub, this is the native-to-Gateway takeover; if it is
+   another native CLI Source, the configured native chain continues without a Gateway
+   notice. If any output was already streamed, do not replay the request: end with
+   §4.5's interrupted-turn copy, keep native cooling, and let the next turn select the
+   next candidate. Once the native
    source is retry-ready again, the next Follow turn returns to it automatically. The
    UI and product copy must make this three-state story obvious: native now → Gateway
    takeover → native restored, without implying that ChatGPT native is the default
@@ -333,8 +347,9 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    user-facing setting, **default `true`**, and the notice is shown at most once per
    conversation. It is informational session copy, never an Error or warning style;
    the user may turn it off. No push, inbox, or other proactive delivery system is
-   introduced, and explicit Custom routing, Gateway-first turns, and automatic return
-   to native do not emit this notice.
+   introduced. Merely selecting or editing a Custom route, a Gateway-first turn, and
+   automatic return to native do not emit this notice; an actual native-to-Hub
+   failover does, whether the authoritative route is Follow or Custom.
 
    This dispatch does not prepend native outside the chain. A Custom chain is an
    explicit override: when its first runnable hop is Hub, the turn uses Hub even while
@@ -777,18 +792,31 @@ not the silent side effect prohibited by §2; without the confirmation, neither 
 Source nor any chain changes.
 
 The same invariant applies to **every Source-inventory mutation**, not only Source
-deletion. Credential replacement, OAuth re-auth, model refresh, and manual-model
-deletion first stage the resulting inventory and compare it with every exact Custom
-hop. If any advertised `(source_id, model_id)` would disappear, the non-forced
+deletion. Reversible or transactional changes — API-key credential replacement,
+refresh, and manual-model deletion — first stage the resulting inventory and compare
+it with every exact Custom hop, using the same validation predicate as §4.6: either the
+literal model remains advertised or a sanctioned native alias retains compatible
+family/version evidence. If a hop would cease to satisfy that predicate, the non-forced
 mutation is refused with `source_model_in_custom_chain` and ordered
 `would_remove_hops`; another Source supplying the same menu model does not make that
-exact reference disposable. A confirmed `force=true` applies the inventory change and
-removes only those invalidated hops in one transaction, preserving the identity and
-relative order of all survivors and keeping an empty route `custom`. Automatic
-background discovery never performs this cascade: it records the newly missing model
-as `model_unsupported`, keeps the configured hop visible and non-runnable, and waits
-for an explicit user refresh/edit to repair or confirm removal. Thus neither a
-credential lifecycle event nor inventory drift silently calls a model the Source no
+exact reference disposable. A confirmed `force=true` applies the inventory
+change and removes only those invalidated hops in one transaction, preserving the
+identity and relative order of all survivors and keeping an empty route `custom`.
+Automatic background discovery never performs this cascade: when neither literal
+inventory nor sanctioned-alias evidence remains, it records the model as
+`model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
+an explicit user refresh/edit to repair or confirm removal.
+
+Native CLI re-authentication and Hub OAuth re-authentication are the irreversible
+exception. Each presents AC-2's server-enforced acknowledgement **before** login starts;
+the user can abort there, but the product promises no rollback or post-login refusal
+once the OAuth exchange has begun. After authentication, the engine commits the
+resulting credential and any inventory it can establish. Exact hops whose source/model
+pair is no longer present remain visible but non-runnable with `model_unsupported` (or
+the equivalent stale state), and the response reports the resulting gaps and
+`needs_action` work for a later explicit edit or force cascade. It never silently
+converts the route to Follow or claims that the old supply is intact. Thus no
+credential lifecycle event or inventory drift silently calls a model the Source no
 longer advertises or rewrites the user's chain.
 
 **Turn provenance.** Each turn whose attribution is **exact** records the model@source
@@ -891,10 +919,13 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
 1. Read `M`'s route policy.
 2. If the policy is **custom**, read the stored hop list verbatim. Every hop is
    exactly `{source_id, model_id}`. Mutation-time validation requires each Source to
-   exist, be eligible for `B`, and advertise that exact upstream model. Each exact
-   pair appears at most once; a Source may appear again with another model. The
-   capability chain is those hops in that order; vendor and model may differ from hop
-   to hop. `O` does not filter a custom chain.
+   exist and be eligible for `B`, and to advertise that exact upstream model **or** be a
+   fixed-menu `native_cli` Source whose adapter supplies sanctioned alias evidence for
+   that model's compatible family/version. A sanctioned native alias is preserved as
+   submitted and is not canonicalized unless the user asks; absent or incompatible
+   evidence is rejected. Each exact pair appears at most once; a Source may appear
+   again with another model. The capability chain is those hops in that order; vendor
+   and model may differ from hop to hop. `O` does not filter a custom chain.
 3. If the policy is **follow** (the default), walk `O` once and project at most one
    hop per Source:
    - reject the Source when it is not eligible for `B` and its channel (§4.4);
@@ -926,8 +957,10 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
    `runnable: true`; it is not a second chain.
 
 Therefore a healthy native subscription at position 0 leads its own backend's Follow
-routes; when it is cooling, the first runnable hub hop later in the same projection
-takes over; when it recovers, the unchanged projection naturally selects it again. A
+routes; when it is cooling, resolution advances to the next runnable hop later in the
+same projection. A later native hop remains native; the first selected Hub hop is the
+native-to-Gateway takeover. When the leading native source recovers, the unchanged
+projection naturally selects it again. A
 Custom chain can instead name `src_chatgptplus + gpt-5.6` ahead of
 `src_anthkey01 + claude-sonnet-4-6` for Claude Code, making both the Source/model
 choice and the deliberate native-first override explicit.
@@ -963,10 +996,18 @@ Source by literal model identity even though v5 Follow deliberately filters that
 Source. An empty v4 chain follows the same comparison rule. No v5 eligibility or alias
 change is allowed to alter the baseline being compared.
 
+The same config conversion preserves every v4 Source model entry. It renames required
+`provenance` to `origin` without changing `discovered`/`manual`, initializes a missing
+`reasoning_effort` to `null`, and preserves optional `display_name` and `discovered_at`
+exactly. A manual entry's `discovered_at` remains `null`; no model entry is dropped.
+
 The upgrade also converts the two persisted diagnostic stores before publishing v5.
 Every attempt slot in `model_hub_turn_provenance.json` replaces `via_mapping` with the
-non-lossy pair `route_policy: "legacy"` plus `requested_model_changed` equal to the old
-boolean. A historical record cannot be relabeled Follow or Custom from today's config,
+non-lossy pair `route_policy: "legacy"` plus `requested_model_changed` derived from
+the recorded `requested_model_id` and `resolved_model_id`: it is `true` only when both
+ids are present and differ, and is `false` when they are equal or no resolved id was
+recorded. The migration never copies `via_mapping`. A historical record cannot be
+relabeled Follow or Custom from today's config,
 because the route may have changed since that turn; `legacy` states that evidence gap
 instead of inventing attribution. Migrated provenance records and converted resolution
 events carry `migrated_from_contract_version: 4`; v5 schemas permit `legacy` only with
