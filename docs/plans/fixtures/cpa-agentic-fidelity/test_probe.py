@@ -439,7 +439,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_tool_result_tuple_preserves_punctuation_in_call_id(self) -> None:
         call = probe.ToolCall("call.123", "lookup_weather", {"city": "Shanghai"})
-        text = probe._tool_output(call)
+        text = f"{probe._tool_output(call)}."
         self.assertEqual(probe._tool_output_tuples(text), [("lookup_weather", "call.123", "WEATHER_OK")])
         turn = probe._parse_anthropic_document({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"})
         projection = probe._validate_second(turn, ("lookup_weather",), stream=False, expected_calls=[call])
@@ -571,8 +571,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_indices_to_restart_each_chunk(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
-            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", events))
@@ -1430,13 +1430,13 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_order_rejects_content_after_finish(self) -> None:
         allowed = [
-            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}},
-            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens": 1}}},
+            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens": 1}}},
             {"kind": "done", "sequence": 2},
         ]
         invalid = [
             allowed[0],
-            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "late"}}]}},
+            {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "late"}}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", allowed))
@@ -2441,6 +2441,12 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("chat", mismatched))
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, mismatched, True, 0, False))
         self.assertIn("stream_completion_id_changed", turn.parse_errors)
+        missing = copy.deepcopy(events)
+        for item in missing[:-1]:
+            item["event"].pop("id")
+        self.assertFalse(probe._stream_order_ok("chat", missing))
+        missing_turn = probe._parse_chat_stream(probe.TransportResult(200, None, missing, True, 0, False))
+        self.assertIn("stream_completion_id_invalid", missing_turn.parse_errors)
 
     def test_first_turn_rejects_user_scope_leakage(self) -> None:
         turn = probe._parse_anthropic_document(

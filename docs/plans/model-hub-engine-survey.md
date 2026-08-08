@@ -600,14 +600,14 @@ when both directions pass:
 
 | Client request | Target API-key source | Live result | Evidence |
 | --- | --- | --- | --- |
-| Anthropic Messages | OpenAI Responses | 200 for both two-turn cases; **NO-GO** | r32: the single failed both parse gates with thinking present; its final system marker, system scope, tool outputs, and exact call-ID/result tuple failed. The parallel passed both parse gates but its final exact tuple failed |
-| OpenAI Responses | Anthropic Messages | 200 for both two-turn cases; **NO-GO** | r32: the single passed both parse gates but lacked the requested reasoning signal in both turns. The parallel lacked reasoning and failed both parse and stream-order gates |
-| Anthropic Messages | OpenAI Chat Completions | 200 for both two-turn cases; **NO-GO** | r32: both cases had thinking present. The single failed both parse gates and its final exact tuple failed; the parallel failed both parse gates and its first stream-order gate, with its final exact tuple failing |
-| OpenAI Chat Completions | Anthropic Messages | 200 for both two-turn cases; **NO-GO** | r32: the single passed both parse gates but lacked reasoning; its final system marker, system scope, and exact tuple failed while tool outputs passed. The parallel lacked reasoning, failed both parse gates, and failed its exact tuple while final system marker and scope passed |
+| Anthropic Messages | OpenAI Responses | 200 for both two-turn cases; **NO-GO** | r33: the single failed both parse gates with thinking present and its final exact tuple failed, while final system/output checks passed. The parallel passed first parsing but failed final parsing and reasoning; its exact tuple passed |
+| OpenAI Responses | Anthropic Messages | 200 for both two-turn cases; **NO-GO** | r33: the single passed both parse gates but lacked the requested reasoning signal in both turns and its final exact tuple failed. The parallel lacked reasoning and failed both parse/order gates plus final system/output/tuple checks |
+| Anthropic Messages | OpenAI Chat Completions | 200 for both two-turn cases; **NO-GO** | r33: first-turn thinking was present in both cases. The single failed both parse gates and its final exact tuple failed; the parallel failed first parsing/order, then passed final parsing while losing reasoning and its final exact tuple |
+| OpenAI Chat Completions | Anthropic Messages | 200 for both two-turn cases; **NO-GO** | r33: the single passed both parse gates but lacked reasoning; its final system marker, system scope, and exact tuple failed while tool outputs passed. The parallel lacked reasoning and failed both parse gates plus final system scope, while exact tuple and tool outputs passed |
 
 Final-answer marker and tuple failures varied across complete live reruns because
 the upstream response text is nondeterministic. The ledger above records the
-latest complete rerun (r32); the direction decisions remain anchored by the repeated
+latest complete rerun (r33); the direction decisions remain anchored by the repeated
 reasoning and parse failures plus the current final-turn evidence.
 
 ### 15. Agentic capability matrix
@@ -620,11 +620,11 @@ the agentic state transition.
 | --- | --- | --- | --- | --- |
 | Single tool call | One prompt with `lookup_weather` | Tool name, JSON arguments, call id, and terminal stop reason survive the conversion | Engine-core translator plus caller adapter | Structural checks passed in all four directions |
 | Parallel tools | One prompt explicitly naming `lookup_weather` and `lookup_time` | Both calls remain addressable and are not silently serialized or merged | Engine-core translator | Passed in all four directions |
-| Multi-turn loop | Assistant tool call followed by a tool result and a final answer | Tool call id links the result to the same call; the second turn sees the tool output | Engine-core translator plus caller adapter | r32 exact tuples failed in all eight cases; both OpenAI -> Anthropic directions also lacked reasoning |
-| Streaming text | Short streamed answer | Every data event is strict UTF-8 JSON, wire sequence and ordering are monotonic, done/content-part snapshots agree with deltas/items, per-item output snapshots agree with their own deltas, and the stream terminates with the protocol's done event | Engine-core stream translator | r32: Messages -> Responses parallel passed parser/order gates; Responses -> Messages parallel failed both; Messages -> Chat parallel failed parsing and its first stream-order gate; Chat -> Messages parallel failed parsing while retaining final stream ordering |
-| Streaming tool fragments | Stream a tool call with split arguments | Fragments reassemble into exactly one valid JSON argument object and one call id; typed error/discriminator events cannot be accepted as completion | Engine-core stream translator | Argument reconstruction passed in all four parallel stream cases; r32 parse/order gates rejected Responses -> Messages parallel and Messages -> Chat parallel, while Chat -> Messages parallel preserved final stream ordering but still failed parsing |
-| System prompt | System/instructions text containing a marker plus a conflicting user marker | Exact system marker remains system-scoped and the exact user conflict marker is absent | Engine-core translator | r32 final system scope passed in the Messages -> Responses parallel case but failed in the single case; both Chat -> Messages cases passed final system scope; the other two pairs were mixed by case |
-| Thinking/reasoning | Anthropic `thinking` budget and OpenAI `reasoning.effort` | Requested signal is observable or an explicit loss is recorded; Anthropic thinking retains its signature and is never treated as user text; Responses reasoning encrypted content is stable across added/done snapshots | Engine-core translator; upstream model semantics | r32 confirmed absent reasoning in both OpenAI -> Anthropic directions; Anthropic thinking was observed in both Messages -> Responses cases and both Messages -> Chat cases, while the Messages -> Responses single and both Messages -> Chat cases still failed their parse gates (the Messages -> Responses parallel case passed both) |
+| Multi-turn loop | Assistant tool call followed by a tool result and a final answer | Tool call id links the result to the same call; the second turn sees the tool output | Engine-core translator plus caller adapter | r33 exact tuples failed in six of eight cases; Messages -> Responses parallel and Chat -> Messages parallel passed, while both OpenAI -> Anthropic directions still lacked reasoning |
+| Streaming text | Short streamed answer | Every data event is strict UTF-8 JSON, wire sequence and ordering are monotonic, done/content-part snapshots agree with deltas/items, per-item output snapshots agree with their own deltas, and the stream terminates with the protocol's done event | Engine-core stream translator | r33: Messages -> Responses parallel passed first parse/order but failed final parsing; Responses -> Messages parallel failed both gates in both turns; Messages -> Chat parallel failed first parse/order and passed both final gates; Chat -> Messages parallel failed parsing while retaining ordering in both turns |
+| Streaming tool fragments | Stream a tool call with split arguments | Fragments reassemble into exactly one valid JSON argument object and one call id; typed error/discriminator events cannot be accepted as completion | Engine-core stream translator | Argument reconstruction passed in all four parallel first turns; r33 parse/order gates still rejected Responses -> Messages, the first Messages -> Chat turn, and both Chat -> Messages turns |
+| System prompt | System/instructions text containing a marker plus a conflicting user marker | Exact system marker remains system-scoped and the exact user conflict marker is absent | Engine-core translator | r33 final system scope passed in both Messages -> Responses cases, both Messages -> Chat cases, and Responses -> Messages single; it failed in Responses -> Messages parallel and both Chat -> Messages cases |
+| Thinking/reasoning | Anthropic `thinking` budget and OpenAI `reasoning.effort` | Requested signal is observable or an explicit loss is recorded; Anthropic thinking retains its signature and is never treated as user text; Responses reasoning encrypted content is stable across added/done snapshots | Engine-core translator; upstream model semantics | r33 confirmed absent reasoning in both OpenAI -> Anthropic directions; first-turn Anthropic thinking was observed in both Messages -> Responses and both Messages -> Chat cases, but both parallel final turns lost the signal and their remaining parse gates were mixed |
 | Context length/truncation | Prompt with a tail marker, then increasing prefix sizes | The first rejected/truncated size and error shape are recorded; no silent loss of the tail marker is accepted | Upstream model plus engine request limits; no plugin | Not covered (optional low-cost probe) |
 
 Thinking and reasoning are deliberately treated as a fidelity question. The
@@ -651,31 +651,33 @@ the exact tuple and system-scope checks additionally inspect the final turn.
 
 1. **Messages -> Responses.** POST `/v1/messages` with one function tool and
    Anthropic `thinking: {type: enabled, budget_tokens: 1024}`. Require the
-   projected Anthropic thinking block to contain a nonempty signature; r32's
-   single first and final responses failed parsing with thinking present; its final
-   system marker, system scope, tool outputs, and exact call-ID/result tuple failed.
-   The parallel passed both parse gates but its final exact tuple failed. The pair remains
-   NO-GO.
+   projected Anthropic thinking block to contain a nonempty signature; r33's
+   single first and final responses failed parsing with thinking present, and its
+   final exact call-ID/result tuple failed while system/output checks passed. The
+   parallel passed first parsing but failed final parsing and reasoning while its
+   exact tuple passed. The pair remains NO-GO.
 2. **Responses -> Messages.** POST `/v1/responses` with `instructions`, two
    function tools, `reasoning: {effort: low}`, a `function_call`, and a matching
-   `function_call_output`; repeat with `stream: true`. In r32 the single passed
-   both parse gates but lacked the requested reasoning signal in both turns. The
-   parallel lacked reasoning and failed both parse and stream-order gates. The reasoning loss is
+   `function_call_output`; repeat with `stream: true`. In r33 the single passed
+   both parse gates but lacked the requested reasoning signal in both turns and
+   its final exact tuple failed. The parallel lacked reasoning and failed both
+   parse/order gates plus final system/output/tuple checks. The reasoning loss is
    independently sufficient for the pair's NO-GO.
 3. **Messages -> Chat Completions.** Repeat the Messages single-tool request
    against the Chat target and require a signed Anthropic thinking block in the
-   projected response. In r32 both cases had thinking present. The single failed
-   both parse gates and its final exact tuple failed; the parallel failed both parse
-   gates and its first stream-order gate, with its final exact tuple failing.
+   projected response. In r33 both first turns had thinking present. The single
+   failed both parse gates and its final exact tuple failed; the parallel failed
+   first parsing/order, then passed final parsing while losing reasoning and its
+   final exact tuple.
 4. **Chat Completions -> Messages.** POST `/v1/chat/completions` with an
    assistant `tool_calls` item and a matching `tool` result, then repeat as a
    short stream. Require an Anthropic `tool_use` block, matching `tool_result`,
    system scope, and a terminal message event, then fail the gate when the
-   requested reasoning signal is absent. In r32 the single passed both parse gates
+   requested reasoning signal is absent. In r33 the single passed both parse gates
    but lacked reasoning; its final system marker, system scope, and exact tuple
    failed while tool outputs passed. The parallel lacked reasoning, failed both
-   parse gates, and failed its final exact tuple while final system marker and
-   system scope passed.
+   parse gates and final system scope, while its exact tuple and tool outputs
+   passed.
 
 For the optional context probe, keep the request count small: send a marker at
 the end of a progressively larger system/user prefix, record the first 4xx or
@@ -712,7 +714,7 @@ The probe also disables environment proxy handlers for loopback requests and
 classifies an exhausted 503 capacity response for any target as blocked; the
 Claude-only fallback model remains limited to the Anthropic target. Every case
 reports a redacted `fallback_used` flag and evidence from a fallback is kept
-separate from the primary-model result. The latest gate-complete rerun (r32)
+separate from the primary-model result. The latest gate-complete rerun (r33)
 exercised all eight cases through the loopback CPA after the current-head
 parser fixes: all eight cases completed both turns with HTTP 200 and no
 fallback was used. A mixed primary/fallback run in which only the

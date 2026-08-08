@@ -221,7 +221,9 @@ def _tool_output(call: ToolCall) -> str:
     return f"tool={call.name};call_id={call.call_id};marker={TOOL_OUTPUTS.get(call.name, 'TOOL_OUTPUT_MISSING')}"
 
 
-_TOOL_OUTPUT_TUPLE_RE = re.compile(r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=([^;\s]+)(?![A-Za-z0-9_])")
+_TOOL_OUTPUT_TUPLE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=(WEATHER_OK|TIME_OK|TOOL_OUTPUT_MISSING)(?![A-Za-z0-9_])"
+)
 
 
 def _tool_output_tuples(text: str) -> list[tuple[str, str, str]]:
@@ -941,8 +943,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             return False
         event_id = event.get("id")
         if not isinstance(event_id, str) or not event_id:
-            if completion_id is not None:
-                return False
+            return False
         elif completion_id is None:
             completion_id = event_id
         elif event_id != completion_id:
@@ -2044,8 +2045,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             continue
         event_id = event.get("id")
         if not isinstance(event_id, str) or not event_id:
-            if completion_id is not None:
-                errors.append("stream_completion_id_invalid")
+            errors.append("stream_completion_id_invalid")
         elif completion_id is None:
             completion_id = event_id
         elif event_id != completion_id:

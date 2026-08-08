@@ -62,20 +62,22 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun (r32) exercised all eight cases after the current-head
+latest gate-complete rerun (r33) exercised all eight cases after the current-head
 parser fixes: all eight completed both turns with HTTP 200 and no fallback was
-used. Messages-to-Responses single failed both parse gates with thinking present;
-its final system marker, system scope, tool outputs, and exact tuple failed. The
-parallel case passed both parse gates but its final exact tuple failed.
+used. Messages-to-Responses single failed both parse gates with thinking present
+and its final exact tuple failed; its final system and output checks passed. The
+parallel passed its first parse gate but failed the final parse and reasoning
+gates while its exact tuple passed.
 Responses-to-Messages single passed both parse gates but had reasoning absent in
 both turns; the parallel case also lacked reasoning and failed both parse and
 stream-order gates. Both Messages-to-Chat cases had thinking present: the single
-failed both parse gates and its final exact tuple failed; the parallel failed both
-parse gates and its first stream-order gate, with its final exact tuple failing.
+failed both parse gates and its final exact tuple failed; the parallel failed its
+first parse/order gate, then passed final parsing while losing reasoning and its
+final exact tuple.
 Chat-to-Messages single passed both parse gates but had reasoning absent; its final
 system marker, system scope, and exact tuple failed while tool outputs passed. The
-parallel case had reasoning absent, failed both parse gates, and failed its exact
-tuple while the final system marker and scope passed.
+parallel case had reasoning absent and failed both parse gates plus final system
+scope, while its exact tuple and tool outputs passed.
 
 ## S4 matrix mapping
 
