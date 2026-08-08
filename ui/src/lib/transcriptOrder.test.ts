@@ -108,6 +108,7 @@ describe('mergeAnchorWindow', () => {
       messages: incoming,
       replaced: true,
       detachedTail: false,
+      trimmedOldest: false,
     });
   });
 
@@ -119,6 +120,7 @@ describe('mergeAnchorWindow', () => {
       messages: incoming,
       replaced: true,
       detachedTail: true,
+      trimmedOldest: false,
     });
   });
 
@@ -130,6 +132,19 @@ describe('mergeAnchorWindow', () => {
       messages: existing,
       replaced: false,
       detachedTail: true,
+      trimmedOldest: false,
+    });
+  });
+
+  it('reports when a following-tail trim discards older rows', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`tail-${index}`, t(index + 4)));
+    const incoming = [mk('old', t(1)), mk('tail-0', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'tail-0', 4, true)).toEqual({
+      messages: existing,
+      replaced: false,
+      detachedTail: false,
+      trimmedOldest: true,
     });
   });
 });

@@ -48,6 +48,18 @@ export function vaultRequestSourceMessageId(request: VaultRequest): string | nul
   return typeof messageId === 'string' && messageId.trim() ? messageId : null;
 }
 
+export function vaultRequestSourceTurnId(request: VaultRequest): string | null {
+  const requester = record(request.requester);
+  const turnId = requester.turn_id;
+  return typeof turnId === 'string' && turnId.trim() ? turnId : null;
+}
+
+export function vaultRequestSourceRunId(request: VaultRequest): string | null {
+  const requester = record(request.requester);
+  const runId = requester.run_id;
+  return typeof runId === 'string' && runId.trim() ? runId : null;
+}
+
 function sameRequestTurn(request: VaultRequest, message: WorkbenchMessage): boolean {
   const requester = record(request.requester);
   const metadata = record(message.metadata);
@@ -115,6 +127,7 @@ function inferReplyFromSourceMessage(
 export function placeVaultProvisionRequests(
   messages: WorkbenchMessage[],
   requests: VaultRequest[],
+  sourceMessageIds: ReadonlyMap<string, string> = new Map(),
 ): VaultProvisionPlacement {
   const byMessageId = new Map<string, VaultRequest[]>();
   const unanchored: VaultRequest[] = [];
@@ -136,13 +149,23 @@ export function placeVaultProvisionRequests(
     // The request row can be written after the Agent reply has already been
     // persisted, so its creation timestamp is not a reliable turn boundary.
     // Newer requesters carry the input message id; use that identity first.
-    const fromSource = vaultRequestSourceMessageId(request);
+    const explicitSource = vaultRequestSourceMessageId(request);
+    const fromSource = explicitSource ?? sourceMessageIds.get(request.id) ?? null;
+    const sourceResolved = Boolean(fromSource && messages.some(
+      (message) => message.id === fromSource || message.native_message_id === fromSource,
+    ));
+    const sourceUnresolved = Boolean(explicitSource && !sourceResolved);
     // Do not guess when the request predates the retained message window: its
     // real owner may have been trimmed, and attaching it to the first visible
     // later reply would move the card to an unrelated turn.
     const windowCoversRequest = Number.isNaN(firstLoadedTime) || firstLoadedTime <= requestTime;
-    const inferred = sameTurn ?? (fromSource ? inferReplyFromSourceMessage(messages, fromSource, requestTime) : undefined)
-      ?? (Number.isNaN(requestTime) || !windowCoversRequest ? undefined : inferReplyWithinTurn(messages, requestTime));
+    const fromSourceReply = fromSource
+      ? inferReplyFromSourceMessage(messages, fromSource, requestTime)
+      : undefined;
+    const inferred = sameTurn ?? fromSourceReply
+      ?? (sourceUnresolved || Number.isNaN(requestTime) || !windowCoversRequest
+        ? undefined
+        : inferReplyWithinTurn(messages, requestTime));
     if (inferred) appendRequest(byMessageId, inferred.id, request);
     else unanchored.push(request);
   }

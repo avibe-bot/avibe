@@ -683,7 +683,7 @@ export type ApiContextType = {
   /** Counts of resources permanently reclaimed when archiving this session
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
-  listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; aroundNativeId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null }>;
+  listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; aroundNativeId?: string; aroundTurnId?: string; aroundRunId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null; anchor_id?: string | null }>;
   // Chat Activity panel (GET /api/sessions/<id>/activity): summary of turn groups
   // for chips, and one group's rows for lazy expand. Only used when the
   // ``ui.show_agent_activity`` toggle is on (see lib/agentActivity).
@@ -3139,6 +3139,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.beforeId) search.set('before_id', params.beforeId);
       if (params?.aroundId) search.set('around_id', params.aroundId);
       if (params?.aroundNativeId) search.set('around_native_id', params.aroundNativeId);
+      if (params?.aroundTurnId) search.set('around_turn_id', params.aroundTurnId);
+      if (params?.aroundRunId) search.set('around_run_id', params.aroundRunId);
       if (params?.limit) search.set('limit', String(params.limit));
       if (params?.tail) search.set('tail', '1');
       const qs = search.toString();

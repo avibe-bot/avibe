@@ -7210,6 +7210,8 @@ def sessions_messages_list(session_id: str):
     # Legacy IM caller contexts may carry only the platform-native message id;
     # storage resolves it to the durable row before applying cursor pagination.
     around_native_id = request.args.get("around_native_id") or None
+    around_turn_id = request.args.get("around_turn_id") or None
+    around_run_id = request.args.get("around_run_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -7232,6 +7234,8 @@ def sessions_messages_list(session_id: str):
             before_id=before_id,
             around_id=around_id,
             around_native_id=around_native_id,
+            around_turn_id=around_turn_id,
+            around_run_id=around_run_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             tail=tail,

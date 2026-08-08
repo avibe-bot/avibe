@@ -646,6 +646,8 @@ def list_session_messages(
     before_id: Optional[str] = None,
     around_id: Optional[str] = None,
     around_native_id: Optional[str] = None,
+    around_turn_id: Optional[str] = None,
+    around_run_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
     tail: bool = False,
@@ -662,7 +664,9 @@ def list_session_messages(
     ``around_id`` centers a window on a durable message id (deep-link / search
     jump). ``around_native_id`` provides the equivalent lookup for a platform
     native message id when a legacy caller context has not retained the durable
-    row id. Up to ``limit`` rows are returned on either side of the anchor,
+    row id. ``around_turn_id`` and ``around_run_id`` resolve the initial accepted
+    delivery for a stable Agent turn/run before applying the same window logic.
+    Up to ``limit`` rows are returned on either side of the anchor,
     merged chronologically. These modes take precedence over ``after_id`` /
     ``before_id`` / ``tail``. ``next_before_id`` is set when older rows remain,
     ``next_after_id`` when newer rows remain, so the chat can page in both
@@ -680,7 +684,7 @@ def list_session_messages(
     if types is not None:
         query = query.where(messages.c.type.in_(list(types)))
     effective_limit = min(max(int(limit), 1), 500)
-    if around_id or around_native_id:
+    if around_id or around_native_id or around_turn_id or around_run_id:
         # Window centered on a specific message (deep-link / search jump). Resolve
         # the anchor's (created_at, id); an unknown id (or one in another session)
         # yields an empty window. ``query`` already carries the type/metadata
@@ -701,6 +705,41 @@ def list_session_messages(
                     messages.c.session_id == session_id,
                 )
                 .order_by(messages.c.id.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if anchor_id is not None:
+                anchor = conn.execute(
+                    select(order_value).where(
+                        messages.c.id == anchor_id, messages.c.session_id == session_id
+                    )
+                ).scalar_one_or_none()
+        if anchor is None and around_turn_id:
+            anchor_id = conn.execute(
+                select(message_deliveries.c.message_id)
+                .where(
+                    message_deliveries.c.turn_id == around_turn_id,
+                    message_deliveries.c.session_id == session_id,
+                    message_deliveries.c.message_id.is_not(None),
+                )
+                .order_by(message_deliveries.c.turn_position.asc(), message_deliveries.c.id.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if anchor_id is not None:
+                anchor = conn.execute(
+                    select(order_value).where(
+                        messages.c.id == anchor_id, messages.c.session_id == session_id
+                    )
+                ).scalar_one_or_none()
+        if anchor is None and around_run_id:
+            anchor_id = conn.execute(
+                select(message_deliveries.c.message_id)
+                .select_from(message_deliveries.join(agent_runs, agent_runs.c.delivery_id == message_deliveries.c.id))
+                .where(
+                    agent_runs.c.id == around_run_id,
+                    message_deliveries.c.session_id == session_id,
+                    message_deliveries.c.message_id.is_not(None),
+                )
+                .order_by(message_deliveries.c.turn_position.asc(), message_deliveries.c.id.asc())
                 .limit(1)
             ).scalar_one_or_none()
             if anchor_id is not None:
@@ -751,6 +790,7 @@ def list_session_messages(
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
             "next_before_id": older[0]["id"] if has_older and older else None,
+            "anchor_id": anchor_id,
         }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.

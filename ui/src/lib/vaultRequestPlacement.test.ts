@@ -183,6 +183,19 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored).toEqual([]);
   });
 
+  it('uses a resolved durable source override for stable turn identities', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const reply = message('owner-reply', '2026-07-30T10:01:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [source, reply],
+      [request('turn-late', 'provision', '2026-07-30T10:02:00Z', null, { turn_id: 'turn-owner' })],
+      new Map([['turn-late', source.id]]),
+    );
+
+    expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['turn-late']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('does not cross a later input when resolving from the requester message', () => {
     const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
     const boundary = message('later-user', '2026-07-30T10:01:00Z', 'user');
@@ -194,6 +207,17 @@ describe('placeVaultProvisionRequests', () => {
 
     expect([...placed.byMessageId]).toEqual([]);
     expect(placed.unanchored.map((item) => item.id)).toEqual(['late']);
+  });
+
+  it('does not timestamp-place an unresolved explicit source onto another turn', () => {
+    const unrelatedReply = message('unrelated-reply', '2026-07-30T10:02:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [unrelatedReply],
+      [request('missing-source', 'provision', '2026-07-30T10:01:00Z', null, { message_id: 'trimmed-source' })],
+    );
+
+    expect([...placed.byMessageId]).toEqual([]);
+    expect(placed.unanchored.map((item) => item.id)).toEqual(['missing-source']);
   });
 
   it('keeps a delayed reply when the next input arrives after request creation', () => {

@@ -241,13 +241,23 @@ def _seed_titled_agent_session(conn, scope_id, session_id, *, title, agent_name)
     )
 
 
-def _insert_agent_run(conn, run_id, *, session_id, source_kind, source_actor=None, parent_run_id=None):
+def _insert_agent_run(
+    conn,
+    run_id,
+    *,
+    session_id,
+    source_kind,
+    source_actor=None,
+    parent_run_id=None,
+    delivery_id=None,
+):
     now = messages_service._utc_now_iso()
     conn.execute(
         agent_runs.insert().values(
             id=run_id, run_type="agent_run", status="succeeded", cancel_requested=0,
             source_kind=source_kind, source_actor=source_actor, parent_run_id=parent_run_id,
-            session_id=session_id, created_at=now, updated_at=now, metadata_json="{}",
+            session_id=session_id, delivery_id=delivery_id,
+            created_at=now, updated_at=now, metadata_json="{}",
         )
     )
 
@@ -2117,6 +2127,78 @@ def test_list_session_messages_tail_returns_recent_window(isolated_state):
     assert [m["text"] for m in oldest["messages"]] == ["m0", "m1", "m2"]
     assert [m["text"] for m in recent["messages"]] == ["m2", "m3", "m4"]
     assert recent["next_after_id"] is None
+
+
+def test_list_session_messages_resolves_turn_and_run_anchors(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        session_id = "ses_anchor_identity"
+        _seed_session(conn, scope_id, session_id)
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_anchor_identity",
+            session_id=session_id,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="anchor prompt",
+            ),
+            dispatch_text="anchor prompt",
+            now="2026-08-08T00:00:00Z",
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id="trn_anchor_identity",
+            session_id=session_id,
+            backend="claude",
+            deliveries=[delivery],
+            dispatch_text="anchor prompt",
+            attempt_id="atm_anchor_identity",
+        )
+        assert message_deliveries.bind_native_start(
+            conn,
+            "trn_anchor_identity",
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="anchor-runtime",
+            runtime_turn_id="anchor-runtime-turn",
+            native_turn_id="anchor-native-turn",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id="trn_anchor_identity",
+            evidence={"kind": "anchor_identity_test"},
+        )
+        _insert_agent_run(
+            conn,
+            "run_anchor_identity",
+            session_id=session_id,
+            source_kind="agent",
+            delivery_id=delivery["id"],
+        )
+
+    with engine.connect() as conn:
+        by_turn = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_turn_id="trn_anchor_identity",
+        )
+        by_run = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_run_id="run_anchor_identity",
+        )
+
+    assert by_turn["anchor_id"] == delivery["id"]
+    assert by_run["anchor_id"] == delivery["id"]
+    assert [row["id"] for row in by_turn["messages"]] == [delivery["id"]]
+    assert [row["id"] for row in by_run["messages"]] == [delivery["id"]]
 
 
 def test_list_session_messages_before_id_returns_older_window(isolated_state):
