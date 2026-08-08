@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage import message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, agent_sessions, messages, scopes
+from storage.models import agent_runs, agent_sessions, messages, scopes, vault_requests
 from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
 from vibe.message_identity import HARNESS_TYPE
@@ -338,6 +338,49 @@ def test_agent_run_provenance_skips_missing_source_session(isolated_state):
         result = messages_service.list_session_messages(conn, session_id="ses_target")
     by_id = {m["id"]: m for m in result["messages"]}
     assert "source_session_id" not in by_id["msg_ghost"]
+
+
+def test_vault_callback_message_provenance_enrichment(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        _insert_agent_run(
+            conn,
+            "execVault",
+            session_id="ses_target",
+            source_kind="callback",
+            source_actor="vault:vrq_access",
+        )
+        conn.execute(
+            vault_requests.insert().values(
+                id="vrq_access",
+                request_type="access",
+                secret_name="PROD_KEY",
+                requester='{"session_id":"ses_target"}',
+                status="denied",
+                created_at="2026-05-30T10:00:00Z",
+                decided_at="2026-05-30T10:00:01Z",
+            )
+        )
+        _insert_harness_msg(
+            conn,
+            scope_id,
+            "ses_target",
+            author_name="agent_run",
+            native_message_id="agent_run:execVault",
+            msg_id="msg_vault",
+            created_at="2026-05-30T10:00:02Z",
+        )
+
+    with engine.connect() as conn:
+        result = messages_service.list_session_messages(conn, session_id="ses_target")
+
+    message = next(row for row in result["messages"] if row["id"] == "msg_vault")
+    assert message["metadata"]["source_kind"] == "callback"
+    assert message["metadata"]["source_actor"] == "vault:vrq_access"
+    assert message["metadata"]["vault_request_type"] == "access"
+    assert message["metadata"]["vault_request_status"] == "denied"
 
 
 @pytest.mark.parametrize(

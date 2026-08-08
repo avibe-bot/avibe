@@ -30,6 +30,7 @@ from storage.models import (
     scope_settings,
     scopes,
     session_turns,
+    vault_requests,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sessions_service import session_agent_display_label
@@ -148,9 +149,10 @@ def _attach_harness_provenance(
     records none). Resolve it read-side: message → its ``agent_runs`` row
     (``id == <execution_id>``) → the run's ``source_actor`` (the session that
     triggered the callback) → that session's title, so the Chat chip can name the
-    source and deep-link to ``/chat/<source_session_id>``. No schema/write-path
-    change. Batched: at most two extra queries per page, only when such a message
-    is present.
+    source and deep-link to ``/chat/<source_session_id>``. Vault callbacks additionally
+    resolve their ``vault:<request_id>`` actor into stable request type/status metadata
+    so the transcript can label the callback as coming from Vault. Batched: at most
+    two extra queries per page, only when such a message is present.
     """
     exec_by_msg: dict[str, str] = {}
     for payload in payloads:
@@ -209,43 +211,69 @@ def _attach_harness_provenance(
         # so an unexpected source_actor shape can't become a bogus /chat target.
         if source_id and ":" not in source_id:
             source_by_exec[exec_id] = source_id
-    if not source_by_exec:
+    vault_by_exec: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    vault_request_ids: set[str] = set()
+    for exec_id, run in runs.items():
+        actor = str(run["source_actor"] or "").strip()
+        if run["source_kind"] == "callback" and actor.startswith("vault:"):
+            request_id = actor[len("vault:"):].strip()
+            if request_id:
+                vault_by_exec[exec_id] = (request_id, None)
+                vault_request_ids.add(request_id)
+    if vault_request_ids:
+        request_rows = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                select(
+                    vault_requests.c.id,
+                    vault_requests.c.request_type,
+                    vault_requests.c.status,
+                ).where(vault_requests.c.id.in_(vault_request_ids))
+            ).mappings()
+        }
+        vault_by_exec = {
+            exec_id: (request_id, request_rows.get(request_id))
+            for exec_id, (request_id, _row) in vault_by_exec.items()
+        }
+    if not source_by_exec and not vault_by_exec:
         return payloads
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
-    for row in conn.execute(
-        select(
-            agent_sessions.c.id,
-            agent_sessions.c.title,
-            agent_sessions.c.agent_name,
-            agent_sessions.c.agent_backend,
-            agents.c.name.label("catalog_agent_name"),
-            agents.c.archived_at.label("catalog_agent_archived_at"),
-            agents.c.metadata_json.label("catalog_agent_metadata_json"),
-        )
-        .select_from(
-            agent_sessions.outerjoin(
-                agents,
-                or_(
-                    agents.c.id == agent_sessions.c.agent_id,
-                    and_(
-                        agent_sessions.c.agent_id.is_(None),
-                        agents.c.name == agent_sessions.c.agent_name,
-                    ),
-                ),
+    if source_by_exec:
+        for row in conn.execute(
+            select(
+                agent_sessions.c.id,
+                agent_sessions.c.title,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+                agents.c.name.label("catalog_agent_name"),
+                agents.c.archived_at.label("catalog_agent_archived_at"),
+                agents.c.metadata_json.label("catalog_agent_metadata_json"),
             )
-        )
-        .where(
-            agent_sessions.c.id.in_(set(source_by_exec.values()))
-        )
-    ).mappings():
-        meta_by_session[row["id"]] = {
-            "title": row["title"],
-            "agent_name": session_agent_display_label(row),
-        }
+            .select_from(
+                agent_sessions.outerjoin(
+                    agents,
+                    or_(
+                        agents.c.id == agent_sessions.c.agent_id,
+                        and_(
+                            agent_sessions.c.agent_id.is_(None),
+                            agents.c.name == agent_sessions.c.agent_name,
+                        ),
+                    ),
+                )
+            )
+            .where(
+                agent_sessions.c.id.in_(set(source_by_exec.values()))
+            )
+        ).mappings():
+            meta_by_session[row["id"]] = {
+                "title": row["title"],
+                "agent_name": session_agent_display_label(row),
+            }
 
     for payload in payloads:
-        source_id = source_by_exec.get(exec_by_msg.get(payload["id"], ""))
+        exec_id = exec_by_msg.get(payload["id"], "")
+        source_id = source_by_exec.get(exec_id)
         # Only attach when the source session still exists (is in meta_by_session);
         # a stale/imported/deleted source would otherwise write source_session_id
         # and produce a dead /chat/<missing id> link with only the fallback label.
@@ -254,6 +282,16 @@ def _attach_harness_provenance(
             payload["source_session_id"] = source_id
             payload["source_session_title"] = meta.get("title")
             payload["source_session_agent_name"] = meta.get("agent_name")
+        vault_info = vault_by_exec.get(exec_id)
+        if vault_info is not None:
+            request_id, request = vault_info
+            metadata = dict(payload.get("metadata") or {})
+            metadata.setdefault("source_kind", "callback")
+            metadata.setdefault("source_actor", f"vault:{request_id}")
+            if request is not None:
+                metadata.setdefault("vault_request_type", request.get("request_type"))
+                metadata.setdefault("vault_request_status", request.get("status"))
+            payload["metadata"] = metadata
     return payloads
 
 

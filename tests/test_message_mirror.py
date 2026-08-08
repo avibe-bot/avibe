@@ -861,6 +861,55 @@ def test_harness_inbound_avibe_session_scoped(isolated_state):
     assert row["content_text"] == "the watched condition fired"
 
 
+def test_harness_inbound_mirrors_vault_callback_provenance(isolated_state):
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_vault", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_vault_callback",
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="anchor_ses_vault_callback",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="scheduled",
+        channel_id="ses_vault_callback",
+        platform="avibe",
+        message_id="agent_run:exec_vault_callback",
+        platform_specific={
+            "agent_session_id": "ses_vault_callback",
+            "task_trigger_kind": "agent_run",
+            "source_kind": "callback",
+            "source_actor": "vault:vrq_1",
+            "vault_request_type": "access",
+            "vault_request_status": "denied",
+        },
+    )
+    mirror_harness_inbound(ctx, "The user declined your vault access request.")
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(messages).where(messages.c.session_id == "ses_vault_callback")
+        ).mappings().one()
+    assert json.loads(row["metadata_json"]) == {
+        "source_kind": "callback",
+        "source_actor": "vault:vrq_1",
+        "vault_request_type": "access",
+        "vault_request_status": "denied",
+    }
+
+
 def test_background_standalone_persists_full_turn_without_realtime_delivery(isolated_state):
     from core import inbox_events
 

@@ -918,6 +918,7 @@ def enqueue_session_callback(
     message: str,
     source_actor: str,
     parent_run_id: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> Optional["TaskExecutionRequest"]:
     """Enqueue a callback turn into an existing agent session — the shared entry used by Agent
     Run / watch / scheduled-task callbacks and vault-request auto-resume. Resolves the session's
@@ -952,7 +953,10 @@ def enqueue_session_callback(
         source_actor=source_actor,
         parent_run_id=parent_run_id,
         delivery_intent=delivery_intent_for_trigger("callback"),
-        metadata={"callback_parent_run_id": parent_run_id} if parent_run_id else {},
+        metadata={
+            **(metadata or {}),
+            **({"callback_parent_run_id": parent_run_id} if parent_run_id else {}),
+        },
     )
 
 
@@ -7013,6 +7017,10 @@ class ScheduledTaskService:
                         session_id=plan.session_id,
                         message=plan.message,
                         source_actor=f"vault:{request_id}",
+                        metadata={
+                            "vault_request_type": str(row.get("request_type") or ""),
+                            "vault_request_status": str(row.get("status") or ""),
+                        },
                     )
                     status = "sent"
             except ValueError:
@@ -7108,6 +7116,10 @@ class ScheduledTaskService:
                     session_id=plan.session_id,
                     message=plan.message,
                     source_actor=f"vault:{request_id}",
+                    metadata={
+                        "vault_request_type": str(row.get("request_type") or ""),
+                        "vault_request_status": str(row.get("status") or ""),
+                    },
                 )
                 status = "sent"
         except ValueError:

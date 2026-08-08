@@ -48,6 +48,7 @@ import {
   chatTriggerLink,
   harnessChipLabelKey,
   needsHarnessProvenanceReconcile,
+  vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
@@ -3940,6 +3941,7 @@ export const MessageRow = memo(function MessageRow({
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
+  const vaultStatusKey = isHarness ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
   const resultPresentation = resultFooterParts(message);
 
@@ -4126,6 +4128,12 @@ export const MessageRow = memo(function MessageRow({
                 <span className="shrink-0 text-[11px] font-medium text-cyan">
                   {t(harnessChipLabelKey(message))}
                 </span>
+              )}
+              {vaultStatusKey && (
+                <>
+                  <span className="shrink-0 text-[11px] text-muted">·</span>
+                  <span className="shrink-0 text-[11px] text-muted">{t(vaultStatusKey)}</span>
+                </>
               )}
               {triggerLink?.kind === 'source' && (
                 // A9a: agent-callback shows the SOURCE session + links to its chat.

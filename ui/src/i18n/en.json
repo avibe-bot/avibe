@@ -3161,6 +3161,13 @@
       "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
+      "vault": "From Vault",
+      "vaultProvided": "Secret provided",
+      "vaultAccessApproved": "Access approved",
+      "vaultSigned": "Signature complete",
+      "vaultDenied": "Denied",
+      "vaultFailed": "Failed",
+      "vaultExpired": "Expired",
       "agentFallback": "agent"
     },
     "annotation": {
