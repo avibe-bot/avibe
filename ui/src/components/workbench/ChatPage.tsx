@@ -708,6 +708,7 @@ export const ChatPage: React.FC = () => {
       session?.id !== sessionId ||
       deepLinkMessageId ||
       jumpTarget ||
+      showPageActive ||
       deepLinkWindowHandledRef.current ||
       provisionPlacement.unanchored.length === 0
     ) return;
@@ -757,6 +758,7 @@ export const ChatPage: React.FC = () => {
     vaultAnchorInFlightRef.current = true;
     let retryDelayMs: number | null = null;
     let deferredByVisibleAnchor = false;
+    let deferredByMissingReply = false;
     const loadedSource = messageAnchorId
       ? messagesRef.current.find(
         (message) => message.id === messageAnchorId || (
@@ -847,7 +849,14 @@ export const ChatPage: React.FC = () => {
           ? new Map([[request.id, res.anchor_id]])
           : undefined;
         const placement = placeVaultProvisionRequests(anchorWindow, [request], sourceMessageIds);
-        if (!placement.byMessageId.size) return;
+        if (!placement.byMessageId.size) {
+          // The source turn may be visible before its Agent reply is persisted.
+          // Release the key and wait for the next transcript update to retry;
+          // cycling immediately here would spin on the same incomplete window.
+          deferredByMissingReply = true;
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
         const anchorMessageId = placement.byMessageId.keys().next().value;
         if (typeof anchorMessageId !== 'string') return;
         if (disjoint) {
@@ -900,11 +909,11 @@ export const ChatPage: React.FC = () => {
             vaultAnchorRetryWaitingRef.current.delete(fetchKey);
             if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
           }, retryDelayMs);
-        } else if (!deferredByVisibleAnchor) {
+        } else if (!deferredByVisibleAnchor && !deferredByMissingReply) {
           setVaultAnchorCycle((cycle) => cycle + 1);
         }
       });
-  }, [api, deepLinkMessageId, jumpTarget, loading, provisionPlacement.unanchored, session?.id, sessionId, vaultAnchorCycle]);
+  }, [api, deepLinkMessageId, jumpTarget, loading, provisionPlacement.unanchored, session?.id, sessionId, showPageActive, vaultAnchorCycle]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
