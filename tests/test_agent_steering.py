@@ -493,6 +493,38 @@ async def test_claude_preserves_receiver_when_ambiguous_input_half_close_fails()
 
 
 @pytest.mark.anyio
+async def test_claude_does_not_accept_steer_when_input_half_close_fails() -> None:
+    primary = _primary_request(backend="claude")
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    client = _ClaudeClient()
+    client._transport.end_input = AsyncMock(side_effect=RuntimeError("stdin close failed"))
+    agent = object.__new__(ClaudeAgent)
+    agent.claude_sessions = {"runtime-key": client}
+    agent.receiver_tasks = {"runtime-key": receiver_task}
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
+    agent._pending_requests = {"runtime-key": [primary]}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "claude", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(
+            controller,
+            "claude",
+            _steer_request(identity[1]),
+        )
+
+        assert receipt.outcome is SteerOutcome.UNKNOWN
+        assert receipt.reason == "native_input_close_failed"
+        assert receipt.details["diagnostic"] == "stdin close failed"
+        assert client.queries[-1] == (STEER_TEXT, "runtime-key")
+        assert not receiver_task.done()
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
 async def test_shared_boundary_finishes_native_reconciliation_before_propagating_cancel() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()

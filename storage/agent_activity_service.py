@@ -173,7 +173,13 @@ def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
 
 # Fallback tiebreak only (used when a row's microsecond id prefix can't be decoded,
 # e.g. format drift): within a single turn the order is open → work → close.
-_PHASE_RANK = {"turn_start": 0, "activity": 1, "terminal": 2, "ignore": 3}
+_PHASE_RANK = {
+    "turn_start": 0,
+    "activity": 1,
+    "boundary": 2,
+    "terminal": 3,
+    "ignore": 4,
+}
 
 
 def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
@@ -271,6 +277,8 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             )
         elif activity_role == "activity":
             kind = "activity"
+        elif activity_role == "boundary":
+            kind = "boundary"
         else:
             kind = "ignore"
         created_at = msg.get("created_at")
@@ -469,6 +477,27 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                     )
                 )
                 pending = []
+            turn_start_iso = item["created_at"]
+            if item["is_transcript"]:
+                last_boundary_id = item["id"]
+        elif kind == "boundary":
+            if pending:
+                groups.append(
+                    _make_group(
+                        pending,
+                        status="done",
+                        anchor_id=item["id"],
+                        anchor_position="before",
+                        open_turn=False,
+                        started_iso=turn_start_iso,
+                        ended_iso=item["created_at"],
+                        include_rows=include_rows,
+                    )
+                )
+                pending = []
+            # This output completes the preceding visible work without ending the
+            # logical Turn. Later activity belongs after this boundary and times
+            # from it until the eventual terminal or interruption.
             turn_start_iso = item["created_at"]
             if item["is_transcript"]:
                 last_boundary_id = item["id"]

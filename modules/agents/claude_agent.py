@@ -952,7 +952,7 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         end_input,
-    ) -> None:
+    ) -> str | None:
         """Half-close native input so EOF determines the steering result owner."""
         # Claude does not acknowledge when a streamed prompt begins execution.
         # Closing stdin after the accepted write makes EOF the sole causal
@@ -960,12 +960,14 @@ class ClaudeAgent(BaseAgent):
         self._steering_input_shutdown_keys().add(composite_key)
         try:
             await end_input()
-        except Exception:  # noqa: BLE001 - the existing receiver keeps ownership
+            return None
+        except Exception as exc:  # noqa: BLE001 - the existing receiver keeps ownership
             logger.warning(
                 "Failed to half-close Claude steering input for %s; preserving the live receiver",
                 composite_key,
                 exc_info=True,
             )
+            return str(exc)
 
     async def steer_active_turn(
         self,
@@ -1098,7 +1100,17 @@ class ClaudeAgent(BaseAgent):
                 or primary_requests[0] is not target.agent_request
             )
             self._advance_steering_generation(composite_key)
-            await self._close_steering_input(composite_key, end_input)
+            close_diagnostic = await self._close_steering_input(
+                composite_key,
+                end_input,
+            )
+            if close_diagnostic is not None:
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="native_input_close_failed",
+                    backend=self.name,
+                    diagnostic=close_diagnostic,
+                )
             if not runtime_stable:
                 return steer_result(
                     SteerOutcome.UNKNOWN,
@@ -1259,6 +1271,7 @@ class ClaudeAgent(BaseAgent):
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
+                settling_ambiguous_had_foreground_tools = False
                 # Capture the steering generation before waiting for the next
                 # native frame. A frame already buffered in the SDK must retain
                 # the ownership state at the time its receive was started.
@@ -1269,17 +1282,21 @@ class ClaudeAgent(BaseAgent):
                     buffered = self._ambiguous_primary_results.pop(composite_key, None)
                     if buffered is None:
                         break
-                    message, settling_ambiguous_assistant_text = (
-                        self._unpack_buffered_terminal(buffered)
-                    )
+                    (
+                        message,
+                        settling_ambiguous_assistant_text,
+                        settling_ambiguous_had_foreground_tools,
+                    ) = self._unpack_buffered_terminal(buffered)
                     settling_ambiguous_primary = True
                 except Exception:
                     buffered = self._ambiguous_primary_results.pop(composite_key, None)
                     if buffered is None:
                         raise
-                    message, settling_ambiguous_assistant_text = (
-                        self._unpack_buffered_terminal(buffered)
-                    )
+                    (
+                        message,
+                        settling_ambiguous_assistant_text,
+                        settling_ambiguous_had_foreground_tools,
+                    ) = self._unpack_buffered_terminal(buffered)
                     settling_ambiguous_primary = True
                     logger.warning(
                         "Settling buffered Claude primary result after receiver failure for %s",
@@ -1296,6 +1313,8 @@ class ClaudeAgent(BaseAgent):
                         self._last_assistant_text[composite_key] = (
                             settling_ambiguous_assistant_text
                         )
+                    if settling_ambiguous_had_foreground_tools:
+                        self._turns_with_foreground_tools.add(composite_key)
                 try:
                     claude_session_id = self._maybe_capture_session_id(
                         message,
@@ -1715,6 +1734,11 @@ class ClaudeAgent(BaseAgent):
                                             "output",
                                             buffered_text,
                                             parse_mode="markdown",
+                                            output=MessageOutput(
+                                                completes_turn=False,
+                                                completes_run=False,
+                                                records_run_output=False,
+                                            ),
                                         )
                                     self._ambiguous_primary_results.pop(
                                         composite_key,
@@ -1727,6 +1751,7 @@ class ClaudeAgent(BaseAgent):
                                 self._ambiguous_primary_results[composite_key] = (
                                     message,
                                     self._last_assistant_text.get(composite_key),
+                                    composite_key in self._turns_with_foreground_tools,
                                 )
                                 logger.info(
                                     "Deferring Claude primary result until ambiguous steering reaches native EOF or a later result for %s",
@@ -2774,19 +2799,23 @@ class ClaudeAgent(BaseAgent):
 
     def _select_buffered_terminal_text(self, composite_key: str, buffered) -> str:
         """Render a buffered pre-steer result without using newer assistant text."""
-        message, assistant_text = self._unpack_buffered_terminal(buffered)
+        message, assistant_text, had_foreground_tools = self._unpack_buffered_terminal(
+            buffered
+        )
         if assistant_text:
             return str(assistant_text).strip()
-        if composite_key in self._turns_with_foreground_tools:
+        if had_foreground_tools:
             return "<silent>Claude turn completed without assistant text.</silent>"
         return str(getattr(message, "result", "") or "")
 
     @staticmethod
-    def _unpack_buffered_terminal(buffered) -> tuple[object, str | None]:
-        if isinstance(buffered, tuple) and len(buffered) == 2:
-            message, assistant_text = buffered
-            return message, assistant_text
-        return buffered, None
+    def _unpack_buffered_terminal(
+        buffered,
+    ) -> tuple[object, str | None, bool]:
+        if isinstance(buffered, tuple) and len(buffered) == 3:
+            message, assistant_text, had_foreground_tools = buffered
+            return message, assistant_text, bool(had_foreground_tools)
+        return buffered, None, False
 
     def _select_detached_result_text(
         self,

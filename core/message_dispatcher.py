@@ -1378,6 +1378,8 @@ class ConsolidatedMessageDispatcher:
     ) -> None:
         payload = context.platform_specific or {}
         semantics = output_semantics or MessageOutput(completes_turn=True)
+        if not semantics.records_run_output:
+            return
         require_confirmation = semantics.requires_delivery_for_run_settlement
         run_ids: list[str] = []
         for value in semantics.run_ids:

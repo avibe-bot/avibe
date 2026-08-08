@@ -185,6 +185,7 @@ def test_annotation_catalog_contract_is_explicit() -> None:
 
 
 def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
+    assert spec_for("output")["activityRole"] == "boundary"
     derived_relevant = {
         message_type
         for message_type in _catalog_types()

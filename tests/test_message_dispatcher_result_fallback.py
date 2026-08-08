@@ -977,6 +977,39 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream.call_args.kwargs["kind"], "output")
         self.assertFalse(stream.call_args.kwargs["completes_turn"])
 
+    async def test_output_can_explicitly_skip_agent_run_recording(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"accepted_agent_run_ids": ["run-steer"]},
+        )
+
+        with (
+            mock.patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "msg-output"},
+            ),
+            mock.patch.object(
+                dispatcher,
+                "_record_agent_run_terminal_for_ids",
+            ) as record,
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "output",
+                "primary answer",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    records_run_output=False,
+                ),
+            )
+
+        record.assert_not_called()
+
     async def test_notify_not_persisted_when_send_fails(self):
         class _FailClient(_StubIMClient):
             async def send_message(self, *args, **kwargs):

@@ -22,7 +22,7 @@ _LIST_PROPERTIES = {
     "webPushWhenEvents",
 }
 _ENUM_PROPERTIES = {
-    "activityRole": {"none", "turn_start", "activity", "terminal"},
+    "activityRole": {"none", "turn_start", "activity", "boundary", "terminal"},
     "render": {
         "none",
         "user",

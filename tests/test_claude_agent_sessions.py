@@ -968,12 +968,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
         output_tokens = []
+        output_semantics = []
 
-        async def _emit_output(emit_context, message_type, *_args, **_kwargs):
+        async def _emit_output(emit_context, message_type, *_args, **kwargs):
             if message_type == "output":
                 output_tokens.append(
                     emit_context.platform_specific.get("agent_runtime_turn_token")
                 )
+                output_semantics.append(kwargs.get("output"))
 
         controller.emit_agent_message = AsyncMock(side_effect=_emit_output)
         controller.session_handler.mark_session_idle = lambda _key: None
@@ -1062,6 +1064,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             "output",
             "primary work completed",
             parse_mode="markdown",
+            output=ANY,
         )
         agent.emit_result_message.assert_awaited_once_with(
             context,
@@ -1073,6 +1076,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertEqual(output_tokens, ["R2"])
+        self.assertEqual(len(output_semantics), 1)
+        self.assertFalse(output_semantics[0].records_run_output)
         begin_agent_initiated_turn.assert_not_awaited()
 
     async def test_ambiguous_results_emit_each_answer_in_order(self):
@@ -1152,6 +1157,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             "output",
             "primary answer",
             parse_mode="markdown",
+            output=ANY,
         )
         agent.emit_result_message.assert_awaited_once_with(
             context,
@@ -1258,6 +1264,61 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_buffered_tool_only_result_keeps_foreground_state_through_eof(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        composite_key = "session-buffered-tool:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._turns_with_foreground_tools.add(composite_key)
+        agent._advance_steering_generation(composite_key)
+
+        result_message = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "Bash completed",
+                "duration_ms": 1,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield result_message
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-buffered-tool",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        selected = agent.emit_result_message.await_args.args[1]
+        self.assertIn("<silent>", selected)
+        self.assertNotIn("Bash completed", selected)
+        self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_toolcall_emit_adopts_current_pending_turn_token(self):
         controller = _StubController()

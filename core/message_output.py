@@ -58,6 +58,7 @@ class MessageOutput:
     sequence: int | None = None
     run_id: str | None = None
     run_ids: tuple[str, ...] = ()
+    records_run_output: bool = True
     requires_delivery_for_run_settlement: bool = False
     settled_by: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
