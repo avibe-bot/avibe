@@ -631,6 +631,7 @@ def promote_suppressed_native_message(
             content_text=text,
             content_json=json.dumps(body),
             metadata_json=json.dumps(metadata or {}),
+            delivered_at=now,
             updated_at=now,
         )
     )

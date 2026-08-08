@@ -543,6 +543,105 @@ def test_all_deferred_turn_runs_elect_and_propagate_the_first_stable_owner(
     assert second_notice["turn_fallback_run_id"] == runs[1].id
 
 
+def test_hfr_447_fallback_owner_requires_writable_notice_metadata(
+    tmp_path: Path,
+) -> None:
+    """Owner election and notice persistence share one eligibility predicate."""
+
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    definitions = ["watch-bad-owner", "watch-valid-owner"]
+    for definition_id in definitions:
+        _task(sqlite, definition_id)
+    runs = sorted(
+        (requests.enqueue_task_run(definition_id) for definition_id in definitions),
+        key=lambda run: run.id,
+    )
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    malformed, valid = runs
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == malformed.id)
+            .values(metadata_json="{not-json")
+        )
+
+    turn_id = "turn-writable-owner"
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": malformed.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    assert sqlite.get_run(malformed.id)["status"] == "failed"
+    assert sqlite.owed_failure_notice(malformed.id) is None
+    assert sqlite.owed_failure_notice(valid.id)["turn_fallback_run_id"] == valid.id
+
+    deferred_definitions = ["watch-bad-deferred-owner", "watch-valid-deferred-owner"]
+    for definition_id in deferred_definitions:
+        _task(sqlite, definition_id)
+    deferred_runs = sorted(
+        (
+            requests.enqueue_task_run(definition_id)
+            for definition_id in deferred_definitions
+        ),
+        key=lambda run: run.id,
+    )
+    for run in deferred_runs:
+        assert requests.claim(run.id) is not None
+    malformed_deferred, valid_deferred = deferred_runs
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == malformed_deferred.id)
+            .values(metadata_json="[]")
+        )
+
+    deferred_turn_id = "turn-writable-deferred-owner"
+    sqlite.record_turn_run_outputs(
+        [run.id for run in deferred_runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": deferred_turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{deferred_turn_id}",
+                "delivered": False,
+                "fallback_run_id": malformed_deferred.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[run.id for run in deferred_runs],
+    )
+
+    assert sqlite.settle_deferred_run(malformed_deferred.id)
+    assert sqlite.owed_failure_notice(malformed_deferred.id) is None
+    pending_metadata = sqlite.get_run(valid_deferred.id)["result_payload"][
+        "deferred_terminal_metadata"
+    ]
+    assert "fallback_run_id" not in pending_metadata["turn_failure_notification"]
+    assert sqlite.settle_deferred_run(valid_deferred.id)
+    assert (
+        sqlite.owed_failure_notice(valid_deferred.id)["turn_fallback_run_id"]
+        == valid_deferred.id
+    )
+
+
 # --- group 2: the owed-notice drain ---------------------------------------
 #
 # The policy decisions are tested against ``core.failure_notices.decide`` directly:
@@ -2379,6 +2478,85 @@ def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path)
     assert promoted["session_id"] == "ses-callback-target"
     assert promoted["text"] == "visible fallback"
     assert promoted["metadata"] == {"run_id": "run-promote"}
+
+
+def test_hfr_446_promoted_receipt_uses_visible_delivery_order(tmp_path: Path) -> None:
+    """Promotion orders the stable row by its visible send, not hidden creation."""
+
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    sqlite, _requests = _store(tmp_path)
+    _callback_session(sqlite)
+    now = "2026-07-27T00:00:00+00:00"
+    instants = iter(
+        [
+            "2026-07-27T00:00:01.000000Z",
+            "2026-07-27T00:00:02.000000Z",
+            "2026-07-27T00:00:03.000000Z",
+        ]
+    )
+    with sqlite.engine.begin() as conn, pytest.MonkeyPatch.context() as patch:
+        patch.setattr(messages_service, "_utc_now_iso", lambda: next(instants))
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-order-source",
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="order-source",
+                native_session_id="native-order-source",
+                status="active",
+                visibility="background",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        hidden = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-order-source",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="hidden failure",
+            metadata={"delivery_suppressed": True, "run_id": "run-order"},
+            native_message_id="agent-output:codex:run-order:failure",
+        )
+        newer = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-callback-target",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="already visible",
+        )
+        promoted = messages_service.promote_suppressed_native_message(
+            conn,
+            platform="avibe",
+            scope_id=None,
+            session_id="ses-callback-target",
+            native_message_id="agent-output:codex:run-order:failure",
+            message_type="notify",
+            text="visible failure",
+            metadata={"run_id": "run-order"},
+        )
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses-callback-target",
+            types={"notify"},
+            tail=True,
+        )["messages"]
+
+    assert promoted is not None
+    assert promoted["id"] == hidden["id"]
+    assert promoted["delivered_at"] == "2026-07-27T00:00:03.000000Z"
+    assert [message["id"] for message in transcript] == [newer["id"], hidden["id"]]
 
 
 def test_the_duplicate_short_circuit_receipt_acks_a_workbench_rung() -> None:
@@ -7378,6 +7556,64 @@ def test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback(
 
     assert delivered == []
     assert sqlite.owed_failure_notice(immediate.id)["state"] == "pending"
+
+
+def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """A stopped deferred participant no longer owns callback membership."""
+
+    from sqlalchemy import update as sa_update
+
+    import core.scheduled_tasks as scheduled_tasks
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-cancel-callback-owner", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-cancel-callback-deferred", deliver_key="slack::channel::C123")
+    _callback_session(sqlite)
+    immediate = requests.enqueue_task_run("watch-cancel-callback-owner")
+    deferred = requests.enqueue_task_run("watch-cancel-callback-deferred")
+    for run in (immediate, deferred):
+        assert requests.claim(run.id) is not None
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == deferred.id)
+            .values(
+                callback_session_id="ses-callback-target",
+                callback_status="pending",
+            )
+        )
+
+    turn_id = "turn-cancel-requested-callback"
+    sqlite.record_turn_run_outputs(
+        [immediate.id, deferred.id],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": immediate.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[deferred.id],
+    )
+
+    assert sqlite.cancel_run(deferred.id)
+    assert sqlite.get_run(deferred.id)["cancel_requested"] is True
+    assert sqlite.turn_callback_state(turn_id) is None
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == [f"turn:{turn_id}"]
+    assert sqlite.owed_failure_notice(immediate.id)["state"] == "sent"
 
 
 @pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])

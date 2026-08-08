@@ -3990,6 +3990,36 @@ scenarios:
     # The guarded post-send promotion preserves the stable native identity while
     # rebinding the Message row from its hidden source Session to the visible target.
     test: tests/test_harness_failure_visibility.py::test_visible_send_promotes_the_stable_suppressed_history_row
+  - id: HFR-446
+    name: promoted history uses visible delivery order
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Promotion stamps delivered_at at the post-send commit point. Transcript
+    # ordering therefore places the stable row after content that was already
+    # visible when the hidden copy was originally created.
+    test: tests/test_harness_failure_visibility.py::test_hfr_446_promoted_receipt_uses_visible_delivery_order
+  - id: HFR-447
+    name: Turn fallback owners can persist their notice
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Immediate and deferred owner election use the exact metadata-writability
+    # predicate used by notice persistence. Malformed legacy rows still settle,
+    # but a writable participant becomes the stable fallback owner.
+    test: tests/test_harness_failure_visibility.py::test_hfr_447_fallback_owner_requires_writable_notice_metadata
+  - id: HFR-448
+    name: canceled deferred callbacks do not block a Turn fallback
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Turn-wide callback membership includes deferred participants only while
+    # they remain live. A canceled or cancel-requested parent cannot later deliver
+    # its callback, so an immediate sibling's fallback is released.
+    test: tests/test_harness_failure_visibility.py::test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

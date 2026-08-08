@@ -43,21 +43,26 @@ follows the complete settlement. A Run whose Activity defers settlement cannot
 own notices that non-deferred siblings owe immediately. If every participant is
 deferred, the first Run that actually settles failed elects itself and propagates
 that stable owner to the remaining deferred participants in the same locked
-transaction.
+transaction. Every election phase uses the same metadata-writability predicate
+as notice persistence, so a malformed legacy row cannot be named as an owner
+that is unable to record the notice.
 
 Persistence caused only by `suppress_delivery` is local history, not delivery
 evidence. It is tagged as suppressed, rejected by outward receipt lookup, and
 promoted under its stable native identity only after a later user-visible send
 succeeds. Promotion rebinds the row to that visible target Session. Its local
-Message row id is not written into the Run's transport receipts. It leaves the
-Turn notification unacknowledged so the durable fallback can route the failure
-to a user-visible target.
+Message row is also stamped with the visible delivery time, so transcript order
+reflects when the user could first see it rather than its earlier hidden creation.
+The row id is not written into the Run's transport receipts. It leaves the Turn
+notification unacknowledged so the durable fallback can route the failure to a
+user-visible target.
 
 A callback delivers the terminal result for its whole Turn. One effective callback
 receipt suppresses every linked Run fallback, while one pending callback defers the
 Turn fallback until its delivery outcome is known. The aggregate is read from one
 SQLite snapshot and includes participants whose Turn attribution is still held in
-a deferred terminal intent.
+a deferred terminal intent. Canceled and cancel-requested participants are excluded
+because their callback can no longer become the Turn's visible delivery.
 
 Waiter health is observed only from completed outcome fields. Starting the first
 cycle does not prove success, so a Watch with no prior exit, finish, or error remains
@@ -123,6 +128,12 @@ does not claim that an event was detected.
   health until an outcome exists.
 - `HFR-445`: promoting suppressed history rebinds the stable row to the visible
   target Session after delivery.
+- `HFR-446`: promotion stamps the visible delivery time so hidden history cannot
+  appear before newer target-Session content.
+- `HFR-447`: fallback ownership requires metadata that can persist the notice in
+  both immediate and deferred settlement.
+- `HFR-448`: a cancel-requested deferred callback participant no longer blocks
+  the remaining Turn fallback.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

@@ -1734,6 +1734,17 @@ def _callback_parent_owns_failure_notice(
     return isinstance(notice, dict) and bool(str(notice.get("state") or "").strip())
 
 
+def _decoded_failure_notice_metadata(raw: Any) -> Optional[dict[str, Any]]:
+    """Return the writable metadata object used by every notice owner decision."""
+
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode("utf-8", "replace")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}
+    decoded = _json_loads(raw if isinstance(raw, str) else None, None)
+    return decoded if isinstance(decoded, dict) else None
+
+
 def _merge_owed_failure_notice(
     values: dict[str, Any],
     *,
@@ -1775,22 +1786,14 @@ def _merge_owed_failure_notice(
     unreachable — and it is the direction every other reader on this path chose.
     """
 
-    if isinstance(row_metadata_json, (bytes, bytearray)):
-        row_metadata_json = bytes(row_metadata_json).decode("utf-8", "replace")
-    if row_metadata_json is None or (
-        isinstance(row_metadata_json, str) and not row_metadata_json.strip()
-    ):
-        merged: dict[str, Any] = {}
-    else:
-        decoded = _json_loads(row_metadata_json if isinstance(row_metadata_json, str) else None, None)
-        if not isinstance(decoded, dict):
-            logger.warning(
-                "run %s has unreadable metadata_json; settling it without touching the "
-                "column, so it records no owed failure notice",
-                run_id,
-            )
-            return
-        merged = decoded
+    merged = _decoded_failure_notice_metadata(row_metadata_json)
+    if merged is None:
+        logger.warning(
+            "run %s has unreadable metadata_json; settling it without touching the "
+            "column, so it records no owed failure notice",
+            run_id,
+        )
+        return
     if extra_metadata:
         merged.update(extra_metadata)
     notice = None
@@ -4082,6 +4085,9 @@ class SQLiteBackgroundTaskStore:
                 callback_session.c.id == child.c.session_id,
             )
         )
+        statement = statement.where(
+            func.coalesce(parent.c.cancel_requested, 0) == 0
+        ).where(~parent.c.status.in_(_status_query_values("canceled")))
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
             # Turn membership has two durable phases: settled Runs carry an owed
@@ -4714,6 +4720,10 @@ class SQLiteBackgroundTaskStore:
                 run_id
                 for run_id in normalized_run_ids
                 if failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
+                and _decoded_failure_notice_metadata(
+                    rows[run_id]["metadata_json"]
+                )
+                is not None
             )
             immediate_owner_ids = [
                 run_id for run_id in eligible_run_ids if run_id not in deferred_ids
@@ -5066,7 +5076,13 @@ class SQLiteBackgroundTaskStore:
                         fallback_owner = str(
                             notification.get("fallback_run_id") or ""
                         ).strip()
-                        owner_has_notice = fallback_owner == run_id
+                        current_can_own = (
+                            _decoded_failure_notice_metadata(row["metadata_json"])
+                            is not None
+                        )
+                        owner_has_notice = (
+                            fallback_owner == run_id and current_can_own
+                        )
                         if fallback_owner and fallback_owner != run_id:
                             owner_row = conn.execute(
                                 select(agent_runs)
@@ -5091,8 +5107,12 @@ class SQLiteBackgroundTaskStore:
                                 == turn_id
                             )
                         if not owner_has_notice:
-                            fallback_owner = run_id
-                            notification["fallback_run_id"] = fallback_owner
+                            if current_can_own:
+                                fallback_owner = run_id
+                                notification["fallback_run_id"] = fallback_owner
+                            else:
+                                fallback_owner = ""
+                                notification.pop("fallback_run_id", None)
                         notice_metadata["turn_failure_notification"] = notification
                 values: dict[str, Any] = {
                     "status": status,
