@@ -57,6 +57,8 @@ logger = logging.getLogger(__name__)
 @dataclass(eq=False)
 class _SteeringInputFence:
     observed: bool = False
+    native_generation: int | None = None
+    receive_boundary_crossed: bool = False
 
 
 @dataclass(eq=False)
@@ -101,6 +103,7 @@ class ClaudeAgent(BaseAgent):
         self._steering_input_fences: dict[str, list[_SteeringInputFence]] = {}
         self._native_query_generations: dict[str, int] = {}
         self._native_query_fences: dict[str, list[_NativeQueryFence]] = {}
+        self._native_query_receive_generations: dict[str, int] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._ambiguous_input_shutdowns: set[str] = set()
         self._ambiguous_interrupts: set[str] = set()
@@ -899,6 +902,11 @@ class ClaudeAgent(BaseAgent):
         native_query_fences = getattr(self, "_native_query_fences", None)
         if native_query_fences is not None:
             native_query_fences.pop(composite_key, None)
+        native_query_receive_generations = getattr(
+            self, "_native_query_receive_generations", None
+        )
+        if native_query_receive_generations is not None:
+            native_query_receive_generations.pop(composite_key, None)
         ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
         if ambiguous_results is not None:
             ambiguous_results.pop(composite_key, None)
@@ -944,6 +952,8 @@ class ClaudeAgent(BaseAgent):
             self._native_query_generations = generations
         generation = generations.get(composite_key, 0) + 1
         generations[composite_key] = generation
+        if steering is not None:
+            steering.native_generation = generation
         fence = _NativeQueryFence(generation=generation, steering=steering)
         pending = getattr(self, "_native_query_fences", None)
         if pending is None:
@@ -1037,7 +1047,19 @@ class ClaudeAgent(BaseAgent):
         fence = fences[0] if fences else None
         if barrier == "accepted" and fence is not None:
             if not fence.observed:
-                return True
+                # Reused Claude SDK sessions may omit a second init frame. In
+                # that case the receive-boundary generation is the remaining
+                # causal signal: a stale sample still defers the primary frame,
+                # while a current sample after the native write owns the only
+                # terminal result. A frame that was already in flight before the
+                # write remains conservatively deferred.
+                if generation_changed or not fence.receive_boundary_crossed:
+                    return True
+                self._consume_terminal_barrier(composite_key)
+                fences.pop(0)
+                if not fences:
+                    self._steering_input_fences.pop(composite_key, None)
+                return False
             # Claude normally dequeues one queued prompt per Result, but if it
             # dequeues several before answering, that Result owns every observed
             # FIFO input instead of leaving an already-consumed prompt hanging.
@@ -1424,6 +1446,30 @@ class ClaudeAgent(BaseAgent):
                     native_query_generation = (
                         getattr(self, "_native_query_generations", None) or {}
                     ).get(composite_key, 0)
+                    receive_generations = getattr(
+                        self, "_native_query_receive_generations", None
+                    )
+                    previous_native_query_generation = (
+                        receive_generations.get(composite_key)
+                        if receive_generations is not None
+                        else None
+                    )
+                    if receive_generations is None:
+                        receive_generations = {}
+                        self._native_query_receive_generations = receive_generations
+                    if previous_native_query_generation is not None:
+                        for input_fence in (
+                            getattr(self, "_steering_input_fences", None) or {}
+                        ).get(composite_key, ()):
+                            native_generation = input_fence.native_generation
+                            if (
+                                native_generation is not None
+                                and previous_native_query_generation
+                                < native_generation
+                                <= native_query_generation
+                            ):
+                                input_fence.receive_boundary_crossed = True
+                    receive_generations[composite_key] = native_query_generation
                 except StopAsyncIteration:
                     message = self._ambiguous_primary_results.pop(composite_key, None)
                     if message is None:

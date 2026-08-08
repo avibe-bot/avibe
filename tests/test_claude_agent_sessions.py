@@ -919,6 +919,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(agent._terminal_claim_superseded(composite_key, 1))
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
 
+    def test_unobserved_fence_with_current_generation_settles_terminal(self):
+        controller = _StubController()
+        agent = ClaudeAgent(controller)
+        composite_key = "session-1:/tmp/work"
+        input_fence = _SteeringInputFence()
+        agent._advance_steering_generation(
+            composite_key,
+            input_fence=input_fence,
+        )
+        input_fence.receive_boundary_crossed = True
+
+        # Some reused native sessions do not emit a second init frame. The
+        # receiver's current generation still proves this terminal is post-steer.
+        self.assertFalse(agent._terminal_claim_superseded(composite_key, 1))
+        self.assertIsNone(agent._next_terminal_barrier(composite_key))
+        self.assertNotIn(composite_key, agent._steering_input_fences)
+
     async def test_steered_assistant_and_result_settle_the_pending_turn(self):
         """HFR-435: a native query start gives the steered Result ownership."""
         controller = _StubController()
