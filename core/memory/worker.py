@@ -20,6 +20,7 @@ from core.memory.everos import (
     ProviderCapture,
 )
 from core.memory.store import (
+    AmbiguousAdd,
     Delivered,
     MemoryStore,
     MessageFailure,
@@ -251,10 +252,7 @@ class MemoryWorker:
                 timeout=self._add_timeout_seconds,
             )
         except asyncio.TimeoutError:
-            await self._ambiguous_failure_is_system_outage(
-                row,
-                "memory_provider_timeout",
-            )
+            await self._manual_required(row, "memory_provider_timeout")
             return False
         except MemoryProviderSystemFailure as failure:
             await self._return_system_failure(
@@ -263,22 +261,31 @@ class MemoryWorker:
             )
             return False
         except MemoryProviderFailure as failure:
-            await self._ambiguous_failure_is_system_outage(
-                row,
-                _provider_error_code(failure, "memory_processing_failed"),
-                retryable=failure.retryable,
-            )
+            error = _provider_error_code(failure, "memory_processing_failed")
+            if error == "memory_provider_timeout":
+                await self._manual_required(row, error)
+            else:
+                await self._ambiguous_failure_is_system_outage(
+                    row,
+                    error,
+                    retryable=failure.retryable,
+                )
             return False
         except Exception:
-            await self._ambiguous_failure_is_system_outage(row, "memory_processing_failed")
+            await self._manual_required(row, "memory_processing_failed")
             return False
 
-        if not isinstance(ack, AddAck):
-            ack = AddAck(request_id=None, status=None)
+        if not isinstance(ack, AddAck) or ack.status not in {"accumulated", "extracted"}:
+            await self._manual_required(
+                row,
+                "memory_provider_response_invalid",
+                request_id=ack.request_id if isinstance(ack, AddAck) else None,
+            )
+            return False
         settled = await self._store_call(
             self._store.settle,
             row,
-            Delivered(add_request_id=ack.request_id),
+            Delivered(add_request_id=ack.request_id, add_status=ack.status),
             lease_owner=self._boot_id,
             now=self._current_time(),
         )
@@ -430,6 +437,21 @@ class MemoryWorker:
             self._store.settle,
             row,
             MessageFailure(error=error, retryable=retryable),
+            lease_owner=self._boot_id,
+            now=self._current_time(),
+        )
+
+    async def _manual_required(
+        self,
+        row: QueueRow,
+        error: MemoryErrorCode,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        await self._store_call(
+            self._store.settle,
+            row,
+            AmbiguousAdd(add_request_id=request_id, error=error),
             lease_owner=self._boot_id,
             now=self._current_time(),
         )

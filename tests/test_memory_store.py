@@ -14,8 +14,10 @@ from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
 from core.memory.store import (
     MAX_MESSAGE_ATTEMPTS,
     MAX_NONTERMINAL_QUEUE_ROWS,
+    AmbiguousAdd,
     Delivered,
     MemoryStore,
+    MemoryStoreSchemaError,
     MessageFailure,
     SettleResult,
     SystemOutage,
@@ -24,6 +26,7 @@ from core.memory.store import (
     derive_principal_id,
     _keyed_digest,
 )
+from core.memory.types import ProviderSessionRef
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -92,8 +95,14 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             row[1]
             for row in conn.execute("PRAGMA index_list('memory_capture_queue')")
         }
-        assert {"memory_meta", "memory_capture_queue"}.issubset(tables)
+        assert {
+            "memory_meta",
+            "memory_capture_queue",
+            "memory_session_flush_state",
+            "memory_flush_settlements",
+        }.issubset(tables)
         assert "ix_memory_capture_due" in indexes
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
         assert {
@@ -107,6 +116,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "flush_error_code",
             "flush_request_id",
             "flush_observed_at",
+            "provider_session_ref",
         }.issubset(queue_columns)
         assert {
             "processing_fault_kind",
@@ -123,6 +133,61 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
+
+
+def test_store_rejects_an_existing_unknown_schema_without_migration(tmp_path: Path) -> None:
+    path = _store_path(tmp_path, "unknown.sqlite")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE old_memory_state (value TEXT)")
+
+    with pytest.raises(MemoryStoreSchemaError, match="incompatible Memory schema"):
+        MemoryStore(path)
+
+
+def test_provider_session_ref_serializes_the_exact_canonical_identity() -> None:
+    reference = ProviderSessionRef(
+        principal_id="u-11111111111111111111111111111111",
+        epoch=7,
+        project_ref=PROJECT,
+        session_id="src--provider-session--e7",
+    )
+
+    assert reference.as_tuple() == (
+        "u-11111111111111111111111111111111",
+        7,
+        PROJECT,
+        "src--provider-session--e7",
+    )
+    assert ProviderSessionRef.deserialize(reference.serialize()) == reference
+    with pytest.raises(ValueError, match="invalid provider session reference"):
+        ProviderSessionRef.deserialize('{"principal_id":"u-only"}')
+    with pytest.raises(ValueError, match="invalid provider session reference"):
+        ProviderSessionRef.deserialize(
+            '{"epoch":7,"principal_id":"u-1","project_ref":"p-1",'
+            '"session_id":"s","extra":"no"}'
+        )
+
+
+def test_enqueue_creates_one_idempotent_session_state_for_the_canonical_ref(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _enqueue(store, "first")
+    second = _enqueue(store, "second", occurred_at_ms=1_001)
+
+    assert first.row is not None and second.row is not None
+    assert first.row.provider_session_ref == second.row.provider_session_ref
+    state = store.get_session_flush_state(first.row.provider_session_ref)
+    assert state is not None
+    assert state.provider_session_ref.as_tuple() == (
+        first.row.principal_id,
+        first.row.epoch,
+        first.row.project_ref,
+        first.row.session_id,
+    )
+    assert (state.generation, state.watermark, state.fence_epoch) == (0, 0, 0)
+    assert len(store.list_session_flush_states()) == 1
+
+    assert store.ensure_session_flush_state(first.row.provider_session_ref) == state
 
 
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
@@ -198,6 +263,19 @@ def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path
     assert stats.distill_failed == 0
     assert stats.last_flush_observation == "succeeded"
     assert stats.last_flush_status == "extracted"
+    delivered = _row_for_source(store, "one")
+    state = store.get_session_flush_state(delivered.provider_session_ref)
+    assert state is not None
+    assert (state.generation, state.watermark, state.fence_epoch) == (1, 1_001, 1)
+    assert (state.flush_state, state.fence_owner, state.first_unflushed_at) == (
+        "not_due",
+        None,
+        None,
+    )
+    settlements = store.list_flush_settlements(delivered.provider_session_ref)
+    flush_settlement = next(item for item in settlements if item.operation_kind == "flush")
+    assert (flush_settlement.generation, flush_settlement.confirmed_watermark_ms) == (0, 1_001)
+    assert store.record_settlement(flush_settlement) is False
 
 
 def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: Path) -> None:
@@ -230,6 +308,32 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     assert stats.distill_failed == 1
     assert stats.last_flush_observation == "unknown"
     assert _row_for_source(store, "rejected").flush_error_code == "INTERNAL_ERROR"
+    unknown_row = _row_for_source(store, "unknown")
+    unknown_state = store.get_session_flush_state(unknown_row.provider_session_ref)
+    assert unknown_state is not None
+    assert unknown_state.flush_state == "manual_required"
+
+
+def test_malformed_flush_success_is_recorded_as_manual_required(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_ref = _deliver(store, "malformed-flush")
+    assert store.mark_flush_in_flight(session_ref, PROJECT) == 1
+
+    assert store.record_flush_verdict(
+        session_ref,
+        PROJECT,
+        FlushSucceeded(request_id="partial-flush", status=None),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+    row = _row_for_source(store, "malformed-flush")
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    settlement = store.list_flush_settlements(row.provider_session_ref)[0]
+    assert (settlement.outcome, settlement.request_id) == (
+        "manual_required",
+        "partial-flush",
+    )
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
@@ -255,6 +359,39 @@ def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: P
     # The payload survives so the row can be delivered once the outage clears.
     assert released.payload_text == "queued payload"
     assert released.last_error == "memory_sidecar_unavailable"
+
+
+def test_ambiguous_add_is_terminal_manual_required_and_fences_its_session(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "ambiguous")
+    assert accepted.row is not None
+    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+
+    result = store.settle(
+        row,
+        AmbiguousAdd(add_request_id="provider-request", error="memory_provider_timeout"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    )
+
+    assert result == SettleResult(settled=True, state="manual_required", attempts=None)
+    retained = _row_for_source(store, "ambiguous")
+    assert retained.state == "pending"
+    assert retained.payload_text == "queued payload"
+    assert retained.last_error == "memory_provider_timeout"
+    state = store.get_session_flush_state(retained.provider_session_ref)
+    assert state is not None
+    assert (state.flush_state, state.fence_epoch, state.fence_owner) == (
+        "manual_required",
+        1,
+        "manual-required",
+    )
+    settlement = store.list_flush_settlements(retained.provider_session_ref)
+    assert len(settlement) == 1
+    assert settlement[0].outcome == "manual_required"
+    assert settlement[0].operation_kind == "add"
+    assert store.claim_due(lease_owner="next-boot", now="2026-01-01T00:01:00.000Z") is None
 
 
 def test_settle_spends_attempts_then_scrubs_a_failing_row_terminally(tmp_path: Path) -> None:

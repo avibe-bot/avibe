@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
@@ -11,6 +12,11 @@ from core.memory.presentation import MemoryStatusBuckets
 
 MemoryKind = Literal["profile", "episode", "fact"]
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
+MemoryOperationKind = Literal["add", "flush"]
+MemorySettlementOutcome = Literal["succeeded", "rejected", "unknown", "manual_required"]
+MemoryObservedOutcome = MemorySettlementOutcome | Literal["in_flight"]
+MemorySettlementSource = Literal["add", "flush"]
+MemoryFlushState = Literal["not_due", "due", "in_flight", "manual_required"]
 MemoryFailureKind = Literal[
     "delivery_abandoned",
     "distillation_rejected",
@@ -66,6 +72,130 @@ def is_memory_error_code(value: object) -> bool:
     """Return whether *value* is a closed Memory error code."""
 
     return isinstance(value, str) and value in CLOSED_MEMORY_ERROR_CODES
+
+
+@dataclass(frozen=True)
+class ProviderSessionRef:
+    """Canonical provider identity used by durable coordination state."""
+
+    principal_id: str
+    epoch: int
+    project_ref: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("principal_id", self.principal_id),
+            ("project_ref", self.project_ref),
+            ("session_id", self.session_id),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"provider session {name} must be non-empty")
+        if isinstance(self.epoch, bool) or not isinstance(self.epoch, int) or self.epoch < 0:
+            raise ValueError("provider session epoch must be a non-negative integer")
+
+    def as_tuple(self) -> tuple[str, int, str, str]:
+        """Return the identity in its canonical ordering."""
+
+        return (self.principal_id, self.epoch, self.project_ref, self.session_id)
+
+    def as_dict(self) -> dict[str, str | int]:
+        """Return the exact durable JSON projection."""
+
+        return {
+            "principal_id": self.principal_id,
+            "epoch": self.epoch,
+            "project_ref": self.project_ref,
+            "session_id": self.session_id,
+        }
+
+    def serialize(self) -> str:
+        """Serialize deterministically for Avibe-owned SQLite state."""
+
+        return json.dumps(self.as_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+    to_json = serialize
+
+    @classmethod
+    def deserialize(cls, value: str) -> "ProviderSessionRef":
+        """Deserialize a reference without accepting an alternate key shape."""
+
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError):
+            raise ValueError("invalid provider session reference") from None
+        if not isinstance(payload, dict) or set(payload) != {
+            "principal_id",
+            "epoch",
+            "project_ref",
+            "session_id",
+        }:
+            raise ValueError("invalid provider session reference")
+        return cls(
+            principal_id=payload["principal_id"],
+            epoch=payload["epoch"],
+            project_ref=payload["project_ref"],
+            session_id=payload["session_id"],
+        )
+
+    from_serialized = deserialize
+
+
+@dataclass(frozen=True)
+class MemorySessionState:
+    """Durable coordinator scaffolding for one provider session."""
+
+    provider_session_ref: ProviderSessionRef
+    generation: int = 0
+    first_unflushed_at: str | None = None
+    last_add_ack_at: str | None = None
+    due_at: str | None = None
+    next_attempt_at: str | None = None
+    flush_state: MemoryFlushState = "not_due"
+    watermark: int = 0
+    fence_epoch: int = 0
+    fence_owner: str | None = None
+    fence_acquired_at: str | None = None
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class MemorySettlementRecord:
+    """Append-only Avibe evidence for an add or flush outcome."""
+
+    provider_session_ref: ProviderSessionRef
+    generation: int
+    fence_epoch: int
+    operation_id: str
+    operation_kind: MemoryOperationKind
+    outcome: MemorySettlementOutcome
+    observed_at: str
+    last_known_state: str | None = None
+    last_observed_outcome: MemoryObservedOutcome | None = None
+    request_id: str | None = None
+    error_code: str | None = None
+    watermark_before: int | None = None
+    watermark_after: int | None = None
+    settled_at: str | None = None
+    confirmed_watermark_ms: int | None = None
+    flush_state: MemoryFlushState | None = None
+    source: MemorySettlementSource | None = None
+    settlement_id: str = ""
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("generation", self.generation),
+            ("fence_epoch", self.fence_epoch),
+            ("watermark_before", self.watermark_before),
+            ("watermark_after", self.watermark_after),
+            ("confirmed_watermark_ms", self.confirmed_watermark_ms),
+        ):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"settlement {name} must be a non-negative integer")
+        if not self.operation_id:
+            raise ValueError("settlement operation_id must be non-empty")
+        if not self.settlement_id:
+            object.__setattr__(self, "settlement_id", uuid.uuid4().hex)
 
 
 @dataclass(frozen=True)

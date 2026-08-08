@@ -18,8 +18,11 @@ from core.memory.types import (
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     MemoryResult,
+    MemorySessionState,
+    MemorySettlementRecord,
     MemoryStatus,
     OperationFailed,
+    ProviderSessionRef,
 )
 
 __all__ = [
@@ -40,6 +43,9 @@ __all__ = [
     "MemoryProfileExplicitInfo",
     "MemoryProfileTrait",
     "MemoryResult",
+    "MemorySessionState",
+    "MemorySettlementRecord",
     "MemoryStatus",
     "OperationFailed",
+    "ProviderSessionRef",
 ]

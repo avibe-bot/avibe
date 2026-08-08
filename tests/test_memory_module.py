@@ -14,6 +14,7 @@ import pytest
 
 from config import paths
 from core.memory.everos import (
+    AddAck,
     FakeMemoryProvider,
     FlushRejected,
     FlushSucceeded,
@@ -351,6 +352,40 @@ async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
     assert store.ensure_meta().last_success_at is not None
 
 
+async def test_malformed_add_ack_retains_payload_and_sets_manual_required_fence(
+    tmp_path: Path,
+) -> None:
+    class MalformedProvider(FakeMemoryProvider):
+        async def add(self, capture):
+            del capture
+            return AddAck(request_id="partial-request", status=None)
+
+    provider = MalformedProvider()
+    module, store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request(source="malformed")) == CaptureAccepted()
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert (row.state, row.attempts, row.payload_text, row.last_error) == (
+        "pending",
+        0,
+        "remember this",
+        "memory_provider_response_invalid",
+    )
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    settlement = store.list_flush_settlements(row.provider_session_ref)
+    assert len(settlement) == 1
+    assert (settlement[0].outcome, settlement[0].request_id) == (
+        "manual_required",
+        "partial-request",
+    )
+    assert provider.flushes == []
+    assert await worker.drain_once() == 0
+
+
 async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breaker(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="one")) == CaptureAccepted()
@@ -416,7 +451,9 @@ async def test_processing_breaker_survives_restart_and_half_open_admits_one_capt
     assert store.list_queue_rows()[2].state == "delivered"
 
 
-async def test_processing_breaker_alerts_once_and_emits_recovery_edge(tmp_path: Path) -> None:
+async def test_unknown_flush_fences_same_session_after_processing_breaker(
+    tmp_path: Path,
+) -> None:
     module, store, provider = _module(tmp_path)
     for source in ("one", "two", "three"):
         assert await module.capture(_request(source=source)) == CaptureAccepted()
@@ -447,11 +484,14 @@ async def test_processing_breaker_alerts_once_and_emits_recovery_edge(tmp_path: 
     current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
     assert await worker.drain(max_rows=3) == 1
     current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await worker.drain(max_rows=3) == 1
+    assert await worker.drain(max_rows=3) == 0
 
-    assert [event[:2] for event in events] == [("fault", "engine"), ("recovered", None)]
+    assert [event[:2] for event in events] == [("fault", "engine")]
     assert events[0][3] == 2
-    assert events[1][3] == 0
+    assert store.list_queue_rows()[2].state == "pending"
+    state = store.get_session_flush_state(store.list_queue_rows()[2].provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
 
 
 async def test_failed_processing_alert_is_retried_on_next_activation(tmp_path: Path) -> None:
@@ -628,7 +668,7 @@ async def test_system_outage_pauses_claims_without_consuming_attempts(tmp_path: 
     assert store.ensure_meta().last_error == "memory_sidecar_unavailable"
 
 
-async def test_ambiguous_failure_uses_health_to_preserve_attempt_budget(tmp_path: Path) -> None:
+async def test_ambiguous_failure_sets_manual_required_fence(tmp_path: Path) -> None:
     class AmbiguousOutage(FakeMemoryProvider):
         async def add(self, capture):
             del capture
@@ -645,7 +685,10 @@ async def test_ambiguous_failure_uses_health_to_preserve_attempt_budget(tmp_path
 
     assert row.state == "pending"
     assert row.attempts == 0
-    assert row.last_error == "memory_sidecar_unavailable"
+    assert row.last_error == "memory_processing_failed"
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
 
 
 async def test_processing_endpoint_outage_pauses_claims_without_consuming_attempts(tmp_path: Path) -> None:
@@ -914,7 +957,9 @@ async def test_status_precedence(tmp_path: Path) -> None:
     assert (await clearing.status()).state == "clearing"
 
 
-async def test_latest_flush_success_closes_stale_timeout_but_keeps_dead_history(tmp_path: Path) -> None:
+async def test_provider_timeout_retains_payload_and_blocks_same_session_replay(
+    tmp_path: Path,
+) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="failed", text="failed delivery")) == CaptureAccepted()
     provider.ingest_failures.extend(
@@ -934,21 +979,20 @@ async def test_latest_flush_success_closes_stale_timeout_but_keeps_dead_history(
     )
 
     await worker.drain_once()
-    current += timedelta(seconds=31)
-    await worker.drain_once()
-    current += timedelta(minutes=2, seconds=1)
-    await worker.drain_once()
-    assert store.list_queue_rows()[0].state == "dead"
+    row = store.list_queue_rows()[0]
+    assert (row.state, row.attempts, row.payload_text, row.last_error) == (
+        "pending",
+        0,
+        "failed delivery",
+        "memory_provider_timeout",
+    )
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
 
-    assert await module.capture(_request(source="succeeded", text="successful delivery")) == CaptureAccepted()
-    assert await worker.drain_once() == 1
-
-    status = await module.status()
-    assert status.state == "ready"
-    assert status.error is None
-    assert status.dead == 1
-    assert status.succeeded == 1
-    assert status.last_flush_observation == "succeeded"
+    assert await module.capture(_request(source="newer", text="newer delivery")) == CaptureAccepted()
+    assert await worker.drain_once() == 0
+    assert store.list_queue_rows()[1].state == "pending"
 
 
 async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_path: Path) -> None:
@@ -999,7 +1043,7 @@ async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_
         (FlushUnknown("timeout"), "unknown"),
     ],
 )
-async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
+async def test_latest_flush_observation_supersedes_stale_delivery_failure(
     tmp_path: Path,
     verdict,
     expected_observation: str,
@@ -1007,7 +1051,7 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="failed")) == CaptureAccepted()
     provider.ingest_failures.extend(
-        [MemoryProviderFailure("memory_provider_timeout")] * 3
+        [MemoryProviderFailure("memory_processing_failed")] * 3
     )
     current = datetime.now(UTC).replace(microsecond=0)
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
@@ -1028,7 +1072,7 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     ).settled
     delivered_status = await module.status()
     assert delivered_status.state == "degraded"
-    assert delivered_status.error == "memory_provider_timeout"
+    assert delivered_status.error == "memory_processing_failed"
 
     assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
     assert store.record_flush_verdict(
@@ -1048,9 +1092,9 @@ async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> 
     assert await module.capture(_request(source="failed", session="private-session", text="private text")) == CaptureAccepted()
     provider.ingest_failures.extend(
         [
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_processing_failed"),
+            MemoryProviderFailure("memory_processing_failed"),
+            MemoryProviderFailure("memory_processing_failed"),
         ]
     )
     current = datetime.now(UTC).replace(microsecond=0)
@@ -1073,7 +1117,7 @@ async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> 
         MemoryFailureLogEntry(
             kind="delivery_abandoned",
             occurred_at=expected_at,
-            error_code="memory_provider_timeout",
+            error_code="memory_processing_failed",
             request_id=None,
             attempts=3,
         ),
@@ -1572,7 +1616,9 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
     assert "ProviderCapture" not in memory.__all__
 
 
-async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_work(tmp_path: Path) -> None:
+async def test_healthy_timeout_sets_manual_required_and_blocks_same_session(
+    tmp_path: Path,
+) -> None:
     class PoisonProvider(FakeMemoryProvider):
         async def add(self, capture):
             if capture.text == "poison":
@@ -1594,19 +1640,21 @@ async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_wo
     )
 
     assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].attempts == 1
-    current += timedelta(seconds=31)
-    assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].attempts == 2
-    current += timedelta(minutes=2, seconds=1)
-    assert await worker.drain_once() == 1
     poison = store.list_queue_rows()[0]
-    assert (poison.state, poison.attempts, poison.payload_text) == ("dead", 3, None)
+    assert (poison.state, poison.attempts, poison.payload_text, poison.last_error) == (
+        "pending",
+        0,
+        "poison",
+        "memory_provider_timeout",
+    )
+    state = store.get_session_flush_state(poison.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
 
-    assert await worker.drain_once() == 1
+    assert await worker.drain_once() == 0
     later = store.list_queue_rows()[1]
-    assert later.state == "delivered"
-    assert [capture.text for capture in provider.captures] == ["later"]
+    assert later.state == "pending"
+    assert provider.captures == []
 
 
 async def test_clear_rejects_a_missing_or_unsentinelized_provider_root(tmp_path: Path) -> None:
