@@ -831,7 +831,14 @@ export const ChatPage: React.FC = () => {
         vaultAnchorRetryExhaustedRef.current.delete(fetchKey);
         vaultAnchorRetryWaitingRef.current.delete(fetchKey);
         const incoming = res.messages.filter(isTranscriptMessage);
-        if (incoming.length === 0) return;
+        if (incoming.length === 0) {
+          // A Turn anchor can be known before its initial Delivery is accepted.
+          // Release the key and wait for the next transcript update to retry once
+          // the around-turn lookup can resolve a durable message.
+          deferredByMissingReply = true;
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
         const existing = messagesRef.current;
         const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
         const preservesVisibleAnchor = [...provisionPlacementRef.current.byMessageId.values()].some(
