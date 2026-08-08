@@ -286,7 +286,11 @@ def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path
     )
     settlements = store.list_flush_settlements(delivered.provider_session_ref)
     flush_settlement = next(item for item in settlements if item.operation_kind == "flush")
-    assert (flush_settlement.generation, flush_settlement.confirmed_watermark_ms) == (0, 1_001)
+    assert (
+        flush_settlement.generation,
+        flush_settlement.confirmed_watermark_ms,
+        flush_settlement.flush_state,
+    ) == (0, 1_001, "settled")
     assert store.record_settlement(flush_settlement) is False
 
 
@@ -350,7 +354,8 @@ def test_extracted_add_records_generation_settlement_and_advances_watermark(tmp_
         settlement[0].generation,
         settlement[0].outcome,
         settlement[0].confirmed_watermark_ms,
-    ) == ("add", 0, "succeeded", 2_000)
+        settlement[0].flush_state,
+    ) == ("add", 0, "succeeded", 2_000, "settled")
 
 
 def test_extracted_add_settles_its_pinned_next_generation(tmp_path: Path) -> None:
@@ -578,6 +583,8 @@ def test_claim_due_blocks_new_adds_until_due_generation_is_retried(tmp_path: Pat
         max_provider_timestamp_ms=4_102_444_800_000,
     )
     assert second.outcome == "accepted"
+    assert second.row is not None
+    assert second.row.flush_generation == first_token.generation + 1
     assert store.claim_due(lease_owner="blocked", now="2026-01-01T00:00:03.000Z") is None
     assert store.list_due_flush_sessions(now="2026-01-01T00:00:03.000Z") == ()
     assert store.list_due_flush_sessions(now="2026-01-01T00:00:32.000Z") == (

@@ -150,7 +150,9 @@ CREATE TABLE IF NOT EXISTS memory_flush_settlements (
         confirmed_watermark_ms IS NULL OR confirmed_watermark_ms >= 0
     ),
     flush_state TEXT CHECK (
-        flush_state IS NULL OR flush_state IN ('not_due', 'due', 'in_flight', 'manual_required')
+        flush_state IS NULL OR flush_state IN (
+            'not_due', 'settled', 'due', 'in_flight', 'manual_required'
+        )
     ),
     source TEXT CHECK (source IS NULL OR source IN ('add', 'flush')),
     observed_at TEXT NOT NULL,

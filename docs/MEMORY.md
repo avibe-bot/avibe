@@ -45,6 +45,9 @@ Memory coordination is keyed by the canonical provider session reference:
 principal, Memory epoch, project, and provider session ID. Each session keeps a
 durable generation, watermark, and fence. A flush records the exact generation
 and fence token it acquired; a late result cannot settle a newer operation.
+Confirmed flush and natural-boundary add outcomes append settlement evidence
+with `flush_state=settled`; the live session state remains independently
+projected as `not_due`.
 
 While a session flush is in flight, its queued rows cannot be claimed into that
 flush; new captures wait in the next generation. A connection failure proven to

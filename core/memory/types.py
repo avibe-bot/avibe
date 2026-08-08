@@ -16,6 +16,9 @@ MemorySettlementOutcome = Literal["succeeded", "rejected", "unknown", "manual_re
 MemoryObservedOutcome = MemorySettlementOutcome | Literal["in_flight"]
 MemorySettlementSource = Literal["add", "flush"]
 MemoryFlushState = Literal["not_due", "due", "in_flight", "manual_required"]
+MemorySettlementState = Literal[
+    "not_due", "settled", "due", "in_flight", "manual_required"
+]
 MemoryFailureKind = Literal[
     "delivery_abandoned",
     "distillation_rejected",
@@ -189,7 +192,7 @@ class MemorySettlementRecord:
     watermark_after: int | None = None
     settled_at: str | None = None
     confirmed_watermark_ms: int | None = None
-    flush_state: MemoryFlushState | None = None
+    flush_state: MemorySettlementState | None = None
     source: MemorySettlementSource | None = None
     settlement_id: str = ""
 

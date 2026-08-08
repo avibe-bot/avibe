@@ -279,10 +279,10 @@ def test_flush_maps_non_2xx_envelopes_to_rejected(response: httpx.Response, expe
     ("failure_type", "expected"),
     [
         (httpx.ReadTimeout, FlushUnknown("timeout")),
-        (httpx.ConnectError, FlushUnknown("transport")),
+        (httpx.ConnectError, FlushPreSubmission(reason="transport")),
     ],
 )
-def test_flush_maps_timeout_and_transport_to_unknown(failure_type, expected) -> None:
+def test_flush_maps_read_timeout_and_connection_failure(failure_type, expected) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise failure_type("failed", request=request)
 

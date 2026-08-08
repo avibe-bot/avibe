@@ -369,7 +369,7 @@ class MemoryStore:
                 first_unflushed_at=now,
             )
             flush_generation = session_state.generation + int(
-                session_state.flush_state == "in_flight"
+                session_state.flush_state in {"due", "in_flight"}
             )
             conn.execute(
                 """
@@ -774,7 +774,7 @@ class MemoryStore:
                         watermark_before=state.watermark,
                         watermark_after=watermark_after,
                         confirmed_watermark_ms=watermark_after,
-                        flush_state="not_due",
+                        flush_state="settled",
                         source="add",
                     ),
                 )
@@ -1201,7 +1201,7 @@ class MemoryStore:
                     watermark_after=watermark if observation == "succeeded" else state.watermark,
                     confirmed_watermark_ms=watermark if observation == "succeeded" else None,
                     flush_state=(
-                        "not_due"
+                        "settled"
                         if observation == "succeeded"
                         else "due"
                         if observation == "rejected" and retryable_rejection and not retry_exhausted
