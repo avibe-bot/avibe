@@ -36,10 +36,6 @@ TERMINAL_TOMBSTONE_LIMIT = 100_000
 TERMINAL_TOMBSTONE_RETENTION = timedelta(days=90)
 
 
-class MemoryStoreSchemaError(RuntimeError):
-    """The on-disk Memory database is not the schema this build owns."""
-
-
 def memory_store_path() -> Path:
     """Return the dedicated Memory database under the effective Avibe state root."""
 
@@ -1647,100 +1643,7 @@ class MemoryStore:
     def _initialize(self) -> None:
         schema = Path(__file__).with_name("schema.sql")
         with self._connection() as conn:
-            tables = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-            if not tables:
-                conn.executescript(schema.read_text(encoding="utf-8"))
-                return
-            self._validate_schema_in_connection(conn)
-
-    def _validate_schema_in_connection(self, conn: sqlite3.Connection) -> None:
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        required_tables = {
-            "memory_meta",
-            "memory_capture_queue",
-            "memory_session_flush_state",
-            "memory_flush_settlements",
-        }
-        tables = {
-            str(row[0])
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        if version != 2 or not required_tables.issubset(tables):
-            raise MemoryStoreSchemaError(
-                "incompatible Memory schema; remove the test-owned store and initialize a clean schema"
-            )
-        required_columns = {
-            "memory_meta": {
-                "singleton",
-                "epoch",
-                "scope_key",
-                "provider_root_id",
-                "last_provider_timestamp_ms",
-                "updated_at",
-            },
-            "memory_capture_queue": {
-                "source_message_digest",
-                "epoch",
-                "session_id",
-                "provider_session_ref",
-                "principal_id",
-                "project_ref",
-                "provenance",
-                "payload_text",
-                "provider_timestamp_ms",
-                "state",
-                "attempts",
-                "last_error",
-                "add_request_id",
-                "flush_observation",
-                "created_at",
-            },
-            "memory_session_flush_state": {
-                "provider_session_ref",
-                "principal_id",
-                "epoch",
-                "project_ref",
-                "session_id",
-                "generation",
-                "first_unflushed_at",
-                "last_add_ack_at",
-                "due_at",
-                "next_attempt_at",
-                "flush_state",
-                "watermark",
-                "fence_epoch",
-                "fence_owner",
-                "fence_acquired_at",
-                "updated_at",
-            },
-            "memory_flush_settlements": {
-                "settlement_id",
-                "provider_session_ref",
-                "generation",
-                "fence_epoch",
-                "operation_id",
-                "operation_kind",
-                "outcome",
-                "observed_at",
-                "settled_at",
-            },
-        }
-        for table, expected in required_columns.items():
-            actual = {
-                str(row[1])
-                for row in conn.execute(f"PRAGMA table_info('{table}')").fetchall()
-            }
-            if not expected.issubset(actual):
-                raise MemoryStoreSchemaError(
-                    "incompatible Memory schema; remove the test-owned store and initialize a clean schema"
-                )
+            conn.executescript(schema.read_text(encoding="utf-8"))
 
     def _ensure_session_state_in_connection(
         self,

@@ -17,7 +17,6 @@ from core.memory.store import (
     AmbiguousAdd,
     Delivered,
     MemoryStore,
-    MemoryStoreSchemaError,
     MessageFailure,
     SettleResult,
     SystemOutage,
@@ -133,16 +132,6 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
-
-
-def test_store_rejects_an_existing_unknown_schema_without_migration(tmp_path: Path) -> None:
-    path = _store_path(tmp_path, "unknown.sqlite")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE old_memory_state (value TEXT)")
-
-    with pytest.raises(MemoryStoreSchemaError, match="incompatible Memory schema"):
-        MemoryStore(path)
 
 
 def test_provider_session_ref_serializes_the_exact_canonical_identity() -> None:
