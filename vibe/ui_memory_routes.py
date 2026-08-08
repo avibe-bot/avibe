@@ -369,6 +369,17 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
+    @app.get("/api/memory/maintenance", include_in_schema=False)
+    async def memory_maintenance_get(starlette_request: FastAPIRequest):
+        async def handler():
+            if _memory_ui_user_key() is None:
+                return _memory_forbidden_response()
+            from vibe import internal_client
+
+            return await _memory_internal_response(internal_client.memory_maintenance)
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
     @app.get("/api/memory/profile", include_in_schema=False)
     async def memory_profile_get(starlette_request: FastAPIRequest):
         async def handler():
@@ -442,16 +453,25 @@ def register_memory_routes(app) -> None:
                 payload = await starlette_request.json()
             except Exception:
                 payload = None
-            if not isinstance(payload, dict) or not set(payload).issubset({"query", "limit"}):
+            if not isinstance(payload, dict) or set(payload) != {"query", "policy"}:
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             query = payload.get("query")
-            limit = payload.get("limit", 8)
-            if not isinstance(query, str) or not isinstance(limit, int) or isinstance(limit, bool):
+            if not isinstance(query, str):
+                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+            from core.memory.types import RecallPolicy
+
+            try:
+                policy = RecallPolicy.from_payload(payload.get("policy"))
+            except (TypeError, ValueError):
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             from vibe import internal_client
 
             return await _memory_internal_response(
-                lambda: internal_client.memory_search(query, limit, user_key=user_key)
+                lambda: internal_client.memory_search(
+                    query,
+                    policy.payload(),
+                    user_key=user_key,
+                )
             )
 
         return await app.dispatch_native_request(starlette_request, handler)
@@ -487,6 +507,58 @@ def register_memory_routes(app) -> None:
 
             return await _memory_internal_response(
                 lambda: internal_client.memory_clear(user_key=user_key)
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    async def memory_clear_recovery_response(
+        starlette_request: FastAPIRequest,
+        *,
+        action: str,
+    ) -> Response:
+        user_key = _memory_ui_user_key()
+        if user_key is None:
+            return _memory_forbidden_response()
+        try:
+            payload = await starlette_request.json()
+        except Exception:
+            payload = None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"operation_id"}
+            or not isinstance(payload.get("operation_id"), str)
+            or not 1 <= len(payload["operation_id"]) <= 128
+        ):
+            return _memory_response(
+                {"status": "failed", "error": "memory_invalid_input"},
+                status_code=400,
+            )
+        from vibe import internal_client
+
+        return await _memory_internal_response(
+            lambda: internal_client.memory_clear_recovery(
+                payload["operation_id"],
+                action=action,
+                user_key=user_key,
+            )
+        )
+
+    @app.post("/api/memory/clear/resume", include_in_schema=False)
+    async def memory_clear_resume_post(starlette_request: FastAPIRequest):
+        async def handler():
+            return await memory_clear_recovery_response(
+                starlette_request,
+                action="resume",
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.post("/api/memory/clear/abort", include_in_schema=False)
+    async def memory_clear_abort_post(starlette_request: FastAPIRequest):
+        async def handler():
+            return await memory_clear_recovery_response(
+                starlette_request,
+                action="abort",
             )
 
         return await app.dispatch_native_request(starlette_request, handler)

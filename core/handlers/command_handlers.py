@@ -535,6 +535,16 @@ class CommandHandlers(BaseHandler):
                     return
             session_key = self._get_session_key(context)
             session_anchor = self._session_anchor_for_new(context)
+            # ``/new`` is the IM lifecycle boundary with the same trusted raw
+            # anchor used by capture. Workbench archive has no equivalent
+            # persisted Memory identity, so it intentionally does not reuse this
+            # hook. A stalled or failed flush must never block the normal reset.
+            final_flush = getattr(self.controller, "final_flush_memory_session", None)
+            if callable(final_flush):
+                try:
+                    await final_flush(context, session_anchor, deadline_seconds=5.0)
+                except Exception:
+                    logger.debug("Memory final flush failed before /new", exc_info=True)
             sessions = getattr(self.controller, "sessions", None)
             clear_base = getattr(sessions, "clear_session_base", None)
             # ``/new`` deletes the session rows that scheduled tasks and watches may

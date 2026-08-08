@@ -642,8 +642,9 @@
   "memory": {
     "cli": {
       "error": "Memory {operation} failed: {code}",
-      "status": "Memory status: {state}",
-      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "status": "Memory source: {state}",
+      "provider": "EverOS {version}: {state}",
+      "sourceReason": "Source reason: {reason}",
       "fault": {
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."

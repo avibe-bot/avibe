@@ -16,6 +16,7 @@ from core.memory.sidecar import (
 
 
 PROJECT = "p-22222222222222222222222222222222"
+SESSION_ID = f"src--{'1' * 64}--e1"
 
 
 def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) -> None:
@@ -174,20 +175,19 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
         "app_id": "avibe",
         "project_id": PROJECT,
         "query": "profile",
-        "method": "hybrid",
+        "method": "keyword",
         "top_k": 1,
-        "include_profile": True,
+        "include_profile": False,
         "enable_llm_rerank": False,
+        "filters": {"session_id": SESSION_ID},
     }
     get_payload = {
         "user_id": "u-11111111111111111111111111111111",
         "app_id": "avibe",
-        "project_id": PROJECT,
+        "project_id": "default",
         "memory_type": "profile",
         "page": 1,
-        "page_size": 20,
-        "sort_by": "timestamp",
-        "sort_order": "desc",
+        "page_size": 1,
     }
 
     async def exercise_guard() -> None:
@@ -279,13 +279,21 @@ def test_sidecar_projects_disabled_recorder_when_capture_is_off() -> None:
 
 def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     principal = "u-11111111111111111111111111111111"
-    payload = (
-        b'{"session_id":"src--one--e1","app_id":"avibe","project_id":"'
-        + PROJECT.encode()
-        + b'",'
-        b'"messages":[{"sender_id":"u-11111111111111111111111111111111","role":"user","timestamp":1725000001234,'
-        b'"content":"text"}]}'
-    )
+    payload = json.dumps(
+        {
+            "session_id": SESSION_ID,
+            "app_id": "avibe",
+            "project_id": PROJECT,
+            "messages": [
+                {
+                    "sender_id": principal,
+                    "role": "user",
+                    "timestamp": 1_725_000_001_234,
+                    "content": "text",
+                }
+            ],
+        }
+    ).encode()
 
     search = json.dumps(
         {
@@ -293,22 +301,21 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
             "app_id": "avibe",
             "project_id": PROJECT,
             "query": "profile",
-            "method": "hybrid",
+            "method": "vector",
             "top_k": 1,
-            "include_profile": True,
+            "include_profile": False,
             "enable_llm_rerank": False,
+            "filters": {"session_id": SESSION_ID},
         }
     ).encode()
     get = json.dumps(
         {
             "user_id": "u-22222222222222222222222222222222",
             "app_id": "avibe",
-            "project_id": PROJECT,
+            "project_id": "default",
             "memory_type": "profile",
             "page": 1,
-            "page_size": 20,
-            "sort_by": "timestamp",
-            "sort_order": "desc",
+            "page_size": 1,
         }
     ).encode()
 
@@ -323,13 +330,40 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
+def test_sidecar_guard_rejects_untrusted_search_scope_and_unbudgeted_agentic() -> None:
+    search = {
+        "user_id": "u-11111111111111111111111111111111",
+        "app_id": "avibe",
+        "project_id": PROJECT,
+        "query": "memory",
+        "method": "keyword",
+        "top_k": 8,
+        "include_profile": True,
+        "enable_llm_rerank": False,
+    }
+
+    for invalid in (
+        {**search, "method": "agentic"},
+        {**search, "filters": {"session_id": "raw-session"}},
+        {**search, "filters": {"project_id": PROJECT}},
+    ):
+        assert (
+            _request_rejection(
+                "POST",
+                "/api/v2/memory/search",
+                json.dumps(invalid).encode(),
+            )
+            == "search"
+        )
+
+
 def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path) -> None:
     attachments_root = tmp_path / "attachments" / "avibe"
     asset = attachments_root / "session-1" / "diagram.png"
     asset.parent.mkdir(parents=True)
     asset.write_bytes(b"png")
     payload = {
-        "session_id": "src--one--e1",
+        "session_id": SESSION_ID,
         "app_id": "avibe",
         "project_id": PROJECT,
         "messages": [
@@ -390,7 +424,7 @@ def test_sidecar_guard_rejects_an_extension_the_runtime_cannot_parse(tmp_path: P
     asset.parent.mkdir(parents=True)
     asset.write_bytes(b"{}")
     payload = {
-        "session_id": "src--one--e1",
+        "session_id": SESSION_ID,
         "app_id": "avibe",
         "project_id": PROJECT,
         "messages": [

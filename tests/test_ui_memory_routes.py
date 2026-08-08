@@ -6,6 +6,7 @@ import time
 import urllib.parse
 
 import httpx
+import pytest
 
 from config.v2_config import (
     AgentsConfig,
@@ -262,7 +263,18 @@ def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> Non
     _save_config(tmp_path)
 
     async def status():
-        return {"status_code": 200, "body": {"state": "disabled", "data_exists": False}}
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "source": {
+                    "status": "unavailable",
+                    "observed_at": None,
+                    "reason": "memory_disabled",
+                },
+                "health": None,
+            },
+        }
 
     monkeypatch.setattr(internal_client, "memory_status", status)
     response = app.test_client().get(
@@ -273,7 +285,45 @@ def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> Non
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"state": "disabled", "data_exists": False}
+    assert response.get_json() == {
+        "status": "ok",
+        "source": {
+            "status": "unavailable",
+            "observed_at": None,
+            "reason": "memory_disabled",
+        },
+        "health": None,
+    }
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def maintenance():
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "data_exists": True,
+                "clear_recovery": {
+                    "operation_id": "clear-42",
+                    "state": "recovery_needed",
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_maintenance", maintenance)
+    response = app.test_client().get(
+        "/api/memory/maintenance",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["clear_recovery"]["operation_id"] == "clear-42"
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -285,16 +335,20 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
         return {
             "status_code": 200,
             "body": {
+                "status": "ok",
                 "items": [
                     {
                         "kind": "delivery_abandoned",
+                        "state": "manual_required",
+                        "operation": "add",
                         "occurred_at": "2026-01-01T00:00:00.000Z",
                         "error_code": "memory_provider_timeout",
                         "request_id": None,
                         "attempts": 3,
+                        "generation": 1,
                     }
                 ],
-                "retention_days": 90,
+                "recovery": None,
             },
         }
 
@@ -319,13 +373,13 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
     assert forwarded.status_code == 403
 
 
-def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypatch, tmp_path) -> None:
+def test_memory_search_requires_csrf_and_only_forwards_query_and_policy(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    calls: list[tuple[str, int, str]] = []
+    calls: list[tuple[str, dict[str, object], str]] = []
 
-    async def search(query: str, limit: int, *, user_key: str):
-        calls.append((query, limit, user_key))
+    async def search(query: str, policy: dict[str, object], *, user_key: str):
+        calls.append((query, policy, user_key))
         return {"status_code": 200, "body": {"status": "ok", "items": [], "warnings": []}}
 
     monkeypatch.setattr(internal_client, "memory_search", search)
@@ -333,14 +387,33 @@ def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypat
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     response = client.post(
         "/api/memory/search",
-        json={"query": "find this", "limit": 3},
+        json={
+            "query": "find this",
+            "policy": {
+                "mode": "keyword",
+                "max_results": 3,
+                "include_profile": False,
+                "include_current_session": False,
+            },
+        },
         headers=headers,
         base_url="http://127.0.0.1:15131",
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
     assert response.status_code == 200
-    assert calls == [("find this", 3, "avibe:local")]
+    assert calls == [
+        (
+            "find this",
+            {
+                "mode": "keyword",
+                "max_results": 3,
+                "include_profile": False,
+                "include_current_session": False,
+            },
+            "avibe:local",
+        )
+    ]
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -664,6 +737,37 @@ def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> N
 
     assert response.status_code == 403
     assert calls == []
+
+
+@pytest.mark.parametrize("action", ["resume", "abort"])
+def test_memory_clear_recovery_forwards_exact_operation(
+    monkeypatch,
+    tmp_path,
+    action: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[tuple[str, str, str]] = []
+
+    async def recover(operation_id: str, *, action: str, user_key: str):
+        calls.append((operation_id, action, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "aborted" if action == "abort" else "completed"},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_clear_recovery", recover)
+    client = app.test_client()
+    response = client.post(
+        f"/api/memory/clear/{action}",
+        json={"operation_id": "clear-42"},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("clear-42", action, "avibe:local")]
 
 
 def test_memory_runtime_restart_calls_the_dedicated_transport(monkeypatch, tmp_path) -> None:

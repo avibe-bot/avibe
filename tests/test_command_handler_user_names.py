@@ -298,6 +298,29 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
 
+    async def test_new_flushes_before_clear_and_continues_after_failed_flush(self):
+        controller = _StubController({"display_name": "小王"})
+        calls = []
+
+        async def _final_flush(context, raw_session_id, *, deadline_seconds):
+            calls.append(("flush", context, raw_session_id, deadline_seconds))
+            raise RuntimeError("provider unavailable")
+
+        async def _clear_sessions(session_key):
+            calls.append(("clear", session_key))
+            return {}
+
+        controller.final_flush_memory_session = _final_flush
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_new(context)
+
+        self.assertEqual(calls[0], ("flush", context, "wechat_wx-chat", 5.0))
+        self.assertEqual(calls[1], ("clear", "wechat::wx-chat"))
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+
     async def test_new_command_reports_paused_bound_definitions(self):
         """D2 — `/new` pauses definitions pinned to the session it clears, and says so.
 

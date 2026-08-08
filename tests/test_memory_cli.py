@@ -55,7 +55,14 @@ def test_memory_cli_passes_agent_session_to_the_internal_boundary(monkeypatch, c
 
     def status(**kwargs):
         calls.append(kwargs)
-        return {"status_code": 200, "body": {"state": "ready"}}
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "source": {"status": "available", "observed_at": "2026-08-08T12:00:00Z", "reason": None},
+                "health": None,
+            },
+        }
 
     monkeypatch.setattr(internal_client, "memory_status_sync", status)
 
@@ -85,25 +92,29 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
         lambda **_kwargs: {
             "status_code": 200,
             "body": {
-                "state": "degraded",
-                "pending": 1,
-                "processing": 0,
-                "awaiting_receipt": 2,
-                "succeeded": 3,
-                "receipt_unknown": 4,
-                "distill_failed": 5,
-                "dead": 6,
-                "missed": 7,
-                "processing_fault_kind": "credential",
+                "status": "ok",
+                "source": {
+                    "status": "stale",
+                    "observed_at": "2026-08-08T12:00:00Z",
+                    "reason": "memory_sidecar_unavailable",
+                },
+                "health": {
+                    "status": "ok",
+                    "version": "1.2.3",
+                    "capabilities": {},
+                    "disabled_features": [],
+                    "cascade": {},
+                    "recorder": {},
+                },
             },
         },
     )
 
     assert cli.cmd_memory(args) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "记忆状态：degraded",
-        "处理中：3；成功：3；结果未知：4；失败：5；已放弃：6；已跳过：7",
-        "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
+        "记忆来源：stale",
+        "EverOS 1.2.3：ok",
+        "来源原因：memory_sidecar_unavailable",
     ]
 
 

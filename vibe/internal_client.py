@@ -386,6 +386,19 @@ async def memory_failures(
     return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
 
 
+async def memory_maintenance(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "GET",
+        "/internal/memory/maintenance",
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_profile(
     *,
     user_key: str,
@@ -407,7 +420,7 @@ async def memory_profile(
 
 async def memory_search(
     query: str,
-    limit: int,
+    policy: dict[str, object],
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
@@ -416,7 +429,7 @@ async def memory_search(
     return await _memory_request(
         "POST",
         "/internal/memory/search",
-        payload={"query": query, "limit": limit},
+        payload={"query": query, "policy": policy},
         headers=_memory_user_key_headers(
             "POST",
             "/internal/memory/search",
@@ -487,6 +500,27 @@ async def memory_clear(
     )
 
 
+async def memory_clear_recovery(
+    operation_id: str,
+    *,
+    action: str,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    if action not in {"resume", "abort"}:
+        raise ValueError("invalid Memory clear recovery action")
+    path = f"/internal/memory/clear/{action}"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={"operation_id": operation_id},
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 def memory_status_sync(
     *,
     caller_session_id: str | None = None,
@@ -528,7 +562,15 @@ def memory_search_sync(
     return _memory_request_sync(
         "POST",
         "/internal/memory/search",
-        payload={"query": query, "limit": limit},
+        payload={
+            "query": query,
+            "policy": {
+                "mode": "hybrid",
+                "max_results": limit,
+                "include_profile": True,
+                "include_current_session": False,
+            },
+        },
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,

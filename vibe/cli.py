@@ -387,27 +387,30 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         print(i18n_t("memory.cli.remembered", language))
         return
     if operation == "status":
-        from core.memory.presentation import memory_status_buckets
-
-        buckets = memory_status_buckets(result)
-        print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
+        source = result.get("source")
+        source_state = source.get("status") if isinstance(source, dict) else None
         print(
             i18n_t(
-                "memory.cli.counts",
+                "memory.cli.status",
                 language,
-                syncing=buckets.syncing,
-                succeeded=buckets.succeeded,
-                unknown=buckets.unknown,
-                failed=buckets.failed,
-                dead=buckets.dead,
-                missed=buckets.missed,
+                state=source_state if isinstance(source_state, str) else "unavailable",
             )
         )
-        fault_kind = result.get("processing_fault_kind")
-        if fault_kind in {"credential", "engine"}:
-            print(i18n_t(f"memory.cli.fault.{fault_kind}", language))
-        # Status is principal-less, so it no longer carries profile_warning.
-        # ``vibe memory profile`` reports an empty profile from its own result.
+        health = result.get("health")
+        if isinstance(health, dict):
+            version = health.get("version")
+            provider_state = health.get("status")
+            print(
+                i18n_t(
+                    "memory.cli.provider",
+                    language,
+                    version=version if isinstance(version, str) else "unknown",
+                    state=provider_state if isinstance(provider_state, str) else "unknown",
+                )
+            )
+        reason = source.get("reason") if isinstance(source, dict) else None
+        if isinstance(reason, str) and reason:
+            print(i18n_t("memory.cli.sourceReason", language, reason=reason))
         return
 
     items = result.get("items")

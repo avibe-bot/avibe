@@ -1,7 +1,10 @@
-import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it, vi } from 'vitest';
+/* @vitest-environment jsdom */
 
-import type { MemoryStatus } from '../../../context/ApiContext';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+
+import type { MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
@@ -10,72 +13,108 @@ vi.mock('react-i18next', () => ({
 
 const STATUS: MemoryStatus = {
   status: 'ok',
-  state: 'ready',
-  buckets: { syncing: 2, succeeded: 17, unknown: 1, failed: 0, dead: 0, missed: 0 },
-  pending: 2,
-  processing: 0,
-  awaiting_receipt: 0,
-  succeeded: 17,
-  receipt_unknown: 1,
-  distill_failed: 0,
-  dead: 0,
-  missed: 0,
-  queue_plaintext_bytes: 128,
-  provider_disk_bytes: 2048,
-  last_success_at: null,
-  last_flush_observation: null,
-  last_flush_status: null,
-  last_flush_error_code: null,
-  last_flush_request_id: null,
-  last_flush_at: null,
-  processing_fault_kind: null,
-  processing_fault_since: null,
-  processing_alert_active: false,
-  error: null,
-  data_exists: true,
+  source: {
+    status: 'available',
+    observed_at: '2026-08-08T12:00:00Z',
+    reason: null,
+  },
+  health: {
+    status: 'ok',
+    version: '1.2.3',
+    capabilities: { keyword_search: true, agentic_search: false },
+    disabled_features: ['agentic_search'],
+    cascade: { status: 'unhealthy' },
+    recorder: { status: 'active' },
+  },
 };
 
-const renderPanel = (status: MemoryStatus | null, error: string | null) =>
-  renderToStaticMarkup(
-    <MemoryStatusPanel
-      status={status}
-      failures={[]}
-      failureRetentionDays={90}
-      failuresError={null}
-      loading={false}
-      error={error}
-      onRefresh={() => undefined}
-      onOpenSettings={() => undefined}
-    />,
-  );
+const MANUAL_FAILURE: MemoryFailureLogEntry = {
+  kind: 'attachment_release',
+  state: 'manual_required',
+  operation: 'flush',
+  occurred_at: '2026-08-08T12:01:00Z',
+  error_code: 'attachment_release_unknown',
+  attempts: 3,
+  generation: 7,
+  request_id: 'request-7',
+};
+
+const baseProps: React.ComponentProps<typeof MemoryStatusPanel> = {
+  status: STATUS,
+  failures: [],
+  recovery: null,
+  logSections: {
+    everos: { status: 'available', observed_at: '2026-08-08T12:00:00Z' },
+    capture: { status: 'stale', observed_at: '2026-08-08T11:00:00Z', reason: 'locked' },
+    calls: { status: 'unavailable', observed_at: null, reason: 'malformed' },
+  },
+  statusLoading: false,
+  failuresLoading: false,
+  statusError: null,
+  failuresError: null,
+  refreshPending: false,
+  recoveryAction: null,
+  onRefresh: vi.fn(),
+  onResumeClear: vi.fn(),
+  onAbortClear: vi.fn(),
+};
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe('MemoryStatusPanel', () => {
-  it('keeps the last status visible behind a polling error banner', () => {
-    const html = renderPanel(STATUS, 'poll failed');
+  it('renders runtime facts and every source without synthesizing a global state', () => {
+    render(<MemoryStatusPanel {...baseProps} />);
 
-    expect(html).toContain('poll failed');
-    expect(html).toContain('memory.status.state.ready');
-    expect(html).toContain('17');
+    expect(screen.getByText('1.2.3')).toBeTruthy();
+    expect(screen.getByText('unhealthy')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.sourceState.stale')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.sourceState.unavailable')).toBeTruthy();
+    expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
   });
 
-  it('renders only the error state before any status has loaded', () => {
-    const html = renderPanel(null, 'initial load failed');
+  it('keeps source-independent anomalies visible when health cannot be read', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={null}
+        statusError="health failed"
+        failures={[MANUAL_FAILURE]}
+      />,
+    );
 
-    expect(html).toContain('initial load failed');
-    expect(html).not.toContain('memory.status.state.ready');
+    expect(screen.getByText('health failed')).toBeTruthy();
+    expect(screen.getByText('attachment_release')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.manualRequiredReadOnly')).toBeTruthy();
   });
 
-  it('keeps credential recovery but does not duplicate the engine restart action', () => {
-    const credentialHtml = renderPanel(
-      { ...STATUS, processing_fault_kind: 'credential', processing_fault_since: '2026-08-04T00:00:00Z' },
-      null,
-    );
-    const engineHtml = renderPanel(
-      { ...STATUS, processing_fault_kind: 'engine', processing_fault_since: '2026-08-04T00:00:00Z' },
-      null,
+  it('renders manual_required as read-only without recovery commands', () => {
+    render(<MemoryStatusPanel {...baseProps} failures={[MANUAL_FAILURE]} />);
+
+    expect(screen.getByText('manual_required')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' })).toBeNull();
+  });
+
+  it('offers distinct resume and abort commands for clear recovery', async () => {
+    const onResumeClear = vi.fn();
+    const onAbortClear = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{ operation_id: 'clear-42', state: 'recovery_required' }}
+        onResumeClear={onResumeClear}
+        onAbortClear={onAbortClear}
+      />,
     );
 
-    expect(credentialHtml).toContain('memory.status.faultAction.credential');
-    expect(engineHtml).not.toContain('memory.status.faultAction.engine');
+    await user.click(screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' }));
+    await user.click(screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' }));
+
+    expect(onResumeClear).toHaveBeenCalledWith('clear-42');
+    expect(onAbortClear).toHaveBeenCalledWith('clear-42');
   });
 });

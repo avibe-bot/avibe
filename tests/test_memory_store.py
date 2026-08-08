@@ -59,7 +59,12 @@ def _row_for_source(store: MemoryStore, source_message_id: str):
     return store.get_queue_row(_keyed_digest(meta.scope_key, source_message_id))
 
 
-def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-session") -> str:
+def _deliver(
+    store: MemoryStore,
+    digest: str,
+    *,
+    session_ref: str = "shared-session",
+) -> ProviderSessionRef:
     result = store.enqueue_request(
         source_message_id=digest,
         session_id=session_ref,
@@ -79,7 +84,7 @@ def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-sess
         lease_owner="boot",
         now=_dt("2026-01-01T00:00:01.000Z"),
     ).settled
-    return result.row.session_id
+    return result.row.provider_session_ref
 
 
 def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None:
@@ -96,28 +101,33 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
         }
         assert {
             "memory_meta",
+            "memory_attachment_bundle",
             "memory_capture_queue",
-        }.issubset(tables)
-        assert not {
             "memory_session_flush_state",
             "memory_flush_settlements",
-        }.intersection(tables)
+        }.issubset(tables)
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
         assert {
+            "generation",
+            "lease_token",
             "principal_id",
             "project_ref",
             "provider_session_ref",
             "provenance",
             "payload_attachments",
+            "attachment_bundle_id",
             "add_request_id",
+            "add_status",
+        }.issubset(queue_columns)
+        assert not {
             "flush_observation",
             "flush_status",
             "flush_error_code",
             "flush_request_id",
             "flush_observed_at",
-        }.issubset(queue_columns)
+        }.intersection(queue_columns)
         assert {
             "processing_fault_kind",
             "processing_fault_since",
@@ -263,65 +273,111 @@ def test_reused_memory_session_anchor_is_namespaced_by_project(tmp_path: Path) -
     assert first.row.session_id != second.row.session_id
     assert first.row.project_ref != second.row.project_ref
 
-def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
+def test_store_settles_one_fenced_generation_not_individual_queue_rows(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "one")
     assert _deliver(store, "two") == session_ref
 
-    assert store.mark_flush_in_flight(session_ref, PROJECT) == 2
-    assert [row.flush_observation for row in store.list_queue_rows()] == ["in_flight", "in_flight"]
+    before = store.get_session_flush_state(session_ref)
+    assert before is not None
+    assert (before.state, before.open_generation, before.unflushed_count) == ("idle", 1, 2)
 
-    assert store.record_flush_verdict(
-        session_ref,
-        PROJECT,
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=session_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert lease.generation == 1
+    assert store.mark_flush_submission_started(lease, now="2026-01-01T00:00:02.500Z")
+    settled = store.settle_flush(
+        lease,
         FlushSucceeded(request_id="flush-request", status="extracted"),
         now="2026-01-01T00:00:03.000Z",
-    ) == 2
+    )
+    assert (settled.settled, settled.state) == (True, "idle")
+
     rows = store.list_queue_rows()
-    assert [row.flush_observation for row in rows] == ["succeeded", "succeeded"]
-    assert [row.flush_status for row in rows] == ["extracted", "extracted"]
-    assert [row.flush_request_id for row in rows] == ["flush-request", "flush-request"]
-    assert store.ensure_meta().last_success_at == "2026-01-01T00:00:03.000Z"
+    assert [row.state for row in rows] == ["delivered", "delivered"]
+    after = store.get_session_flush_state(session_ref)
+    assert after is not None
+    assert (after.state, after.open_generation, after.unflushed_count) == ("idle", 2, 0)
+    assert store.ensure_meta().last_success_at == "2026-01-01T00:00:01.000Z"
 
-    stats = store.queue_stats()
-    assert stats.awaiting_receipt == 0
-    assert stats.succeeded == 2
-    assert stats.receipt_unknown == 0
-    assert stats.distill_failed == 0
-    assert stats.last_flush_observation == "succeeded"
-    assert stats.last_flush_status == "extracted"
+    with sqlite3.connect(store.path) as conn:
+        settlement = conn.execute(
+            """
+            SELECT generation, operation_kind, observation, request_id
+            FROM memory_flush_settlements
+            WHERE operation_kind = 'flush'
+            """
+        ).fetchone()
+        assert settlement == (1, "flush", "settled", "flush-request")
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                "UPDATE memory_flush_settlements SET observation = 'rejected'"
+            )
 
 
-def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: Path) -> None:
+def test_store_records_rejected_and_unknown_as_generation_settlements(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     rejected_session = _deliver(store, "rejected", session_ref="rejected-session")
-    assert store.mark_flush_in_flight(rejected_session, PROJECT) == 1
-    assert store.record_flush_verdict(
-        rejected_session,
-        PROJECT,
+    rejected_lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=rejected_session,
+        force=True,
+    )
+    assert rejected_lease is not None
+    assert store.mark_flush_submission_started(
+        rejected_lease,
+        now="2026-01-01T00:00:02.500Z",
+    )
+    rejected = store.settle_flush(
+        rejected_lease,
         FlushRejected(
             request_id="reject-request",
             error_code="INTERNAL_ERROR",
             server_fault=True,
         ),
         now="2026-01-01T00:00:03.000Z",
-    ) == 1
+    )
+    assert (rejected.settled, rejected.state) == (True, "idle")
 
     unknown_session = _deliver(store, "unknown", session_ref="unknown-session")
-    assert store.mark_flush_in_flight(unknown_session, PROJECT) == 1
-    assert store.record_flush_verdict(
-        unknown_session,
-        PROJECT,
+    unknown_lease = store.acquire_flush(
+        now="2026-01-01T00:00:03.000Z",
+        provider_session_ref=unknown_session,
+        force=True,
+    )
+    assert unknown_lease is not None
+    assert store.mark_flush_submission_started(
+        unknown_lease,
+        now="2026-01-01T00:00:03.500Z",
+    )
+    unknown = store.settle_flush(
+        unknown_lease,
         FlushUnknown(reason="timeout"),
         now="2026-01-01T00:00:04.000Z",
-    ) == 1
+    )
+    assert (unknown.settled, unknown.state) == (True, "manual_required")
 
-    stats = store.queue_stats()
-    assert stats.succeeded == 0
-    assert stats.receipt_unknown == 1
-    assert stats.distill_failed == 1
-    assert stats.last_flush_observation == "unknown"
-    assert _row_for_source(store, "rejected").flush_error_code == "INTERNAL_ERROR"
+    rejected_state = store.get_session_flush_state(rejected_session)
+    unknown_state = store.get_session_flush_state(unknown_session)
+    assert rejected_state is not None and rejected_state.state == "idle"
+    assert unknown_state is not None and unknown_state.state == "manual_required"
+    with sqlite3.connect(store.path) as conn:
+        settlements = conn.execute(
+            """
+            SELECT observation, request_id, error_code
+            FROM memory_flush_settlements
+            WHERE operation_kind = 'flush'
+            ORDER BY observed_at
+            """
+        ).fetchall()
+    assert settlements == [
+        ("rejected", "reject-request", "INTERNAL_ERROR"),
+        ("manual_required", None, "memory_provider_timeout"),
+    ]
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
@@ -405,13 +461,27 @@ def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None
     assert still_claimed.attempts == 0
 
 
-def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted_sessions(
+def test_store_activation_recovery_fences_submitted_and_resumes_unsubmitted_flushes(
     tmp_path: Path,
 ) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
-    not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
-    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
+    submitted_ref = _deliver(store, "in-flight", session_ref="in-flight-session")
+    resumable_ref = _deliver(store, "not-attempted", session_ref="not-attempted-session")
+    submitted_lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=submitted_ref,
+        force=True,
+    )
+    resumable_lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=resumable_ref,
+        force=True,
+    )
+    assert submitted_lease is not None and resumable_lease is not None
+    assert store.mark_flush_submission_started(
+        submitted_lease,
+        now="2026-01-01T00:00:03.000Z",
+    )
 
     recovery = store.recover_after_boot(
         lease_owner="boot",
@@ -419,23 +489,40 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     )
 
     assert recovery.interrupted_flushes == 1
-    assert _row_for_source(store, "in-flight").flush_observation == "unknown"
-    # Sessions are listed only after interrupted flushes have been resolved;
-    # recover_after_boot owns that ordering.
-    assert recovery.not_attempted_sessions == ((not_attempted_session, PROJECT),)
+    assert recovery.due_flushes == 1
+    submitted_state = store.get_session_flush_state(submitted_ref)
+    resumable_state = store.get_session_flush_state(resumable_ref)
+    assert submitted_state is not None and submitted_state.state == "manual_required"
+    assert resumable_state is not None and resumable_state.state == "due"
+    assert store.list_flush_candidates(
+        now="2026-01-01T00:00:05.000Z",
+    ) == (resumable_ref,)
+    assert store.acquire_flush(
+        now="2026-01-01T00:00:05.000Z",
+        provider_session_ref=submitted_ref,
+        force=True,
+    ) is None
+    assert store.acquire_flush(
+        now="2026-01-01T00:00:05.000Z",
+        provider_session_ref=resumable_ref,
+    ) == resumable_lease
 
 
 def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path) -> None:
-    """Reclamation can block on SQLite contention; the flush stamp must postdate it.
-
-    A backdated `flush_observed_at` reorders the `ORDER BY
-    COALESCE(flush_observed_at, ...)` history, so the sampling point is part of
-    this method's contract rather than a caller's detail.
-    """
+    """Recovery timestamps submitted-flush evidence after reclaiming add leases."""
 
     store = MemoryStore(_store_path(tmp_path / "recovery-clock-order"))
-    in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
-    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
+    in_flight_ref = _deliver(store, "in-flight", session_ref="in-flight-session")
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=in_flight_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert store.mark_flush_submission_started(
+        lease,
+        now="2026-01-01T00:00:03.000Z",
+    )
     _enqueue(store, "stale-lease")
     assert store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z") is not None
     observed_states: list[str] = []
@@ -451,7 +538,20 @@ def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path)
 
     assert recovery.reclaimed == 1
     assert observed_states == ["manual_required"], "the clock was sampled before leases were reclaimed"
-    assert _row_for_source(store, "in-flight").flush_observed_at == "2026-01-01T00:00:09.000Z"
+    state = store.get_session_flush_state(in_flight_ref)
+    assert state is not None
+    assert (state.state, state.updated_at) == (
+        "manual_required",
+        "2026-01-01T00:00:09.000Z",
+    )
+    with sqlite3.connect(store.path) as conn:
+        observed_at = conn.execute(
+            """
+            SELECT observed_at FROM memory_flush_settlements
+            WHERE operation_kind = 'flush'
+            """
+        ).fetchone()[0]
+    assert observed_at == "2026-01-01T00:00:09.000Z"
 
 
 def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) -> None:
@@ -571,6 +671,21 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert completed.clear_in_progress is False
     assert completed.epoch == clearing.epoch
     assert store.list_queue_rows() == ()
+
+
+def test_clear_reset_replays_at_the_exact_target_epoch(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "queued")
+    pre_epoch = store.ensure_meta().epoch
+
+    first = store.reset_for_clear(target_epoch=pre_epoch + 1)
+    replay = store.reset_for_clear(target_epoch=pre_epoch + 1)
+
+    assert first.epoch == pre_epoch + 1
+    assert replay.epoch == first.epoch
+    assert store.list_queue_rows() == ()
+    with pytest.raises(ValueError):
+        store.reset_for_clear(target_epoch=pre_epoch + 3)
 
 
 @pytest.mark.parametrize("provenance", ["user_input", "agent"])

@@ -10,7 +10,6 @@ import type {
   MemoryLogDetailResult,
   MemoryLogEntry,
   MemoryLogListResult,
-  MemoryStatus,
 } from '../../../context/ApiContext';
 import {
   MemoryLogListContent,
@@ -124,40 +123,9 @@ const detailResult = (
   sections,
 });
 
-const status = (reason: string): MemoryStatus => ({
-  status: 'ok',
-  state: 'degraded',
-  buckets: { syncing: 0, succeeded: 0, unknown: 0, failed: 0, dead: 0, missed: 0 },
-  pending: 0,
-  processing: 0,
-  awaiting_receipt: 0,
-  succeeded: 0,
-  receipt_unknown: 0,
-  distill_failed: 0,
-  dead: 0,
-  missed: 0,
-  queue_plaintext_bytes: 0,
-  provider_disk_bytes: 0,
-  last_success_at: null,
-  last_flush_observation: null,
-  last_flush_status: null,
-  last_flush_error_code: null,
-  last_flush_request_id: null,
-  last_flush_at: null,
-  processing_fault_kind: null,
-  processing_fault_since: null,
-  processing_alert_active: false,
-  recorder: { state: 'degraded', reason },
-  error: null,
-  data_exists: true,
-});
-
 const renderPanel = (props?: Partial<React.ComponentProps<typeof MemoryLogPanel>>) =>
   render(
     <MemoryLogPanel
-      enabled
-      status={null}
-      onClearAll={() => undefined}
       {...props}
     />,
   );
@@ -281,23 +249,36 @@ describe('MemoryLogPanel', () => {
     expect(screen.getByText('Fast')).toBeTruthy();
   });
 
-  it('leaves transient recorder recovery to the page-level restart action', async () => {
+  it('reports source sections to the merged Processing Record view', async () => {
     api.getMemoryLog.mockResolvedValue(listResult([]));
-    renderPanel({ status: status('writer_failures') });
+    const onSectionsChange = vi.fn();
+    renderPanel({ onSectionsChange });
 
-    expect(await screen.findByText('memory.log.recorderDegraded')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
+    await screen.findByText('memory.log.empty');
+    await waitFor(() => expect(onSectionsChange).toHaveBeenLastCalledWith(sections));
   });
 
-  it('guides corrupt logs to the existing Clear confirmation', async () => {
-    api.getMemoryLog.mockResolvedValue(listResult([]));
-    const clear = vi.fn();
+  it('reloads the timeline when the merged view refresh token changes', async () => {
+    api.getMemoryLog
+      .mockResolvedValueOnce(listResult([entry('mc-initial', 'Initial')]))
+      .mockResolvedValueOnce(listResult([entry('mc-refreshed', 'Refreshed')]));
     const user = userEvent.setup();
-    renderPanel({ status: status('call_log_corrupt'), onClearAll: clear });
+    const Harness = () => {
+      const [refreshToken, setRefreshToken] = useState(0);
+      return (
+        <>
+          <button type="button" onClick={() => setRefreshToken((value) => value + 1)}>refresh-record</button>
+          <MemoryLogPanel refreshToken={refreshToken} />
+        </>
+      );
+    };
 
-    await user.click(await screen.findByRole('button', { name: 'memory.log.clearAction' }));
-    expect(clear).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
+    render(<Harness />);
+    expect(await screen.findByText('Initial')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'refresh-record' }));
+    expect(await screen.findByText('Refreshed')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('Initial')).toBeNull());
+    expect(api.getMemoryLog).toHaveBeenCalledTimes(2);
   });
 
   it('drops list and expanded payload state when Clear remounts the log', async () => {
@@ -312,12 +293,7 @@ describe('MemoryLogPanel', () => {
       return (
         <>
           <button type="button" onClick={() => setGeneration((value) => value + 1)}>clear-finished</button>
-          <MemoryLogPanel
-            key={generation}
-            enabled
-            status={null}
-            onClearAll={() => undefined}
-          />
+          <MemoryLogPanel key={generation} />
         </>
       );
     };
@@ -379,7 +355,11 @@ describe('Memory Log bounded helpers and static states', () => {
     render(
       <MemoryLogListContent
         entries={[entry('a')]}
-        sections={{ ...sections, everos: { status: 'partial', reason: 'runs_missing' } }}
+        sections={{
+          ...sections,
+          everos: { status: 'partial', reason: 'runs_missing' },
+          capture: { status: 'stale', observed_at: '2026-08-08T11:00:00Z', reason: 'busy' },
+        }}
         loading={false}
         loaded
         error={null}
@@ -393,6 +373,7 @@ describe('Memory Log bounded helpers and static states', () => {
     );
 
     expect(screen.getByText('memory.log.sectionPartial')).toBeTruthy();
+    expect(screen.getByText('memory.log.sectionStale')).toBeTruthy();
     expect(screen.getByText('memory.log.limitReached:200')).toBeTruthy();
     expect(screen.getAllByRole('status')).toHaveLength(2);
     expect(screen.queryByRole('button', { name: 'memory.log.loadMore' })).toBeNull();

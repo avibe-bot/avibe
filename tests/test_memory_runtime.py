@@ -32,7 +32,8 @@ from core.memory.artifact import (
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
 )
-from core.memory.everos import FakeMemoryProvider
+from core.memory.clear_journal import MemoryClearJournal
+from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
 import core.memory.process as memory_process
 import core.memory.runtime as memory_runtime
 from core.memory.process import (
@@ -149,7 +150,20 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     runtime = create_memory_runtime(MemoryConfig(enabled=True))
 
     assert runtime.available is False
-    assert asyncio.run(runtime.status_payload())["error"] == "memory_store_unavailable"
+    assert asyncio.run(runtime.status_payload()) == {
+        "status": "ok",
+        "source": {
+            "status": "unavailable",
+            "observed_at": None,
+            "reason": "memory_sidecar_unavailable",
+        },
+        "health": None,
+    }
+    assert asyncio.run(runtime.maintenance_payload()) == {
+        "status": "ok",
+        "data_exists": True,
+        "clear_recovery": None,
+    }
 
 
 def test_memory_runtime_reopens_the_store_after_initialization_failure(
@@ -1662,7 +1676,7 @@ def test_explicit_sidecar_retry_keeps_crash_budget_until_observed_health(monkeyp
     assert process.consecutive_failures == 5
 
 
-def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Path) -> None:
     started: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -1675,6 +1689,13 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
+    journal = MemoryClearJournal(tmp_path)
+    journal.start(
+        operation_id="interrupted-clear",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(),
@@ -1682,16 +1703,15 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
         effective_home=tmp_path,
     )
 
-    async def interrupted_clear() -> OperationFailed:
-        return OperationFailed(error="memory_clear_failed")
-
-    monkeypatch.setattr(runtime.module, "_recover_interrupted_clear_locked", interrupted_clear)
-
     async def run() -> None:
         assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
 
     asyncio.run(run())
     assert started == []
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.operation_id == "interrupted-clear"
+    assert recovery.state == "recovery_needed"
 
 
 def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
@@ -2425,7 +2445,7 @@ def test_legacy_disabled_diagnostics_still_records_provider_calls(
     asyncio.run(run())
 
 
-def test_recorder_corruption_stays_degraded_until_clear(
+def test_status_reuses_each_direct_everos_recorder_observation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2446,30 +2466,43 @@ def test_recorder_corruption_stays_degraded_until_clear(
         assert (await runtime.reconcile(config))["ok"] is True
         calls = 0
 
-        async def recorder_health() -> dict[str, str | None]:
+        async def health_snapshot() -> ProviderHealthSnapshot:
             nonlocal calls
             calls += 1
-            return (
-                {"state": "degraded", "reason": "call_log_corrupt"}
-                if calls == 1
-                else {"state": "active", "reason": None}
+            return ProviderHealthSnapshot(
+                status="ok",
+                version="1.2.3",
+                capabilities={
+                    "llm": True,
+                    "embed": True,
+                    "rerank": True,
+                    "multimodal_llm": True,
+                    "parser": True,
+                },
+                disabled_features=(),
+                cascade=None,
+                recorder=(
+                    {"state": "degraded", "reason": "call_log_corrupt"}
+                    if calls == 1
+                    else {"state": "active", "reason": None}
+                ),
             )
 
-        async def ready_status():
-            return memory_runtime.MemoryStatus(state="ready")
-
-        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
-        monkeypatch.setattr(runtime.module, "status", ready_status)
+        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
 
         first = await runtime.status_payload()
+        anomalies = await runtime.failure_log_payload()
         second = await runtime.status_payload()
 
-        assert first["recorder"] == {
+        assert first["health"]["recorder"] == {
             "state": "degraded",
             "reason": "call_log_corrupt",
         }
-        assert second["recorder"] == first["recorder"]
-        assert calls == 1
+        assert anomalies["items"][0]["kind"] == "recorder_degraded"
+        assert anomalies["items"][0]["operation"] == "record"
+        assert anomalies["items"][0]["error_code"] == "memory_processing_failed"
+        assert second["health"]["recorder"] == {"state": "active", "reason": None}
+        assert calls == 2
         await runtime._stop_sidecar_for_clear()
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
         await runtime.close()
@@ -2477,7 +2510,7 @@ def test_recorder_corruption_stays_degraded_until_clear(
     asyncio.run(run())
 
 
-def test_live_sidecar_with_unexpectedly_disabled_recorder_reports_writer_failure(
+def test_status_preserves_everos_disabled_recorder_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2497,17 +2530,28 @@ def test_live_sidecar_with_unexpectedly_disabled_recorder_reports_writer_failure
         )
         assert (await runtime.reconcile(config))["ok"] is True
 
-        async def recorder_health() -> dict[str, str | None]:
-            return {"state": "disabled", "reason": None}
+        snapshot = ProviderHealthSnapshot(
+            status="ok",
+            version="1.2.3",
+            capabilities={
+                "llm": True,
+                "embed": True,
+                "rerank": True,
+                "multimodal_llm": True,
+                "parser": True,
+            },
+            disabled_features=(),
+            cascade=None,
+            recorder={"state": "disabled", "reason": None},
+        )
 
-        async def ready_status() -> memory_runtime.MemoryStatus:
-            return memory_runtime.MemoryStatus(state="ready")
+        async def health_snapshot() -> ProviderHealthSnapshot:
+            return snapshot
 
-        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
-        monkeypatch.setattr(runtime.module, "status", ready_status)
-        assert (await runtime.status_payload())["recorder"] == {
-            "state": "degraded",
-            "reason": "writer_failures",
+        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+        assert (await runtime.status_payload())["health"]["recorder"] == {
+            "state": "disabled",
+            "reason": None,
         }
         await runtime.close()
 
@@ -2649,10 +2693,8 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
                 break
             await asyncio.sleep(0)
         payload = await runtime.status_payload()
-        assert payload["recorder"] == {
-            "state": "degraded",
-            "reason": "call_log_corrupt",
-        }
+        assert payload["health"] is None
+        assert payload["source"]["reason"] == "memory_disabled"
         await asyncio.wait_for(asyncio.shield(task), timeout=1)
         assert maintenance_calls == 1
         assert runtime._call_log_retention_task is None
@@ -2697,7 +2739,7 @@ def test_runtime_close_waits_for_active_call_log_maintenance(
     asyncio.run(run())
 
 
-def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
+def test_clear_quiesce_does_not_delete_call_log_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2713,7 +2755,7 @@ def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
         runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
         await runtime._stop_sidecar_for_clear()
 
-        assert not db_path.exists()
+        assert db_path.exists()
         assert unexpected.read_text(encoding="utf-8") == "keep"
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
         await runtime.close()
@@ -2876,7 +2918,7 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     assert "profile_warning" not in payload
 
 
-def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
+def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2888,7 +2930,8 @@ def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
     async def run() -> None:
-        assert (await runtime.status_payload())["data_exists"] is False
+        assert (await runtime.maintenance_payload())["data_exists"] is False
+        assert "data_exists" not in await runtime.status_payload()
         await runtime.close()
 
     asyncio.run(run())
@@ -3529,7 +3572,6 @@ def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
 
 
 def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     marked_factory = FakeEverOSProcessFactory()
@@ -3551,13 +3593,12 @@ def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery
         effective_home=tmp_path / "recovery",
     )
 
-    async def failed_recovery() -> OperationFailed:
-        return OperationFailed(error="memory_clear_failed")
-
-    monkeypatch.setattr(
-        recovering.module,
-        "_recover_interrupted_clear_locked",
-        failed_recovery,
+    meta = recovering._store.ensure_meta()
+    recovering._clear_journal.start(
+        operation_id="restart-recovery",
+        operator_ref="user:owner",
+        pre_epoch=meta.epoch,
+        target_epoch=meta.epoch + 1,
     )
 
     async def run() -> None:
@@ -3683,13 +3724,13 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
         if lifecycle == "clear":
-            async def blocked_clear():
+            async def blocked_prepare(_operation):
                 entered.set()
                 await release.wait()
-                return OperationFailed(error="memory_clear_failed")
+                raise RuntimeError("injected clear pause")
 
-            monkeypatch.setattr(runtime.module, "clear", blocked_clear)
-            operation = asyncio.create_task(runtime.clear())
+            monkeypatch.setattr(runtime, "_prepare_clear", blocked_prepare)
+            operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
         elif lifecycle == "reconcile":
             async def blocked_reconcile(*_args, **_kwargs):
                 entered.set()
@@ -3734,7 +3775,7 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         ready_task = runtime._ready_activation_task
         if ready_task is not None:
             await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
-        assert activations == ([] if lifecycle == "artifact" else [None])
+        assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
         await runtime.close()
 
     asyncio.run(run())
