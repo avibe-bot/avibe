@@ -62,24 +62,22 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun (r38) exercised all eight cases after treating
-opaque reasoning payloads as protected leakage material and rejecting tool
-results before tool execution: all eight completed both turns with HTTP 200,
-no fallback was used, and both new gates passed in every case.
-Messages-to-Responses single retained reasoning but failed both parse gates and
-the final exact tuple; the parallel passed every first- and final-turn gate.
+latest gate-complete rerun (r39) exercised all eight cases after recognizing
+tuple syntax independently of marker value: all eight completed both turns
+with HTTP 200 and no fallback was used. Messages-to-Responses single retained
+reasoning but failed both parse gates; the parallel passed every first-turn
+gate but failed final system scope and the exact tuple.
 Responses-to-Messages single passed every gate except reasoning presence in
 both turns. The parallel also lacked reasoning, failed both parse/order gates,
 and repeated a tool call instead of completing the final
 system/output/tuple exchange.
 Messages-to-Chat single retained reasoning but failed both parse gates and the
 final exact tuple; the parallel retained reasoning but failed both parse gates
-and first-turn stream ordering while its final tuple, system, and output checks
-passed. Chat-to-Messages single passed both parse gates but lacked reasoning in
-both turns and failed final system scope and the exact tuple. The parallel also
-lacked reasoning and failed both parse gates plus final system scope while
-retaining stream order, tool outputs, and the exact tuple. The focused suite
-contains 189 tests.
+and first-turn stream ordering plus the final exact tuple. Chat-to-Messages
+single passed both parse gates but lacked reasoning in both turns and failed
+final system scope and the exact tuple. The parallel also lacked reasoning and
+failed both parse gates plus final system scope while retaining stream order,
+tool outputs, and the exact tuple. The focused suite contains 190 tests.
 
 ## S4 matrix mapping
 
@@ -105,10 +103,10 @@ also fails, the affected direction is reported as blocked rather than as a
 semantic no-go.
 
 Malformed relay URL handling, including nonnumeric loopback ports, top-level
-Anthropic message ID and non-stream `stop_sequence` validation, and mixed
-primary/fallback second-turn accounting remain outside the closed eight-row
-semantic matrix; they are recorded as known-by-design residuals rather than
-promoted into probe gates.
+Anthropic message ID, non-stream `stop_sequence` validation, non-stream
+Anthropic/Responses text-field presence, and mixed primary/fallback second-turn
+accounting remain outside the closed eight-row semantic matrix; they are
+recorded as known-by-design residuals rather than promoted into probe gates.
 
 The closed matrix requires monotonic Responses wire sequence, not a particular
 origin. The measured relay emitted contiguous one-based values. Non-stream

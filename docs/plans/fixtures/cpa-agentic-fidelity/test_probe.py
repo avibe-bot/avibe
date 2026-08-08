@@ -526,6 +526,22 @@ class ProbeParserTests(unittest.TestCase):
         projection = probe._validate_second(turn, ("lookup_weather",), stream=False, expected_calls=[call])
         self.assertFalse(projection["checks"]["tool_output_call_pairs"])
 
+    def test_tool_result_tuple_check_rejects_punctuation_marker(self) -> None:
+        call = probe.ToolCall("call_weather", "lookup_weather", {"city": "Shanghai"})
+        text = f"{probe._tool_output(call)} tool=lookup_weather;call_id=fake;marker=!!!"
+        self.assertEqual(
+            probe._tool_output_tuples(text),
+            [
+                ("lookup_weather", "call_weather", "WEATHER_OK"),
+                ("lookup_weather", "fake", "!!!"),
+            ],
+        )
+        turn = probe._parse_anthropic_document(
+            {"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}
+        )
+        projection = probe._validate_second(turn, ("lookup_weather",), stream=False, expected_calls=[call])
+        self.assertFalse(projection["checks"]["tool_output_call_pairs"])
+
     def test_tool_result_tuple_preserves_punctuation_in_call_id(self) -> None:
         call = probe.ToolCall("call.123", "lookup_weather", {"city": "Shanghai"})
         text = f"{probe._tool_output(call)}."

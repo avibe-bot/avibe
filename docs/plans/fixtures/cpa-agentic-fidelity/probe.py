@@ -222,12 +222,17 @@ def _tool_output(call: ToolCall) -> str:
 
 
 _TOOL_OUTPUT_TUPLE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=([A-Za-z0-9_]+)(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=([^;\s]+)"
 )
 
 
 def _tool_output_tuples(text: str) -> list[tuple[str, str, str]]:
-    return [match.groups() for match in _TOOL_OUTPUT_TUPLE_RE.finditer(text)]
+    tuples: list[tuple[str, str, str]] = []
+    for match in _TOOL_OUTPUT_TUPLE_RE.finditer(text):
+        tool, call_id, raw_marker = match.groups()
+        token = re.match(r"[A-Za-z0-9_]+", raw_marker)
+        tuples.append((tool, call_id, token.group(0) if token else raw_marker))
+    return tuples
 
 
 def _tool_output_tuple(call: ToolCall) -> tuple[str, str, str]:
