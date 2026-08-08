@@ -3931,6 +3931,37 @@ scenarios:
     # transition. Explicit delivery evidence remains authoritative for legacy Harness
     # contexts that have no Turn token.
     test: tests/test_scheduled_tasks.py::test_hfr_439_turn_failure_metadata_reaches_every_linked_run
+  - id: HFR-440
+    name: one sibling callback receipt suppresses the complete Turn fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # A callback carries the shared terminal Turn result. Callback delivery facts
+    # are aggregated from one SQLite snapshot across every linked failed Run, so a
+    # successful sibling callback prevents the elected owner from sending again.
+    test: tests/test_harness_failure_visibility.py::test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback
+  - id: HFR-441
+    name: suppressed local history cannot shadow an outward receipt
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # suppress_delivery rows carry an explicit marker and are rejected as receipts.
+    # A later visible fallback sends first, then promotes the stable row under a
+    # guarded update. Local row ids never enter Run transport receipts, and a
+    # suppressed callback row is never delivery evidence.
+    test: tests/test_harness_failure_visibility.py::test_suppressed_history_cannot_shadow_a_later_visible_receipt
+  - id: HFR-442
+    name: bare Turn provenance does not enter notification ownership
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Direct error results retain their Turn id as execution provenance, but only
+    # an explicit turn_failure_notification contract admits the Turn fallback lane.
+    # Definition-level suppression therefore remains active for generic failures.
+    test: tests/test_harness_failure_visibility.py::test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

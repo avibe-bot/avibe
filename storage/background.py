@@ -1532,13 +1532,27 @@ def _owed_failure_notice_for_transition(
         # The escalation turn IS the user-visible report for this failure.
         return None
     reason = str(metadata.get("interrupt_reason") or "").strip() or None
-    turn_id = str(metadata.get("turn_id") or "").strip() or None
     turn_notification = metadata.get("turn_failure_notification")
     turn_notification = (
         dict(turn_notification) if isinstance(turn_notification, dict) else {}
     )
     turn_failure_id = str(turn_notification.get("failure_id") or "").strip()
-    fallback_run_id = str(turn_notification.get("fallback_run_id") or "").strip()
+    has_turn_notification = bool(turn_failure_id)
+    # ``turn_id`` is broad execution provenance. It becomes notification ownership
+    # only when the terminal output also carries the explicit Turn-failure contract.
+    # A direct error result (for example the disabled OpenCode question tool) has a
+    # Turn id but no separate notification; admitting it here would stamp every linked
+    # Run as an ownerless Turn fallback and bypass ordinary definition suppression.
+    turn_id = (
+        str(metadata.get("turn_id") or "").strip() or None
+        if has_turn_notification
+        else None
+    )
+    fallback_run_id = (
+        str(turn_notification.get("fallback_run_id") or "").strip()
+        if has_turn_notification
+        else ""
+    )
     return {
         "state": NOTICE_PENDING,
         "attempts": 0,
@@ -4015,6 +4029,113 @@ class SQLiteBackgroundTaskStore:
             row = conn.execute(statement).first()
         return None if row is None else str(row[0])
 
+    def _callback_state_rows(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+    ) -> list[Any]:
+        """Read callback delivery facts for one Run or one Turn snapshot."""
+
+        parent = agent_runs.alias("callback_parent")
+        child = agent_runs.alias("callback_child")
+        callback_session = agent_sessions.alias("callback_session")
+        persisted_receipt = (
+            select(literal(1))
+            .select_from(messages)
+            .where(messages.c.session_id == child.c.session_id)
+            .where(messages.c.type == "result")
+            .where(func.json_valid(messages.c.metadata_json) == 1)
+            .where(
+                cast(func.json_extract(messages.c.metadata_json, "$.run_id"), Text)
+                == child.c.id
+            )
+            .where(
+                func.coalesce(
+                    cast(
+                        func.json_extract(
+                            messages.c.metadata_json,
+                            "$.delivery_suppressed",
+                        ),
+                        Integer,
+                    ),
+                    0,
+                )
+                == 0
+            )
+            .correlate(child)
+            .exists()
+        )
+        statement = select(
+            parent.c.callback_session_id,
+            parent.c.callback_status,
+            parent.c.callback_run_id,
+            child.c.status,
+            persisted_receipt,
+            callback_session.c.status,
+            callback_session.c.visibility,
+            child.c.legacy_session_key,
+            child.c.message_ids_json,
+        ).select_from(
+            parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
+                callback_session,
+                callback_session.c.id == child.c.session_id,
+            )
+        )
+        normalized_turn_id = str(turn_id or "").strip()
+        if normalized_turn_id:
+            statement = statement.where(func.json_valid(parent.c.metadata_json) == 1).where(
+                cast(
+                    func.json_extract(
+                        parent.c.metadata_json,
+                        f"$.{OWED_FAILURE_NOTICE_KEY}.turn_id",
+                    ),
+                    Text,
+                )
+                == normalized_turn_id
+            )
+        else:
+            statement = statement.where(parent.c.id == str(run_id or ""))
+        with self.engine.connect() as conn:
+            return list(conn.execute(statement))
+
+    @staticmethod
+    def _callback_state_from_row(row: Any) -> Optional[str]:
+        if row is None or not str(row[0] or "").strip():
+            return None
+        callback_status = str(row[1] or "").strip() or None
+        callback_run_id = str(row[2] or "").strip()
+        if callback_status != "sent" or not callback_run_id:
+            return callback_status
+        child_status = normalize_run_status(row[3]) if row[3] is not None else ""
+        if child_status in {"queued", "running"}:
+            return "pending"
+        target_key_parts = SQLiteBackgroundTaskStore._parse_session_key(row[7])
+        message_ids = _json_loads(row[8], [])
+        descriptor = (
+            PLATFORM_REGISTRY.get(target_key_parts[0])
+            if target_key_parts is not None
+            else None
+        )
+        has_native_im_receipt = (
+            descriptor is not None
+            and descriptor.kind == "im"
+            and target_key_parts is not None
+            and target_key_parts[1] in {"channel", "user"}
+            and isinstance(message_ids, list)
+            and any(str(message_id or "").strip() for message_id in message_ids)
+        )
+        target_is_visible = (
+            str(row[5] or "").strip() != "archived"
+            and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
+        )
+        has_visible_persisted_receipt = bool(row[4]) and target_is_visible
+        if child_status == "succeeded" and (
+            has_native_im_receipt or has_visible_persisted_receipt
+        ):
+            return "sent"
+        return "failed"
+
     def run_callback_state(self, run_id: str) -> Optional[str]:
         """This run's effective callback delivery state, or ``None`` without one.
 
@@ -4043,78 +4164,29 @@ class SQLiteBackgroundTaskStore:
         no-shield.
         """
 
-        parent = agent_runs.alias("callback_parent")
-        child = agent_runs.alias("callback_child")
-        callback_session = agent_sessions.alias("callback_session")
-        persisted_receipt = (
-            select(literal(1))
-            .select_from(messages)
-            .where(messages.c.session_id == child.c.session_id)
-            .where(messages.c.type == "result")
-            .where(func.json_valid(messages.c.metadata_json) == 1)
-            .where(
-                cast(func.json_extract(messages.c.metadata_json, "$.run_id"), Text)
-                == child.c.id
-            )
-            .correlate(child)
-            .exists()
-        )
-        with self.engine.connect() as conn:
-            row = conn.execute(
-                select(
-                    parent.c.callback_session_id,
-                    parent.c.callback_status,
-                    parent.c.callback_run_id,
-                    child.c.status,
-                    persisted_receipt,
-                    callback_session.c.status,
-                    callback_session.c.visibility,
-                    child.c.legacy_session_key,
-                    child.c.message_ids_json,
-                )
-                .select_from(
-                    parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
-                        callback_session,
-                        callback_session.c.id == child.c.session_id,
-                    )
-                )
-                .where(parent.c.id == str(run_id))
-                .limit(1)
-            ).first()
-        if row is None or not str(row[0] or "").strip():
-            return None
-        callback_status = str(row[1] or "").strip() or None
-        callback_run_id = str(row[2] or "").strip()
-        if callback_status != "sent" or not callback_run_id:
-            return callback_status
-        child_status = normalize_run_status(row[3]) if row[3] is not None else ""
-        if child_status in {"queued", "running"}:
-            return "pending"
-        target_key_parts = self._parse_session_key(row[7])
-        message_ids = _json_loads(row[8], [])
-        descriptor = (
-            PLATFORM_REGISTRY.get(target_key_parts[0])
-            if target_key_parts is not None
-            else None
-        )
-        has_native_im_receipt = (
-            descriptor is not None
-            and descriptor.kind == "im"
-            and target_key_parts is not None
-            and target_key_parts[1] in {"channel", "user"}
-            and isinstance(message_ids, list)
-            and any(str(message_id or "").strip() for message_id in message_ids)
-        )
-        target_is_visible = (
-            str(row[5] or "").strip() != "archived"
-            and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
-        )
-        has_visible_persisted_receipt = bool(row[4]) and target_is_visible
-        if child_status == "succeeded" and (
-            has_native_im_receipt or has_visible_persisted_receipt
-        ):
+        rows = self._callback_state_rows(run_id=run_id)
+        return self._callback_state_from_row(rows[0] if rows else None)
+
+    def turn_callback_state(self, turn_id: str) -> Optional[str]:
+        """Aggregate callback delivery across every failed Run in one Turn.
+
+        A callback reports the Turn's terminal result, not only its parent Run. One
+        delivered callback therefore suppresses every sibling fallback; while any
+        callback is still pending, the fallback waits rather than racing it. The
+        aggregation is read in one SQLite snapshot so two sibling decisions cannot
+        observe a half-updated callback set.
+        """
+
+        states = [
+            state
+            for row in self._callback_state_rows(turn_id=turn_id)
+            if (state := self._callback_state_from_row(row)) is not None
+        ]
+        if "sent" in states:
             return "sent"
-        return "failed"
+        if "pending" in states:
+            return "pending"
+        return "failed" if states else None
 
     def update_callback_status(
         self,

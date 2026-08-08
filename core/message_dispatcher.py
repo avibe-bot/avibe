@@ -1129,7 +1129,7 @@ class ConsolidatedMessageDispatcher:
         self,
         context: MessageContext,
         text: str,
-        message_id: str,
+        message_id: str | None,
         *,
         terminal_status: Optional[str] = None,
     ) -> None:
@@ -2164,11 +2164,19 @@ class ConsolidatedMessageDispatcher:
         # cross-platform history) — persist_agent_message attributes IM rows to
         # this target's scope.
         target_context = self._get_target_context(context)
-        output_metadata = output_semantics.provenance(context) if output is not None else None
-        native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
         suppresses_outward_delivery = bool(
             (context.platform_specific or {}).get("suppress_delivery")
         )
+        output_metadata = output_semantics.provenance(context) if output is not None else None
+        if suppresses_outward_delivery:
+            # A background transcript row is local history, not an outward receipt.
+            # Mark that fact durably: a later user-visible fallback keeps the stable
+            # native identity but must send before promoting the row to a receipt.
+            output_metadata = {
+                **(output_metadata or {}),
+                "delivery_suppressed": True,
+            }
+        native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -2191,10 +2199,27 @@ class ConsolidatedMessageDispatcher:
             )
         )
         for candidate in native_output_candidates:
-            accepted_message = agent_message_exists(target_context, candidate)
-            if accepted_message:
-                native_output_id = candidate
-                break
+            candidate_message = agent_message_exists(target_context, candidate)
+            if not candidate_message:
+                continue
+            candidate_metadata = (
+                candidate_message.get("metadata")
+                if isinstance(candidate_message, Mapping)
+                else None
+            )
+            if (
+                not suppresses_outward_delivery
+                and isinstance(candidate_metadata, Mapping)
+                and candidate_metadata.get("delivery_suppressed") is True
+            ):
+                logger.info(
+                    "Replaying local-only agent output %s to its outward target",
+                    candidate,
+                )
+                continue
+            accepted_message = candidate_message
+            native_output_id = candidate
+            break
         if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
             accepted_output_semantics = self._output_with_accepted_provenance(
@@ -2340,7 +2365,7 @@ class ConsolidatedMessageDispatcher:
                         metadata=output_metadata,
                         native_message_id=native_output_id,
                     )
-                message_id = (persisted_output or {}).get("id") or (
+                local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
                 terminal_status = None
@@ -2355,7 +2380,7 @@ class ConsolidatedMessageDispatcher:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
                         recorded_text,
-                        message_id,
+                        None,
                         is_error=is_error,
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
@@ -2364,7 +2389,7 @@ class ConsolidatedMessageDispatcher:
                     self._record_suppressed_run_message(
                         context,
                         recorded_text,
-                        message_id,
+                        None,
                         terminal_status=terminal_status,
                     )
                 if mutates_turn_lifecycle:
@@ -2387,7 +2412,7 @@ class ConsolidatedMessageDispatcher:
                             "Suppressed Activity output local settlement is incomplete",
                             delivered=False,
                         )
-                return message_id
+                return local_message_id
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)

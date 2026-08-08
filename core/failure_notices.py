@@ -459,9 +459,11 @@ def decide(
     no streak was read (the bypass lanes below return before it is consulted).
     ``earlier_unsettled`` is an earlier-created execution of the same definition that
     has not settled. ``callback_status`` is the run's effective callback delivery
-    state read FRESH at decision time (``run_callback_state``): a queued callback
-    child remains pending, only a succeeded child is sent, and a terminally failed
-    child releases the notice. ``None`` means the run has no callback.
+    state read FRESH at decision time: a queued callback child remains pending,
+    only a succeeded child is sent, and a terminally failed child releases the
+    notice. For a Turn fallback this is aggregated across every linked Run because
+    one callback carries the shared terminal result. ``None`` means no effective
+    callback exists in the applicable ownership scope.
 
     Facts, not rows. This function used to receive the streak itself and rederive
     "anyone sent?" and "who is canonical?" from it in Python, which is what made the

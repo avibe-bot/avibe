@@ -2238,6 +2238,128 @@ def test_suppressed_duplicate_short_circuit_is_local_history_not_a_receipt() -> 
     assert evidence.ack_evidence is None
 
 
+def test_suppressed_history_cannot_shadow_a_later_visible_receipt() -> None:
+    """HFR-441 — local history cannot satisfy the stable outward identity."""
+
+    from unittest.mock import patch
+
+    import core.message_dispatcher as dispatcher_module
+    from core.delivery_evidence import DeliveryEvidence
+    from core.message_output import MessageOutput
+    from modules.im import MessageContext
+
+    from tests.test_message_dispatcher_scheduled import _StubController
+
+    controller = _StubController()
+    dispatcher = dispatcher_module.ConsolidatedMessageDispatcher(controller)
+    persisted: dict[str, dict[str, Any]] = {}
+    persisted_versions: list[dict[str, Any]] = []
+
+    def _lookup(_context, native_message_id):
+        return persisted.get(str(native_message_id))
+
+    def _persist(
+        _context,
+        canonical_type,
+        text,
+        *,
+        metadata=None,
+        native_message_id=None,
+        **_kwargs,
+    ):
+        row = {
+            "id": f"row-{len(persisted) + 1}",
+            "type": canonical_type,
+            "text": text,
+            "metadata": dict(metadata or {}),
+            "native_message_id": native_message_id,
+        }
+        persisted[str(native_message_id)] = row
+        persisted_versions.append(row)
+        return row
+
+    output = MessageOutput(
+        completes_turn=False,
+        completes_run=False,
+        idempotency_key="backend-failure:failure:shared",
+    )
+    suppressed = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={"suppress_delivery": True},
+    )
+    visible = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="slack",
+    )
+    evidence = DeliveryEvidence()
+
+    with (
+        patch.object(dispatcher_module, "agent_message_exists", side_effect=_lookup),
+        patch.object(dispatcher_module, "persist_agent_message", side_effect=_persist),
+    ):
+        asyncio.run(
+            dispatcher.emit_agent_message(
+                suppressed,
+                "notify",
+                "local background failure",
+                output=output,
+            )
+        )
+        asyncio.run(
+            dispatcher.emit_agent_message(
+                visible,
+                "notify",
+                "visible durable fallback",
+                output=output,
+                delivery=evidence,
+            )
+        )
+
+    assert len(controller.im_client.sent) == 1
+    assert evidence.delivered is True
+    assert len(persisted) == 1, "local history preserves the stable output identity"
+    assert persisted_versions[0]["metadata"]["delivery_suppressed"] is True
+    assert "delivery_suppressed" not in persisted_versions[1]["metadata"]
+
+
+def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path) -> None:
+    """The post-send commit keeps identity while removing local-only semantics."""
+
+    from storage import messages_service
+
+    sqlite, _requests = _store(tmp_path)
+    with sqlite.engine.begin() as conn:
+        local = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id=None,
+            platform="slack",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="local history",
+            metadata={"delivery_suppressed": True, "run_id": "run-promote"},
+            native_message_id="agent-output:codex:run-promote:failure",
+        )
+        promoted = messages_service.promote_suppressed_native_message(
+            conn,
+            platform="slack",
+            scope_id=None,
+            native_message_id="agent-output:codex:run-promote:failure",
+            message_type="notify",
+            text="visible fallback",
+            metadata={"run_id": "run-promote"},
+        )
+
+    assert promoted is not None
+    assert promoted["id"] == local["id"]
+    assert promoted["text"] == "visible fallback"
+    assert promoted["metadata"] == {"run_id": "run-promote"}
+
+
 def test_the_duplicate_short_circuit_receipt_acks_a_workbench_rung() -> None:
     """HFR-075 — the dedup receipt has to satisfy the STRICTEST ack source there is.
 
@@ -6051,7 +6173,13 @@ def _callback_session(
         )
 
 
-def _persist_callback_result(sqlite_store, run_id: str, *, text: str) -> None:
+def _persist_callback_result(
+    sqlite_store,
+    run_id: str,
+    *,
+    text: str,
+    delivery_suppressed: bool = False,
+) -> None:
     """Materialize the durable message receipt that a callback success requires."""
 
     from storage import messages_service
@@ -6066,7 +6194,10 @@ def _persist_callback_result(sqlite_store, run_id: str, *, text: str) -> None:
             source="agent",
             message_type="result",
             text=text,
-            metadata={"run_id": run_id},
+            metadata={
+                "run_id": run_id,
+                **({"delivery_suppressed": True} if delivery_suppressed else {}),
+            },
         )
 
 
@@ -6463,6 +6594,43 @@ def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
 
     assert delivered == ["run-cb-hidden"]
     assert sqlite.owed_failure_notice("run-cb-hidden")["state"] == "sent"
+
+
+def test_suppressed_callback_history_is_not_visible_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    """A foreground Session does not make a suppress_delivery row visible."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb-suppressed", deliver_key="slack::channel::C1")
+    _callback_session(sqlite, visibility="foreground")
+    _callback_run(sqlite, "run-cb-suppressed", "task-cb-suppressed", status="pending")
+    callback = requests.enqueue_agent_run(
+        message="persist without outward delivery",
+        source_kind="callback",
+        parent_run_id="run-cb-suppressed",
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        "run-cb-suppressed",
+        status="sent",
+        callback_run_id=callback.id,
+    )
+    assert requests.claim(callback.id) is not None
+    sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="local callback history",
+        terminal_status="succeeded",
+    )
+    _persist_callback_result(
+        sqlite,
+        callback.id,
+        text="local callback history",
+        delivery_suppressed=True,
+    )
+
+    assert sqlite.run_callback_state("run-cb-suppressed") == "failed"
 
 
 def test_skip_reason_writer_cannot_erase_a_terminal_notice_from_its_write_gap(
@@ -7060,6 +7228,107 @@ def test_hfr_438_missing_turn_notification_delivers_one_fallback(tmp_path: Path)
     assert {notice["state"] for run_id, notice in notices.items() if run_id != min(notices)} == {
         "skipped"
     }
+
+
+def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """A callback reports the shared Turn result, not only its parent Run."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-callback-a", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-callback-b", deliver_key="slack::channel::C123")
+    _callback_session(sqlite)
+    owner_id = "run-turn-owner"
+    callback_parent_id = "run-turn-callback"
+    notice = {
+        "state": "pending",
+        "attempts": 0,
+        "next_attempt_at": None,
+        "failure_id": "turn:turn-with-callback",
+        "turn_id": "turn-with-callback",
+        "turn_fallback_run_id": owner_id,
+    }
+    _pending_failure(
+        sqlite,
+        owner_id,
+        "watch-callback-a",
+        created_at="2026-07-27T00:00:00+00:00",
+        notice=notice,
+    )
+    _callback_run(
+        sqlite,
+        callback_parent_id,
+        "watch-callback-b",
+        status="pending",
+    )
+    sqlite.update_owed_failure_notice(
+        callback_parent_id,
+        failure_id="turn:turn-with-callback",
+        turn_id="turn-with-callback",
+        turn_fallback_run_id=owner_id,
+    )
+    callback = requests.enqueue_agent_run(
+        message="deliver the shared Turn result",
+        source_kind="callback",
+        parent_run_id=callback_parent_id,
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        callback_parent_id,
+        status="sent",
+        callback_run_id=callback.id,
+    )
+    assert requests.claim(callback.id) is not None
+    sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="shared Turn callback delivered",
+        terminal_status="succeeded",
+    )
+    _persist_callback_result(sqlite, callback.id, text="shared Turn callback delivered")
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import core.scheduled_tasks as scheduled_tasks
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == []
+    for run_id in (owner_id, callback_parent_id):
+        stored = sqlite.owed_failure_notice(run_id)
+        assert stored["state"] == "skipped"
+        assert stored["skip_reason"] == "delivered_by_callback"
+
+
+@pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])
+def test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane(
+    tmp_path: Path,
+    turn_notification: dict[str, Any] | None,
+) -> None:
+    """A direct error result has a Turn id but no notification ownership contract."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-direct-error", deliver_key="slack::channel::C123")
+    runs = [requests.enqueue_task_run("task-direct-error") for _ in range(2)]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    provenance: dict[str, Any] = {"turn_id": "turn-direct-error"}
+    if turn_notification is not None:
+        provenance["turn_failure_notification"] = turn_notification
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="question tool is disabled",
+        terminal_status="failed",
+        error="question tool is disabled",
+        provenance=provenance,
+    )
+
+    notices = [sqlite.owed_failure_notice(run.id) for run in runs]
+    assert all(notice["turn_id"] is None for notice in notices)
+    assert all(notice["turn_fallback_run_id"] is None for notice in notices)
 
 
 def test_the_index_migration_and_the_query_use_the_same_expressions(tmp_path: Path) -> None:

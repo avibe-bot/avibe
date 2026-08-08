@@ -1005,6 +1005,40 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.sent_messages, [])
         self.assertIsNone(evidence.ack_evidence)
 
+    async def test_suppressed_history_id_is_not_recorded_as_run_delivery(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._record_suppressed_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "scheduled",
+                "task_execution_id": "run-background",
+            },
+        )
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value={"id": "msg-local-history"},
+        ):
+            returned = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private output",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    idempotency_key="stable-output",
+                ),
+            )
+
+        self.assertEqual(returned, "msg-local-history")
+        self.assertIsNone(
+            dispatcher._record_suppressed_agent_run_terminal_result.call_args.args[2]
+        )
+
     async def test_suppressed_result_records_folded_footer(self):
         """A suppressed Web result keeps structured UI metrics while its run
         record retains the complete folded text."""

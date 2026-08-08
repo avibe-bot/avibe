@@ -5678,9 +5678,15 @@ class ScheduledTaskService:
         # callback already landed, and a stale absence would deliver beside it. A
         # read failure propagates to the drain loop's per-row handler and the row is
         # retried later, which errs toward one message rather than two.
+        turn_id = failure_notices.notice_turn_id(notice)
+        callback_reader = (
+            store.turn_callback_state
+            if turn_id and hasattr(store, "turn_callback_state")
+            else store.run_callback_state
+        )
         callback_status = await self._run_runtime_sync(
-            store.run_callback_state,
-            run_id,
+            callback_reader,
+            turn_id or run_id,
         )
         decision = failure_notices.decide(
             run_id=run_id,

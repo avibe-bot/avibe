@@ -46,8 +46,20 @@ that stable owner to the remaining deferred participants in the same locked
 transaction.
 
 Persistence caused only by `suppress_delivery` is local history, not delivery
-evidence. It leaves the Turn notification unacknowledged so the durable fallback
+evidence. It is tagged as suppressed, rejected by outward receipt lookup, and
+promoted under its stable native identity only after a later user-visible send
+succeeds. Its local Message row id is not written into the Run's transport
+receipts. It leaves the Turn notification unacknowledged so the durable fallback
 can route the failure to a user-visible target.
+
+A callback delivers the terminal result for its whole Turn. One effective callback
+receipt suppresses every linked Run fallback, while one pending callback defers the
+Turn fallback until its delivery outcome is known. The aggregate is read from one
+SQLite snapshot.
+
+Turn execution provenance alone does not enter this ownership lane. A terminal
+output must carry the explicit `turn_failure_notification` contract; direct error
+results without it remain under the existing definition-level notice policy.
 
 The Turn id is the failure identity. Definition ids remain provenance and do
 not create additional user-visible failures.
@@ -93,6 +105,12 @@ does not claim that an event was detected.
   the initial election; the locked participant settlement validates it against
   current cancellation and deferral state before writing every Run. Legacy
   Harness contexts without a Turn token still honor explicit delivery evidence.
+- `HFR-440`: one effective callback receipt on any linked Run suppresses the
+  complete Turn fallback; pending callback delivery defers it.
+- `HFR-441`: persistence under `suppress_delivery` cannot satisfy or shadow a
+  later outward receipt, including in a foreground callback target Session.
+- `HFR-442`: bare Turn provenance without a notification contract does not
+  bypass definition-level failure-notice suppression.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

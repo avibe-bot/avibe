@@ -581,6 +581,66 @@ def get_native_message(
     return _row_to_payload(dict(row)) if row else None
 
 
+def promote_suppressed_native_message(
+    conn: Connection,
+    *,
+    platform: str,
+    scope_id: str | None,
+    native_message_id: str,
+    message_type: str,
+    text: str,
+    content: Optional[dict[str, Any]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Turn local-only history into a receipt after outward delivery succeeds.
+
+    ``suppress_delivery`` deliberately persists the transcript before there is an
+    outward receipt. A later visible replay keeps the same native identity, so its
+    post-send persistence hits the unique constraint. This guarded update is that
+    replay's commit point: it removes the suppression marker only after the caller
+    has delivered, refreshes the accepted body, and returns the now-valid receipt.
+    """
+
+    platform = str(platform or "").strip()
+    native_message_id = str(native_message_id or "").strip()
+    if not platform or not native_message_id:
+        return None
+    body: dict[str, Any] = {}
+    if content:
+        body.update(content)
+    body.setdefault("text", text)
+    now = canonical_message_timestamp(_utc_now_iso())
+    assert now is not None
+    scope_predicate = (
+        messages.c.scope_id == scope_id
+        if scope_id is not None
+        else messages.c.scope_id.is_(None)
+    )
+    promoted = conn.execute(
+        update(messages)
+        .where(messages.c.platform == platform)
+        .where(scope_predicate)
+        .where(messages.c.native_message_id == native_message_id)
+        .where(func.json_valid(messages.c.metadata_json) == 1)
+        .where(func.json_extract(messages.c.metadata_json, "$.delivery_suppressed") == 1)
+        .values(
+            type=message_type,
+            content_text=text,
+            content_json=json.dumps(body),
+            metadata_json=json.dumps(metadata or {}),
+            updated_at=now,
+        )
+    )
+    if not promoted.rowcount:
+        return None
+    return get_native_message(
+        conn,
+        platform=platform,
+        scope_id=scope_id,
+        native_message_id=native_message_id,
+    )
+
+
 def get_quick_reply_chosen(conn: Connection, session_id: str, message_id: str) -> Optional[str]:
     """The label already chosen for *message_id*'s quick-reply group, or None.
 
