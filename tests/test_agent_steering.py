@@ -561,7 +561,7 @@ async def test_shared_boundary_finishes_native_reconciliation_before_propagating
             await caller
 
         assert agent._steering_generation("runtime-key") == 1
-        assert agent._next_terminal_barrier("runtime-key") == "accepted"
+        assert agent._pending_steering_input_state("runtime-key") == "accepted"
         assert agent._pending_requests["runtime-key"] == [primary]
         assert not receiver_task.done()
     finally:

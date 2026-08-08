@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
+from modules.claude_sdk_compat import UserMessage
 
 
 class _ResultMessage:
@@ -86,7 +87,11 @@ def _build_agent(mark_idle_calls):
     # Stub the external bits the result branch touches so the test isolates the
     # settle-on-failure contract.
     agent._detect_message_type = lambda message: (
-        "system" if isinstance(message, SystemMessage) else "result"
+        "system"
+        if isinstance(message, SystemMessage)
+        else "user"
+        if isinstance(message, UserMessage)
+        else "result"
     )
     agent._maybe_capture_session_id = lambda *a, **k: None
     agent._consume_suppressed_synthetic_result = lambda *a, **k: False
@@ -286,6 +291,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     first.result = "primary result"
                     yield first
                     await second_result_ready.wait()
+                    yield UserMessage("补充：`exact`")
                     second = _ResultMessage()
                     second.result = "steered result"
                     yield second
@@ -368,6 +374,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     buffered.result = "buffered primary result"
                     yield buffered
                     await final_result_ready.wait()
+                    yield UserMessage("continue after buffered result")
                     final = _ResultMessage()
                     final.result = "steered result"
                     yield final
@@ -464,6 +471,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     first.result = "primary result"
                     yield first
                     await second_result_ready.wait()
+                    yield UserMessage("ambiguous input")
                     second = _ResultMessage()
                     second.result = "reconciled result"
                     yield second
@@ -623,6 +631,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     result_yielded.set()
                     yield primary
                     await second_result_ready.wait()
+                    yield UserMessage("ambiguous input")
                     second = _ResultMessage()
                     second.result = "reconciled result"
                     yield second
@@ -783,7 +792,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
 
-    async def test_unmatched_activity_flush_does_not_consume_terminal_barrier(self):
+    async def test_unmatched_activity_flush_preserves_pending_input_receipt(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
         context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
@@ -794,6 +803,12 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent._activity_registry = lambda: registry
         agent._claim_activity_batch_for_turns = Mock(return_value=[])
         expected_generation = agent._steering_generation(composite_key)
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "unknown"
         agent._advance_steering_generation(composite_key)
 
         retry = await agent._flush_completed_activity_outputs(
@@ -803,7 +818,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(retry)
-        self.assertEqual(agent._next_terminal_barrier(composite_key), "unknown")
+        self.assertEqual(agent._pending_steering_input_state(composite_key), "unknown")
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
 
     async def test_concurrent_receiver_eof_makes_steering_ack_ambiguous(self):
@@ -1224,6 +1239,8 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, _AssistantFailureMessage)
             else "system"
             if isinstance(message, SystemMessage)
+            else "user"
+            if isinstance(message, UserMessage)
             else "result"
         )
         agent._handle_assistant_terminal_failure = AsyncMock(return_value="failure")
@@ -1260,11 +1277,13 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     failed.result = "primary failed"
                     yield failed
                     await first_steered_result_ready.wait()
+                    yield UserMessage("continue after failure")
                     first_steered = _ResultMessage()
                     first_steered.result = "first steered result"
                     yield first_steered
                     first_steered_result_processed.set()
                     await second_steered_result_ready.wait()
+                    yield UserMessage("continue after failure")
                     second_steered = _ResultMessage()
                     second_steered.result = "second steered result"
                     yield second_steered

@@ -3871,15 +3871,16 @@ scenarios:
     # native evidence either accepts the attempt or closes it terminally.
     test: tests/test_agent_steering.py::test_opencode_keeps_reconciliation_armed_after_post_write_idle
   - id: HFR-435
-    name: Claude accepted steering reserves one preceding Result slot
+    name: Claude input echoes establish steering result ownership
     status: covered
     kind: recovery
     layer: contract
     backend: claude
-    # A transport write only queues the input and Claude exposes no consumption
-    # acknowledgement. Each accepted write therefore reserves one FIFO Result slot,
-    # keeping the shared Turn open until the corresponding steered Result arrives.
-    test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
+    # A transport write only queues input, while Claude may merge several inputs
+    # into one response. The native top-level UserMessage echo acknowledges each
+    # consumed input in FIFO order, so a Result before the echo stays nonterminal
+    # and a Result after all echoes can settle the shared Turn.
+    test: tests/test_claude_agent_sessions.py::test_user_echo_allows_one_result_to_own_primary_and_steer
   - id: HFR-436
     name: Watch waiter health is independent from downstream event processing
     status: covered

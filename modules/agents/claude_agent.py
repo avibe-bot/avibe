@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
@@ -53,6 +54,13 @@ from modules.im import MessageContext
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _ClaudeInputReceipt:
+    text: str
+    kind: Literal["primary", "steer"]
+    state: Literal["writing", "accepted", "unknown"] = "writing"
+
+
 class ClaudeAgent(BaseAgent):
     """Existing Claude Code integration extracted into an agent backend."""
 
@@ -85,7 +93,7 @@ class ClaudeAgent(BaseAgent):
         self._pending_requests: dict[str, list[AgentRequest]] = {}
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
-        self._steering_terminal_barriers: dict[str, list[str]] = {}
+        self._native_input_receipts: dict[str, list[_ClaudeInputReceipt]] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._steering_input_shutdowns: set[str] = set()
         self._ambiguous_interrupts: set[str] = set()
@@ -191,9 +199,19 @@ class ClaudeAgent(BaseAgent):
 
             # Prepare message with file attachment info if present
             message = self._prepare_message_with_files(request)
+            input_receipt = self._register_native_input(
+                runtime_session_key,
+                message,
+                kind="primary",
+            )
 
             mark_backend_dispatch_attempted(request.context)
-            await client.query(message, session_id=runtime_session_key)
+            try:
+                await client.query(message, session_id=runtime_session_key)
+            except (Exception, asyncio.CancelledError):
+                self._remove_native_input_receipt(runtime_session_key, input_receipt)
+                raise
+            input_receipt.state = "accepted"
             if (
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
@@ -864,9 +882,9 @@ class ClaudeAgent(BaseAgent):
         generations = getattr(self, "_steering_generations", None)
         if generations is not None:
             generations.pop(composite_key, None)
-        barriers = getattr(self, "_steering_terminal_barriers", None)
-        if barriers is not None:
-            barriers.pop(composite_key, None)
+        receipts = getattr(self, "_native_input_receipts", None)
+        if receipts is not None:
+            receipts.pop(composite_key, None)
         ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
         if ambiguous_results is not None:
             ambiguous_results.pop(composite_key, None)
@@ -882,50 +900,105 @@ class ClaudeAgent(BaseAgent):
     def _advance_steering_generation(
         self,
         composite_key: str,
-        *,
-        barrier: str = "unknown",
     ) -> None:
         current_generation = self._steering_generation(composite_key)
         self._steering_generations[composite_key] = current_generation + 1
-        barriers = getattr(self, "_steering_terminal_barriers", None)
-        if barriers is None:
-            barriers = {}
-            self._steering_terminal_barriers = barriers
-        barriers.setdefault(composite_key, []).append(barrier)
 
-    def _next_terminal_barrier(self, composite_key: str) -> str | None:
-        barriers = getattr(self, "_steering_terminal_barriers", None) or {}
-        pending = barriers.get(composite_key) or []
-        return pending[0] if pending else None
+    def _register_native_input(
+        self,
+        composite_key: str,
+        text: str,
+        *,
+        kind: Literal["primary", "steer"],
+    ) -> _ClaudeInputReceipt:
+        receipt = _ClaudeInputReceipt(text=text, kind=kind)
+        self._native_input_receipt_map().setdefault(composite_key, []).append(receipt)
+        return receipt
 
-    def _consume_terminal_barrier(self, composite_key: str) -> str | None:
-        barriers = getattr(self, "_steering_terminal_barriers", None) or {}
-        pending = barriers.get(composite_key) or []
-        if not pending:
+    def _native_input_receipt_map(self) -> dict[str, list[_ClaudeInputReceipt]]:
+        receipts = getattr(self, "_native_input_receipts", None)
+        if receipts is None:
+            receipts = {}
+            self._native_input_receipts = receipts
+        return receipts
+
+    def _remove_native_input_receipt(
+        self,
+        composite_key: str,
+        receipt: _ClaudeInputReceipt,
+    ) -> None:
+        receipt_map = self._native_input_receipt_map()
+        receipts = receipt_map.get(composite_key) or []
+        for index, candidate in enumerate(receipts):
+            if candidate is receipt:
+                receipts.pop(index)
+                break
+        if not receipts:
+            receipt_map.pop(composite_key, None)
+
+    @staticmethod
+    def _native_user_input_text(message) -> str | None:
+        if getattr(message, "parent_tool_use_id", None) is not None:
             return None
-        barrier = pending.pop(0)
-        if not pending:
-            barriers.pop(composite_key, None)
-        return barrier
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = [
+                block.text
+                for block in content
+                if isinstance(block, TextBlock) and isinstance(block.text, str)
+            ]
+            if len(texts) == len(content):
+                return "\n".join(texts)
+        return None
+
+    def _observe_native_user_input(self, composite_key: str, message) -> bool:
+        text = self._native_user_input_text(message)
+        if text is None:
+            return False
+        receipt_map = self._native_input_receipt_map()
+        receipts = receipt_map.get(composite_key) or []
+        for index, receipt in enumerate(receipts):
+            if receipt.text != text:
+                continue
+            receipts.pop(index)
+            if not receipts:
+                receipt_map.pop(composite_key, None)
+            logger.debug(
+                "Observed Claude %s input receipt for %s",
+                receipt.kind,
+                composite_key,
+            )
+            return True
+        return False
+
+    def _pending_steering_input_state(self, composite_key: str) -> str | None:
+        for receipt in self._native_input_receipt_map().get(composite_key) or []:
+            if receipt.kind == "steer":
+                return receipt.state
+        return None
+
+    def _discard_completed_primary_input_receipts(self, composite_key: str) -> None:
+        receipt_map = self._native_input_receipt_map()
+        receipts = receipt_map.get(composite_key) or []
+        receipts[:] = [receipt for receipt in receipts if receipt.kind != "primary"]
+        if not receipts:
+            receipt_map.pop(composite_key, None)
+
+    def _clear_native_input_receipts(self, composite_key: str) -> None:
+        self._native_input_receipt_map().pop(composite_key, None)
 
     def _terminal_claim_superseded(
         self,
         composite_key: str,
         expected_steering_generation: int,
     ) -> bool:
-        """Consume a terminal frame that predates a native steer.
-
-        A successful transport write only enqueues native input. Claude may emit
-        the current query's Assistant/Result before it dequeues that input, so
-        output arrival time alone cannot assign the terminal owner. Each accepted
-        steer therefore reserves one FIFO Result slot before the final Result can
-        settle the shared Turn.
-        """
+        """Whether a terminal frame arrived before Claude echoed the steer input."""
         generation_changed = expected_steering_generation != self._steering_generation(
             composite_key
         )
-        buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
-        return generation_changed or buffered_terminal
+        return generation_changed or self._pending_steering_input_state(composite_key) is not None
 
     @staticmethod
     def _steering_input_closer(client):
@@ -1019,10 +1092,16 @@ class ClaudeAgent(BaseAgent):
                 )
             writers = self._steering_writer_keys()
             writers.add(composite_key)
+            input_receipt = self._register_native_input(
+                composite_key,
+                request.text,
+                kind="steer",
+            )
             try:
                 try:
                     await client.query(request.text, session_id=composite_key)
                 except (asyncio.TimeoutError, TimeoutError) as exc:
+                    input_receipt.state = "unknown"
                     self._advance_steering_generation(composite_key)
                     await self._close_steering_input(
                         composite_key,
@@ -1050,6 +1129,7 @@ class ClaudeAgent(BaseAgent):
                             "unexpected eof",
                         )
                     ):
+                        input_receipt.state = "unknown"
                         self._advance_steering_generation(composite_key)
                         await self._close_steering_input(
                             composite_key,
@@ -1070,12 +1150,14 @@ class ClaudeAgent(BaseAgent):
                             "process that exited with error",
                         )
                     ):
+                        self._remove_native_input_receipt(composite_key, input_receipt)
                         return steer_result(
                             SteerOutcome.REFUSED,
                             reason="runtime_unavailable",
                             backend=self.name,
                             diagnostic=diagnostic,
                         )
+                    input_receipt.state = "unknown"
                     self._advance_steering_generation(composite_key)
                     await self._close_steering_input(
                         composite_key,
@@ -1100,6 +1182,7 @@ class ClaudeAgent(BaseAgent):
                 or primary_requests[0] is not target.agent_request
             )
             if not runtime_stable:
+                input_receipt.state = "unknown"
                 self._advance_steering_generation(composite_key)
                 close_diagnostic = await self._close_steering_input(
                     composite_key,
@@ -1117,7 +1200,8 @@ class ClaudeAgent(BaseAgent):
                     reason="receiver_generation_changed",
                     backend=self.name,
                 )
-            self._advance_steering_generation(composite_key, barrier="accepted")
+            input_receipt.state = "accepted"
+            self._advance_steering_generation(composite_key)
             return steer_result(
                 SteerOutcome.ACCEPTED,
                 backend=self.name,
@@ -1356,6 +1440,10 @@ class ClaudeAgent(BaseAgent):
                     message_type = self._detect_message_type(message)
                     if message_type not in {"assistant", "result", "system"}:
                         terminal_steering_generation = None
+                    if message_type == "user":
+                        async with self._steering_lock(composite_key):
+                            self._observe_native_user_input(composite_key, message)
+                        continue
                     formatter = self._get_formatter(context)
                     is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
                     model_refusal_fallback_notice = (
@@ -1458,6 +1546,9 @@ class ClaudeAgent(BaseAgent):
                                     terminal_steering_generation,
                                 )
                             ):
+                                self._discard_completed_primary_input_receipts(
+                                    composite_key
+                                )
                                 self._suppressed_synthetic_results.add(composite_key)
                                 self._suppressed_synthetic_error_text[composite_key] = diagnostic
                                 logger.info(
@@ -1465,6 +1556,8 @@ class ClaudeAgent(BaseAgent):
                                     composite_key,
                                 )
                                 continue
+                            if diagnostic is not None:
+                                self._clear_native_input_receipts(composite_key)
                             failure_disposition = await self._handle_assistant_terminal_failure(
                                 context,
                                 composite_key,
@@ -1747,8 +1840,12 @@ class ClaudeAgent(BaseAgent):
                                     )
                             if (
                                 not settling_ambiguous_primary
-                                and self._next_terminal_barrier(composite_key) == "unknown"
+                                and self._pending_steering_input_state(composite_key)
+                                == "unknown"
                             ):
+                                self._discard_completed_primary_input_receipts(
+                                    composite_key
+                                )
                                 self._ambiguous_primary_results[composite_key] = (
                                     message,
                                     self._last_assistant_text.get(composite_key),
@@ -1775,6 +1872,9 @@ class ClaudeAgent(BaseAgent):
                                 )
                             )
                             if terminal_superseded:
+                                self._discard_completed_primary_input_receipts(
+                                    composite_key
+                                )
                                 pending = self._pending_requests.get(composite_key) or []
                                 superseded_request = pending[0] if pending else None
                                 superseded_result_text = self._select_terminal_text(
@@ -1782,6 +1882,7 @@ class ClaudeAgent(BaseAgent):
                                     raw_result_text,
                                 )
                             else:
+                                self._clear_native_input_receipts(composite_key)
                                 failure_disposition = await self._handle_terminal_failure_result(
                                     context,
                                     composite_key,
