@@ -882,6 +882,7 @@ _TERMINAL_STATUS_PRIORITY = {
 # paths cannot drift apart (this file previously spelled the set inline).
 TERMINAL_RUN_STATUSES = frozenset(_TERMINAL_STATUS_PRIORITY)
 DEFERRED_TERMINAL_METADATA_KEY = "deferred_terminal_metadata"
+TURN_PARTICIPANT_RUN_IDS_METADATA_KEY = "turn_participant_run_ids"
 
 
 def _parse_iso_instant(value: Any) -> Optional[datetime]:
@@ -4626,12 +4627,22 @@ class SQLiteBackgroundTaskStore:
                 for run_id in normalized_run_ids
                 if failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
             )
-            if isinstance(notification, dict) and eligible_run_ids:
+            immediate_owner_ids = [
+                run_id for run_id in eligible_run_ids if run_id not in deferred_ids
+            ]
+            if isinstance(notification, dict):
                 notification = dict(notification)
-                if not failure_notices.turn_fallback_owner_eligible(
-                    runs.get(current_owner)
-                ):
-                    notification["fallback_run_id"] = eligible_run_ids[0]
+                if immediate_owner_ids:
+                    if current_owner not in immediate_owner_ids:
+                        notification["fallback_run_id"] = immediate_owner_ids[0]
+                else:
+                    # A deferred Run is still mutable: Stop can cancel it before its
+                    # Activity releases terminal settlement. Electing it now makes
+                    # already-terminal siblings permanently stand down for an owner
+                    # that may never owe a notice. When every participant is deferred,
+                    # the first Run that actually settles elects and propagates the
+                    # owner under the settlement writer lock instead.
+                    notification.pop("fallback_run_id", None)
                 terminal_provenance["turn_failure_notification"] = notification
 
             deferred_metadata = {
@@ -4639,6 +4650,10 @@ class SQLiteBackgroundTaskStore:
                 for key in ("turn_id", "turn_failure_notification")
                 if (value := terminal_provenance.get(key)) is not None
             }
+            if deferred_ids:
+                deferred_metadata[TURN_PARTICIPANT_RUN_IDS_METADATA_KEY] = list(
+                    normalized_run_ids
+                )
             for run_id in normalized_run_ids:
                 run = runs.get(run_id)
                 if run is None or normalize_run_status(run.get("status")) == "canceled":
@@ -4897,6 +4912,7 @@ class SQLiteBackgroundTaskStore:
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
+        participant_rows_to_publish: list[dict[str, Any]] = []
         transitioned = False
         with self.engine.begin() as conn:
             row = conn.execute(
@@ -4932,6 +4948,64 @@ class SQLiteBackgroundTaskStore:
                     else normalize_run_status(deferred_status)
                 )
                 status, guards = _cancel_aware_terminal_status(row, requested_status)
+                participant_ids: list[str] = []
+                fallback_owner = ""
+                notice_metadata = (
+                    dict(deferred_metadata)
+                    if isinstance(deferred_metadata, dict)
+                    else None
+                )
+                if notice_metadata is not None:
+                    raw_participant_ids = notice_metadata.pop(
+                        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY, []
+                    )
+                    participant_ids = list(
+                        dict.fromkeys(
+                            participant_id
+                            for value in (
+                                raw_participant_ids
+                                if isinstance(raw_participant_ids, list)
+                                else []
+                            )
+                            if (participant_id := str(value or "").strip())
+                        )
+                    )
+                if status == "failed" and notice_metadata is not None:
+                    turn_id = str(notice_metadata.get("turn_id") or "").strip()
+                    notification = notice_metadata.get("turn_failure_notification")
+                    if turn_id and isinstance(notification, dict):
+                        notification = dict(notification)
+                        fallback_owner = str(
+                            notification.get("fallback_run_id") or ""
+                        ).strip()
+                        owner_has_notice = fallback_owner == run_id
+                        if fallback_owner and fallback_owner != run_id:
+                            owner_row = conn.execute(
+                                select(agent_runs)
+                                .where(agent_runs.c.id == fallback_owner)
+                                .limit(1)
+                            ).mappings().first()
+                            owner_metadata = (
+                                _json_loads(owner_row["metadata_json"], {})
+                                if owner_row is not None
+                                else {}
+                            )
+                            owner_notice = (
+                                owner_metadata.get(OWED_FAILURE_NOTICE_KEY)
+                                if isinstance(owner_metadata, dict)
+                                else None
+                            )
+                            owner_has_notice = bool(
+                                owner_row is not None
+                                and normalize_run_status(owner_row["status"]) == "failed"
+                                and isinstance(owner_notice, dict)
+                                and str(owner_notice.get("turn_id") or "").strip()
+                                == turn_id
+                            )
+                        if not owner_has_notice:
+                            fallback_owner = run_id
+                            notification["fallback_run_id"] = fallback_owner
+                        notice_metadata["turn_failure_notification"] = notification
                 values: dict[str, Any] = {
                     "status": status,
                     "completed_at": now,
@@ -4952,9 +5026,7 @@ class SQLiteBackgroundTaskStore:
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
                     extra_metadata=(
-                        dict(deferred_metadata)
-                        if isinstance(deferred_metadata, dict)
-                        else None
+                        notice_metadata
                     ),
                     now=now,
                 )
@@ -4966,6 +5038,73 @@ class SQLiteBackgroundTaskStore:
                 )
                 if transition.rowcount:
                     transitioned = True
+                    if fallback_owner and participant_ids:
+                        turn_id = str((notice_metadata or {}).get("turn_id") or "").strip()
+                        for participant_id in participant_ids:
+                            if participant_id == run_id:
+                                continue
+                            participant_row = conn.execute(
+                                select(agent_runs)
+                                .where(agent_runs.c.id == participant_id)
+                                .limit(1)
+                            ).mappings().first()
+                            if (
+                                participant_row is None
+                                or normalize_run_status(participant_row["status"])
+                                in TERMINAL_RUN_STATUSES
+                            ):
+                                continue
+                            participant_payload = _json_loads(
+                                participant_row["result_payload_json"], {}
+                            )
+                            if not isinstance(participant_payload, dict):
+                                continue
+                            participant_metadata = participant_payload.get(
+                                DEFERRED_TERMINAL_METADATA_KEY
+                            )
+                            if not isinstance(participant_metadata, dict) or str(
+                                participant_metadata.get("turn_id") or ""
+                            ).strip() != turn_id:
+                                continue
+                            participant_notification = participant_metadata.get(
+                                "turn_failure_notification"
+                            )
+                            if not isinstance(participant_notification, dict):
+                                continue
+                            participant_notification = dict(participant_notification)
+                            if (
+                                str(
+                                    participant_notification.get("fallback_run_id")
+                                    or ""
+                                ).strip()
+                                == fallback_owner
+                            ):
+                                continue
+                            participant_notification["fallback_run_id"] = fallback_owner
+                            participant_metadata = dict(participant_metadata)
+                            participant_metadata["turn_failure_notification"] = (
+                                participant_notification
+                            )
+                            participant_payload[DEFERRED_TERMINAL_METADATA_KEY] = (
+                                participant_metadata
+                            )
+                            conn.execute(
+                                update(agent_runs)
+                                .where(agent_runs.c.id == participant_id)
+                                .values(
+                                    result_payload_json=_json_dumps(participant_payload),
+                                    updated_at=now,
+                                )
+                            )
+                            participant_rows_to_publish.append(
+                                dict(
+                                    conn.execute(
+                                        select(agent_runs)
+                                        .where(agent_runs.c.id == participant_id)
+                                        .limit(1)
+                                    ).mappings().one()
+                                )
+                            )
                     row_to_publish = dict(
                         conn.execute(
                             select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -4981,7 +5120,7 @@ class SQLiteBackgroundTaskStore:
                 )
                 if row is None:
                     break
-        _publish_run_rows_updated([row_to_publish])
+        _publish_run_rows_updated([row_to_publish, *participant_rows_to_publish])
         return transitioned
 
     def find_escalation_run(self, *, parent_run_id: str) -> Optional[dict[str, Any]]:

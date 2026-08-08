@@ -444,6 +444,105 @@ def test_turn_output_batch_locks_before_re_electing_a_canceled_fallback_owner(
     assert notice["turn_fallback_run_id"] == runs[1].id
 
 
+def test_turn_output_batch_prefers_an_immediately_settled_fallback_owner(
+    tmp_path: Path,
+) -> None:
+    """A running Activity cannot own notices that its terminal sibling owes now."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-immediate-owner-a")
+    _task(sqlite, "watch-immediate-owner-b")
+    runs = [
+        requests.enqueue_task_run(definition_id)
+        for definition_id in ("watch-immediate-owner-a", "watch-immediate-owner-b")
+    ]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    deferred, immediate = sorted(runs, key=lambda run: run.id)
+
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": "turn-immediate-owner",
+            "turn_failure_notification": {
+                "failure_id": "turn:turn-immediate-owner",
+                "delivered": False,
+                "fallback_run_id": deferred.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[deferred.id],
+    )
+
+    assert sqlite.get_run(deferred.id)["status"] == "running"
+    assert sqlite.get_run(immediate.id)["status"] == "failed"
+    assert sqlite.owed_failure_notice(immediate.id)["turn_fallback_run_id"] == immediate.id
+    deferred_metadata = sqlite.get_run(deferred.id)["result_payload"][
+        "deferred_terminal_metadata"
+    ]
+    assert (
+        deferred_metadata["turn_failure_notification"]["fallback_run_id"]
+        == immediate.id
+    )
+
+
+def test_all_deferred_turn_runs_elect_and_propagate_the_first_stable_owner(
+    tmp_path: Path,
+) -> None:
+    """A canceled deferred candidate cannot strand the Turn's only fallback."""
+
+    sqlite, requests = _store(tmp_path)
+    definitions = [f"watch-deferred-owner-{index}" for index in range(3)]
+    for definition_id in definitions:
+        _task(sqlite, definition_id)
+    runs = [requests.enqueue_task_run(definition_id) for definition_id in definitions]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": "turn-all-deferred",
+            "turn_failure_notification": {
+                "failure_id": "turn:turn-all-deferred",
+                "delivered": False,
+                "fallback_run_id": runs[0].id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[run.id for run in runs],
+    )
+    for run in runs:
+        metadata = sqlite.get_run(run.id)["result_payload"][
+            "deferred_terminal_metadata"
+        ]
+        assert "fallback_run_id" not in metadata["turn_failure_notification"]
+
+    assert sqlite.cancel_run(runs[0].id)
+    assert sqlite.settle_deferred_run(runs[0].id)
+    assert sqlite.get_run(runs[0].id)["status"] == "canceled"
+
+    assert sqlite.settle_deferred_run(runs[1].id)
+    first_notice = sqlite.owed_failure_notice(runs[1].id)
+    assert first_notice["turn_fallback_run_id"] == runs[1].id
+    propagated = sqlite.get_run(runs[2].id)["result_payload"][
+        "deferred_terminal_metadata"
+    ]
+    assert (
+        propagated["turn_failure_notification"]["fallback_run_id"] == runs[1].id
+    )
+
+    assert sqlite.settle_deferred_run(runs[2].id)
+    second_notice = sqlite.owed_failure_notice(runs[2].id)
+    assert second_notice["turn_fallback_run_id"] == runs[1].id
+
+
 # --- group 2: the owed-notice drain ---------------------------------------
 #
 # The policy decisions are tested against ``core.failure_notices.decide`` directly:
@@ -6856,6 +6955,43 @@ def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
         "skipped",
     ]
     assert controller.im_client.sent == [], "the fallback drain repeated a live Turn notification"
+
+
+def test_legacy_harness_delivery_evidence_suppresses_the_durable_fallback(
+    tmp_path: Path,
+) -> None:
+    """A pre-turn-token Harness receipt remains authoritative delivery evidence."""
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-legacy-delivery", deliver_key="slack::channel::C123")
+    run = requests.enqueue_task_run("watch-legacy-delivery")
+    assert requests.claim(run.id) is not None
+    sqlite.record_run_output(
+        run.id,
+        output_id="terminal",
+        text="",
+        terminal_status="failed",
+        error="backend failed",
+        provenance={
+            "turn_failure_notification": {
+                "failure_id": run.id,
+                "delivered": True,
+                "ack_evidence": "delivery_only",
+            }
+        },
+    )
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["turn_id"] is None
+    assert notice["turn_notification_delivered"] is True
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert sqlite.owed_failure_notice(run.id)["state"] == "skipped"
+    assert controller.im_client.sent == []
 
 
 def _settle_linked_turn_failures(sqlite, runs, *, delivered: bool) -> None:

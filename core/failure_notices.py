@@ -395,7 +395,11 @@ def notice_turn_id(notice: Optional[dict[str, Any]]) -> str:
 def turn_notification_delivered(notice: Optional[dict[str, Any]]) -> bool:
     """Whether the Turn's primary backend failure notification was acknowledged."""
 
-    return bool(notice_turn_id(notice) and (notice or {}).get("turn_notification_delivered"))
+    # Legacy Harness contexts predate ``turn_token`` and therefore stamp no Turn id,
+    # but the explicit delivery flag still comes from the live notification's
+    # DeliveryEvidence. Requiring the newer identity discards valid evidence and lets
+    # the durable fallback repeat a notification that was already delivered.
+    return bool((notice or {}).get("turn_notification_delivered"))
 
 
 def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
