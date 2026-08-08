@@ -921,6 +921,7 @@ def enqueue_session_callback(
     message: str,
     source_actor: str,
     parent_run_id: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> Optional["TaskExecutionRequest"]:
     """Enqueue a callback turn into an existing agent session — the shared entry used by Agent
     Run / watch / scheduled-task callbacks and vault-request auto-resume. Resolves the session's
@@ -948,7 +949,10 @@ def enqueue_session_callback(
         source_actor=source_actor,
         parent_run_id=parent_run_id,
         delivery_intent=delivery_intent_for_trigger("callback"),
-        metadata={"callback_parent_run_id": parent_run_id} if parent_run_id else {},
+        metadata={
+            **(metadata or {}),
+            **({"callback_parent_run_id": parent_run_id} if parent_run_id else {}),
+        },
         callback_parent_to_arm=parent_run_id,
     )
 
@@ -7079,6 +7083,10 @@ class ScheduledTaskService:
                         session_id=plan.session_id,
                         message=plan.message,
                         source_actor=f"vault:{request_id}",
+                        metadata={
+                            "vault_request_type": str(row.get("request_type") or ""),
+                            "vault_request_status": str(row.get("status") or ""),
+                        },
                     )
                     status = "sent"
             except ValueError:
@@ -7174,6 +7182,10 @@ class ScheduledTaskService:
                     session_id=plan.session_id,
                     message=plan.message,
                     source_actor=f"vault:{request_id}",
+                    metadata={
+                        "vault_request_type": str(row.get("request_type") or ""),
+                        "vault_request_status": str(row.get("status") or ""),
+                    },
                 )
                 status = "sent"
         except ValueError:
@@ -10145,6 +10157,8 @@ class ScheduledTaskService:
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
+                "vault_request_type": (metadata or {}).get("vault_request_type"),
+                "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,

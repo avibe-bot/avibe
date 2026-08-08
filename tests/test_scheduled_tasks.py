@@ -1124,6 +1124,36 @@ def test_build_context_assigns_hook_message_id() -> None:
     assert context.platform_specific["task_trigger_kind"] == "hook"
 
 
+def test_build_context_forwards_vault_callback_outcome_metadata() -> None:
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")))
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-vault",
+            trigger_kind="agent_run",
+            metadata={
+                "source_kind": "callback",
+                "source_actor": "vault:vrq_1",
+                "vault_request_type": "access",
+                "vault_request_status": "denied",
+            },
+        )
+    )
+
+    assert context.platform_specific["vault_request_type"] == "access"
+    assert context.platform_specific["vault_request_status"] == "denied"
+
+
 def test_build_context_carries_the_definition_name_for_display() -> None:
     """The prompt echo names what fired, so the label cannot be an opaque id."""
 

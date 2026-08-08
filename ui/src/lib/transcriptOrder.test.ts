@@ -4,9 +4,11 @@ import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   byCreatedThenId,
   isTranscriptWindowDisjoint,
+  mergeAnchorWindow,
   mergeById,
   insertMessageOrdered,
   messageOrderTimeMs,
+  transcriptWindowsOverlap,
   timestampOrderTimeMs,
   transcriptOrderTimeMs,
 } from './transcriptOrder';
@@ -89,6 +91,64 @@ describe('isTranscriptWindowDisjoint', () => {
   });
 });
 
+describe('transcriptWindowsOverlap', () => {
+  it('detects a shared row between fetched windows', () => {
+    expect(transcriptWindowsOverlap([mk('a', t(1)), mk('b', t(2))], [mk('b', t(2)), mk('c', t(3))])).toBe(true);
+    expect(transcriptWindowsOverlap([mk('a', t(1))], [mk('b', t(2))])).toBe(false);
+    expect(transcriptWindowsOverlap([], [mk('b', t(2))])).toBe(false);
+  });
+});
+
+describe('mergeAnchorWindow', () => {
+  it('keeps the owning reply when a following-tail trim would drop it', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`tail-${index}`, t(index + 4)));
+    const incoming = [mk('owner', t(1)), mk('tail-0', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'owner', 4, true)).toEqual({
+      messages: incoming,
+      replaced: true,
+      detachedTail: false,
+      trimmedOldest: false,
+    });
+  });
+
+  it('keeps the owning reply when trimming from the newest side', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`head-${index}`, t(index)));
+    const incoming = [mk('head-3', t(3)), mk('owner', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'owner', 4, false)).toEqual({
+      messages: incoming,
+      replaced: true,
+      detachedTail: true,
+      trimmedOldest: false,
+    });
+  });
+
+  it('marks a newest-side trim historical even when the anchor is retained', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`head-${index}`, t(index)));
+    const incoming = [mk('head-0', t(0)), mk('new-tail', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'head-0', 4, false)).toEqual({
+      messages: existing,
+      replaced: false,
+      detachedTail: true,
+      trimmedOldest: false,
+    });
+  });
+
+  it('reports when a following-tail trim discards older rows', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`tail-${index}`, t(index + 4)));
+    const incoming = [mk('old', t(1)), mk('tail-0', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'tail-0', 4, true)).toEqual({
+      messages: existing,
+      replaced: false,
+      detachedTail: false,
+      trimmedOldest: true,
+    });
+  });
+});
+
 describe('mergeById', () => {
   it('dedupes by id and sorts into durable order', () => {
     const existing = [mk('p1', t(1))];
@@ -141,6 +201,27 @@ describe('mergeById', () => {
     const [row] = mergeById([live], [enriched]);
     expect(row.author_name).toBe('watch');
     expect(row.author_id).toBe('def_watch');
+  });
+
+  it('merges Vault provenance metadata into an existing live row', () => {
+    const live = {
+      id: 'm1',
+      created_at: t(1),
+      metadata: { source_kind: 'callback', source_actor: 'vault:vrq_1' },
+    } as unknown as WorkbenchMessage;
+    const enriched = {
+      id: 'm1',
+      created_at: t(1),
+      metadata: {
+        source_kind: 'callback',
+        source_actor: 'vault:vrq_1',
+        vault_request_type: 'access',
+        vault_request_status: 'denied',
+      },
+    } as unknown as WorkbenchMessage;
+
+    const [row] = mergeById([live], [enriched]);
+    expect(row.metadata).toEqual(enriched.metadata);
   });
 
   it('does not overwrite an already-resolved source-session id with a null reconcile', () => {

@@ -609,6 +609,16 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
     definition_id = spec.get("task_definition_id")
     session_id = spec.get("agent_session_id")
     suppress_delivery = bool(spec.get("suppress_delivery"))
+    provenance_metadata = {
+        key: value
+        for key in (
+            "source_kind",
+            "source_actor",
+            "vault_request_type",
+            "vault_request_status",
+        )
+        if (value := spec.get(key)) not in (None, "")
+    }
     try:
         engine = get_cached_sqlite_engine()
         appended_row = None
@@ -653,6 +663,7 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
                 author_id=definition_id,
                 message_type=messages_service.HARNESS_TYPE,
                 text=text,
+                metadata=provenance_metadata,
                 native_message_id=context.message_id,
                 parent_native_message_id=context.thread_id,
             )

@@ -3167,6 +3167,13 @@
       "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
+      "vault": "来自 Vault",
+      "vaultProvided": "填写完成",
+      "vaultAccessApproved": "访问已批准",
+      "vaultSigned": "签名完成",
+      "vaultDenied": "已拒绝",
+      "vaultFailed": "处理失败",
+      "vaultExpired": "已过期",
       "agentFallback": "智能体"
     },
     "annotation": {

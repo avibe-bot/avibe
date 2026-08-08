@@ -30,6 +30,7 @@ from storage.models import (
     scope_settings,
     scopes,
     session_turns,
+    vault_requests,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sessions_service import session_agent_display_label
@@ -148,9 +149,10 @@ def _attach_harness_provenance(
     records none). Resolve it read-side: message → its ``agent_runs`` row
     (``id == <execution_id>``) → the run's ``source_actor`` (the session that
     triggered the callback) → that session's title, so the Chat chip can name the
-    source and deep-link to ``/chat/<source_session_id>``. No schema/write-path
-    change. Batched: at most two extra queries per page, only when such a message
-    is present.
+    source and deep-link to ``/chat/<source_session_id>``. Vault callbacks additionally
+    resolve their ``vault:<request_id>`` actor into stable request type/status metadata
+    so the transcript can label the callback as coming from Vault. Batched: at most
+    two extra queries per page, only when such a message is present.
     """
     exec_by_msg: dict[str, str] = {}
     for payload in payloads:
@@ -209,43 +211,69 @@ def _attach_harness_provenance(
         # so an unexpected source_actor shape can't become a bogus /chat target.
         if source_id and ":" not in source_id:
             source_by_exec[exec_id] = source_id
-    if not source_by_exec:
+    vault_by_exec: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    vault_request_ids: set[str] = set()
+    for exec_id, run in runs.items():
+        actor = str(run["source_actor"] or "").strip()
+        if run["source_kind"] == "callback" and actor.startswith("vault:"):
+            request_id = actor[len("vault:"):].strip()
+            if request_id:
+                vault_by_exec[exec_id] = (request_id, None)
+                vault_request_ids.add(request_id)
+    if vault_request_ids:
+        request_rows = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                select(
+                    vault_requests.c.id,
+                    vault_requests.c.request_type,
+                    vault_requests.c.status,
+                ).where(vault_requests.c.id.in_(vault_request_ids))
+            ).mappings()
+        }
+        vault_by_exec = {
+            exec_id: (request_id, request_rows.get(request_id))
+            for exec_id, (request_id, _row) in vault_by_exec.items()
+        }
+    if not source_by_exec and not vault_by_exec:
         return payloads
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
-    for row in conn.execute(
-        select(
-            agent_sessions.c.id,
-            agent_sessions.c.title,
-            agent_sessions.c.agent_name,
-            agent_sessions.c.agent_backend,
-            agents.c.name.label("catalog_agent_name"),
-            agents.c.archived_at.label("catalog_agent_archived_at"),
-            agents.c.metadata_json.label("catalog_agent_metadata_json"),
-        )
-        .select_from(
-            agent_sessions.outerjoin(
-                agents,
-                or_(
-                    agents.c.id == agent_sessions.c.agent_id,
-                    and_(
-                        agent_sessions.c.agent_id.is_(None),
-                        agents.c.name == agent_sessions.c.agent_name,
-                    ),
-                ),
+    if source_by_exec:
+        for row in conn.execute(
+            select(
+                agent_sessions.c.id,
+                agent_sessions.c.title,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+                agents.c.name.label("catalog_agent_name"),
+                agents.c.archived_at.label("catalog_agent_archived_at"),
+                agents.c.metadata_json.label("catalog_agent_metadata_json"),
             )
-        )
-        .where(
-            agent_sessions.c.id.in_(set(source_by_exec.values()))
-        )
-    ).mappings():
-        meta_by_session[row["id"]] = {
-            "title": row["title"],
-            "agent_name": session_agent_display_label(row),
-        }
+            .select_from(
+                agent_sessions.outerjoin(
+                    agents,
+                    or_(
+                        agents.c.id == agent_sessions.c.agent_id,
+                        and_(
+                            agent_sessions.c.agent_id.is_(None),
+                            agents.c.name == agent_sessions.c.agent_name,
+                        ),
+                    ),
+                )
+            )
+            .where(
+                agent_sessions.c.id.in_(set(source_by_exec.values()))
+            )
+        ).mappings():
+            meta_by_session[row["id"]] = {
+                "title": row["title"],
+                "agent_name": session_agent_display_label(row),
+            }
 
     for payload in payloads:
-        source_id = source_by_exec.get(exec_by_msg.get(payload["id"], ""))
+        exec_id = exec_by_msg.get(payload["id"], "")
+        source_id = source_by_exec.get(exec_id)
         # Only attach when the source session still exists (is in meta_by_session);
         # a stale/imported/deleted source would otherwise write source_session_id
         # and produce a dead /chat/<missing id> link with only the fallback label.
@@ -254,6 +282,16 @@ def _attach_harness_provenance(
             payload["source_session_id"] = source_id
             payload["source_session_title"] = meta.get("title")
             payload["source_session_agent_name"] = meta.get("agent_name")
+        vault_info = vault_by_exec.get(exec_id)
+        if vault_info is not None:
+            request_id, request = vault_info
+            metadata = dict(payload.get("metadata") or {})
+            metadata.setdefault("source_kind", "callback")
+            metadata.setdefault("source_actor", f"vault:{request_id}")
+            if request is not None:
+                metadata.setdefault("vault_request_type", request.get("request_type"))
+                metadata.setdefault("vault_request_status", request.get("status"))
+            payload["metadata"] = metadata
     return payloads
 
 
@@ -709,6 +747,10 @@ def list_session_messages(
     after_id: Optional[str] = None,
     before_id: Optional[str] = None,
     around_id: Optional[str] = None,
+    around_native_id: Optional[str] = None,
+    around_native_platform: Optional[str] = None,
+    around_turn_id: Optional[str] = None,
+    around_run_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
     tail: bool = False,
@@ -722,13 +764,18 @@ def list_session_messages(
     ``before_id`` returns the page immediately older than that row, still in
     chronological order. This powers upward history loading from the chat page.
 
-    ``around_id`` centers a window on a specific message (deep-link / search
-    jump): up to ``limit`` rows strictly older + the anchor + up to ``limit`` rows
-    strictly newer, merged chronologically. It takes precedence over
-    ``after_id`` / ``before_id`` / ``tail``. ``next_before_id`` is set when older
-    rows remain, ``next_after_id`` when newer rows remain, so the chat can page in
-    both directions from the centered window. An unknown ``around_id`` returns no
-    messages and null cursors.
+    ``around_id`` centers a window on a durable message id (deep-link / search
+    jump). ``around_native_id`` provides the equivalent lookup for a platform
+    native message id when a legacy caller context has not retained the durable
+    row id; ``around_native_platform`` disambiguates native ids reused by another
+    platform in the same session. ``around_turn_id`` and ``around_run_id`` resolve the initial accepted
+    delivery for a stable Agent turn/run before applying the same window logic.
+    Up to ``limit`` rows are returned on either side of the anchor,
+    merged chronologically. These modes take precedence over ``after_id`` /
+    ``before_id`` / ``tail``. ``next_before_id`` is set when older rows remain,
+    ``next_after_id`` when newer rows remain, so the chat can page in both
+    directions from the centered window. An unknown anchor returns no messages
+    and null cursors.
 
     ``tail`` returns the most-recent ``limit`` rows (still chronological) instead
     of the oldest page — used by the Chat page's reconnect/visibility gap
@@ -741,18 +788,78 @@ def list_session_messages(
     if types is not None:
         query = query.where(messages.c.type.in_(list(types)))
     effective_limit = min(max(int(limit), 1), 500)
-    if around_id:
+    if around_id or around_native_id or around_turn_id or around_run_id:
         # Window centered on a specific message (deep-link / search jump). Resolve
         # the anchor's (created_at, id); an unknown id (or one in another session)
         # yields an empty window. ``query`` already carries the type/metadata
         # filter, so the older/anchor/newer sub-queries inherit it — the anchor
         # only appears if it is itself transcript-visible.
         order_value = transcript_order_value()
+        anchor_id = around_id
         anchor = conn.execute(
             select(order_value).where(
-                messages.c.id == around_id, messages.c.session_id == session_id
+                messages.c.id == anchor_id, messages.c.session_id == session_id
             )
         ).scalar_one_or_none()
+        if anchor is None and around_native_id:
+            native_query = select(messages.c.id).where(
+                messages.c.native_message_id == around_native_id,
+                messages.c.session_id == session_id,
+            )
+            if around_native_platform:
+                native_query = native_query.where(messages.c.platform == around_native_platform)
+            anchor_id = conn.execute(native_query.order_by(messages.c.id.asc()).limit(1)).scalar_one_or_none()
+            if anchor_id is not None:
+                anchor = conn.execute(
+                    select(order_value).where(
+                        messages.c.id == anchor_id, messages.c.session_id == session_id
+                    )
+                ).scalar_one_or_none()
+        if anchor is None and around_turn_id:
+            anchor_id = conn.execute(
+                select(message_deliveries.c.message_id)
+                .where(
+                    message_deliveries.c.turn_id == around_turn_id,
+                    message_deliveries.c.session_id == session_id,
+                    message_deliveries.c.message_id.is_not(None),
+                )
+                .order_by(message_deliveries.c.turn_position.asc(), message_deliveries.c.id.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if anchor_id is not None:
+                anchor = conn.execute(
+                    select(order_value).where(
+                        messages.c.id == anchor_id, messages.c.session_id == session_id
+                    )
+                ).scalar_one_or_none()
+        if anchor is None and around_run_id:
+            anchor_id = conn.execute(
+                select(message_deliveries.c.message_id)
+                .select_from(message_deliveries.join(agent_runs, agent_runs.c.delivery_id == message_deliveries.c.id))
+                .where(
+                    agent_runs.c.id == around_run_id,
+                    message_deliveries.c.session_id == session_id,
+                    message_deliveries.c.message_id.is_not(None),
+                )
+                .order_by(message_deliveries.c.turn_position.asc(), message_deliveries.c.id.asc())
+                .limit(1)
+                ).scalar_one_or_none()
+            if anchor_id is None:
+                anchor_id = conn.execute(
+                    select(messages.c.id)
+                    .where(
+                        messages.c.native_message_id == f"agent_run:{around_run_id}",
+                        messages.c.session_id == session_id,
+                    )
+                    .order_by(messages.c.id.asc())
+                    .limit(1)
+                ).scalar_one_or_none()
+            if anchor_id is not None:
+                anchor = conn.execute(
+                    select(order_value).where(
+                        messages.c.id == anchor_id, messages.c.session_id == session_id
+                    )
+                ).scalar_one_or_none()
         if anchor is None:
             return {"messages": [], "next_after_id": None, "next_before_id": None}
 
@@ -760,7 +867,7 @@ def list_session_messages(
             query.where(
                 or_(
                     order_value < anchor,
-                    and_(order_value == anchor, messages.c.id < around_id),
+                    and_(order_value == anchor, messages.c.id < anchor_id),
                 )
             )
             .order_by(order_value.desc(), messages.c.id.desc())
@@ -773,14 +880,14 @@ def list_session_messages(
 
         anchor_rows = [
             _row_to_payload(dict(row))
-            for row in conn.execute(query.where(messages.c.id == around_id)).mappings().all()
+            for row in conn.execute(query.where(messages.c.id == anchor_id)).mappings().all()
         ]
 
         newer_q = (
             query.where(
                 or_(
                     order_value > anchor,
-                    and_(order_value == anchor, messages.c.id > around_id),
+                    and_(order_value == anchor, messages.c.id > anchor_id),
                 )
             )
             .order_by(order_value.asc(), messages.c.id.asc())
@@ -795,6 +902,7 @@ def list_session_messages(
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
             "next_before_id": older[0]["id"] if has_older and older else None,
+            "anchor_id": anchor_id,
         }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.

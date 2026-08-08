@@ -555,13 +555,20 @@ def test_enqueue_session_callback_uses_callback_source(monkeypatch):
 
     monkeypatch.setattr(st, "resolve_session_id_target", lambda sid: _Target())
 
-    out = st.enqueue_session_callback(_Store(), session_id="ses_x", message="resume now", source_actor="vault:vrq_1")
+    out = st.enqueue_session_callback(
+        _Store(),
+        session_id="ses_x",
+        message="resume now",
+        source_actor="vault:vrq_1",
+        metadata={"vault_request_status": "denied"},
+    )
     assert out is not None and out.id == "run_1"
     assert calls["source_kind"] == "callback"
     assert calls["session_policy"] == "existing"
     assert calls["session_id"] == "ses_x"
     assert calls["message"] == "resume now"
     assert calls["source_actor"] == "vault:vrq_1"
+    assert calls["metadata"] == {"vault_request_status": "denied"}
 
     # Nothing to send → no enqueue.
     assert st.enqueue_session_callback(_Store(), session_id="", message="x", source_actor="a") is None
