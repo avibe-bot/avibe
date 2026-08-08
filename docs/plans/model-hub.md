@@ -165,9 +165,9 @@ The Source workflow is complete at both entry points:
   optional name, Base URL, and API key. Its user-triggered Add action reuses one
   connectivity interaction to classify reachability/authentication and observe the
   protocol before Save can commit; it adds no separate step and presents no protocol
-  selector. Source details retains an explicit test of the already stored protocol.
-  The unsaved variant does not save the Source, consume routing order, or run an Agent
-  turn. For an API key it may provision an engine credential only transiently:
+  selector. This unsaved operation does not save a Source, consume routing order, or
+  run an Agent turn. For an API key it may provision an engine credential only
+  transiently:
   every success, failure, timeout, and cancellation path revokes that ref before the
   operation settles. A revoke failure enters the existing durable pending-revocation
   reconciliation rather than leaving an unreferenced credential untracked. No test
@@ -175,12 +175,25 @@ The Source workflow is complete at both entry points:
   independently from protocol observation: Save may proceed only when that interaction
   still produced response evidence for the protocol, and it provisions the committed
   Source independently.
+- **Saved Source refresh and recovery.** Source details exposes the distinct
+  `POST /api/models/sources/<id>/refresh` operation. It is intentionally mutating: it
+  tests the stored protocol, rediscovers inventory, updates Source health, and clears a
+  `needs_action` or `error` blocker only when current evidence proves recovery. Before
+  committing a smaller inventory it runs §4.5's Custom-hop and Follow-supply guards.
+  The UI names this action as refresh/recovery and displays the resulting inventory and
+  state; it never presents it as the non-persisting Add Source connectivity operation.
 - **Model discovery.** Third-party Anthropic-compatible and OpenAI-compatible Sources
   expose an explicit “Fetch models” action in both Add Source and Source details.
-  Discovery uses the observed-and-stored protocol adapter, replaces only the discovered slice,
-  preserves manual entries, and renders added, removed, unchanged, and failed results.
+  Discovery uses the observed-and-stored protocol adapter, replaces only the discovered
+  slice, preserves manual entries, and renders added, removed, unchanged, and failed
+  results. Rediscovering an unchanged model id preserves its edited
+  `reasoning_efforts`, `display_name`, and `discovered_at`; only an id absent from the
+  new upstream list leaves the discovered slice. Unsaved Add Source discovery applies
+  the same transient credential rule as connectivity observation: success, failure,
+  timeout, and cancellation all revoke the provisioned ref, and a revoke failure enters
+  durable pending-revocation reconciliation before the operation settles.
 - **Model inventory and manual entries.** A user may add and remove exact manual model
-  ids. Every model-list item has
+  ids. Model `id` is unique within a Source. Every model-list item has
   `{id, origin: "discovered" | "manual", reasoning_efforts: string[]}`; discovery
   creates `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
   `reasoning_efforts` is required and may be empty. It declares the exact reasoning
@@ -389,14 +402,24 @@ policy:
    `reasoning_efforts`, pass that one value to the adapter; otherwise pass `null` and
    let the upstream use its own default. The list never selects a value, and resolution
    performs no approximate mapping or downgrade fallback. Parameter, protocol, and
-   tool-compatibility errors surface without fallback. A 401 refreshes once and retries
-   that hop once.
-   Before output starts, explicit quota exhaustion, 429, transient 5xx, or network
-   failure sets the classified source-global cooldown and continues to the next hop.
-   After any output starts, never replay the request: record the interrupted turn and
-   let the next turn run this entire algorithm again. If no hop can complete, report
-   the existing truthful terminal failure. Every switch is recorded for the pull
-   surfaces; a successful handoff emits no conversation notice or setting.
+   tool-compatibility errors surface without fallback. A local Gateway start/listener/
+   process failure is `engine_down`: it surfaces as a terminal local-runtime error,
+   mutates no Source health, and does not walk another Hub hop because no upstream was
+   attempted. A 401 refreshes once and retries that hop once.
+   Before output starts, explicit quota exhaustion, 429, transient 5xx, or attributable
+   upstream network failure sets the classified source-global cooldown and continues to
+   the next hop. A second 401, or a classified 402/403 result of
+   `credential_expired | credential_revoked | balance_exhausted | account_banned`,
+   persists that Source as `needs_action` and also continues to the next hop before
+   output; a non-self-healing account failure does not prevent another configured
+   Source from serving the turn.
+   After any output starts, never replay the request. Still classify and persist any
+   attributable Source failure: self-healing failures set their cooldown and non-self-
+   healing failures set `needs_action`, so the next turn does not immediately retry a
+   hop known to be unavailable. Record the interrupted turn and let the next turn run
+   this entire algorithm again. If no hop can complete, report the existing truthful
+   terminal failure. Every switch is recorded for the pull surfaces; a successful
+   handoff emits no conversation notice or setting.
 
 Because health is source-global, a cooldown created through one backend affects every
 route using that Source. Because every turn runs the algorithm again, an elapsed
@@ -816,16 +839,36 @@ not the silent side effect prohibited by §2; without the confirmation, neither 
 Source nor any chain changes.
 
 The same invariant applies to **every Source-inventory mutation**, not only Source
-deletion. Reversible or transactional changes — API-key credential replacement,
-refresh, and manual-model deletion — first stage the resulting inventory and compare
-it with every exact Custom hop, using the §4.3 phase-1 capability predicate: either the
-literal model remains advertised or a sanctioned native alias retains compatible
-family/version evidence. If a hop would cease to satisfy that predicate, the non-forced
-mutation is refused with `source_model_in_custom_chain` and ordered
-`would_remove_hops`; another Source supplying the same menu model does not make that
-exact reference disposable. A confirmed `force=true` applies the inventory
+deletion. Reversible or transactional changes — API-key Base URL replacement, API-key
+credential replacement, explicit refresh/recovery, and manual-model deletion — first
+stage the resulting inventory and run **both** guards: compare it with every exact
+Custom hop using the §4.3 phase-1 capability predicate, and recompute `would_interrupt`
+for every protected Follow or Custom menu model. Either the literal model remains
+advertised or a sanctioned native alias retains compatible family/version evidence. If
+an exact hop would cease to satisfy that predicate, the non-forced mutation is refused
+with `source_model_in_custom_chain` and ordered `would_remove_hops`; another Source
+supplying the same menu model does not make that exact reference disposable. If no
+exact hop is lost but a protected route loses its last supplier, it is refused with
+`source_last_supplier`. When both apply, the exact-hop error leads and the response
+still carries both complete arrays. A confirmed `force=true` applies the inventory
 change and removes only those invalidated hops in one transaction, preserving the
 identity and relative order of all survivors and keeping an empty route `custom`.
+It also reports every resulting supply gap; force is confirmation, not a claim that
+the mutation is interruption-free.
+
+The force carrier and response are uniform and JSON-body based for inventory changes:
+`PATCH /api/models/sources/<id>` carries
+`{display_name?, base_url?, force?: boolean}` (`force` is meaningful only when
+`base_url` changes);
+`PUT /api/models/sources/<id>/credential` carries `{key, force?: boolean}`;
+`POST /api/models/sources/<id>/refresh` carries `{force?: boolean}`; and
+`DELETE /api/models/custom-models` carries
+`{source_id, model_id, force?: boolean}`. Omitted `force` is false. A guarded `409`
+returns `{error, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` with
+both arrays present. Success returns
+`{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` with empty
+arrays when nothing was cascaded or interrupted. No query-parameter variant exists for
+these four mutations.
 Automatic background discovery never performs this cascade: when neither literal
 inventory nor sanctioned-alias evidence remains, it records the model as
 `model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
@@ -836,9 +879,9 @@ exception. Each presents AC-2's server-enforced acknowledgement **before** login
 the user can abort there, but the product promises no rollback or post-login refusal
 once the OAuth exchange has begun. After authentication, the engine commits the
 resulting credential and any inventory it can establish. Exact hops whose source/model
-pair is no longer present remain visible but non-runnable with `model_unsupported` (or
-the equivalent stale state), and the response reports the resulting gaps and
-`needs_action` work for a later explicit edit or force cascade. It never silently
+pair is no longer present remain visible but non-runnable with exactly
+`reason: "model_unsupported"` and `retry_at: null`, and the response reports the
+resulting gaps and `needs_action` work for a later explicit edit or force cascade. It never silently
 converts the route to Follow or claims that the old supply is intact. Thus no
 credential lifecycle event or inventory drift silently calls a model the Source no
 longer advertises or rewrites the user's chain.
@@ -1023,7 +1066,8 @@ Required interaction rules:
   a consent flow. When a backend already has its singleton native Source, its native
   choice is disabled rather than creating an alias for the same CLI login.
 - Add Source exposes §4.1's combined connectivity/protocol observation without a normal
-  protocol control; Source details tests the stored protocol. Both surfaces expose
+  protocol control; Source details runs the separately named mutating refresh/recovery
+  against the stored protocol. Both surfaces expose
   compatible model discovery. Results stay in the current flow and use compact status plus an
   info affordance for explanation; the page does not grow permanent instructional
   paragraphs. Every inventory model exposes an editable per-model `reasoning_efforts`
@@ -1062,6 +1106,10 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
   it launches (env vars for Claude Code; `-c` overrides for Codex app-server;
   `OPENCODE_CONFIG` overlay for OpenCode, gateway-config hash tracked for
   long-lived `opencode serve`). Native user configs are never written.
+- **Availability is default-on.** Absence of `VIBE_MODEL_HUB_ENABLED` cannot disable
+  the controller, `/api/models/` routes, or Models UI. K3 deletes the old default-off
+  gate; an explicitly configured development/emergency override may disable the surface,
+  but no fresh user depends on an environment variable to receive the product default.
 - **Direct (supported diagnostic/self-managed path)**: current behavior —
   per-backend native config editing (auth tabs, API key + base URL, writes to
   `settings.json` etc.), useful for diagnostics and self-managed setups.

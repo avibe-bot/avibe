@@ -109,7 +109,7 @@ the three whitelisted planning documents while K2 extends the engine survey. K3 
 | --- | --- | --- | --- |
 | **K1 spec v3 sync** | codex | This docs-only PR: `model-hub.md`, binding §3/§8 updates here, and one dated addendum in `model-hub-tos-review.md`; no frozen-contract edit | — |
 | **K2 conversion fidelity** | codex | Preserve the recorded M0 measurements and go/no-go rows; record the 2026-08-08 owner waiver of an official-API attribution re-test and the accepted relay-attributed reasoning degradation without rewriting the evidence or adding product/UI scope | — |
-| **K3 final contracts + routing core** | codex | First implementation lane. Land the complete final-shape handoff below in one commit with its runtime consumers and tests; make per-model route policy/hops the only route structure; implement and own the sole §4.3 resolver, normalized OpenCode provider matching, the per-backend native Source singleton, Source-order enrollment versus effective-route adoption projections, fresh-install Gateway plus existing-install Direct onboarding, serializer completeness, exact-hop and supply-gap guards for every inventory mutation, vendor-specific subscription defaults, protocol observation, and the Source model shape plus all-inventory reasoning-efforts mutation | K1 |
+| **K3 final contracts + routing core** | codex | First implementation lane. Land the complete final-shape handoff below in one commit with its runtime consumers and tests; make per-model route policy/hops the only route structure; implement and own the sole §4.3 resolver, normalized OpenCode provider matching, the per-backend native Source singleton, Source-order enrollment versus effective-route adoption projections, fresh-install Gateway plus existing-install Direct onboarding, removal of the default-off global gate, serializer completeness, exact-hop and supply-gap guards for every inventory mutation, vendor-specific subscription defaults subject to the pre-default vendor gate below, protocol observation, and the Source model shape plus all-inventory reasoning-efforts mutation | K1 |
 | **K4 channel runtime** | codex | Consume K3's sole §4.3 result for vendor-specific channel dispatch and execution; re-evaluate Source capability and runnability immediately before every hop; preserve silent native pre-stream same-turn Gateway takeover, post-stream interruption, and recovery; pass a turn-requested reasoning effort only under §4.3's exact capability-membership rule; honor Custom order without a hidden native pre-pass; implement hub-held subscription cross-backend eligibility, `allowed_origins` channel semantics, response-backed add-flow protocol observation, model discovery, all-exit credential cleanup, provenance/event consumers, and focused backend/scenario evidence; edits no final contract | K3 |
 | **K5 Sources + Gateway UI** | claude | Use the owner-approved v3 interaction baseline and add production-complete desktop/mobile states, then implement exactly two modules: Source add/detail probe and discovery, response-backed protocol observation with no normal protocol selector and one verified manual-hint fallback, manual model add/remove plus editable reasoning-efforts lists on every inventory entry with no default item, backend order + per-model chain editing, state-only connectors, vendor-specific subscription custody guidance, disabled duplicate-native choice, distinct enrollment/adoption copy, pull-only takeover state, compact info-level conversion-fidelity copy with no per-hop warning, and the Claude hub-add warning matrix; remove consent/experimental UI; Configure Agents remains absent | K3; runtime wiring may land after K4 |
 | **K6 integration and GA evidence definition** | either | Check AC-1 through AC-28, scenario catalog, Incus behavior, EN/ZH user docs, and turn the K2 fidelity plus asset-mirror/platform research into proposed gates for owner approval. Does not declare GA or expand its scope | K2, K4, K5 |
@@ -124,6 +124,14 @@ and lands those edits in the same commit as all affected implementation and test
 After K3 merges, those files are read-only to K4–K6. An implementation-proven mismatch
 escalates for an orchestrator-owned targeted revision; it is never patched by the
 discovering lane.
+
+**ChatGPT pre-default vendor gate.** Immediately before K3 enables ChatGPT Hub custody
+as the product default, K3 re-verifies the current OpenAI terms and product language
+identified in `model-hub-tos-review.md` §2.1 and §3.1 under §11's timing gate, records dated evidence in its PR,
+and asks the owner to adjudicate any material change. A failed or inconclusive check
+blocks only that default; it does not silently substitute another recommendation or
+block API-key implementation. K2 fidelity work and K6 post-implementation evidence do
+not own this precondition.
 
 ### Historical v2 lane plan (non-binding; retained for traceability)
 
@@ -441,36 +449,34 @@ The contracts README's wording stays as written: it is still true, and still GA-
 
 ## 4. Product gates
 
-- **Resolved (owner 2026-07-23 10:33, after S2):** default = hybrid supply —
-  subscription sources are `native_cli` channel (per-turn channel dispatch,
-  CLI-sanctioned OAuth); hub-held subscription login (incl. Claude-in-engine)
-  ships ONLY behind `subscription_hub_experimental` with explicit ban-risk
-  consent (copy from S2 §9) and per-source opt-in. API-key paths ungated.
-  L3 owns channel dispatch; L2 owns the flag + consent recording; L4 owns
-  the consent dialog + 实验 marking.
-- Cross-vendor auto-fallback remains default-off experimental (spec §9);
-  no lane builds UI for it beyond the advanced placeholder row.
-- Mode default: existing users stay in Direct until they migrate (no silent
-  flips); fresh installs default to Hub. Wizard/banner triggers per spec §6.
+- **Subscription custody (owner 2026-08-07, amended 2026-08-08):** Claude recommends
+  native custody and ChatGPT recommends Hub custody; both explicit alternatives remain
+  supported. Only Claude Hub shows the factual risk sentence. Hub-held subscriptions
+  may enter cross-vendor Custom chains with no experimental or consent gate. K3's
+  ChatGPT default remains subject to the current-vendor re-verification in §3.
+- Cross-vendor supply is a normal explicit Custom-chain capability, not an experimental
+  placeholder or warning surface.
+- Mode onboarding: existing installations with no Model Hub state start in Direct and
+  switch only by user action; fresh installations start in Gateway. The product is
+  available when the global enable environment variable is absent.
 
 ## 5. Verification layers
 
 - **Unit**: resolution projection, serializer completeness, overlay generation
-  (identifier stability invariant), migration parsers, and — added 07-29, review
-  round 11 — **both migration order policies**, which the rewrite in §3 makes
+  (identifier stability invariant), native-config import parsers, and — added 07-29,
+  review round 11 — **both import order policies**, which the rewrite in §3 makes
   user-visible and nothing else here catches: an imported source **auto-joins every
   `follow`-policy order it is eligible for**, and it **stays outside every `custom`
   order** while
   producing the new-source hint. Parsers plus non-destructiveness pass unchanged if
-  the migration still inserts into a custom order or fails to adopt into a follow
-  one, which is exactly the append that L1 is deleting.
+  the import still inserts into a custom order or fails to adopt into a follow one.
 - **Contract**: REST API against `model-hub-contracts` schemas (both
   directions), engine adapter against pinned engine version.
 - **Scenario**: `tests/scenarios/model_hub/catalog.yaml` — at minimum:
   quota-exhausted failover & recovery switchback, a per-backend source reorder
-  takes effect next turn (v2; v1 read "priority reorder"), mapping applies to
-  CC only, OpenCode identifier stability
-  across mode switch, migration non-destructiveness, OAuth forms A/B/C happy
+  takes effect next turn (v2; v1 read "priority reorder"), a Custom chain applies only
+  to its named backend/menu model, OpenCode identifier stability
+  across mode switch, native-config import non-destructiveness, OAuth forms A/B/C happy
   path + timeout/cancel. Scenario IDs appear in PR descriptions.
 - **Behavioral (Incus)**: real backend turns in both modes; 最近切换 log
   reflects induced quota errors; UI pixel pass vs the exported design frames
@@ -749,7 +755,7 @@ upgrade path. The fourteen contract entries below are the exhaustive handoff:
 | **FC-09** | `resolution-event.schema.json` | Events use the final route vocabulary (`route_model_rewritten`, `configured_route`) and exact Source/model attribution with mechanically mirrored reason/detail/severity fields. The feed is a pull surface; event descriptions contain no proactive-delivery or recipient-resolution contract. No mapping field or internal-version conversion state exists. |
 | **FC-10** | `adapter-interface.py` | Defines the three protocols, response-backed protocol observation, connectivity classification, discovery, all-inventory reasoning-efforts validation, transient credential cleanup on every unsaved-flow exit, and durable reconciliation on revoke failure. `invoke(reasoning_effort: str | None)` stays singular because §4.3 passes zero or one exact member. Runtime-local `engine_down` is distinct from Source failure. The checked-in interface and runtime adapter are byte-identical. |
 | **FC-11** | `opencode-overlay.md` | Uses the same provider-id normalization as §4.3, routes recognized providers by normalized id and unrecognized vendors through `custom`, supports the three protocols, and pins one exact Source/model hop per invocation. It contains no vendor-to-protocol save default. |
-| **FC-12** | `api.md` | Contracts Source CRUD, distinct saved recovery versus unsaved connectivity/protocol observation, discovery, all-inventory reasoning-list edits, Source order, route GET/PUT, mode, events/provenance, native-config import, OAuth, and Direct-mode responses. Custom and Follow guards cover Source deletion, Base URL/credential replacement, explicit refresh, and manual model removal with a canonical `force` carrier plus `would_remove_hops` and `would_interrupt`; OAuth-start rejects a duplicate native Source before adapter invocation. Create responses distinguish enrollment from adoption. No mapping, experimental-consent, or vendor-guessed protocol surface exists. |
+| **FC-12** | `api.md` | Contracts Source CRUD, distinct saved recovery versus unsaved connectivity/protocol observation, discovery, all-inventory reasoning-list edits, Source order, route GET/PUT, mode, events/provenance, native-config import, OAuth, and Direct-mode responses. Custom and Follow guards cover Source deletion, Base URL/credential replacement, explicit refresh, and manual model removal. The four inventory-changing JSON bodies are exactly `{display_name?, base_url?, force?}`, `{key, force?}`, `{force?}`, and `{source_id, model_id, force?}`; guarded `409` returns `{error, would_remove_hops, would_interrupt}` and success returns `{source, removed_hops, interrupted}`, with both arrays always present. OAuth-start rejects a duplicate native Source before adapter invocation. Create responses distinguish enrollment from adoption. No mapping, experimental-consent, or vendor-guessed protocol surface exists. |
 | **FC-13** | `migration-scan.schema.json` | Describes only the user-facing copy-only import of existing Claude, Codex, and OpenCode local configuration. Each selected item declares `import | reauth | controlled_import`; originals are never modified or deleted, subscription credentials default to `keep_native`, duplicate native selection fails before OAuth or partial commit, and controlled engine credential import remains deferred. It contains no Model Hub internal contract/data conversion. |
 | **FC-14** | `runtime-dependency.schema.json` | Defines the single local engine asset, immutable version/SHA, loopback binding, lifecycle/health, management and Gateway tokens, and fail-closed behavior. Engine availability is local Gateway health and never mutates an upstream Source cooldown. This entry does not widen the GA asset-mirror or platform-matrix research scope. |
 
@@ -767,14 +773,14 @@ the handoff must touch every applicable row and leave no downstream compatibilit
 | `config/v2_config.py` | Final Source/model/protocol/order/route types, singleton and uniqueness validation, sparse Follow default, serializer completeness, fresh-install Gateway construction, and existing-install-with-no-Hub-state Direct onboarding. |
 | `core/handlers/model_hub/{service,resolver,classification,errors}.py` | One §4.3 projection/execution authority, closed error classes, enrollment/adoption separation, Source-global health, local-engine distinction, and all route/inventory guards. |
 | `core/handlers/model_hub/{oauth,native_oauth,revocations,migration}.py` | Vendor-specific OAuth defaults, duplicate-native rejection before adapter work, all-exit transient credential cleanup, durable revoke reconciliation, and copy-only native-config import with original files untouched. |
-| `core/handlers/model_hub/{rpc,request,provenance,events}.py`, `vibe/ui_server.py`, `vibe/model_hub_client.py` | Final API envelopes/routes plus mapping-free provenance/events and Direct-mode responses. |
+| `core/handlers/model_hub/{rpc,request,provenance,events}.py`, `vibe/ui_server.py`, `vibe/model_hub_client.py` | Final API envelopes/routes plus mapping-free provenance/events and Direct-mode responses. The Models controller/routes/UI are available when `VIBE_MODEL_HUB_ENABLED` is absent; only an explicit false emergency/development override may disable them. |
 | `core/handlers/model_hub/adapter.py` | Exact byte mirror of `model-hub-contracts/adapter-interface.py`, including three protocols and observation/cleanup signatures. |
 | `core/handlers/model_hub/turn_gateway.py`, `vibe/model_hub_runtime/{config,client,state,adapter}.py` | Sole-chain consumption, exact-hop execution, three-protocol transport, pre-stream fallthrough, post-stream no replay with classified health, and local Gateway failures excluded from Source cooldown. |
 | `ui/src/components/settings/models/**` | Final Source/Gateway types and calls; protocol selector only after failed observation; no `ExperimentalConsentDialog`, experimental flag, consent field, mapping UI, or vendor default protocol. `vendorMeta.ts` may order probes but cannot choose a saved protocol; `AddApiKeyDialog.tsx` submits no guessed value. |
 | `ui/src/i18n/{en,zh}.json`, `vibe/i18n/{en,zh}.json` | Exact mirrored final reason/detail keys, the sole Claude Hub warning, compact protocol-observation failure copy, and no retired consent/experimental keys. |
 | `tests/test_model_hub_config.py` | The adapter parity gate at current line 159 remains exact; the mirror-registry version gate at current line 236 and provenance version gate at current line 314 use the one owner-approved terminal value; round-trip/completeness fixtures use only final Source and route shapes. |
-| `tests/test_model_hub_api.py` | The current line-1204 `experimental_consent_at` assertion becomes an absence assertion; API fixtures cover final model entries, three protocols, observation-before-save, force carriers, duplicate-native pre-adapter rejection, and enrollment/adoption. |
-| `tests/test_model_hub_{resolution,runtime,oauth,l3}.py` | Sole §4.3 consumption, no mapping branch, provider normalization, exact effort membership, current-hop fallthrough, Source/local-engine classification, vendor OAuth defaults, and exact diagnostic shapes. |
+| `tests/test_model_hub_api.py` | The current line-1204 `experimental_consent_at` assertion becomes an absence assertion; API fixtures cover unique final model entries, edited-effort preservation across rediscovery, distinct unsaved/saved operations, all-exit discovery cleanup, three protocols, observation-before-save, every force carrier/response, duplicate-native pre-adapter rejection, and enrollment/adoption. |
+| `tests/test_model_hub_{resolution,runtime,oauth,l3}.py` | Sole §4.3 consumption, no mapping branch, provider normalization, exact effort membership, pre-stream credential/account fallthrough, post-stream health persistence without replay, Source/local-engine classification, vendor OAuth defaults, and exact diagnostic shapes. |
 | `ui/src/components/settings/models/**/*.test.*` | No protocol control on the normal add flow, honest manual fallback after failed observation, final inventory editing, no consent/experimental surface, and Sources/Gateway rendering from the server projection. |
 | `tests/scenarios/model_hub/**`, `tests/scenario_harness/model_hub_native_oauth.py` | End-to-end final-shape setup, copy-only native import, Direct/Gateway onboarding, subscription custody, protocol observation, route chains, guarded mutations, silent successful takeover, and truthful exhaustion failure. |
 
@@ -980,6 +986,12 @@ Review round 9, P1, on `docs/plans/model-hub-contracts/api.md`, [thread](https:/
 **Acceptance.** With `mode: direct`: a chain request for the model that backend is actually running returns the chosen Direct representation and never `ok: true, chain: []`; a probe request returns the same representation and never a `ProbeResult` with a fabricated `source_id`; and the agent drawer offers neither 「试跑一次」 nor a chain view for that backend. An implementation that leaves the Hub-shaped 200 in place fails the first two, and a UI that keeps the affordances and renders the refusal as 中断 fails the third.
 
 ### AC-8 — Exclude disabled mapping rows from the protected set
+
+**Current v3 disposition (2026-08-09).** The live-mapping acceptance block retained
+below is historical and non-executable. AC-22's final-shape acceptance supersedes it
+with independent Follow and Custom route fixtures that exercise protected-model and
+disabled-configuration behavior without creating a mapping field or resolver branch.
+The guard invariant survives; the historical fixture shape does not.
 
 Review round 10, P2, on `docs/plans/model-hub-contracts/api.md`, [thread](https://github.com/avibe-bot/avibe/pull/1081#discussion_r3670099008). Verbatim:
 
@@ -1201,7 +1213,10 @@ ordered `custom` chain. Every custom hop is an exact `(source_id, model_id)` pai
 **Acceptance.** A table-driven resolver suite exercises every branch and precedence
 rule in §4.3 phases 1–3, including normalized OpenCode provider ids, sanctioned native
 aliases, stale exact hops, source-global cooldown, and live revalidation before each
-attempt. The chain API, runtime, probe, Gateway UI, deletion guards, diagnostics, and
+attempt. Failure fixtures prove pre-stream continuation after the refreshed 401 and
+classified 402/403 account states, post-stream Source health persistence without replay,
+and terminal `engine_down` with no Source mutation or second Hub attempt. The chain API,
+runtime, probe, Gateway UI, deletion guards, diagnostics, and
 route-adoption response all consume the same returned result; a test double fails if a
 consumer performs an independent Source/model walk. Custom writes preserve submitted
 order and exact pair identity and cannot change another menu model. Final config and
@@ -1214,6 +1229,11 @@ cover non-forced exact-hop refusal, confirmed atomic
 cascade with survivor order intact, background stale-hop retention, and the pre-login
 irreversibility acknowledgement for both native and Hub OAuth. No path silently changes
 Custom to Follow or claims invalidated supply survived.
+
+With `VIBE_MODEL_HUB_ENABLED` absent, the controller, API, and Models UI are available;
+a test that preserves the old absent-means-disabled gate fails. Sparse route storage
+also gets a catalog-expansion fixture: adding a bundled menu id yields Follow through
+the missing-row default and leaves every existing Custom row byte-identical.
 
 Schema, serializer, API, resolver, diagnostic, and UI fixtures begin directly from the
 final Source-model and route-policy shapes. Historical AC-5 and AC-8 live-mapping
@@ -1242,6 +1262,11 @@ adapter is called**; a spy proves the adapter received no request. §4.3 phase t
 the sole acceptance authority for Custom precedence,
 channel dispatch, per-hop live revalidation, pre-stream fallthrough, post-stream
 no-replay, and recovery.
+
+Before ChatGPT Hub becomes default-on, K3's PR includes a dated re-verification of
+`model-hub-tos-review.md` §2.1 and §3.1 under §11's timing gate. A material or inconclusive vendor change blocks
+that default and is escalated to the owner; passing by omission, relying on K2 fidelity,
+or deferring the check to K6 fails this criterion.
 
 Every successful native-to-Hub handoff is silent (owner ruling 2026-08-08, superseding
 the 2026-08-07 afternoon notice). No session message, setting, outbox row, or push path
@@ -1301,26 +1326,31 @@ are reused. The list is editable on every inventory entry, including discovered 
 (owner-vetoable orchestrator scope ruling, 2026-08-08), because discovery commonly
 returns ids without effort metadata; editing it never changes the entry's `origin`.
 
-**Acceptance.** Add Source exposes one user-triggered submission that combines
-connectivity classification with response-backed protocol observation; Source details
-exposes a test of the stored adapter. The unsaved variant returns classified reachability,
-authentication, and a protocol only when a real upstream response proves it, without
-persisting a Source, changing backend order, or running an Agent turn. For an API-key
-test, success, authentication
-failure, adapter error, timeout, and cancellation each revoke the transient provisioned
+**Acceptance.** Add Source exposes one non-persisting submission that combines
+connectivity classification with response-backed protocol observation. Source details
+instead exposes the mutating saved-Source refresh/recovery operation: it uses the stored
+adapter, refreshes inventory and health, and clears `needs_action`/`error` only on current
+recovery evidence. The UI and API never label one as the other. The unsaved variant
+returns classified reachability, authentication, and a protocol only when a real
+upstream response proves it, without persisting a Source, changing backend order, or
+running an Agent turn. For an API-key test, success, authentication failure, adapter
+error, timeout, and cancellation each revoke the transient provisioned
 ref before the operation settles. A fault-injected revoke failure writes the existing
 durable pending-revocation record, and a reconstructed service reconciles it; no response
 contains the ref and no final state leaves live material unreferenced and untracked.
-Third-party Anthropic-compatible and
+Unsaved Add Source model discovery has the same independently provisioned transient-ref
+cleanup on success, failure, adapter error, timeout, and cancellation, plus the same
+fault-injected reconciliation proof. Third-party Anthropic-compatible and
 OpenAI-compatible Sources can fetch models from either surface; the result distinguishes
 added, removed, unchanged, and failed discovery while preserving manual entries.
 
 `source.models` no longer relies on bare strings. Every item carries exact `id`,
 `origin: "discovered" | "manual"`, and required `reasoning_efforts: string[]`. The list
 may be empty and declares supported values; it never declares a selected or default
-value. Discovery creates `origin: "discovered"`; user-added entries create
-`origin: "manual"`. Existing optional `display_name` and `discovered_at` metadata remain
-part of each entry and survive refresh. `PATCH /api/models/custom-models`
+value, and ids are unique within a Source. Discovery creates `origin: "discovered"`;
+user-added entries create `origin: "manual"`. Rediscovering the same id preserves the
+user-edited `reasoning_efforts` list plus existing `display_name` and `discovered_at`;
+an upstream result cannot reset them to empty/default values. `PATCH /api/models/custom-models`
 accepts `{source_id, model_id, reasoning_efforts}` for an existing discovered or manual
 entry, atomically validates the complete list through the selected adapter, returns
 `{"source": Source}`, preserves `origin`, and leaves every route chain unchanged.
@@ -1329,10 +1359,14 @@ the turn-requested effort is passed through the unchanged single-value invocatio
 parameter only when it exactly matches the capability-evidence entry's list; a missing
 or non-member value passes `null`, with no approximate mapping or downgrade. This makes
 a persistence/UI-only implementation fail.
-Refresh, credential replacement, and manual deletion run AC-22's reversible exact-hop
-guard before committing a smaller inventory. Native CLI and Hub OAuth re-auth instead
+Base URL replacement, credential replacement, explicit refresh/recovery, and manual
+deletion stage inventory and run AC-22's exact-hop **and** protected-route supply-gap
+guards before committing. Their JSON bodies and canonical guarded/success responses are
+exactly the four shapes in FC-12; force-cascade fixtures cover each mutation. Native CLI
+and Hub OAuth re-auth instead
 use AC-2's pre-login acknowledgement and retain newly invalid hops as visible,
-non-runnable entries after the irreversible exchange.
+non-runnable entries with exactly `reason: "model_unsupported"` and `retry_at: null`
+after the irreversible exchange.
 UI evidence covers loading, reachable, authentication failure, discovery failure,
 empty result, merge result, manual add, all-inventory reasoning-efforts list editing
 with an empty/no-default state, guarded removal, and mobile treatment. The control form
