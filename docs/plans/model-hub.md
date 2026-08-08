@@ -218,15 +218,20 @@ manual-choice ruling).** Every stored `protocol` is traceable to a real response
 that upstream before Save. Avibe never infers the value from vendor name or Base URL;
 known-vendor metadata may order the three probes but cannot produce a conclusion or a
 save-time default. When observation cannot distinguish a protocol, the failure state
-honestly asks the user for a one-time manual hint among the same three values. That is
-the only product surface that names protocol choices, and Avibe must verify the hinted
-adapter with a real response before saving it. A failed observation therefore stores
-nothing rather than guessing.
+honestly asks the user for a one-time manual hint among the same three values. The hint
+changes probe order only: its selected adapter must still receive a successful upstream
+response before Save. A failed observation therefore stores nothing rather than guessing.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
 the stored adapter and never rewrite it. Changing protocol means creating a new Source,
 so a later operation cannot silently reinterpret existing inventory or Custom hops.
+The stored shape carries no manual/automatic provenance marker and no unverified
+protocol state: manual and automatic probe ordering become indistinguishable after the
+same response-backed conclusion. “Add anyway” is available only after protocol has been
+proved and some other information, such as model inventory, remains unavailable; that
+uncertainty belongs to Source health, not protocol identity. Every saved Source therefore
+has a response-proven protocol, and any path without that proof produces no Source.
 
 `openai_chat` is the one Chat Completions-compatible transport; there is no separate
 `openai_compatible` value because both names drove the same engine section and endpoint.
@@ -548,19 +553,12 @@ old id silently shortens. Recovery must not be a reorder. (Top-up is the third t
 and needs no *replacement* route of ours — no credential of ours changes; it is a
 link out to the vendor.)
 
-**What re-checks a topped-up balance is NOT 「the next probe or turn」** (07-29, review
-round 8; the earlier wording claimed it was). `balance_exhausted` is a `needs_action`
-state, `needs_action` is never `runnable`, and the probe answers `probe_no_candidate`
-when the chain has no runnable member — so for a source that is the only supplier of a
-model, both paths exclude the very source whose recovery they would have to observe,
-and the state can never clear on its own. The same trap is generic to `needs_action`:
-a re-keyed source recovers because `PUT …/credential` re-discovers through the new
-credential, but a source whose blocker was cleared *at the vendor* has no such route.
-Defining the path that may test a blocked source after an explicit user action — its
-surface, and what it is allowed to spend — is an implementation requirement, recorded
-as **AC-3** in `model-hub-implementation.md`. This spec does not invent that route at
-round 8: it is a new tap on a frozen contract, and freezing it as a side effect of a
-review round is how the last two rounds generated findings.
+**A normal turn never probes a blocked Source in hope that it recovered.** The explicit
+Source-details recovery path is `POST /api/models/sources/<id>/refresh`, the same saved
+mutation defined in §4.1. It may test `needs_action` or `error` after a
+user acts; a successful current observation clears the blocker without recreating or
+reordering the Source. AC-3 and AC-11 use this one route and no parallel `/test` recovery
+route.
 
 **Agent-level derived `supply_status`** (computed, never stored):
 
@@ -953,7 +951,7 @@ it may not do is come back indistinguishable from a turn whose provenance was ne
 written. The current contract chooses and tests the representation; v3 does not reopen
 it. Cancellation remains FSM truth rather than transport inference.
 
-Four outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
+Five outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
 end, every attempt failed for a fallback cause); `failed_terminal` — an attempt hit
 one of §4.3's **non-fallback** errors and the turn stopped there, param/protocol/
 tool-compat, or anything after the first streamed token, where no transparent retry
@@ -968,6 +966,10 @@ a malformed request. `no_candidate` is precisely the turn a user needs explained
 the record has to hold an **empty** attempt list rather than force the emitter to
 fabricate a phantom attempt or write nothing at all; it carries the model-scoped
 `waiting`/`interrupted` state instead, which is the thing that actually explains it.
+`canceled` is the fifth outcome: the turn FSM, never a transport guess, says Stop/cancel
+settled the turn. An in-flight attempt may be retained as interrupted-at-cancel but
+receives no fabricated Source failure reason; attribution-ambiguous attempts remain
+absent under AC-4's control fixture.
 The terminating attempt is recorded in exactly one place — failed
 attempts in an ordered list, the served attempt in its own field, the terminal error
 in a third, at most one of the latter two ever populated, the full sequence
@@ -985,6 +987,13 @@ menu model therefore follows the backend Source order automatically, while an ex
 Custom row remains untouched. Custom hop order and exact pair identity are user-owned.
 Writes use the capability predicate defined in §4.3 phase 1; reads return the §4.3
 result and never project a second chain here.
+
+Source deletion has one defined Custom state. A non-forced delete refuses while any
+Custom hop names that Source. A confirmed forced delete removes every exact hop naming
+it atomically, preserves all survivor order, and leaves the route `custom` even when no
+hop survives. Inventory loss without Source deletion instead retains the hop in place as
+§4.3's visible `model_unsupported` entry. A deleted Source is never represented by a
+different stale-hop reason or silently converted to Follow.
 
 There is no `mappings` field, mapping mutation, mapping resolver, or mapping diagnostic
 in the final product. A single-target override is a Custom chain whose hops use that
@@ -1191,8 +1200,9 @@ one pinned hop it receives.
   and requires no additional warning.
 - **No protocol guessing or post-save backfill.** A stored protocol comes from a real
   pre-save upstream response, never a vendor/Base-URL string heuristic. If observation
-  fails, the product asks once for a manual hint and verifies it rather than persisting
-  a guess. No later operation changes the stored value.
+  fails, the product may ask once for a manual probe-order hint, but the hinted adapter
+  must still return a successful response before anything is saved. No later operation
+  changes the stored value.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 - No v3 Configure Agents module (§5), runtime plugin UI, or GA scope beyond the
@@ -1246,7 +1256,8 @@ directions into questions that later lanes must answer before writing mechanical
       backend has at most one native Source.
 - [ ] §4.1 defines manual connectivity testing, model discovery, manual model
       add/remove, and editable `reasoning_efforts` lists for every inventory entry;
-      stored protocol is response-observed before Save and immutable afterward.
+      every saved protocol is response-proven before Save and immutable afterward,
+      with no persistent provenance marker or protocol-level unverified value.
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
       Completions, and shows protocol choices only after observation cannot decide.
 - [ ] §4.2 keeps own-vendor subscription supply first in the vendor-recommended form
