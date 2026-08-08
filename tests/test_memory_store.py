@@ -59,6 +59,26 @@ def _row_for_source(store: MemoryStore, source_message_id: str):
     return store.get_queue_row(_keyed_digest(meta.scope_key, source_message_id))
 
 
+def _enqueue_for_scope(
+    store: MemoryStore,
+    source_message_id: str,
+    session_id: str,
+    principal_id: str,
+    project_ref: str,
+) -> None:
+    result = store.enqueue_request(
+        source_message_id=source_message_id,
+        session_id=session_id,
+        principal_id=principal_id,
+        project_ref=project_ref,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert result.row is not None
+
+
 def _deliver(
     store: MemoryStore,
     digest: str,
@@ -143,6 +163,49 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
+
+
+def test_session_scope_recovery_survives_store_reopen_and_separates_sessions(tmp_path: Path) -> None:
+    store_path = _store_path(tmp_path)
+    first_scope = ("u-11111111111111111111111111111111", PROJECT)
+    second_scope = (
+        "u-22222222222222222222222222222222",
+        "p-33333333333333333333333333333333",
+    )
+    store = MemoryStore(store_path)
+    _enqueue_for_scope(store, "source-a", "session-a", *first_scope)
+    _enqueue_for_scope(store, "source-b", "session-b", *second_scope)
+
+    reopened = MemoryStore(store_path)
+
+    assert reopened.resolve_current_session_scope("session-a") == first_scope
+    assert reopened.resolve_current_session_scope("session-b") == second_scope
+    assert reopened.resolve_current_session_scope("absent") is None
+
+    current_epoch = reopened.ensure_meta().epoch
+    reopened.reset_for_clear(target_epoch=current_epoch + 1)
+
+    assert reopened.resolve_current_session_scope("session-a") is None
+
+
+def test_session_scope_recovery_fails_closed_when_raw_session_is_ambiguous(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue_for_scope(
+        store,
+        "source-a",
+        "shared-session",
+        "u-11111111111111111111111111111111",
+        PROJECT,
+    )
+    _enqueue_for_scope(
+        store,
+        "source-b",
+        "shared-session",
+        "u-22222222222222222222222222222222",
+        "p-33333333333333333333333333333333",
+    )
+
+    assert store.resolve_current_session_scope("shared-session") is None
 
 
 def test_provider_session_ref_preserves_the_canonical_identity(tmp_path: Path) -> None:

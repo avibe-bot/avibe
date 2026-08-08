@@ -313,6 +313,54 @@ class MemoryStore:
                 ),
             )
 
+    def resolve_current_session_scope(self, session_id: str) -> tuple[str, str] | None:
+        """Recover one unambiguous current-epoch scope for a raw session ID.
+
+        Raw session IDs are never persisted.  Recompute each durable canonical
+        reference with the store-owned key so only exact capture state can
+        authorize recovery after a controller restart.
+        """
+
+        if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
+            return None
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None or meta.clear_in_progress:
+                return None
+            rows = conn.execute(
+                """
+                SELECT provider_session_ref
+                FROM memory_session_flush_state
+                WHERE epoch = ?
+                """,
+                (meta.epoch,),
+            ).fetchall()
+
+        matches: set[tuple[str, str]] = set()
+        for row in rows:
+            try:
+                ref = ProviderSessionRef.deserialize(str(row["provider_session_ref"]))
+            except (TypeError, ValueError):
+                return None
+            if (
+                ref.epoch != meta.epoch
+                or not is_principal_id(ref.principal_id)
+                or not is_project_id(ref.project_ref)
+            ):
+                return None
+            expected_session_id = _provider_session_ref(
+                meta.scope_key,
+                ref.principal_id,
+                ref.project_ref,
+                session_id,
+                meta.epoch,
+            )
+            if hmac.compare_digest(ref.session_id, expected_session_id):
+                matches.add((ref.principal_id, ref.project_ref))
+                if len(matches) > 1:
+                    return None
+        return next(iter(matches)) if matches else None
+
     def get_meta(self) -> MemoryMeta | None:
         """Return the metadata row without creating Memory state."""
 
@@ -697,6 +745,30 @@ class MemoryStore:
                 ),
             )
             return updated.rowcount == 1
+
+    def claim_is_current(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+    ) -> bool:
+        """Revalidate an exact add lease immediately before provider submission."""
+
+        with self._connection() as conn:
+            current = conn.execute(
+                """
+                SELECT 1 FROM memory_capture_queue
+                WHERE source_message_digest = ? AND epoch = ?
+                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
+                """,
+                (
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                    row.lease_token,
+                ),
+            ).fetchone()
+        return current is not None
 
     def settle(
         self,
@@ -1393,6 +1465,31 @@ class MemoryStore:
                 """,
                 (
                     now,
+                    now,
+                    serialized_ref,
+                    lease.epoch,
+                    lease.generation,
+                    lease.operation_epoch,
+                    lease.fence_token,
+                ),
+            )
+            return updated.rowcount == 1
+
+    def return_unsubmitted_flush(self, lease: FlushLease, *, now: str) -> bool:
+        """Return an exact marked flush whose provider coroutine never began."""
+
+        serialized_ref = lease.provider_session_ref.serialize()
+        with self._transaction() as conn:
+            updated = conn.execute(
+                """
+                UPDATE memory_session_flush_state
+                SET state = 'due', submission_started_at = NULL, updated_at = ?
+                WHERE provider_session_ref = ? AND epoch = ?
+                  AND target_generation = ? AND operation_epoch = ?
+                  AND fence_token = ? AND state = 'in_flight'
+                  AND submission_started_at IS NOT NULL
+                """,
+                (
                     now,
                     serialized_ref,
                     lease.epoch,

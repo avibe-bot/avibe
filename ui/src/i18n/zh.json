@@ -3657,7 +3657,52 @@
         "noneDisabled": "运行时未报告已禁用功能。",
         "cascade": "级联处理",
         "recorder": "记录器",
-        "noFacts": "未报告相关事实。"
+        "noFacts": "未报告相关事实。",
+        "fact": {
+          "capability": {
+            "llm": "LLM",
+            "embed": "Embedding",
+            "rerank": "重排序",
+            "multimodalLlm": "多模态 LLM",
+            "parser": "解析器"
+          },
+          "cascade": {
+            "healthy": "健康",
+            "reasons": "原因",
+            "pending": "待处理",
+            "failedPermanent": "永久失败",
+            "failedRetryable": "可重试失败",
+            "drainConsecutiveFailures": "连续排空失败",
+            "unrecoverableTotal": "不可恢复总数",
+            "optimizeFailureStreak": "连续优化失败",
+            "pruneStaleSeconds": "过期数据清理阈值（秒）"
+          },
+          "recorder": {
+            "state": "状态",
+            "reason": "原因"
+          },
+          "boolean": {
+            "true": "是",
+            "false": "否"
+          },
+          "cascadeReason": {
+            "drainFailures": "排空失败",
+            "optimizeStuck": "优化停滞",
+            "pruneStale": "过期数据清理停滞",
+            "healthProbeFailed": "健康探测失败",
+            "unknown": "未知"
+          },
+          "recorderState": {
+            "active": "活跃",
+            "degraded": "已降级",
+            "disabled": "已禁用"
+          },
+          "recorderReason": {
+            "writerFailures": "写入失败",
+            "serializationFailed": "序列化失败",
+            "callLogCorrupt": "调用日志损坏"
+          }
+        }
       },
       "source": {
         "health": "运行时健康状态"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from core.memory.everos import (
 )
 from core.memory.observations import AddAck, FlushRetryable, FlushSucceeded
 from core.memory.store import MemoryStore
+from core.memory.types import ProviderSessionRef
 from core.memory.worker import MemoryWorker
 
 
@@ -42,6 +44,15 @@ def _enqueue(store: MemoryStore, source: str, *, session: str = "session"):
     return result.row
 
 
+async def _wait_for_scheduled_flush(
+    coordinator: SessionFlushCoordinator,
+    session_ref: ProviderSessionRef,
+) -> None:
+    task = coordinator._flush_tasks.get(session_ref.serialize())
+    if task is not None:
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+
+
 def test_accumulated_add_waits_for_idle_flush(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -64,7 +75,7 @@ def test_accumulated_add_waits_for_idle_flush(tmp_path: Path) -> None:
 
         current[0] += timedelta(minutes=5)
         assert await worker.coordinator.run_due() == 1
-        await asyncio.sleep(0.05)
+        await _wait_for_scheduled_flush(worker.coordinator, row.provider_session_ref)
 
         assert provider.flushes == [row.provider_session_ref]
         state = store.get_session_flush_state(row.provider_session_ref)
@@ -233,7 +244,7 @@ def test_fence_routes_new_capture_to_next_generation(tmp_path: Path) -> None:
         assert store.claim_due(lease_owner="raced", now="2026-01-01T00:05:01.000Z") is None
 
         release.set()
-        await asyncio.sleep(0.05)
+        await _wait_for_scheduled_flush(worker.coordinator, first.provider_session_ref)
         claimed = store.claim_due(lease_owner="next", now="2026-01-01T00:05:01.000Z")
         assert claimed is not None and claimed.source_message_digest == second.source_message_digest
 
@@ -334,7 +345,7 @@ def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) 
         current[0] += timedelta(minutes=5)
         for retry_count, delay in enumerate(expected_delays, start=1):
             assert await coordinator.run_due() == 1
-            await asyncio.sleep(0.05)
+            await _wait_for_scheduled_flush(coordinator, row.provider_session_ref)
 
             state = store.get_session_flush_state(row.provider_session_ref)
             assert state is not None
@@ -347,7 +358,7 @@ def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) 
             current[0] += timedelta(seconds=delay)
 
         assert await coordinator.run_due() == 1
-        await asyncio.sleep(0.05)
+        await _wait_for_scheduled_flush(coordinator, row.provider_session_ref)
         terminal = store.get_session_flush_state(row.provider_session_ref)
         assert terminal is not None
         assert terminal.state == "manual_required"
@@ -396,7 +407,7 @@ def test_continuous_activity_cannot_extend_flush_past_max_age(tmp_path: Path) ->
         assert await coordinator.run_due() == 0
         current[0] = start + timedelta(minutes=30)
         assert await coordinator.run_due() == 1
-        await asyncio.sleep(0.05)
+        await _wait_for_scheduled_flush(coordinator, session_ref)
 
         assert provider.flushes == [session_ref]
         state = store.get_session_flush_state(session_ref)
@@ -423,7 +434,7 @@ def test_message_bound_makes_generation_immediately_due(
         rows = [_enqueue(store, f"bounded-{index}") for index in range(3)]
 
         assert await worker.drain(max_rows=3) == 3
-        await asyncio.sleep(0.05)
+        await _wait_for_scheduled_flush(worker.coordinator, rows[0].provider_session_ref)
 
         assert provider.flushes == [rows[0].provider_session_ref]
         state = store.get_session_flush_state(rows[0].provider_session_ref)
@@ -603,6 +614,65 @@ def test_cancelled_flush_waiting_for_write_slot_remains_retryable(tmp_path: Path
     asyncio.run(run())
 
 
+def test_cancelled_flush_while_submission_marker_commits_remains_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        row = _enqueue(store, "cancelled-marker")
+        assert await worker.drain_once() == 1
+
+        marker_committed = threading.Event()
+        release_marker = threading.Event()
+        original_mark = store.mark_flush_submission_started
+
+        def blocking_mark(lease, *, now: str) -> bool:
+            marked = original_mark(lease, now=now)
+            marker_committed.set()
+            release_marker.wait(timeout=2)
+            return marked
+
+        monkeypatch.setattr(store, "mark_flush_submission_started", blocking_mark)
+        flush_call = asyncio.create_task(
+            coordinator.final_flush(row.provider_session_ref, deadline_seconds=5)
+        )
+        assert await asyncio.to_thread(marker_committed.wait, 1)
+        flush_task = coordinator._flush_tasks[row.provider_session_ref.serialize()]
+        flush_task.cancel()
+        await asyncio.sleep(0)
+        assert flush_task.done() is False
+        release_marker.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await flush_call
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None
+        assert state.state == "due"
+        assert state.submission_started_at is None
+        assert provider.flushes == []
+
+        assert await coordinator.final_flush(
+            row.provider_session_ref,
+            deadline_seconds=1,
+        )
+        assert provider.flushes == [row.provider_session_ref]
+
+    asyncio.run(run())
+
+
 def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -677,6 +747,54 @@ def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path
             "payload-first-add",
             "payload-waiting-add",
         ]
+
+    asyncio.run(run())
+
+
+def test_stale_add_waiter_does_not_resubmit_after_flush_reclaims_it(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        first_add_entered = asyncio.Event()
+        release_first_add = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                if len(self.captures) == 1:
+                    first_add_entered.set()
+                    await release_first_add.wait()
+                return AddAck(f"add-{len(self.captures)}", "accumulated")
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        row = _enqueue(store, "stale-waiter")
+        stale_claim = store.claim_due(
+            lease_owner="ordinary-worker",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert stale_claim is not None
+
+        flush_call = asyncio.create_task(
+            coordinator.final_flush(row.provider_session_ref, deadline_seconds=2)
+        )
+        await asyncio.wait_for(first_add_entered.wait(), timeout=1)
+        stale_call = asyncio.create_task(
+            coordinator.deliver(stale_claim, lease_owner="ordinary-worker")
+        )
+        await asyncio.sleep(0)
+        assert stale_call.done() is False
+
+        release_first_add.set()
+        assert await flush_call
+        assert await stale_call is False
+        assert [capture.text for capture in provider.captures] == [
+            "payload-stale-waiter"
+        ]
+        assert provider.flushes == [row.provider_session_ref]
 
     asyncio.run(run())
 

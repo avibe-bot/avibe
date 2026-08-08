@@ -81,6 +81,65 @@ describe('MemoryStatusPanel', () => {
     expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
   });
 
+  it('localizes closed runtime fact labels and enum values while preserving diagnostics', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={{
+          ...STATUS,
+          health: {
+            ...STATUS.health!,
+            capabilities: { embed: false },
+            disabled_features: ['embed'],
+            cascade: {
+              healthy: false,
+              reasons: ['drain_failures'],
+              prune_stale_seconds: 45,
+            },
+            recorder: { state: 'degraded', reason: 'call_log_corrupt' },
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText('memory.processingRecord.runtime.fact.capability.embed')).toHaveLength(2);
+    expect(screen.getAllByText('memory.processingRecord.runtime.fact.boolean.false')).toHaveLength(2);
+    expect(screen.getByText('memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.runtime.fact.cascadeReason.drainFailures')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.runtime.fact.recorder.state')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.runtime.fact.recorderState.degraded')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.runtime.fact.recorderReason.callLogCorrupt')).toBeTruthy();
+    expect(screen.getByText('45')).toBeTruthy();
+  });
+
+  it('leaves future runtime fact labels and values as raw fallback text', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={{
+          ...STATUS,
+          health: {
+            ...STATUS.health!,
+            capabilities: { future_capability: true },
+            disabled_features: ['future_feature'],
+            cascade: { reasons: ['future_reason'], future_counter: 12 },
+            recorder: { state: 'future_state', future_field: 'future_value' },
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('future_capability')).toBeTruthy();
+    expect(screen.getByText('true')).toBeTruthy();
+    expect(screen.getByText('future_feature')).toBeTruthy();
+    expect(screen.getByText('future_reason')).toBeTruthy();
+    expect(screen.getByText('future_counter')).toBeTruthy();
+    expect(screen.getByText('12')).toBeTruthy();
+    expect(screen.getByText('future_state')).toBeTruthy();
+    expect(screen.getByText('future_field')).toBeTruthy();
+    expect(screen.getByText('future_value')).toBeTruthy();
+  });
+
   it('localizes known runtime and log source reasons', () => {
     render(
       <MemoryStatusPanel

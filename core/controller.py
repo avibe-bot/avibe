@@ -1610,6 +1610,15 @@ class Controller:
             return False
         scope = self.memory_scope_for_cli_session(raw_session_id)
         if scope is None:
+            runtime = getattr(self, "memory_runtime", None)
+            resolve = getattr(runtime, "resolve_current_session_scope", None)
+            if callable(resolve):
+                try:
+                    scope = await resolve(raw_session_id)
+                except Exception:
+                    logger.debug("Memory session scope recovery failed", exc_info=True)
+                    return False
+        if scope is None:
             return False
         return await self._final_flush_memory_scope(
             raw_session_id,

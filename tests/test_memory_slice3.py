@@ -55,6 +55,8 @@ class _Runtime:
         self.final_flush_calls: list[dict[str, object]] = []
         self.final_flush_result = True
         self.final_flush_error: Exception | None = None
+        self.recovered_scope: tuple[str, str] | None = None
+        self.scope_recovery_calls: list[str] = []
 
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
@@ -63,6 +65,10 @@ class _Runtime:
     def project_for_workdir(self, workdir: str) -> str:
         assert workdir == "/tmp/project"
         return PROJECT
+
+    async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
+        self.scope_recovery_calls.append(raw_session_id)
+        return self.recovered_scope
 
     async def final_flush(self, **kwargs) -> bool:
         self.final_flush_calls.append(kwargs)
@@ -289,6 +295,26 @@ def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
     assert len(controller.memory_runtime.final_flush_calls) == 1
 
 
+def test_final_flush_memory_cli_session_recovers_scope_after_controller_restart() -> None:
+    controller = _controller()
+    principal_id = "u-" + ("2" * 32)
+    controller._memory_scopes_by_session = {}
+    controller.memory_runtime.recovered_scope = (principal_id, PROJECT)
+
+    result = asyncio.run(controller.final_flush_memory_cli_session("ses-workbench"))
+
+    assert result is True
+    assert controller.memory_runtime.scope_recovery_calls == ["ses-workbench"]
+    assert controller.memory_runtime.final_flush_calls == [
+        {
+            "principal_id": principal_id,
+            "project_id": PROJECT,
+            "raw_session_id": "ses-workbench",
+            "deadline_seconds": 5.0,
+        }
+    ]
+
+
 def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
     controller = _controller()
     controller._memory_scopes_by_session = {}
@@ -296,6 +322,7 @@ def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
     result = asyncio.run(controller.final_flush_memory_cli_session("ses-absent"))
 
     assert result is False
+    assert controller.memory_runtime.scope_recovery_calls == ["ses-absent"]
     assert controller.memory_runtime.final_flush_calls == []
 
 

@@ -41,9 +41,12 @@ _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 # ``tests/test_internal_client_timeouts.py`` asserts the relationship against
 # the sources below rather than trusting these numbers to stay in step.
 #
-# Memory reads wait on provider operations bounded by
-# ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
+# Most Memory reads wait on one provider operation bounded by
+# ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s). Search can first
+# probe capabilities and then issue the provider read, so it needs a separate
+# transport bound outside both sequential steps.
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
+MEMORY_SEARCH_TIMEOUT_SECONDS = 45.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
@@ -444,7 +447,7 @@ async def memory_search(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+    timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return await _memory_request(
         "POST",
@@ -577,7 +580,7 @@ def memory_search_sync(
     *,
     caller_session_id: str | None = None,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+    timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return _memory_request_sync(
         "POST",

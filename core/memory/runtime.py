@@ -733,6 +733,16 @@ class MemoryRuntime:
             raise self._unavailable()
         return self._store.project_for_workdir(workdir)
 
+    async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
+        """Recover a trusted capture scope from durable current-epoch state."""
+
+        if not self.available:
+            return None
+        return await asyncio.to_thread(
+            self._store.resolve_current_session_scope,
+            raw_session_id,
+        )
+
     async def final_flush(
         self,
         *,

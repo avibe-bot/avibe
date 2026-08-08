@@ -58,6 +58,11 @@ class _AddSubmissionGuard:
         self.started = False
 
 
+class _FlushSubmissionGuard:
+    def __init__(self) -> None:
+        self.started = False
+
+
 class SessionFlushCoordinator:
     """Own the exact session fence from add admission through flush settlement."""
 
@@ -342,6 +347,7 @@ class SessionFlushCoordinator:
                 return
             result: FlushResult
             async with self._write_slots:
+                submission = _FlushSubmissionGuard()
                 try:
                     submitted_at = _iso(self._current_time())
                     if not await self._store_call(
@@ -352,7 +358,7 @@ class SessionFlushCoordinator:
                         return
                     try:
                         result = await asyncio.wait_for(
-                            self._provider.flush(lease.provider_session_ref),
+                            self._submit_flush(lease, submission),
                             timeout=self._flush_timeout_seconds,
                         )
                     except asyncio.TimeoutError:
@@ -378,14 +384,23 @@ class SessionFlushCoordinator:
                     except Exception:
                         result = FlushUnknown(reason="transport")
                 except asyncio.CancelledError:
-                    await asyncio.shield(
-                        self._store_call(
-                            self._store.settle_flush,
-                            lease,
-                            FlushUnknown(reason="transport"),
-                            now=_iso(self._current_time()),
+                    if submission.started:
+                        await asyncio.shield(
+                            self._store_call(
+                                self._store.settle_flush,
+                                lease,
+                                FlushUnknown(reason="transport"),
+                                now=_iso(self._current_time()),
+                            )
                         )
-                    )
+                    else:
+                        await asyncio.shield(
+                            self._store_call(
+                                self._store.return_unsubmitted_flush,
+                                lease,
+                                now=_iso(self._current_time()),
+                            )
+                        )
                     raise
 
             if isinstance(result, FlushRetryable):
@@ -463,6 +478,12 @@ class SessionFlushCoordinator:
         )
         try:
             async with self._write_slots:
+                if not await self._store_call(
+                    self._store.claim_is_current,
+                    row,
+                    lease_owner=lease_owner,
+                ):
+                    return False
                 submission.started = True
                 ack = await asyncio.wait_for(
                     self._provider.add(capture),
@@ -530,6 +551,14 @@ class SessionFlushCoordinator:
         if settled.settled:
             await self._close_processing_fault()
         return settled.settled
+
+    async def _submit_flush(
+        self,
+        lease: FlushLease,
+        submission: _FlushSubmissionGuard,
+    ) -> FlushResult:
+        submission.started = True
+        return await self._provider.flush(lease.provider_session_ref)
 
     async def _return_cancelled_unsubmitted(
         self,

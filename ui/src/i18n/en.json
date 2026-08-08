@@ -3657,7 +3657,52 @@
         "noneDisabled": "No disabled features were reported.",
         "cascade": "Cascade",
         "recorder": "Recorder",
-        "noFacts": "No facts were reported."
+        "noFacts": "No facts were reported.",
+        "fact": {
+          "capability": {
+            "llm": "LLM",
+            "embed": "Embedding",
+            "rerank": "Reranking",
+            "multimodalLlm": "Multimodal LLM",
+            "parser": "Parser"
+          },
+          "cascade": {
+            "healthy": "Healthy",
+            "reasons": "Reasons",
+            "pending": "Pending",
+            "failedPermanent": "Permanent failures",
+            "failedRetryable": "Retryable failures",
+            "drainConsecutiveFailures": "Consecutive drain failures",
+            "unrecoverableTotal": "Unrecoverable total",
+            "optimizeFailureStreak": "Optimization failure streak",
+            "pruneStaleSeconds": "Stale prune threshold (seconds)"
+          },
+          "recorder": {
+            "state": "State",
+            "reason": "Reason"
+          },
+          "boolean": {
+            "true": "Yes",
+            "false": "No"
+          },
+          "cascadeReason": {
+            "drainFailures": "Drain failures",
+            "optimizeStuck": "Optimization stuck",
+            "pruneStale": "Stale pruning stalled",
+            "healthProbeFailed": "Health probe failed",
+            "unknown": "Unknown"
+          },
+          "recorderState": {
+            "active": "Active",
+            "degraded": "Degraded",
+            "disabled": "Disabled"
+          },
+          "recorderReason": {
+            "writerFailures": "Writer failures",
+            "serializationFailed": "Serialization failed",
+            "callLogCorrupt": "Call log corrupt"
+          }
+        }
       },
       "source": {
         "health": "Runtime health"

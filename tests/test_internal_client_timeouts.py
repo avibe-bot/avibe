@@ -30,6 +30,7 @@ from vibe.internal_client import (
     MEMORY_INSTALL_TIMEOUT_SECONDS,
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
+    MEMORY_SEARCH_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
     memory_profile,
     memory_final_flush,
@@ -72,6 +73,15 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
         memory_search_sync,
     ):
         assert inspect.signature(read).parameters["timeout"].default > PROVIDER_READ_TIMEOUT_SECONDS
+
+
+def test_search_clients_outlast_capability_probe_and_provider_search() -> None:
+    assert MEMORY_SEARCH_TIMEOUT_SECONDS > 2 * PROVIDER_READ_TIMEOUT_SECONDS
+    for search in (memory_search, memory_search_sync):
+        assert (
+            inspect.signature(search).parameters["timeout"].default
+            == MEMORY_SEARCH_TIMEOUT_SECONDS
+        )
 
 
 def test_final_flush_client_outlasts_the_controller_deadline() -> None:

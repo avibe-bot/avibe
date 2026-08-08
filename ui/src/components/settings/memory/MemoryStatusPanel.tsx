@@ -76,7 +76,53 @@ const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_restart_failed',
 ]);
 
+const RUNTIME_FACT_LABEL_KEYS = {
+  capability: {
+    llm: 'memory.processingRecord.runtime.fact.capability.llm',
+    embed: 'memory.processingRecord.runtime.fact.capability.embed',
+    rerank: 'memory.processingRecord.runtime.fact.capability.rerank',
+    multimodal_llm: 'memory.processingRecord.runtime.fact.capability.multimodalLlm',
+    parser: 'memory.processingRecord.runtime.fact.capability.parser',
+  },
+  cascade: {
+    healthy: 'memory.processingRecord.runtime.fact.cascade.healthy',
+    reasons: 'memory.processingRecord.runtime.fact.cascade.reasons',
+    pending: 'memory.processingRecord.runtime.fact.cascade.pending',
+    failed_permanent: 'memory.processingRecord.runtime.fact.cascade.failedPermanent',
+    failed_retryable: 'memory.processingRecord.runtime.fact.cascade.failedRetryable',
+    drain_consecutive_failures: 'memory.processingRecord.runtime.fact.cascade.drainConsecutiveFailures',
+    unrecoverable_total: 'memory.processingRecord.runtime.fact.cascade.unrecoverableTotal',
+    optimize_failure_streak: 'memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak',
+    prune_stale_seconds: 'memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds',
+  },
+  recorder: {
+    state: 'memory.processingRecord.runtime.fact.recorder.state',
+    reason: 'memory.processingRecord.runtime.fact.recorder.reason',
+  },
+} as const;
+
+const CASCADE_REASON_LABEL_KEYS = {
+  drain_failures: 'memory.processingRecord.runtime.fact.cascadeReason.drainFailures',
+  optimize_stuck: 'memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck',
+  prune_stale: 'memory.processingRecord.runtime.fact.cascadeReason.pruneStale',
+  health_probe_failed: 'memory.processingRecord.runtime.fact.cascadeReason.healthProbeFailed',
+  unknown: 'memory.processingRecord.runtime.fact.cascadeReason.unknown',
+} as const;
+
+const RECORDER_STATE_LABEL_KEYS = {
+  active: 'memory.processingRecord.runtime.fact.recorderState.active',
+  degraded: 'memory.processingRecord.runtime.fact.recorderState.degraded',
+  disabled: 'memory.processingRecord.runtime.fact.recorderState.disabled',
+} as const;
+
+const RECORDER_REASON_LABEL_KEYS = {
+  writer_failures: 'memory.processingRecord.runtime.fact.recorderReason.writerFailures',
+  serialization_failed: 'memory.processingRecord.runtime.fact.recorderReason.serializationFailed',
+  call_log_corrupt: 'memory.processingRecord.runtime.fact.recorderReason.callLogCorrupt',
+} as const;
+
 type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
+type RuntimeFactGroup = keyof typeof RUNTIME_FACT_LABEL_KEYS;
 
 const anomalyLabel = (t: TFunction, group: AnomalyLabelGroup, value: string): string => {
   const keys = ANOMALY_LABEL_KEYS[group] as Record<string, string>;
@@ -111,18 +157,54 @@ const formatFact = (value: unknown): string => {
   }
 };
 
+const knownLabel = (t: TFunction, keys: Record<string, string>, value: string): string => {
+  const key = Object.prototype.hasOwnProperty.call(keys, value) ? keys[value] : undefined;
+  return key ? t(key) : value;
+};
+
+const runtimeFactLabel = (t: TFunction, group: RuntimeFactGroup, value: string): string => (
+  knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group] as Record<string, string>, value)
+);
+
+const formatRuntimeFact = (t: TFunction, group: RuntimeFactGroup, name: string, value: unknown): string => {
+  const knownField = Object.prototype.hasOwnProperty.call(RUNTIME_FACT_LABEL_KEYS[group], name);
+  if (!knownField) return formatFact(value);
+  if (typeof value === 'boolean') {
+    return t(`memory.processingRecord.runtime.fact.boolean.${value ? 'true' : 'false'}`);
+  }
+  if (group === 'cascade' && name === 'reasons' && Array.isArray(value)) {
+    if (value.length === 0) return formatFact(value);
+    return value
+      .map((reason) => typeof reason === 'string'
+        ? knownLabel(t, CASCADE_REASON_LABEL_KEYS, reason)
+        : formatFact(reason))
+      .join(', ');
+  }
+  if (group === 'recorder' && name === 'state' && typeof value === 'string') {
+    return knownLabel(t, RECORDER_STATE_LABEL_KEYS, value);
+  }
+  if (group === 'recorder' && name === 'reason' && typeof value === 'string') {
+    return knownLabel(t, RECORDER_REASON_LABEL_KEYS, value);
+  }
+  return formatFact(value);
+};
+
 const FactList: React.FC<{
   facts: Record<string, unknown>;
   emptyLabel: string;
-}> = ({ facts, emptyLabel }) => {
+  group: RuntimeFactGroup;
+}> = ({ facts, emptyLabel, group }) => {
+  const { t } = useTranslation();
   const entries = Object.entries(facts);
   if (entries.length === 0) return <span className="text-[11.5px] text-muted">{emptyLabel}</span>;
   return (
     <dl className="grid min-w-0 gap-x-4 gap-y-2 text-[11.5px] sm:grid-cols-2">
       {entries.map(([name, value]) => (
         <div key={name} className="flex min-w-0 items-start justify-between gap-3">
-          <dt className="break-words text-muted">{name}</dt>
-          <dd className="max-w-[65%] break-all text-right font-mono text-foreground">{formatFact(value)}</dd>
+          <dt className="break-words text-muted">{runtimeFactLabel(t, group, name)}</dt>
+          <dd className="max-w-[65%] break-all text-right font-mono text-foreground">
+            {formatRuntimeFact(t, group, name, value)}
+          </dd>
         </div>
       ))}
     </dl>
@@ -342,7 +424,11 @@ export const MemoryStatusPanel: React.FC<{
                     <div className="mb-2 text-[11.5px] font-semibold text-foreground">
                       {t('memory.processingRecord.runtime.capabilities')}
                     </div>
-                    <FactList facts={health.capabilities} emptyLabel={t('memory.processingRecord.runtime.noCapabilities')} />
+                    <FactList
+                      facts={health.capabilities}
+                      emptyLabel={t('memory.processingRecord.runtime.noCapabilities')}
+                      group="capability"
+                    />
                   </div>
                   <div className="min-w-0">
                     <div className="mb-2 text-[11.5px] font-semibold text-foreground">
@@ -352,18 +438,28 @@ export const MemoryStatusPanel: React.FC<{
                       <span className="text-[11.5px] text-muted">{t('memory.processingRecord.runtime.noneDisabled')}</span>
                     ) : (
                       <div className="flex flex-wrap gap-1.5">
-                        {health.disabled_features.map((feature) => <Badge key={feature} variant="secondary">{feature}</Badge>)}
+                        {health.disabled_features.map((feature) => (
+                          <Badge key={feature} variant="secondary">{runtimeFactLabel(t, 'capability', feature)}</Badge>
+                        ))}
                       </div>
                     )}
                   </div>
                   <div className="min-w-0 border-t border-border pt-3 lg:col-span-2 lg:grid lg:grid-cols-2 lg:gap-4">
                     <div className="min-w-0">
                       <div className="mb-2 text-[11.5px] font-semibold text-foreground">{t('memory.processingRecord.runtime.cascade')}</div>
-                      <FactList facts={health.cascade} emptyLabel={t('memory.processingRecord.runtime.noFacts')} />
+                      <FactList
+                        facts={health.cascade}
+                        emptyLabel={t('memory.processingRecord.runtime.noFacts')}
+                        group="cascade"
+                      />
                     </div>
                     <div className="mt-3 min-w-0 lg:mt-0">
                       <div className="mb-2 text-[11.5px] font-semibold text-foreground">{t('memory.processingRecord.runtime.recorder')}</div>
-                      <FactList facts={health.recorder} emptyLabel={t('memory.processingRecord.runtime.noFacts')} />
+                      <FactList
+                        facts={health.recorder}
+                        emptyLabel={t('memory.processingRecord.runtime.noFacts')}
+                        group="recorder"
+                      />
                     </div>
                   </div>
                 </div>
