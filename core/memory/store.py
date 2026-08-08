@@ -1178,6 +1178,41 @@ class MemoryStore:
                         lease_owner,
                     ),
                 )
+                provider_session_ref = row.provider_session_ref or _provider_ref_from_queue_row(row)
+                session_state = self._ensure_session_state_in_connection(
+                    conn,
+                    provider_session_ref,
+                    now=now_iso,
+                    first_unflushed_at=None,
+                )
+                # Keep a receipt-specific barrier after scrubbing the payload.
+                # Later generation settlements must not make this failed add look
+                # covered merely because they carry a higher watermark.
+                self._record_settlement_in_connection(
+                    conn,
+                    MemorySettlementRecord(
+                        provider_session_ref=provider_session_ref,
+                        generation=(
+                            row.target_generation
+                            if row.target_generation is not None
+                            else session_state.generation
+                        ),
+                        fence_epoch=session_state.fence_epoch,
+                        operation_id=f"dead-{row.source_message_digest}",
+                        operation_kind="add",
+                        outcome="rejected",
+                        last_known_state="dead",
+                        last_observed_outcome="rejected",
+                        error_code=error,
+                        watermark_before=session_state.watermark,
+                        watermark_after=session_state.watermark,
+                        observed_at=now_iso,
+                        settled_at=now_iso,
+                        flush_state="due",
+                        source="add",
+                        settlement_id=f"dead-{row.source_message_digest}",
+                    ),
+                )
                 state: Literal["pending", "dead"] = "dead"
                 self._compact_terminal_tombstones_in_connection(conn, now)
             else:
@@ -1873,6 +1908,12 @@ class MemoryStore:
                 (record.observed_at, record.observed_at),
             )
 
+        manual_resolution = (
+            record.source == "manual"
+            and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
+            and state.generation == record.generation
+            and state.fence_epoch == record.fence_epoch
+        )
         projection_allowed = (
             state.generation == record.generation
             and (
@@ -1882,6 +1923,7 @@ class MemoryStore:
             and (
                 state.flush_state != "manual_required"
                 or record.outcome in {"unknown", "manual_required"}
+                or manual_resolution
             )
         )
         if not projection_allowed:

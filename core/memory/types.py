@@ -406,18 +406,21 @@ class RecallPolicy:
             raise ValueError("agentic budgets are only valid for agentic recall")
         if not isinstance(self.declarations, (tuple, list)):
             raise ValueError("recall declarations must be a sequence")
-        if len(self.declarations) > MAX_RECALL_DECLARATIONS:
+        declarations = tuple(self.declarations)
+        object.__setattr__(self, "declarations", declarations)
+        if len(declarations) > MAX_RECALL_DECLARATIONS:
             raise ValueError("recall declaration fan-out exceeded")
-        if any(not isinstance(declaration, RecallDeclaration) for declaration in self.declarations):
+        if any(not isinstance(declaration, RecallDeclaration) for declaration in declarations):
             raise ValueError("recall declarations must contain RecallDeclaration values")
         agentic_declarations = [
             declaration
-            for declaration in self.declarations
+            for declaration in declarations
             if declaration.mode == "agentic"
         ]
-        if len(agentic_declarations) > MAX_AGENTIC_RECALL_DECLARATIONS:
+        agentic_run_count = len(agentic_declarations) + (self.mode == "agentic")
+        if agentic_run_count > MAX_AGENTIC_RECALL_DECLARATIONS:
             raise ValueError("recall agentic declaration fan-out exceeded")
-        for declaration in self.declarations:
+        for declaration in declarations:
             budget = declaration.budget
             if budget.limit > self.limit:
                 raise ValueError("declaration limit exceeds caller limit")
@@ -431,7 +434,7 @@ class RecallPolicy:
         if (
             sum(
                 declaration.budget.limit
-                for declaration in self.declarations
+                for declaration in declarations
                 if declaration.mode != "agentic"
             )
             > MAX_NON_AGENTIC_DECLARATION_RESULTS
@@ -443,7 +446,7 @@ class RecallPolicy:
         total_timeout_seconds += sum(
             (declaration.budget.freshness_timeout_seconds or 0)
             + (declaration.budget.timeout_seconds or 0)
-            for declaration in self.declarations
+            for declaration in declarations
         )
         if total_timeout_seconds > self.process_timeout_seconds:
             raise ValueError("recall declaration budget exceeds process timeout")

@@ -281,6 +281,33 @@ def test_recall_policy_bounds_declaration_fanout_and_aggregate_budgets() -> None
     with pytest.raises(ValueError, match="RecallDeclaration"):
         RecallPolicy(declarations=(object(),))
 
+    declarations = [RecallDeclaration(mode="keyword", budget=RecallBudget(limit=1))]
+    policy = RecallPolicy(declarations=declarations)
+    declarations.append(RecallDeclaration(mode="vector", budget=RecallBudget(limit=1)))
+    assert policy.declarations == (declarations[0],)
+
+    with pytest.raises(ValueError, match="agentic declaration fan-out"):
+        RecallPolicy(
+            mode="agentic",
+            limit=1,
+            max_results=2,
+            timeout_seconds=1,
+            max_model_calls=1,
+            cost_budget_tokens=1,
+            declarations=(
+                RecallDeclaration(
+                    mode="agentic",
+                    budget=RecallBudget(
+                        limit=1,
+                        max_results=1,
+                        timeout_seconds=1,
+                        max_model_calls=1,
+                        cost_budget_tokens=1,
+                    ),
+                ),
+            ),
+        )
+
 
 async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path)

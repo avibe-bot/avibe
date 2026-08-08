@@ -732,6 +732,62 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     assert rejected_settlement.error_code == "INTERNAL_ERROR"
 
 
+def test_matching_manual_resolution_projects_and_automatic_settlement_does_not(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_id = _deliver(store, "manual-resolution", session_ref="manual-session")
+    provider_session_ref = next(
+        row.provider_session_ref
+        for row in store.list_queue_rows()
+        if row.session_id == session_id
+    )
+    assert provider_session_ref is not None
+    assert store.mark_flush_in_flight(session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        session_id,
+        PROJECT,
+        FlushUnknown(reason="timeout"),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    automatic = MemorySettlementRecord(
+        provider_session_ref=provider_session_ref,
+        generation=state.generation,
+        fence_epoch=state.fence_epoch,
+        operation_id="automatic-commit",
+        operation_kind="flush",
+        outcome="committed",
+        observed_at="2026-01-01T00:00:03.000Z",
+        source="flush",
+    )
+    assert store.record_settlement(automatic)
+    assert store.get_session_flush_state(provider_session_ref).flush_state == "manual_required"
+
+    manual = MemorySettlementRecord(
+        provider_session_ref=provider_session_ref,
+        generation=state.generation,
+        fence_epoch=state.fence_epoch,
+        operation_id="manual-resolution",
+        operation_kind="flush",
+        outcome="settled_with_caveat",
+        observed_at="2026-01-01T00:00:04.000Z",
+        actor="operator",
+        decision="settled_with_caveat",
+        evidence_ref="audit-1",
+        source="manual",
+    )
+    assert store.record_settlement(manual)
+    resolved = store.get_session_flush_state(provider_session_ref)
+    assert resolved is not None
+    assert resolved.flush_state == "settled_with_caveat"
+    assert resolved.fence_owner is None
+    assert resolved.fence_acquired_at is None
+
+
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
     """An outage is not this row's fault: it returns to pending, attempts intact."""
 
@@ -787,6 +843,60 @@ def test_settle_spends_attempts_then_scrubs_a_failing_row_terminally(tmp_path: P
     assert dead.state == "dead"
     # A terminal row keeps no captured text.
     assert dead.payload_text is None
+
+
+def test_terminal_failure_keeps_a_generation_barrier_for_later_settlements(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    failed = _enqueue(store, "barrier-failed", occurred_at_ms=1_000)
+    later = _enqueue(store, "barrier-later", occurred_at_ms=2_000)
+    assert failed.row is not None and later.row is not None
+    assert failed.target_generation == later.target_generation == 0
+    assert failed.provider_session_ref is not None
+
+    first_row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert first_row is not None
+    assert store.settle(
+        first_row,
+        MessageFailure(error="memory_invalid_input", retryable=False),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ) == SettleResult(settled=True, state="dead", attempts=1)
+
+    failed_settlement = next(
+        record
+        for record in store.list_flush_settlements(failed.provider_session_ref)
+        if record.operation_id == f"dead-{failed.row.source_message_digest}"
+    )
+    assert failed_settlement.generation == 0
+    assert failed_settlement.outcome == "rejected"
+    assert failed_settlement.last_known_state == "dead"
+    assert failed_settlement.source == "add"
+
+    second_row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:02.000Z")
+    assert second_row is not None
+    assert second_row.source_message_digest == later.row.source_message_digest
+    assert store.settle(
+        second_row,
+        Delivered(add_request_id="later-add", add_status="accumulated"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:03.000Z"),
+    ).settled
+    assert store.mark_flush_in_flight(second_row.session_id, PROJECT) == 1
+    assert store.record_flush_verdict(
+        second_row.session_id,
+        PROJECT,
+        FlushSucceeded(request_id="later-flush", status="extracted"),
+        now="2026-01-01T00:00:04.000Z",
+    ) == 1
+
+    state = store.get_session_flush_state(failed.provider_session_ref)
+    assert state is not None
+    assert state.generation == 1
+    assert any(
+        record.operation_id == f"dead-{failed.row.source_message_digest}"
+        and record.outcome == "rejected"
+        for record in store.list_flush_settlements(failed.provider_session_ref)
+    )
 
 
 def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None:
