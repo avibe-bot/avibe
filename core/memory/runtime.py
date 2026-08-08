@@ -10,7 +10,7 @@ import stat
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,12 +131,18 @@ class MemoryRuntime:
         self._config = config
         self._restart_config = deepcopy(config)
         self._effective_home = effective_home or paths.get_vibe_remote_dir()
+        self._backup_active = False
         self._clear_journal: MemoryClearJournal | None = None
         self._snapshot_manager: MemorySnapshotManager | None = None
+        self._backup_manager: MemorySnapshotManager | None = None
         self._clear_journal_error: Exception | None = None
         try:
             self._clear_journal = MemoryClearJournal(self._effective_home)
             self._snapshot_manager = MemorySnapshotManager(self._effective_home)
+            self._backup_manager = MemorySnapshotManager._for_backup(
+                self._effective_home,
+                operation_guard=self._clear_journal.assert_backup_allowed,
+            )
             self._clear_journal.mark_boot_recovery_needed()
         except Exception as exc:
             self._clear_journal_error = exc
@@ -250,6 +256,8 @@ class MemoryRuntime:
     def _maintenance_open(self) -> bool:
         """Fail closed when the independent clear authority cannot prove terminal."""
 
+        if self._backup_active:
+            return True
         journal = self._clear_journal
         if journal is None or self._clear_journal_error is not None:
             return True
@@ -843,6 +851,74 @@ class MemoryRuntime:
                     pass
                 raise
 
+    async def create_backup(self, backup_id: str | None = None) -> MemorySnapshot:
+        """Create one ordinary Memory backup under the full maintenance fence."""
+
+        return await self._run_backup_operation(
+            lambda manager: manager.create(backup_id),
+        )
+
+    async def restore_backup(
+        self,
+        backup_id: str,
+        *,
+        expected_manifest_sha256: str,
+        expected_surface_digests: Mapping[str, str | None],
+    ) -> MemorySnapshot:
+        """Restore one verified ordinary Memory backup under the same fence."""
+
+        return await self._run_backup_operation(
+            lambda manager: manager.restore(
+                backup_id,
+                expected_manifest_sha256=expected_manifest_sha256,
+                expected_surface_digests=expected_surface_digests,
+            ),
+        )
+
+    async def _run_backup_operation(
+        self,
+        operation: Callable[[MemorySnapshotManager], MemorySnapshot],
+    ) -> MemorySnapshot:
+        if not self.available:
+            raise self._unavailable()
+        journal = self._require_clear_journal()
+        manager = self._require_backup_manager()
+        async with self._reconcile_lock, self.module._lifecycle_lock:
+            async with self.module._root_lifecycle_lock():
+                journal.assert_backup_allowed()
+                self._backup_active = True
+                self.module._clear_active = True
+                try:
+                    await self._quiesce_for_clear()
+                    return await self._run_snapshot_io(lambda: operation(manager))
+                finally:
+                    self._backup_active = False
+                    try:
+                        await self._resume_after_clear()
+                    finally:
+                        self.module._clear_active = False
+
+    @staticmethod
+    async def _run_snapshot_io(operation: Callable[[], MemorySnapshot]) -> MemorySnapshot:
+        """Keep the maintenance fence until a cancelled snapshot thread settles."""
+
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+            except Exception:
+                break
+        if cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise cancellation
+        return task.result()
+
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
@@ -1182,6 +1258,11 @@ class MemoryRuntime:
         if self._snapshot_manager is None or self._clear_journal_error is not None:
             raise MemoryStoreUnavailableError("Memory snapshot manager is unavailable")
         return self._snapshot_manager
+
+    def _require_backup_manager(self) -> MemorySnapshotManager:
+        if self._backup_manager is None or self._clear_journal_error is not None:
+            raise MemoryStoreUnavailableError("Memory backup manager is unavailable")
+        return self._backup_manager
 
     @staticmethod
     def _clear_execution_token(operation: ClearOperation) -> str:

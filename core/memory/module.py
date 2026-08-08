@@ -234,25 +234,39 @@ class MemoryModule:
             return CaptureSkipped(reason="memory_disabled")
         if self._clear_active or self._is_maintenance_open():
             return CaptureSkipped(reason="memory_clear_failed")
-        if not isinstance(request, CaptureRequest):
-            return await self._skipped_with_missed("memory_invalid_input")
 
-        normalized_text = self._normalize_text(request.text)
-        validation_error = self._capture_validation_error(request, normalized_text)
-        if validation_error is not None:
-            return await self._skipped_with_missed(validation_error)
+        async with self._root_lifecycle_lock():
+            if not self._is_enabled():
+                return CaptureSkipped(reason="memory_disabled")
+            if self._clear_active or self._is_maintenance_open():
+                return CaptureSkipped(reason="memory_clear_failed")
+            if not isinstance(request, CaptureRequest):
+                return await self._skipped_with_missed("memory_invalid_input")
 
-        try:
-            disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
-        except Exception:
-            return await self._skipped_with_missed("memory_low_disk_space")
-        if disk_free < MIN_FREE_DISK_BYTES:
-            return await self._skipped_with_missed("memory_low_disk_space")
+            normalized_text = self._normalize_text(request.text)
+            validation_error = self._capture_validation_error(request, normalized_text)
+            if validation_error is not None:
+                return await self._skipped_with_missed(validation_error)
+
+            try:
+                disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
+            except Exception:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            if disk_free < MIN_FREE_DISK_BYTES:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            return await self._capture_under_root(request, normalized_text)
+
+    async def _capture_under_root(
+        self,
+        request: CaptureRequest,
+        normalized_text: str,
+    ) -> CaptureReceipt:
+        """Pin and enqueue one validated capture under the provider-root fence."""
 
         pinned_bundle: PinnedBundle | None = None
         try:
             if request.attachments:
-                pinned_bundle = await asyncio.to_thread(
+                pinned_bundle = await self._thread_call(
                     self._attachment_store.pin,
                     request.attachments,
                 )
@@ -322,7 +336,7 @@ class MemoryModule:
 
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
         try:
-            await asyncio.to_thread(self._attachment_store.release, bundle_id)
+            await self._thread_call(self._attachment_store.release, bundle_id)
         except Exception:
             # It has no DB reference and boot reconciliation removes the orphan.
             return
@@ -828,7 +842,26 @@ class MemoryModule:
             return
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.to_thread(method, *args, **kwargs)
+        return await self._thread_call(method, *args, **kwargs)
+
+    @staticmethod
+    async def _thread_call(method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """Settle durable thread work before propagating caller cancellation."""
+
+        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        if cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise cancellation
+        return task.result()
 
     def _default_free_disk_bytes(self) -> int:
         return int(shutil.disk_usage(self._store.path.parent).free)

@@ -1530,7 +1530,7 @@ class MemoryStore:
             if row is None:
                 return FlushSettleResult(settled=False)
             retries = int(row["retry_count"]) + 1
-            if retries >= max(int(max_attempts), 1):
+            if retries > max(int(max_attempts), 0):
                 conn.execute(
                     """
                     INSERT INTO memory_flush_settlements (

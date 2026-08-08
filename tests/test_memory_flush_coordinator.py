@@ -200,7 +200,7 @@ def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) 
     async def run() -> None:
         store = _store(tmp_path)
         provider = FakeMemoryProvider()
-        provider.flush_results.append(FlushRetryable())
+        provider.flush_results.extend([FlushRetryable()] * 4)
         current = [datetime(2026, 1, 1, tzinfo=UTC)]
         coordinator = SessionFlushCoordinator(
             store=store,
@@ -217,15 +217,30 @@ def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) 
         )
         row = _enqueue(store, "retry")
         assert await worker.drain_once() == 1
+        expected_delays = (1, 2, 4)
         current[0] += timedelta(minutes=5)
-        await coordinator.run_due()
-        await asyncio.sleep(0.05)
+        for retry_count, delay in enumerate(expected_delays, start=1):
+            assert await coordinator.run_due() == 1
+            await asyncio.sleep(0.05)
 
-        state = store.get_session_flush_state(row.provider_session_ref)
-        assert state is not None
-        assert state.state == "due"
-        assert state.retry_count == 1
-        assert state.submission_started_at is None
+            state = store.get_session_flush_state(row.provider_session_ref)
+            assert state is not None
+            assert state.state == "due"
+            assert state.retry_count == retry_count
+            assert state.next_attempt_at == (
+                current[0] + timedelta(seconds=delay)
+            ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            assert state.submission_started_at is None
+            current[0] += timedelta(seconds=delay)
+
+        assert await coordinator.run_due() == 1
+        await asyncio.sleep(0.05)
+        terminal = store.get_session_flush_state(row.provider_session_ref)
+        assert terminal is not None
+        assert terminal.state == "manual_required"
+        assert terminal.retry_count == 4
+        assert terminal.next_attempt_at is None
+        assert len(provider.flushes) == 4
 
     asyncio.run(run())
 

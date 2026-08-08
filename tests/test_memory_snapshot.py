@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 import core.memory.snapshot as snapshot_module
-from core.memory.clear_journal import ClearTransitionError, MemoryClearJournal
+from core.memory.clear_journal import (
+    ClearBackupBlocked,
+    ClearTransitionError,
+    MemoryClearJournal,
+)
 from core.memory.snapshot import (
     MemorySnapshotManager,
     MemorySnapshotUnsafePathError,
@@ -72,6 +76,53 @@ def _build_all_surfaces(home: Path) -> sqlite3.Connection:
     _private_directory(home / "memory/everos-root/episodes/empty", home)
     _private_file(home / "memory/attachments/bundles/a1/00.txt", b"attachment", home)
     return queue_connection
+
+
+def _complete_clear_audit(
+    journal: MemoryClearJournal,
+    manager: MemorySnapshotManager,
+    operation_id: str,
+) -> None:
+    operation = journal.start(
+        operation_id=operation_id,
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    snapshot = manager.create(operation.operation_id)
+    assert operation.execution_token is not None
+    operation = journal.record_snapshot(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+        snapshot=snapshot,
+    )
+    assert operation.execution_token is not None
+    operation = journal.mark_prepared(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    assert operation.execution_token is not None
+    operation = journal.begin_deleting(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    for surface in journal.surfaces:
+        assert operation.execution_token is not None
+        operation = journal.record_surface_deleted(
+            operation.operation_id,
+            surface.name,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+        )
+    assert operation.execution_token is not None
+    journal.mark_completed(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
 
 
 def test_snapshot_round_trip_covers_all_surfaces_and_wal(tmp_path: Path) -> None:
@@ -194,6 +245,53 @@ def test_snapshot_restore_relocates_and_restores_missing_as_absent(tmp_path: Pat
     assert not (relocated_home / "memory/call-log/call-log.db").exists()
     assert not (relocated_home / "memory/attachments").exists()
     assert source_home / "state/memory/memory.sqlite" != relocated_home / "state/memory/memory.sqlite"
+
+
+def test_ordinary_backup_includes_clear_audit_and_blocks_on_open_clear(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    queue_connection = _build_all_surfaces(home)
+    queue_connection.close()
+    journal = MemoryClearJournal(home)
+    clear_manager = MemorySnapshotManager(home)
+    _complete_clear_audit(journal, clear_manager, "completed-audit")
+
+    backup_manager = MemorySnapshotManager._for_backup(
+        home,
+        operation_guard=journal.assert_backup_allowed,
+    )
+    backup = backup_manager.create("backup-01")
+
+    assert backup.relative_path == "state/memory/backups/backup-01"
+    roots = {entry.path: entry for entry in backup.entries}
+    assert roots["state/memory/clear-journal.sqlite"].type == "sqlite"
+    copied_journal = (
+        backup_manager.snapshot_path(backup.snapshot_id)
+        / "payload/state/memory/clear-journal.sqlite"
+    )
+    with sqlite3.connect(copied_journal) as connection:
+        assert connection.execute(
+            "SELECT state FROM clear_operation WHERE operation_id = 'completed-audit'"
+        ).fetchone() == ("completed",)
+        assert connection.execute(
+            "SELECT event FROM clear_event ORDER BY event_id DESC LIMIT 1"
+        ).fetchone() == ("completed",)
+
+    journal.start(
+        operation_id="open-clear",
+        operator_ref="user:owner",
+        pre_epoch=1,
+        target_epoch=2,
+    )
+    with pytest.raises(ClearBackupBlocked):
+        backup_manager.create("blocked-backup")
+    with pytest.raises(ClearBackupBlocked):
+        backup_manager.restore(
+            backup.snapshot_id,
+            expected_manifest_sha256=backup.manifest_sha256,
+            expected_surface_digests=backup.surface_digests(),
+        )
 
 
 def test_snapshot_verify_fails_before_restore_on_tampered_payload(tmp_path: Path) -> None:

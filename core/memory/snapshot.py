@@ -1,4 +1,4 @@
-"""Crash-conscious snapshots for the four durable Memory surfaces.
+"""Crash-conscious snapshots for the durable Memory surfaces.
 
 The manager deliberately knows paths, bytes, and integrity only.  It does not
 own the maintenance fence or decide when clear may proceed.  SQLite inputs are
@@ -17,7 +17,7 @@ import stat
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
 
 SnapshotSurfaceKind = Literal["sqlite", "tree"]
@@ -79,6 +79,11 @@ DEFAULT_MEMORY_SNAPSHOT_SURFACES: tuple[SnapshotSurface, ...] = (
     SnapshotSurface("memory/everos-root", "tree"),
     SnapshotSurface("memory/call-log/call-log.db", "sqlite"),
     SnapshotSurface("memory/attachments", "tree"),
+)
+
+DEFAULT_MEMORY_BACKUP_SURFACES: tuple[SnapshotSurface, ...] = (
+    *DEFAULT_MEMORY_SNAPSHOT_SURFACES,
+    SnapshotSurface("state/memory/clear-journal.sqlite", "sqlite"),
 )
 
 
@@ -247,6 +252,7 @@ class MemorySnapshotManager:
         *,
         snapshot_root: Path | str = "state/memory/clear-snapshots",
         surfaces: Sequence[SnapshotSurface] = DEFAULT_MEMORY_SNAPSHOT_SURFACES,
+        operation_guard: Callable[[], None] | None = None,
     ) -> None:
         self._effective_home = _absolute_without_resolve(effective_home)
         root_value = Path(snapshot_root)
@@ -263,7 +269,30 @@ class MemorySnapshotManager:
         if not surfaces:
             raise ValueError("at least one Memory snapshot surface is required")
         self._surfaces = tuple(surfaces)
+        self._operation_guard = operation_guard
         self._validate_surface_layout()
+
+    @classmethod
+    def _for_backup(
+        cls,
+        effective_home: Path | str,
+        *,
+        operation_guard: Callable[[], None],
+    ) -> "MemorySnapshotManager":
+        """Build the low-level ordinary-backup manager.
+
+        Only ``MemoryRuntime`` may expose this manager: it holds the runtime and
+        provider-root maintenance fences for the full create/restore operation.
+        """
+
+        if not callable(operation_guard):
+            raise TypeError("Memory backup requires a clear-journal guard")
+        return cls(
+            effective_home,
+            snapshot_root="state/memory/backups",
+            surfaces=DEFAULT_MEMORY_BACKUP_SURFACES,
+            operation_guard=operation_guard,
+        )
 
     @property
     def effective_home(self) -> Path:
@@ -283,6 +312,7 @@ class MemorySnapshotManager:
     def create(self, snapshot_id: str | None = None) -> MemorySnapshot:
         """Create and verify one all-surface snapshot before publishing it."""
 
+        self._assert_operation_allowed()
         identifier = _validated_snapshot_id(snapshot_id or uuid.uuid4().hex)
         _ensure_private_directory(self._effective_home, self._effective_home)
         _ensure_private_directory(self._effective_home, self._snapshot_root)
@@ -357,6 +387,7 @@ class MemorySnapshotManager:
         process-wide maintenance fence and crash recovery journal.
         """
 
+        self._assert_operation_allowed()
         snapshot = self.verify(
             snapshot_id,
             expected_manifest_sha256=expected_manifest_sha256,
@@ -441,6 +472,10 @@ class MemorySnapshotManager:
                 _remove_safe_path(self._effective_home, plan.staged)
             _fsync_directory(plan.target.parent)
         return snapshot
+
+    def _assert_operation_allowed(self) -> None:
+        if self._operation_guard is not None:
+            self._operation_guard()
 
     def remove(self, permit: _CompletedSnapshotPermit) -> None:
         """Remove only a snapshot authorized by a completed journal row."""
