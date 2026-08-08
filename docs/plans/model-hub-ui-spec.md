@@ -40,27 +40,47 @@ All seven frames are 1440×1100 Dark. Light and mobile variants are not drawn ye
 1. `model-hub.md` — behaviour, vocabulary, resolution. **§4.3 is the sole
    authority for the routing algorithm.** On any conflict, it wins and this file
    is the defect.
-2. `model-hub-implementation.md` §8 — the behaviour acceptance ledger (AC-1…AC-21).
-   §3 below does not duplicate, restate, or extend it.
-3. This file — layout, copy, state reachability, interaction feedback.
-4. `design.pen` — the pixels. Where this file and the frame disagree on a number,
+2. `model-hub-implementation.md` §8 — the behaviour acceptance ledger
+   (AC-1…AC-28) and the `FC-01…FC-14` final-contract handoff. §3 below does not
+   duplicate, restate, or extend either.
+3. `model-hub-contracts/` — the frozen wire shapes the two above are landed as.
+4. This file — layout, copy, state reachability, interaction feedback.
+5. `design.pen` — the pixels. Where this file and the frame disagree on a number,
    the frame is right and this file must be corrected, *unless* the number is
    marked `[derived]`.
 
 This file **references anchors and never restates spec content**. If you want to
-know what a chain is, read §4.6 there; this file only says where it is drawn.
+know what a chain is, read §4.3 there; this file only says where it is drawn.
+
+**Verification basis.** Every anchor and every `[spec]` / `[contract]` claim below
+was checked against `docs/model-hub-v3-local-gateway` @ `7984aabf` — the open head
+of the spec lane's PR #1215 — **not** against `master`, whose §3, §4.1, §4.2, §4.6
+and §5 have all been superseded there. A reader on `master` will find some anchors
+missing; that is the expected state until #1215 lands, and this file must not merge
+before it does.
 
 ### 0.3 Provenance markers
 
-Every statement below carries one of three markers, because "the design says so"
-and "somebody decided so while writing this" are not the same kind of fact and a
-lane needs to know which one it is holding:
+Every statement below carries one of five markers, because "the design says so" and
+"somebody decided so while writing this" are not the same kind of fact and a lane
+needs to know which one it is holding:
 
 - `[frame]` — measured off the design file. Changing it is a design change.
 - `[derived]` — not drawn; decided here because the frame does not cover the case
   (empty lists, overflow, keyboard paths). Changing it is a spec change to *this*
   file and needs no design pass.
 - `[spec]` — owned by `model-hub.md`; repeated here only as a pointer.
+- `[contract]` — backed by a named AC / FC item or a frozen wire shape. The anchor
+  is part of the marker, so the reader can go read it.
+- `[contract-gap]` — **the surface needs a value or a route that does not exist
+  yet.** The gap is named at the point of the claim, and the claim is *not* an
+  acceptance requirement until the gap closes.
+
+The last marker is the one that earns its keep. Without it, a UI spec asserts a
+control as functional and the reader has no way to tell whether it is implementable
+today; the honest signal has to live *where the assertion is*, not in a boundary
+paragraph six hundred lines away that the implementer will not be reading when they
+build that control.
 
 ### 0.4 Not in scope
 
@@ -69,6 +89,74 @@ precedence). Those belong to §8 of the implementation plan. Where drawing the
 frames surfaced a *missing* behaviour invariant, it is listed in the PR
 description under 「建议移交 AC 账本」 for routing — not written here, and not
 written into §8 by this lane.
+
+### 0.5 Contract-gap registry
+
+Every `[contract-gap]` in this file, in one place. A `[contract-gap]` statement
+describes the intended surface, and is **not** an acceptance requirement: no `UI-n`
+depends on one, and where a frame draws an affordance that sits on a gap, §3 says so
+explicitly rather than quietly requiring it.
+
+| # | Surface | Missing | Verified absent at `7984aabf` |
+| --- | --- | --- | --- |
+| G-1 | 05 ③ 仍要添加 | a durable state meaning *saved, explicitly unverified* | `source.schema.json` `state.status` ∈ {active, standby, cooldown, needs_action, error}; AC-27 requires a verifying response before a protocol persists |
+| G-2 | 05 `undetermined.hint` 2nd clause; 06 protocol edit entry | any route that changes a stored protocol | AC-27 「changing protocol requires a new Source」; FC-12 PATCH body is `{display_name?, base_url?, force?}` |
+| G-3 | 06 接入 toggle | a per-model connected/enabled field and its mutation | FC-03 model item is `{id, origin, reasoning_efforts, display_name?, discovered_at?}`; FC-12 lists only manual model removal |
+| G-4 | 06 quiet badge | provenance recording that a protocol was human-specified | no such field on the source shape |
+
+G-3 and G-4 are pure gaps: additive fields plus their mutation, listed in the PR
+description for routing into the AC ledger. G-1 and G-2 are the *visible* half of the
+two conflicts in §0.6 (E-3 and E-2) — adding the missing state or route is only one
+of the two possible answers there, and this lane must not present it as the obvious
+one.
+
+None of the four is decided here. This lane owns the visible layer, and inventing a
+persistence model to make a drawn control defensible is exactly the kind of quiet
+scope grab that produces two disagreeing authorities.
+
+### 0.6 Open conflicts — escalated, not ruled
+
+Three places where the owner-approved frames and the behaviour authority at
+`7984aabf` say different things. All are recorded here so that a reader is never
+misled by a confidently-written section, and all are escalated in the PR description.
+This lane does not pick a side: each is a conflict between two owner decisions, and
+choosing between them is a product call, not an editorial one.
+
+A conflict is not the same thing as a gap. §0.5's G-1…G-4 are *missing* contract —
+something has to be added. The three below are *contradicted* contract — something
+has to be retracted. Filing a contradiction as a gap is how a lane talks itself into
+implementing the side it happened to draw.
+
+**E-1 — Is the source order global, or one subset per backend?** §1.3, D-9 and D-10
+describe one product-global order with native sources held out of it, which is what
+frames 01, 02 and 03 draw (「全局顺序」, 「跟随全局顺序」, 「全局 #n」, and 03's
+「不参与排序」 section). At `7984aabf`, §3 defines 来源顺序 as an ordered subset
+eligible for **one backend** and 「never product-global」, bans 优先级 as a global
+noun, and §4.2's order is server-computed by a rule whose first step **includes** the
+native singleton. Three separate consequences, which is why this cannot be patched
+locally: (a) one drawer versus one order per backend; (b) native excluded versus
+native leading; (c) §1.3 has no follow-versus-custom ownership state, no
+「恢复推荐顺序」 and no 「有新来源未启用」 hint, all of which a server-computed
+recommendation implies. Affected: §1.1, §1.2, §1.3, D-9, D-10, the
+`gateway.globalOrder` / `chain.hop.globalRank` / `order.*` copy keys, and possibly
+the frames.
+
+**E-2 — Can a stored protocol be changed?** 05's `undetermined.hint`, 06's badge
+tooltip and the instruction to add a protocol-edit entry point at that badge all say
+yes. AC-27 says 「changing protocol requires a new Source」 and FC-12's PATCH body
+carries no protocol field. See G-2 and §1.6's held entry-point paragraph. Both
+positions are owner rulings dated 2026-08-09.
+
+**E-3 — Can a source be saved without a verifying upstream response?** D-4
+(「校验是信息,不是闸门」) keeps 05 state ③'s 仍要添加 live, and the frame draws it.
+AC-27 requires a verifying response before anything persists, and `source.schema.json`
+has no state that means *saved, explicitly unverified* — so the affordance has no
+landing place. The review's `Add anyway` finding is correct on the contract; what a
+review cannot decide is which of the two owner positions yields. Recorded as G-1 for the missing state, and here for the
+contradiction. §1.5 currently describes the button as drawn and marks it.
+
+Until each is answered, treat the affected sections as **descriptive of the frames**
+rather than as normative for implementation, and do not build on them.
 
 ---
 
@@ -103,7 +191,7 @@ a shell that will drift in six of them.
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `title` + info icon | Page name | static | icon: hover | Tooltip: what the gateway is `[derived]` |
-| Run pill | Engine liveness | engine status | no | — |
+| Run pill | Engine liveness | engine status | **`not_started` / `stopped`: yes; `running`: no** `[derived]` | Start the engine (`POST /api/models/runtime/start` `[contract]`) |
 | Tabs ×4 | Section nav | route | yes | Navigate; active tab gets the mint underline |
 | Upstream module | Source inventory | `GET /api/models/sources` `[spec]` | rows: yes | Open 06 for that source |
 | Dispatch rail | That upstream feeds gateway | derived, decorative | no | — |
@@ -117,18 +205,33 @@ a shell that will drift in six of them.
 | Loading | Route entered, first payload outstanding | Payload arrives → Ready, or fails → Unreachable |
 | Ready | Payload arrives | Any mutation re-renders in place `[derived]` |
 | Empty (no sources) | `sources == []` | First source added → Ready |
-| Unreachable (engine down) | Status request fails or reports stopped | Recovery → Ready |
+| **Not started** | Runtime status reads `not_started` `[contract]` | User activates the run pill → Starting → Ready |
+| **Starting** | Start accepted, engine not yet live | Live → Ready; start fails → Unreachable |
+| Unreachable (engine down) | Status request fails, or the engine was running and died | Recovery → Ready |
 | Partial | Sources load, per-backend supply does not | Retry succeeds → Ready |
 
-Empty, Unreachable and Partial are **not drawn** `[derived]`. Required behaviour:
+Empty, Not started, Starting, Unreachable and Partial are **not drawn** `[derived]`.
+Required behaviour:
 
 - Empty: upstream module keeps its head and footer and shows one line —
   「还没有来源。先添加一个订阅或 API Key。」 The gateway module shows its backend
   groups with 「没有可用来源」 per group rather than vanishing; a backend that
   exists is a fact independent of whether anything can supply it.
-- Unreachable: the run pill flips to 「网关未运行」 and every derived column
-  (current source, chain, takeover) renders `—`, **not** a stale last-known value.
-  See D-3 and UI-20: a surface that cannot prove a fact must say so.
+- **Not started**: the pill reads 「网关未启动 · 点击启动」 and is the page's start
+  affordance. It is styled as an *idle* pill — `$--muted` label on `#FFFFFF0A`,
+  **not** the error treatment `[derived]`. The runtime contract classes
+  `not_started` as lazy-start idleness rather than an alarm `[contract]`, and a
+  page that paints idleness red teaches users to ignore the colour that matters.
+  Derived columns render `—` exactly as in Unreachable; supply that has never been
+  arbitrated is unknown, not empty.
+- **Starting**: the pill reads 「正在启动…」 with the `loader-circle` spinner and
+  stops accepting activation, so a second click cannot queue a second start
+  `[derived]`.
+- Unreachable: the run pill flips to 「网关未运行」 — the error treatment, because an
+  engine that *was* running and stopped answering is a fault — and every derived
+  column (current source, chain, takeover) renders `—`, **not** a stale last-known
+  value. See D-3 and UI-20: a surface that cannot prove a fact must say so.
+  Recovery offers the same start action as Not started.
 - Partial: only the sub-tree that failed degrades. A failed supply payload must
   not blank the source inventory, which loaded fine.
 
@@ -136,17 +239,36 @@ Empty, Unreachable and Partial are **not drawn** `[derived]`. Required behaviour
 `.legend.*`. Both `ui/src/i18n/zh.json` and `en.json` must carry every key (they
 are currently at exact parity, 3534 keys each; UI-11 keeps it that way).
 
+**Count-bearing keys** `[derived]`. Every key interpolating `{{count}}` ships as an
+i18next plural family — `<key>_one` and `<key>_other` — in **both** locale files,
+never as a single bare key. Two consequences worth stating, because getting either
+wrong is invisible until a user hits `count = 1`:
+
+- English needs the distinction (`1 source`, not `1 sources`), and UI-14 tests
+  exactly `0 / 1 / 2`. A bare key cannot pass it.
+- Chinese has no plural categories, so `zh` never selects `_one`. It still carries
+  both variants, with identical values, so that locale parity stays a plain set
+  equality. A parity rule with a per-language exemption list is a parity rule that
+  stops catching anything.
+
+The count-bearing keys in this file are `upstream.count`, `gateway.modelCount`,
+`gateway.collapse`, `chain.derived.hops`, `sourceDetail.summary` and
+`takeover.pill`; each appears below in its `_one` / `_other` form.
+
 | Key | 中文 | English |
 | --- | --- | --- |
 | `shell.title` | 模型网关 | Model Gateway |
 | `shell.running` | 网关运行中 | Gateway running |
 | `shell.stopped` `[derived]` | 网关未运行 | Gateway not running |
+| `shell.notStarted` `[derived]` | 网关未启动 · 点击启动 | Gateway not started · click to start |
+| `shell.starting` `[derived]` | 正在启动… | Starting… |
 | `shell.tab.hub` | 模型网关 | Model Gateway |
 | `shell.tab.usage` | 用量与额度 | Usage & quota |
 | `shell.tab.backends` | Agent 后端 | Agent backends |
 | `shell.tab.diagnostics` | 诊断 | Diagnostics |
 | `upstream.heading` | 上游 | Upstream |
-| `upstream.count` | {{count}} 个来源 | {{count}} sources |
+| `upstream.count_one` | {{count}} 个来源 | {{count}} source |
+| `upstream.count_other` | {{count}} 个来源 | {{count}} sources |
 | `upstream.group.native` | 本机原生 | Native · on this machine |
 | `upstream.group.hub` | 网关持有 | Held by the gateway |
 | `upstream.kind.nativeCredential` | 原生 · 本机凭据 | Native · local credential |
@@ -162,7 +284,8 @@ are currently at exact parity, 3534 keys each; UI-11 keeps it that way).
 | `gateway.heading` | 网关 | Gateway |
 | `gateway.rail` | 调度 | Dispatch |
 | `gateway.globalOrder` | 全局顺序 | Global order |
-| `gateway.modelCount` | {{count}} 个型号 | {{count}} models |
+| `gateway.modelCount_one` | {{count}} 个型号 | {{count}} model |
+| `gateway.modelCount_other` | {{count}} 个型号 | {{count}} models |
 | `gateway.supply.nativeDirect` | 原生订阅直供 · 未经网关 | Supplied directly by native subscription · not via the gateway |
 | `gateway.supply.viaGateway` | 网关供给 · {{source}} | Gateway supply · {{source}} |
 | `gateway.supply.takenOver` | 已接管 · {{source}} | Taken over · {{source}} |
@@ -171,23 +294,43 @@ are currently at exact parity, 3534 keys each; UI-11 keeps it that way).
 | `gateway.row.overridden` | 已覆盖 | Overridden |
 | `gateway.row.current` | 当前 {{source}} | Now: {{source}} |
 | `gateway.row.currentTakeover` | 当前 {{source}}(接管) | Now: {{source}} (takeover) |
-| `gateway.collapse` | 还有 {{count}} 个型号 | {{count}} more models |
+| `gateway.collapse_one` | 还有 {{count}} 个型号 | {{count}} more model |
+| `gateway.collapse_other` | 还有 {{count}} 个型号 | {{count}} more models |
 | `legend.nativeDirect` | 原生直连 · 不经网关 | Native direct · not via the gateway |
 | `legend.viaGateway` | 网关供给 | Gateway supply |
 | `legend.connectedUnused` | 已接入 · 当前未被使用 | Connected · not currently used |
 | `legend.takeover` | 接管中 · 临时改走 | Taken over · temporarily rerouted |
 | `legend.note` | 链路按「全局顺序」自动派生;单个型号可单独覆盖 | Chains are derived from the global order; any single model can override it |
 
-**Semantic ink** `[frame]` — four inks, each with exactly one meaning:
+**Semantic ink** `[frame]` — four inks. Meaning is assigned **per element role**, and
+the two roles below are disjoint, so every inked element has exactly one reading:
 
-| Ink | Meaning | Where |
-| --- | --- | --- |
-| `$--cyan` `#3FE0E5` | native direct, not via the gateway | wire, card tint `#3FE0E50A` / border `#3FE0E54D`, tile `#3FE0E51A`, status text |
-| `$--mint` `#5BFFA0` | gateway supply | wire, rail (`#5BFFA01A` chip / `#5BFFA033` line), order badges, primary buttons |
-| `$--gold` `#FFC857` | takeover / temporarily rerouted; also ToS warning | 08 only (wire `#FFC857` @1.75, pills `#FFC8571A`+`#FFC8574D`), 04 note |
-| `#FFFFFF26` | connected but not currently used | dim wire only |
+- **Relation / status ink** — the element states a fact about where tokens come
+  from: wires, rails, tint washes, status text, supply pills, legend swatches.
+- **Control ink** — the element states that a control is active, selected, or
+  primary: tab underline, order badges, selected option, input focus ring, toggle
+  fill, manual-row wash, primary button.
 
-Cyan's exclusivity is load-bearing, not decorative — see D-6 and UI-8.
+| Ink | As relation / status ink | As control ink | Where |
+| --- | --- | --- | --- |
+| `$--cyan` `#3FE0E5` | native direct, not via the gateway | **never** | wire, card tint `#3FE0E50A` / border `#3FE0E54D`, tile `#3FE0E51A`, status text |
+| `$--mint` `#5BFFA0` | gateway supply | active / selected / primary | relation: wire, rail (`#5BFFA01A` chip / `#5BFFA033` line), supply text. control: active tab underline `@2`, order badges, selected option card, tier-editor focus ring, connected toggle, manual-row wash `#5BFFA00D`, primary buttons |
+| `$--gold` `#FFC857` | takeover / temporarily rerouted | warning emphasis | 08 (wire `#FFC857` @1.75, pills `#FFC8571A`+`#FFC8574D`), 05 state ④ strip, 04 ToS note |
+| `#FFFFFF26` | connected but not currently used | — | dim wire only |
+
+Two asymmetries are deliberate and load-bearing:
+
+- **Cyan is exclusive in both roles.** It never inks a control, so cyan anywhere on
+  the page means exactly one thing: this supply bypasses the gateway. That is the
+  single most consequential distinction on the surface — see D-6 and UI-8.
+- **Mint is dual, and that is fine, because the roles never collide on one
+  element.** A tab underline is not claiming an upstream relation, and a wire is not
+  claiming to be a control. Forcing mint down to one meaning would need a second
+  accent hue for controls, which buys nothing and costs the brand a token.
+
+The honest statement of the rule is therefore a partition, not a whitelist: mint
+inking a relation/status element **must** mean gateway supply, and mint inking a
+control element **must** mean active/selected/primary. UI-9 checks that partition.
 
 ---
 
@@ -196,6 +339,11 @@ Cyan's exclusivity is load-bearing, not decorative — see D-6 and UI-8.
 **The question it answers:** *where do my tokens come from, and who is using
 which one right now?* Read left to right it is one sentence: these sources exist →
 dispatch arbitrates → each backend's models resolve to these sources today.
+
+> **⚠ E-1 (§0.6)** — the `fwCwQ` 「全局顺序」 entry point and `legend.note` presume one
+> product-wide order. If the owner rules per-backend, this button becomes one entry
+> point per backend group and the note's wording changes; the layout, wire generator
+> and every other element here are unaffected.
 
 **Element inventory** (deltas from §1.0)
 
@@ -249,26 +397,41 @@ Collapse predicate for a backend group `[frame]` for the shape, `[derived]` for 
 ordering rule:
 
 ```
-N = 3                                     # baseline visible rows
+N = 3                                     # ADDITIONAL nominal rows, not a total
 mustShow  = { m in models | m.state != nominal }        # hard: never collapsed
 ranked    = sort(models - mustShow, by=(
                0 if m.hasOverride else 1,               # overrides outrank
                m.backendMenuIndex))                     # then the backend's own order
-visible   = mustShow ++ take(ranked, max(0, N - |mustShow|))
+visible   = mustShow ++ take(ranked, N)
 collapsed = models - visible
 render collapse row  iff  |collapsed| > 0
 collapse label count = |collapsed|
 ```
 
-Consequences worth spelling out, because each has already been got wrong once:
+**`N` is an additive nominal baseline, not a total row floor.** This is the one
+number in the file most likely to be mis-implemented, so it is worth saying why it
+is additive. The baseline exists to give the group *context* — a few ordinary rows
+so the abnormal ones read as exceptions rather than as the whole list. A total floor
+destroys exactly that: at three cooling models the context disappears precisely when
+it is most needed, and the group renders as if everything were broken.
 
-- `|mustShow| > N` ⇒ the group shows **more** than three rows. The baseline is a
-  floor on information, not a cap on rows.
-- The count in 「还有 N 个型号」 is `|collapsed|`, never `|models| - 3`. With two
-  cooling models the group shows 5 and says `还有 {total-5} 个型号`.
-- `|models| <= N` ⇒ **no collapse row at all**, not an empty one.
+Consequences, each a test fixture:
+
+| `models` | non-nominal | visible | collapse row |
+| --- | --- | --- | --- |
+| 12 | 0 | 3 | 「还有 9 个型号」 |
+| 12 | 2 | **5** (2 + 3) | 「还有 7 个型号」 |
+| 12 | 5 | **8** (5 + 3) | 「还有 4 个型号」 |
+| 12 | 12 | 12 | none |
+| 3 | 0 | 3 | none |
+| 2 | 1 | 2 | none |
+
+- The count in 「还有 N 个型号」 is `|collapsed|`, never `|models| - 3`.
+- `|models| <= |mustShow| + N` ⇒ **no collapse row at all**, not an empty one.
 - Expanding is idempotent and does not re-rank: the order the user saw stays the
   order they get.
+- Zero non-nominal models is the frame's own case: 01 draws 3 rows per group plus a
+  collapse row `[frame]`, which is this predicate at `mustShow = ∅`.
 
 Other limits `[derived]`:
 
@@ -290,13 +453,19 @@ Other limits `[derived]`:
 what order, and is that order mine or the product's?* Two dialogs, side by side,
 are the two answers: follow-the-global-order, and I have overridden this model.
 
+> **⚠ E-1 (§0.6)** — the two-mode structure, the hop rendering and the copy are
+> normative. The word 「全局」 in `mode.follow`, `hop.globalRank`, `hint.follow` and
+> `hint.custom` presumes one product-wide order; if the owner rules the order is
+> per-backend, those four strings change wording but nothing else in this section
+> moves.
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `zmWYg` head | `{model} · 来源链路` + backend name | route params | close icon | Dismiss |
 | `UxCia` segmented | 跟随全局顺序 / 自定义此型号 | override presence | yes, 2 options | Switch mode; picking custom **forks** the chain |
-| `y9mDvQ` label + `OL7EH` chip | 当前派生结果 / 3 跳 — or 这个型号的链路 / 已覆盖 | derived chain `[spec §4.6]` | no | — |
+| `y9mDvQ` label + `OL7EH` chip | 当前派生结果 / 3 跳 — or 这个型号的链路 / 已覆盖 | derived chain `[spec §4.3]` | no | — |
 | `F2sqds` hop | ordinal badge, source name, effective upstream model id (mono), `全局 #n` tag | chain hop | follow: no | — |
 | `Fq0MA` hop (custom) | same, minus the tag, plus up / down / remove | chain hop | yes | Reorder / remove |
 | `HOQqF` 添加一跳 | — | eligible sources not yet in the chain | yes | Source picker `[derived]` |
@@ -342,7 +511,8 @@ Two `[derived]` rules the frame cannot show:
 | `mode.follow` | 跟随全局顺序 | Follows global order |
 | `mode.custom` | 自定义此型号 | Customize this model |
 | `derived.label` | 当前派生结果 | Derived result |
-| `derived.hops` | {{count}} 跳 | {{count}} hops |
+| `derived.hops_one` | {{count}} 跳 | {{count}} hop |
+| `derived.hops_other` | {{count}} 跳 | {{count}} hops |
 | `custom.label` | 这个型号的链路 | This model's chain |
 | `custom.badge` | 已覆盖 | Overridden |
 | `hop.globalRank` | 全局 #{{n}} | Global #{{n}} |
@@ -366,6 +536,14 @@ omitted, not blanked, on hops that entered by override.
 
 **The question it answers:** *when several sources can serve the same model, who
 goes first?* One list, one answer, for every model that has not been overridden.
+
+> **⚠ E-1 — this whole section is under an open conflict (§0.6).** The frame draws
+> one product-global list with native sources held outside it; `model-hub.md` §3 at
+> `7984aabf` scopes the order to one backend and §4.2 computes it with the native
+> singleton first. Read everything below as *a faithful description of frame 03*, not
+> as a normative instruction — the scoping question, the native row's treatment, and
+> the missing follow-versus-custom states all wait on the owner's answer. The
+> metrics, copy and drag semantics are unaffected by that answer and are normative.
 
 **Element inventory**
 
@@ -437,15 +615,15 @@ is **different per vendor** and for a reason that is legal, not technical.
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | head | `添加 {vendor} 订阅` + `host / plan` | vendor | close | Dismiss |
-| `gI9r5` / `Fs6bj` option | radio, name, info icon, recommendation badge, one-line consequence | static per vendor | yes | Select |
+| `gI9r5` / `Fs6bj` option | selection mark, name, info icon, recommendation badge, one-line consequence | static per vendor | yes | Toggle **this** option, independently of the other |
 | `uzelE` ToS note | why gateway-supplying a Claude subscription is out of scope | static, Claude only | no | — |
 | `iF4LZ` hint | that both can be selected, and what that means | static per vendor | no | — |
 | foot | 取消 / 去登录 | selection | yes | Dismiss / start OAuth `[spec §4.5]` |
 
 **Metrics** `[frame]`: dialog 620 wide, `radius 14`, `$--surface`,
 `border-strong`; Claude 424 tall, ChatGPT 365. Option card 580 wide `padding 14`
-`gap 12` `radius 10`; **selected** = `#5BFFA00F` fill + `#5BFFA059` border; radio
-16×16 `radius 999` `stroke $--mint @1.5`. Badge `padding [3,8]` `radius 999`
+`gap 12` `radius 10`; **selected** = `#5BFFA00F` fill + `#5BFFA059` border; selection
+mark 16×16 `radius 999` `stroke $--mint @1.5`. Badge `padding [3,8]` `radius 999`
 `#5BFFA01A` / `#5BFFA04D`. ToS note 524 wide `padding [9,11]` `radius 8`, gold
 (`#FFC8571A` / `#FFC8574D`), `triangle-alert` icon. Foot 61 tall, mint 去登录 with
 `arrow-right`.
@@ -455,16 +633,33 @@ The recommendation flips per vendor `[frame]`: Claude = 原生使用 **推荐** 
 **支持,不推荐**. Frame order follows the recommendation — the recommended option
 is first in both dialogs.
 
+**The two options are independently selectable, and the round mark is a drawn form,
+not a radio group** `[derived]`. The frame draws a 16×16 circle, which reads as a
+radio to anyone implementing from the pixels — but `hint.claude` promises 「两个都选
+也可以:原生优先用,额度用完自动走网关」, and mutually exclusive radios cannot
+express that. So:
+
+- implement as two independent checkboxes wrapped in a `role="group"` labelled by
+  the dialog title, **never** as `role="radiogroup"` / `<input type=radio>`;
+- keep the circular mark — the affordance the frame draws is the affordance we ship,
+  and the *shape* of a checkbox is not what makes it a checkbox;
+- neither option may be deselected into an all-empty state while 去登录 is enabled;
+  zero selected disables 去登录 rather than silently defaulting to one.
+
+Getting this backwards is the more expensive error: radios would silently delete a
+product capability the copy on the same screen advertises. (UI-26.)
+
 **State machine**
 
 | State | Entry | Exit |
 | --- | --- | --- |
 | Default | Opened | — (the recommended option is pre-selected) |
 | Both selected | User selects the second option too | Deselect one |
+| None selected `[derived]` | User deselects the last remaining option | Select either; 去登录 is disabled meanwhile |
 | Awaiting sign-in | 去登录 pressed | OAuth completes → source created; user abandons → Dismissed |
-| OAuth failed | Provider or engine failure `[spec models.oauth.*]` | Retry, or 取消 |
+| OAuth failed | Provider or engine failure; classified `needs_action` `[spec §4.5]` | Retry, or 取消 |
 | Engine unavailable | Gateway not running and gateway-upstream was chosen | Engine recovers |
-| Already bound | This account is already another source `[spec models.oauth.binding_failed]` | Choose another account |
+| Already bound | This account is already another source `[spec §4.1]` | Choose another account |
 | Loading | — | Not applicable: nothing is fetched before the dialog opens |
 
 `[derived]`: choosing 登录为网关上游 while the engine is down must fail **before**
@@ -492,6 +687,14 @@ that the engine is down.
 | `hint.chatgpt` | 原生登录不走网关:额度用完不会自动接管,也看不到用量。 | A native sign-in bypasses the gateway: nothing takes over when the quota runs out, and usage stays invisible. |
 | `signIn` | 去登录 | Sign in |
 | `cancel` | 取消 | Cancel |
+| `retry` `[derived]` | 重试 | Retry |
+| `error.oauthFailed` `[derived]` | 登录没有完成。可以重试。 | Sign-in did not complete. You can retry. |
+| `error.engineDown` `[derived]` | 网关没有响应,请重试 | The gateway is not responding. Please retry. |
+| `error.alreadyBound` `[derived]` | 这个账号已经是一个来源了。换一个账号登录。 | This account is already a source. Sign in with a different one. |
+
+The four error strings are `[derived]`, not `[spec]`: the failure *classes* are the
+spec's (§4.5), but no `models.oauth.*` namespace exists in either locale file today,
+so this file is where these strings are decided.
 
 **Extreme data** `[derived]`: vendor name and plan list are interpolated, so both
 locales must survive a long vendor name without wrapping the head into the body;
@@ -550,19 +753,40 @@ deviation; it has implemented the opposite decision.
 | State | Entry | Exit |
 | --- | --- | --- |
 | ① Default | Dialog opened | Add pressed → ②; 测试连通 → probe result inline |
-| ② Adding | Add pressed | Success → dialog closes into 06; classified failure → ③; undetermined interface → ④; 取消 → ① |
-| ③ Failure (address / auth / network) | Probe classified the failure | 重试 → ②; 仍要添加 → persist unverified, close; 取消 → dismiss |
-| ④ Interface undetermined | Reachable **and** authenticated, response shape matches no known interface | Pick one + 仍要添加 → persist with a user-specified interface; 取消 → dismiss |
+| ② Adding | Add pressed | Success → dialog closes into 06; classified failure → ③; undetermined interface → ④; 取消 → ① (transient credential revoked server-side `[contract]` AC-26) |
+| ③ Failure (address / auth / network) | Probe classified the failure | 重试 → ②; 取消 → dismiss; 仍要添加 → see the contract gap below |
+| ④ Interface undetermined | Reachable **and** authenticated, response shape matches no known interface | Pick one + 仍要添加 → **re-verify with the chosen adapter** → verified: persist and close; not verified: back to ④ with the attempt as evidence. 取消 → dismiss |
 | Empty | — | Not applicable: a form has no empty state |
 | Credential-invalid | Auth failure is one of ③'s three causes | As ③ |
 | Engine unavailable `[derived]` | Gateway not running | Add is blocked with 「网关没有响应,请重试」; the form keeps its values |
 
-`[derived]` for ④'s exit: until a segment is chosen, 仍要添加 is **disabled** —
-this is the only place in the product where a failure state withholds its escape
-hatch, and the reason is that "add anyway" here would have to write a guess. ③'s
-仍要添加 is always live because there the unknown is *the endpoint's health*, which
-the product can honestly record as unverified; ④'s unknown is *a value it would
-have to invent*. (D-3, D-4, UI-20.)
+**④ is a verify-then-save gate, not a save-what-I-picked gate** `[contract]`. AC-27
+requires that the adapter the user names must itself receive a verifying upstream
+response before anything persists, so 仍要添加 in ④ is a *second attempt* using the
+stated interface — it can fail, and failing returns to ④ rather than closing. Two
+consequences for the implementation:
+
+- ④'s primary button is not a bypass. It reuses ②'s spinner treatment while the
+  verification is in flight `[derived]`.
+- Repeated failures must not accumulate silently: the strip shows the latest
+  attempt's evidence for the interface that was tried `[derived]`.
+
+`[derived]` for ④'s entry gate: until a segment is chosen, 仍要添加 is **disabled**.
+This is the only place in the product where a failure state withholds its escape
+hatch, and the reason is that pressing it without a choice would have to write a
+guess. (D-3, D-4, UI-20.)
+
+**`[contract-gap]` — ③'s 仍要添加 has nowhere to persist to.** D-4 says a check is
+information and not a gate, and the frame draws 仍要添加 live in ③. But at
+`7984aabf` there is no state that represents *saved but explicitly unverified*:
+`source.schema.json`'s `state.status` enumerates only `active` / `standby` /
+`cooldown` / `needs_action` / `error`, and AC-27 requires a verifying upstream
+response before a protocol is stored — which an auth or network failure by
+definition has not produced. Until that is resolved, **③'s 仍要添加 is not an
+acceptance requirement** (see §3's contract-gap rule and the registry in §0.5). The
+conflict is escalated as **E-3** in §0.6 and in the PR description, not ruled on
+here: D-4 and AC-27 are both owner rulings, and deciding which one yields is a
+product call.
 
 **Copy** — `models.hub.addKey.*`
 
@@ -598,14 +822,37 @@ have to invent*. (D-3, D-4, UI-20.)
 | `cancel` | 取消 | Cancel |
 
 The three protocol strings above are the **only** protocol names anywhere in the
-product surface (UI-12). They are identifiers, identical in both locales.
+product surface (UI-12). They are identifiers, identical in both locales, and they
+are exactly the three transports the protocol enum admits `[contract]` AC-28 — the
+label 「OpenAI Chat Completions」 maps to `openai_chat`.
+
+**`[contract-gap]` — `undetermined.hint`'s second clause promises something AC-27
+forbids.** The drawn string 「选一种才会保存 · 之后可在来源详情里改」 tells the user
+the choice is changeable later. At `7984aabf`, AC-27 states the opposite: after Save
+the stored protocol is preserved byte-for-byte through retest, discovery, refresh,
+credential and Base-URL replacement and restart, and 「changing protocol requires a
+new Source」 — and FC-12 confirms the source PATCH body is exactly
+`{display_name?, base_url?, force?}`, with no protocol field. The first clause
+(「选一种才会保存」) is correct and matches AC-27 precisely. The second is escalated
+as **E-2** in §0.6 and in the PR description, together with frame 06's edit entry
+point; this lane does not rewrite owner-approved frame copy to resolve a conflict
+between two owner rulings.
 
 **Extreme data** `[derived]`: the evidence line is mono and truncates from the
 middle, keeping method+host and the status code; a base URL with no scheme is
 normalized to `https://` before the probe and the normalized form is what the
-field shows afterwards (so the user can see what was actually tried); an empty
-名称 falls back to the URL host as the display name, and that fallback is applied
-at render time, never written into the name field.
+field shows afterwards (so the user can see what was actually tried).
+
+**An omitted 名称 is filled at submit time, not at render time** `[derived]`. If the
+field is blank when 添加 is pressed, the client sets `display_name` to the URL host
+before the request goes out, so the persisted value *is* the host. The rejected
+alternative was a render-time fallback, and it is worth naming why it is wrong:
+`display_name` is a required non-null string `[contract]` FC-03 and creation fills an
+omitted name from the vendor, so a details page receiving `custom` cannot tell
+whether the user typed it or left the field empty. A fallback that depends on
+information the payload does not carry is a fallback that will eventually lie — the
+same principle as D-3. The user sees the host in the name field as soon as it is
+filled, so the value they get is the value they were shown.
 
 ---
 
@@ -620,12 +867,12 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `VV7jc` breadcrumb | 模型网关 / 上游 → source name + kind pill | route | back icon | Return to 01 |
-| `sugad` source bar | health dot, 连通正常, latency + last check, mono `host · N models, M connected` | source + last probe | 测试连通 / 重新拉取 / 添加模型 | Probe / refetch / append an editable row |
+| `sugad` source bar | health dot, 连通正常, latency + last check, mono `host · N models, M connected` | source + last probe | 测试连通 / 重新拉取 / 添加模型 | Recovery test / refetch / append an editable row |
 | `myA8k` header | 型号 ID (250) · 录入 (84) · 推理强度 (470, with info) · 接入 (110) | static | no | — |
 | `OM5PH` row | model id, entry-kind pill, tier chips, toggle + label, overflow icon | one model | tiers, toggle, overflow | Edit tiers / connect / row menu |
-| `p2JwTz` tiers | chips, or 未设置档位 + `+ 添加档位` | per-model tier list | yes | Enter edit mode |
-| `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit | yes | Add / remove a tier |
-| `MdjR0` toggle | connected or not | per-model | yes | Connect / disconnect |
+| `p2JwTz` tiers | chips, or 未设置档位 + `+ 添加档位` | `reasoning_efforts[]` `[contract]` FC-03 | yes | Enter edit mode |
+| `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit → `PATCH /api/models/custom-models` `[contract]` AC-26 | yes | Add / remove a tier |
+| `MdjR0` toggle | connected or not | `[contract-gap]` G-3 | yes | Connect / disconnect |
 | `nN4TZ` manual row | editable id input, 手动添加 pill, tier affordance, 取消 / 添加 | local draft | yes | Commit or discard |
 | `Q83BF` add row | 添加模型 + when to use it | — | yes | Append a manual draft row |
 | `tF3Bh` footnote | scope of this page; that tiers are yours to type; that the interface type is identified at add time and not shown | static | no | — |
@@ -656,18 +903,34 @@ bottom). Footnote 11.5 `#FFFFFF8C`, one line at 1026 within the 1120 track.
 | Credential-invalid | Source is `needs_action` `[spec §4.5]` | Repair from the source bar |
 | Interface specified by hand | Source provenance says so | Never — the badge is permanent while true |
 
-Three `[derived]` rules:
+Five rules:
 
-- **Refetch is a diff, not a replacement.** Manually added models survive it;
-  removed-upstream models are marked, not deleted, when they are connected —
-  deleting something the user switched on, because a vendor's `/models` changed
-  shape, silently unconfigures them.
-- **Empty state** keeps the header row and the add row and shows
+- **Refetch is a diff, not a replacement** `[derived]`. Manually added models
+  survive it; removed-upstream models are marked, not deleted, when they are
+  connected — deleting something the user switched on, because a vendor's `/models`
+  changed shape, silently unconfigures them. AC-26 already requires rediscovery to
+  preserve user tier edits `[contract]`; this is the same principle applied to the
+  row itself.
+- **Empty state** `[derived]` keeps the header row and the add row and shows
   「这个来源没有返回型号。可以手动添加,或重新拉取。」 An empty table with a live
   add row is the shortest path out.
-- **Credential-invalid** keeps the whole table visible and read-only-ish: you can
-  still see what you had configured. Hiding the inventory because the key expired
-  destroys the only copy of the user's intent.
+- **Credential-invalid** `[derived]` keeps the whole table visible and
+  read-only-ish: you can still see what you had configured. Hiding the inventory
+  because the key expired destroys the only copy of the user's intent.
+- **测试连通 and 重新拉取 are different operations and must never be labelled as each
+  other** `[contract]` AC-26. On a *saved* source, 测试连通 is the source-scoped
+  recovery test — `probe-result.schema.json` covers saved-Source recovery tests
+  explicitly `[contract]` FC-07 — and 重新拉取 is the mutating rediscovery that
+  rewrites the inventory. Both are source-scoped and neither is the per-Agent chain
+  probe. The reason the contract bothers to forbid conflating them is that they have
+  different costs: one tells you whether the endpoint is alive, the other can change
+  what is on screen.
+- **The tier control form is this file's call** `[contract]`. AC-26 fixes the data
+  (`reasoning_efforts: string[]`, editable for discovered and manual models alike, no
+  default item, no prefill, no selected state) and then explicitly defers the control
+  form to `design.pen`. So the chips-plus-freetext-input treatment in the metrics
+  above is normative, and 「未设置档位」 is the real empty state rather than a
+  synthesized default — see D-5.
 
 **Copy** — `models.hub.sourceDetail.*`
 
@@ -676,7 +939,8 @@ Three `[derived]` rules:
 | `breadcrumb` | 模型网关 / 上游 | Model Gateway / Upstream |
 | `status.healthy` | 连通正常 | Connection healthy |
 | `status.detail` | · 延迟 {{latency}} · 最近校验 {{time}} | · {{latency}} · last checked {{time}} |
-| `summary` | {{host}} · {{total}} 个型号,已接入 {{connected}} 个 | {{host}} · {{total}} models, {{connected}} connected |
+| `summary_one` | {{host}} · {{total}} 个型号,已接入 {{connected}} 个 | {{host}} · {{total}} model, {{connected}} connected |
+| `summary_other` | {{host}} · {{total}} 个型号,已接入 {{connected}} 个 | {{host}} · {{total}} models, {{connected}} connected |
 | `action.test` | 测试连通 | Test connection |
 | `action.refetch` | 重新拉取 | Refetch |
 | `action.addModel` | 添加模型 | Add model |
@@ -695,14 +959,34 @@ Three `[derived]` rules:
 | `addRow.hint` | 拉取不到、或只想接入其中一个时用 | Use this when a model is not discoverable, or when you only want one of them |
 | `empty` `[derived]` | 这个来源没有返回型号。可以手动添加,或重新拉取。 | This source returned no models. Add one by hand, or refetch. |
 | `interfaceBadge` `[derived]` | 接口由你指定 | Interface set by you |
-| `interfaceBadge.tooltip` `[derived]` | 添加时没能自动认出,当前按「{{protocol}}」处理。可以改。 | Could not be identified automatically at add time; currently handled as "{{protocol}}". You can change it. |
+| `interfaceBadge.tooltip` `[derived]` `[contract-gap]` G-2 | 添加时没能自动认出,当前按「{{protocol}}」处理。可以改。 | Could not be identified automatically at add time; currently handled as "{{protocol}}". You can change it. |
+| `interfaceBadge.tooltip.immutable` `[derived]` | 添加时没能自动认出,当前按「{{protocol}}」处理。 | Could not be identified automatically at add time; currently handled as "{{protocol}}". |
+| `interfaceBadge.change` `[derived]` `[contract-gap]` G-2 | 改为… | Change to… |
 | `footnote` | 这里只管「这个来源有哪些型号」。型号走哪条链,到总览页改。档位自己填,两种录入方式都一样。接口类型添加时自动认出、页面不显示;只有当初没认出、由你指定过的来源,标题旁才带一枚安静徽标。 | This page answers only "which models does this source have". Which chain a model takes is set on the overview. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and is not shown here; only a source whose interface you had to specify yourself carries a quiet badge next to its title. |
 
 The quiet badge is the one exception to "the user does not perceive the supply
 mechanism" (D-8), and 06 does **not** get a second header state drawn for it: it
 is one element in an existing row, so the footnote carries the rule instead. That
 was a cost decision, made explicit here so nobody reads the absence of a frame as
-the absence of the requirement.
+the absence of the requirement. The badge's existence needs a provenance field that
+does not exist yet — `[contract-gap]` G-4.
+
+**The protocol-edit entry point at the badge is specified but held** `[contract-gap]`
+G-2. The intended shape, so that it is not re-derived later: the badge itself is the
+affordance — activating it opens a small popover carrying the current interface name
+and a 「改为…」 action with the same three-value selector as 05 state ④, and changing
+the value re-verifies with the new adapter before it takes effect, exactly as 05 ④
+does. It is deliberately *not* a persistent visible control: it is meaningful only
+for the small set of sources whose interface could not be identified automatically,
+and putting a protocol control on every source's detail page would re-teach the whole
+user base a mechanism D-8 spends its entire argument hiding.
+
+This is written down and **not drawn**, because it cannot be built as specified today
+and because two owner rulings disagree about whether it should exist at all: the
+instruction to add this entry point (and 05's 「之后可在来源详情里改」) versus AC-27's
+「changing protocol requires a new Source」. Both are dated 2026-08-09. The escalation
+is **E-2** in §0.6 and in the PR description; the design change waits on the answer
+rather than baking either reading into the frames.
 
 **Extreme data** `[derived]`: the table does not collapse — the whole point of the
 page is the full inventory, so it scrolls (the frame's 12 rows are an instance, not
@@ -759,7 +1043,8 @@ takeover, so at zero it is absent, not `0 处接管中` (UI-14).
 
 | Key | 中文 | English |
 | --- | --- | --- |
-| `pill` | {{count}} 处接管中 | {{count}} takeovers active |
+| `pill_one` | {{count}} 处接管中 | {{count}} takeover active |
+| `pill_other` | {{count}} 处接管中 | {{count}} takeovers active |
 | `chip` | 接管中 | Taken over |
 
 **Extreme data** `[derived]`: with N takeovers the pill says N and each affected
@@ -795,7 +1080,9 @@ is cheaper than a wrong value forever. This is also why the *picture* enforces i
 an unselected control and a dimmed button cannot silently default.
 
 **D-4 — A connectivity check is information, not a gate.** 「仍要添加」 is always
-available in state ③, and 测试连通 is labelled as optional.
+available in state ③, and 测试连通 is labelled as optional. **⚠ E-3** — AC-27 at
+`7984aabf` forbids persisting without a verifying response, so this decision is in
+open conflict (§0.6) and 仍要添加 is not an acceptance requirement today.
 *Why:* the product cannot distinguish "your key is wrong" from "the vendor is down
 this minute". Blocking on a probe converts the product's uncertainty into the
 user's dead end. Note this does not weaken D-3: ③'s unknown is the endpoint's
@@ -824,14 +1111,19 @@ user has no basis to make. The exception holds because there the user *did* deci
 and hiding somebody's own decision makes it unfindable.
 
 **D-9 — Chains are derived, not hand-wired.** One global order, plus a per-model
-override.
+override. **⚠ E-1** — the *derived* half is uncontested; whether the order that
+feeds it is global or one subset per backend is an open conflict (§0.6). The *why*
+below survives either answer.
 *Why:* N sources × M models of manual wiring is a configuration surface nobody can
 hold in their head, and the order is the only part users actually have an opinion
 about.
 
 **D-10 — Native-CLI sources do not participate in the order, and say so where the
 order lives.** Frame 03's 不参与排序 section is never hidden while such a source
-exists.
+exists. **⚠ E-1** — §4.2 at `7984aabf` puts the native singleton *first* in the
+computed order rather than outside it, which would turn this section into a
+non-reorderable first row instead of an excluded one. Open conflict (§0.6); do not
+implement either shape yet.
 *Why:* a native credential can serve only its own sanctioned client, so placing it
 in a shared order would promise an arbitration that cannot happen. The section
 exists to answer "why isn't my Claude subscription in this list" *before* it is
@@ -898,8 +1190,29 @@ JetBrains Mono for identifiers, URLs and keys.
 **Boundary.** This list covers only what is visible: layout fidelity, copy, state
 reachability, interaction feedback. Behaviour invariants — persistence, event
 fan-out, resolver precedence, schema constraints — belong to
-`model-hub-implementation.md` §8 (AC-1…AC-21) and are neither duplicated nor
+`model-hub-implementation.md` §8 (AC-1…AC-28) and are neither duplicated nor
 extended here.
+
+**No item depends on a `[contract-gap]`.** Where a frame draws an affordance whose
+persistence does not exist yet (§0.5: G-1 through G-4), the item below says so and
+checks only the part that is real — usually that the affordance is absent rather than
+present-and-broken. An acceptance list that requires something unbuildable does not
+raise the bar; it trains people to sign off on items they could not actually verify.
+
+**No item depends on an open conflict either.** §0.6's two escalations (E-1 the
+scope of the source order, E-2 whether a stored protocol can change) touch §1.1,
+§1.2, §1.3 and §1.6, but no item below asserts either side: UI-19 and UI-23 hold
+whichever way E-1 is ruled, and UI-12's protocol-surface equality is stated over
+what is drawn today. Nothing here has to be rewritten when the owner answers —
+only §1's prose.
+
+**Set-equality items are total, and their member sets are bounded here.** Six items
+below (UI-9, UI-10, UI-12, UI-14, UI-27, UI-31) are stated as equalities rather than
+prohibitions, and every one of them names the complete set it quantifies over. This
+is deliberate and was worth a sweep: the failure mode is not "the set is wrong", it
+is writing an equality whose right-hand side was never enumerated, which reads as
+rigorous and checks nothing. If you add a surface that belongs to one of those sets,
+the item is what fails — that is the whole point of stating it as an equality.
 
 ### Layout fidelity
 
@@ -954,19 +1267,33 @@ or an alpha of it; for each, name the entity it describes.
 *Criterion:* every one is a native-direct source, its card, its wire, or its
 「原生」 tag. One cyan element describing anything else fails the item.
 
-**UI-9 — Mint, gold and `#FFFFFF26` each have exactly one referent, per §1.0's ink
-table.**
-*Check:* as UI-8, per ink.
-*Criterion:* mint ⇒ gateway supply or a primary action; gold ⇒ takeover or a ToS
-warning; `#FFFFFF26` ⇒ a connected-but-unused wire.
+**UI-9 — Mint, gold and `#FFFFFF26` partition by element role exactly as §1.0's ink
+table says.**
+*Check:* list every element whose computed colour, border, stroke or fill is one of
+those inks or an alpha of it. Classify each as a **relation/status** element (wire,
+rail, tint wash, status text, supply pill, legend swatch) or a **control** element
+(tab underline, ordinal badge, selection mark, focus ring, toggle, row wash, primary
+button). Then read its meaning.
+*Criterion:* every relation/status element inked mint means gateway supply; every
+control element inked mint means active, selected or primary; gold ⇒ takeover, or
+warning emphasis on a control; `#FFFFFF26` ⇒ a connected-but-unused wire. The two
+role sets are disjoint, so each element gets exactly one reading — an element that
+is both, or a mint relation element meaning something other than gateway supply,
+fails. (An earlier phrasing demanded a single referent for mint and would have failed
+the reference design at the active tab underline; that is the failure mode this
+wording exists to avoid.)
 
 **UI-10 — The legend keys and the ink classes actually rendered on the page are in
 bijection.**
-*Check:* on a nominal page and on a page with a takeover, compare the legend's keys
-against the distinct inks present in the wire layer.
-*Criterion:* nominal = 3 keys; takeover = 4. A legend key with no corresponding
-element, or an ink with no key, fails. (This is the item that catches a takeover
-shipped without its legend entry.)
+*Check:* on a nominal page, on a page with a takeover, and on a page with zero supply
+relations, compare the legend's keys against the distinct inks present in the wire
+layer.
+*Criterion:* the legend is **derived from what is rendered**, not a fixed list — so
+nominal = 3 keys, takeover = 4, and zero relations = **no legend row at all**. A
+legend key with no corresponding element, or an ink with no key, fails. Two
+consequences: this catches a takeover shipped without its legend entry, and it is
+consistent with UI-31's zero-relation state, which the earlier fixed-3-keys phrasing
+made unsatisfiable.
 
 ### Copy
 
@@ -986,20 +1313,27 @@ so a *new* surface that leaks a protocol name fails it too — which a "must not
 appear on 01/02/03/04/06/08" phrasing would not.
 
 **UI-13 — Every product noun rendered on these surfaces has a row in
-`model-hub.md` §3's vocabulary table.**
+`model-hub.md` §3's vocabulary table, and uses the term that table marks required.**
 *Check:* extract the nouns from the copy tables in §1 and look each up in §3.
-*Criterion:* every one has a row. **Blocked** until the spec lane lands §3's
-gateway-arc revision — master's table still bans 网关, which the owner-approved
-frames use as their primary noun. Re-run this item after that lands; it is a
-cross-lane dependency, not a design defect.
+*Criterion:* every one has a row, and where §3 marks a term **required**, the copy
+uses that term and not a synonym. 网关 / Gateway is the required noun for the local
+adaptation and routing module, so 「模型网关」 as the page title, 「网关」 as the module
+heading and 「网关供给」 as the supply phrasing all pass; a build that substituted
+「Models」 or 「路由」 for them fails. Any noun with no row is a finding against
+whichever side is wrong — usually this file, occasionally the table.
 
-**UI-14 — Every count-bearing string is grammatically correct in English at 0, 1
-and 2.**
-*Check:* render each interpolated count key at those three values.
-*Criterion:* no `1 models`, no `0 takeovers active` where the element should be
-absent, no fused numeral+noun that cannot pluralize. Keys to cover:
-`upstream.count`, `gateway.modelCount`, `gateway.collapse`, `chain.derived.hops`,
-`sourceDetail.summary`, `takeover.pill`.
+**UI-14 — The set of count-bearing keys equals the set of keys shipping i18next
+plural variants, and each is grammatically correct in English at 0, 1 and 2.**
+*Check:* grep both locale files for `{{count}}`; that is the left-hand set. Grep for
+`_one` / `_other` suffixes; that is the right-hand set. Then render each key at 0, 1
+and 2.
+*Criterion:* the two sets are equal — a count-bearing key with no plural family fails,
+and so does a plural family nobody interpolates a count into. In `en`, no `1 models`
+and no `1 source` mismatch; in `zh`, both variants exist and carry identical values.
+`0 takeovers active` never renders because the element is absent at zero, not because
+the string handles it. The six keys today: `upstream.count`, `gateway.modelCount`,
+`gateway.collapse`, `chain.derived.hops`, `sourceDetail.summary`, `takeover.pill`,
+each present as `_one` and `_other` in both files — twenty-four entries.
 
 **UI-15 — Copy states consequences, not mechanisms or rationale.**
 *Check:* read every string in §1's tables and ask, for each, "does this tell me
@@ -1068,9 +1402,9 @@ drag would.
 active state.**
 *Check:* activate it by keyboard; then serve a group where 5 of 15 models are
 cooling.
-*Criterion:* it is focusable and announces expanded/collapsed; the group shows all
-5 non-nominal rows plus the baseline, and the label's count equals the number of
-rows actually hidden — not `total − 3`.
+*Criterion:* it is focusable and announces expanded/collapsed; the group shows all 5
+non-nominal rows **plus 3 nominal baseline rows = 8 visible**, and the label reads
+「还有 7 个型号」 — the number actually hidden, never `total − 3`.
 
 **UI-25 — The tier editor accepts arbitrary text, commits on Enter, and never
 supplies a value.**
@@ -1079,12 +1413,24 @@ supplies a value.**
 commits the string as typed, without validation or case normalization; each chip
 removes individually; leaving without typing leaves the list empty.
 
-**UI-26 — Frame 06's connect toggle is optimistic and reports its own failure
-direction.**
+**UI-26 — Frame 04's two options are independently selectable.**
+*Check:* on the Claude dialog, select 原生使用, then also select 登录为网关上游;
+inspect the accessible roles; then deselect both.
+*Criterion:* both can be on at once (which is what `hint.claude` promises); the
+controls expose checkbox semantics inside a labelled `role="group"`, never
+`role="radiogroup"`; with zero selected, 去登录 is disabled rather than a selection
+being silently restored. Radio semantics fail this item even though the frame draws
+round marks.
+
+**UI-26a — Frame 06's connect toggle is optimistic and reports its own failure
+direction.** `[contract-gap]` G-3
 *Check:* force the mutation to fail on connect, then on disconnect.
 *Criterion:* the toggle reverts to its prior position and the row states which
-direction failed. A silent revert fails the item — it is indistinguishable from
-the user's own click not landing.
+direction failed. A silent revert fails — it is indistinguishable from the user's own
+click not landing. **Not yet checkable:** no per-model connected field or mutation
+route exists (§0.5 G-3), so until that lands this item verifies only that the column
+is absent rather than present and inert. A toggle that flips and forgets is worse than
+no toggle, because it reports a configuration the system does not hold.
 
 **UI-27 — Every failure state offers a way out that is not a mutation.**
 *Check:* reach frame 05 ③ and ④, a failed order save, and a failed refetch.
@@ -1092,12 +1438,15 @@ the user's own click not landing.
 
 ### Extreme data
 
-**UI-28 — The collapse predicate is implemented as written in §1.1.**
-*Check:* serve four fixtures for one backend: 2 models; 3 models; 15 models all
-nominal; 15 models with 5 non-nominal.
-*Criterion:* no collapse row at 2 or 3; 3 rows + 「还有 12 个型号」; 5+ rows with the
-label reading the true hidden count. Priority order within the visible set is
-override-first, then the backend's own menu order.
+**UI-28 — The collapse predicate is implemented as written in §1.1, including that
+`N` is additive.**
+*Check:* serve §1.1's six fixtures for one backend, verbatim: (12, 0), (12, 2),
+(12, 5), (12, 12), (3, 0), (2, 1) as `(models, non-nominal)`.
+*Criterion:* visible rows are 3, 5, 8, 12, 3, 2 and the collapse labels are 「还有 9 /
+7 / 4 个型号」, none, none, none. A build that treats `N` as a total row floor produces
+3, 3, 5 on the first three fixtures and fails — that is the specific mistake this
+fixture set exists to catch. Priority order within the visible set is override-first,
+then the backend's own menu order.
 
 **UI-29 — Every unbounded string has a stated truncation rule and keeps its full
 value reachable.**
@@ -1125,14 +1474,16 @@ fixed asset that survives a relation disappearing.
 *Check:* on 06, compare the source bar against the table; on 08, compare the
 header pill against the group chips; on 01, compare each group's model count
 against its rows plus its collapsed count.
-*Criterion:* `total` equals the row count, `connected` equals the toggled-on count,
-the pill count equals the number of groups carrying a takeover chip, and
-visible + collapsed equals the group's stated model count.
+*Criterion:* `total` equals the row count, the pill count equals the number of groups
+carrying a takeover chip, and visible + collapsed equals the group's stated model
+count. `connected` equals the toggled-on count once G-3 lands; until then the summary
+must omit the clause rather than print a number it cannot derive (D-16).
 
-**Total: 32 items (UI-1 … UI-32).** One is blocked on an external dependency
-(UI-13, on the spec lane's §3 revision). Light-theme and mobile variants are not
-drawn, so UI-1…UI-7 and UI-21 are checkable for Dark desktop only until those
-frames exist.
+**Total: 33 items (UI-1 … UI-32, with UI-26a).** Nothing is blocked on another lane.
+Two items are bounded by a contract gap and say so inline (UI-26a on G-3, UI-32's
+`connected` clause on G-3); neither asserts an unbuildable requirement. Light-theme
+and mobile variants are not drawn, so UI-1…UI-7 and UI-21 are checkable for Dark
+desktop only until those frames exist.
 
 ---
 
@@ -1140,33 +1491,45 @@ frames exist.
 
 This file never restates the behaviour spec. Use these anchors:
 
+All section titles below were read at `7984aabf`, not on `master`.
+
 | Question | Authority |
 | --- | --- |
-| What the product promises the user | `model-hub.md` §2 |
-| Which nouns UI copy may use | `model-hub.md` §3 (pending the gateway-arc revision; see UI-13) |
-| What a source is and what it carries | `model-hub.md` §4.1 |
-| How supply is consumed per Agent | `model-hub.md` §4.2 |
-| **How a request resolves to a source — the sole authority** | `model-hub.md` §4.3 |
-| Whether eligibility is client- or server-decided | `model-hub.md` §4.4 |
-| Source states, self-healing classes, `detail_key` vocabulary | `model-hub.md` §4.5 |
-| What a chain is; capability vs runnable | `model-hub.md` §4.6 |
-| OpenCode identifier scheme | `model-hub.md` §4.8 |
-| Which frames are the UI source of truth | `model-hub.md` §5 |
-| Modes and native-config migration | `model-hub.md` §6 |
-| Behaviour acceptance criteria | `model-hub-implementation.md` §8 |
+| What the product promises the user | `model-hub.md` §2 — *Product promise, locked 2026-08-07* |
+| Which nouns UI copy may use, and which are required | `model-hub.md` §3 — *Vocabulary (v3 recut; UI copy uses only these nouns)* |
+| What a source is and what it carries | `model-hub.md` §4.1 — *Supply — Sources (global assets, no ordering)* |
+| Per-backend order plus per-model policy | `model-hub.md` §4.2 — *Gateway strategy* |
+| **How a request resolves to a source — the sole authority** | `model-hub.md` §4.3 — *The only normative resolution algorithm* |
+| Whether eligibility is client- or server-decided | `model-hub.md` §4.4 — *Eligibility is server-authoritative (v3)* |
+| Source states, self-healing classes, `detail_key` vocabulary | `model-hub.md` §4.5 — *State taxonomy* |
+| How route policy is stored and mutated | `model-hub.md` §4.6 — *Route-policy storage and mutation* |
+| Downstream Agents | `model-hub.md` §4.7 |
+| OpenCode identifier scheme | `model-hub.md` §4.8 — *locked 07-23, retained in v3* |
+| Which module owns which class of configuration | `model-hub.md` §5 — *Surfaces — two modules, one understandable handoff* |
+| Modes and onboarding | `model-hub.md` §6 — *Modes & onboarding* |
+| Security boundaries | `model-hub.md` §7 |
+| Explicit non-goals | `model-hub.md` §9 — *(v3)* |
+| Behaviour acceptance criteria | `model-hub-implementation.md` §8 — *AC-1…AC-28, v3 addenda through 2026-08-09* |
+| Final contract shapes and their landing lane | `model-hub-implementation.md` §8, *Final contract shape handoff* — FC-01…FC-14 |
 | Frozen wire contracts | `docs/plans/model-hub-contracts/` |
-| Probe result shape | `model-hub-contracts/probe-result.schema.json` |
+| Probe result shape (incl. saved-source recovery tests) | `model-hub-contracts/probe-result.schema.json` |
 | Source shape | `model-hub-contracts/source.schema.json` |
 | Chain shape | `model-hub-contracts/agent-chain.schema.json` |
 | Routes | `model-hub-contracts/api.md` |
 
-Two boundaries worth stating explicitly, because they are the two places a lane
-would otherwise write the same thing twice:
+Three boundaries worth stating explicitly, because they are the places a lane would
+otherwise write the same thing twice — or write it in two places that then disagree:
 
-- `model-hub.md` §5 owns the frame-to-content contract at spec grain (which frame
-  is authoritative for which surface). §1 here owns the implementation grain
-  (element inventory, states, verbatim copy, extreme data). If §5 and §1 disagree
-  about *what a frame contains*, §5 wins and §1 is the defect.
-- `model-hub-implementation.md` §8 owns behaviour acceptance. §3 here owns visible
-  acceptance. A candidate item that would pass or fail regardless of what is on
+- **`model-hub.md` §5 owns module-level semantics; §1 here owns frame-level
+  implementation.** §5 decides which module owns which class of configuration and
+  which interaction rules govern the handoff between them. §1 decides element
+  inventory, states, verbatim copy and extreme data for a given frame. These are
+  different grains, so a genuine contradiction between them is a defect on whichever
+  side misread the other's grain — there is no standing winner, and a conflict is
+  escalated rather than resolved by precedence.
+- **`model-hub.md` §4.3 remains the sole normative authority for routing
+  resolution.** Nothing in this file may be read as modifying it. Where a frame
+  displays a resolved chain, the frame is a *view* of §4.3's output.
+- **`model-hub-implementation.md` §8 owns behaviour acceptance; §3 here owns visible
+  acceptance.** A candidate item that would pass or fail regardless of what is on
   screen belongs in §8, not here.
