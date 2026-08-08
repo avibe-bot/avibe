@@ -22,6 +22,8 @@ import type {
   MemoryLogSourceStatus,
   MemoryStatus,
 } from '../../../context/ApiContext';
+import { memoryErrorMessage } from '../../../lib/memoryRead';
+import { memoryLogEnumLabel } from './memoryLog';
 
 type SourceState = MemoryStatus['source']['status'] | MemoryLogSourceStatus['status'];
 type BadgeVariant = 'success' | 'warning' | 'destructive' | 'info' | 'secondary';
@@ -61,6 +63,19 @@ const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
   recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
 } as const;
 
+const MEMORY_SOURCE_ERROR_REASONS = new Set([
+  'memory_disabled',
+  'memory_runtime_missing',
+  'memory_runtime_unsupported',
+  'memory_runtime_install_failed',
+  'memory_sidecar_unavailable',
+  'memory_provider_timeout',
+  'memory_provider_response_invalid',
+  'memory_processing_failed',
+  'memory_clear_failed',
+  'memory_restart_failed',
+]);
+
 type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
 
 const anomalyLabel = (t: TFunction, group: AnomalyLabelGroup, value: string): string => {
@@ -72,6 +87,12 @@ const clearRecoveryStateLabel = (t: TFunction, value: string): string => {
   const keys = CLEAR_RECOVERY_STATE_LABEL_KEYS as Record<string, string>;
   return keys[value] ? t(keys[value]) : value;
 };
+
+const sourceReasonLabel = (t: TFunction, value: string): string => (
+  MEMORY_SOURCE_ERROR_REASONS.has(value)
+    ? memoryErrorMessage(t, value)
+    : memoryLogEnumLabel(t, 'reason', value)
+);
 
 const formatTimestamp = (value: string | null | undefined): string => {
   if (!value) return '-';
@@ -127,7 +148,7 @@ const SourceCard: React.FC<{
       </div>
       {source.reason ? (
         <div className="break-words text-[11px] text-muted">
-          {t('memory.processingRecord.sourceReason', { reason: source.reason })}
+          {t('memory.processingRecord.sourceReason', { reason: sourceReasonLabel(t, source.reason) })}
         </div>
       ) : null}
     </div>

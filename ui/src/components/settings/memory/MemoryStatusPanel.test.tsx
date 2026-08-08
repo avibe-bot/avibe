@@ -8,7 +8,13 @@ import type { MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiCo
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) => (
+      key === 'memory.processingRecord.sourceReason'
+        ? `${key}:${String(options?.reason)}`
+        : key
+    ),
+  }),
 }));
 
 const STATUS: MemoryStatus = {
@@ -73,6 +79,41 @@ describe('MemoryStatusPanel', () => {
     expect(screen.getByText('memory.processingRecord.sourceState.stale')).toBeTruthy();
     expect(screen.getByText('memory.processingRecord.sourceState.unavailable')).toBeTruthy();
     expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
+  });
+
+  it('localizes known runtime and log source reasons', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={{
+          ...STATUS,
+          source: { status: 'unavailable', observed_at: null, reason: 'memory_sidecar_unavailable' },
+        }}
+        logSections={{
+          ...baseProps.logSections!,
+          everos: { status: 'unavailable', observed_at: null, reason: 'missing' },
+          capture: { status: 'stale', observed_at: null, reason: 'runs_busy' },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('memory.processingRecord.sourceReason:errors.memory_sidecar_unavailable')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.sourceReason:memory.log.reason.missing')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.sourceReason:memory.log.reason.runsBusy')).toBeTruthy();
+  });
+
+  it('leaves a future source reason as inert fallback text', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={{
+          ...STATUS,
+          source: { status: 'unavailable', observed_at: null, reason: 'future_source_reason' },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('memory.processingRecord.sourceReason:future_source_reason')).toBeTruthy();
   });
 
   it('keeps source-independent anomalies visible when health cannot be read', () => {
