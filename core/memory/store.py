@@ -300,7 +300,8 @@ class MemoryStore:
                 conn.execute(
                     """
                     SELECT COUNT(*) FROM memory_capture_queue
-                    WHERE epoch = ? AND state IN ('pending', 'processing')
+                    WHERE epoch = ?
+                      AND state IN ('pending', 'processing', 'manual_required')
                     """,
                     (meta.epoch,),
                 ).fetchone()[0]
@@ -959,7 +960,7 @@ class MemoryStore:
                     SUM(CASE WHEN state = 'delivered' AND flush_observation = 'rejected'
                         THEN 1 ELSE 0 END) AS distill_failed,
                     COALESCE(SUM(
-                        CASE WHEN state IN ('pending', 'processing')
+                        CASE WHEN state IN ('pending', 'processing', 'manual_required')
                         THEN length(CAST(payload_text AS BLOB))
                            + length(CAST(COALESCE(payload_attachments, '') AS BLOB))
                         ELSE 0 END

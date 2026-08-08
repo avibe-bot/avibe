@@ -61,6 +61,10 @@ queue state. Duplicate source identities remain idempotent within the active
 epoch, and a claimed row is either settled successfully or retained with its
 payload for recovery.
 
+This phase initializes a clean Avibe-owned schema; legacy Memory databases and
+schema migration are intentionally not supported for the currently unused
+feature.
+
 An incomplete, malformed, or otherwise ambiguous provider add is terminal for
 automatic delivery: the row is retained and its provider session is fenced as
 `manual_required`. Boot recovery applies the same fence to any abandoned

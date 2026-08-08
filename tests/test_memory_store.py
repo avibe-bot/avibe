@@ -204,6 +204,50 @@ def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> No
     assert store.has_manual_required_fence() is True
     assert store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:02.000Z") is None
     assert store.ensure_meta().last_error == "memory_provider_response_invalid"
+    assert store.queue_stats().queue_plaintext_bytes == len("queued payload")
+    assert (
+        store.enqueue_request(
+            source_message_id="bounded-after-manual",
+            session_id="other-session",
+            principal_id="u-11111111111111111111111111111111",
+            project_ref=PROJECT,
+            provenance="user_input",
+            payload_text="another payload",
+            occurred_at_ms=2_000,
+            max_provider_timestamp_ms=4_102_444_800_000,
+            nonterminal_limit=1,
+        ).outcome
+        == "queue_full"
+    )
+
+
+def test_settlement_schema_accepts_settled_natural_boundary_records(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    result = _enqueue(store, "settlement")
+    assert result.row is not None
+    reference = result.row.provider_session_ref.serialize()
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+            INSERT INTO memory_flush_settlements (
+                settlement_id, provider_session_ref, generation, fence_epoch,
+                operation_id, operation_kind, outcome, flush_state, source,
+                observed_at, settled_at
+            ) VALUES (?, ?, 0, 0, ?, 'flush', 'succeeded', 'settled',
+                      'natural_boundary', '2026-01-01T00:00:00.000Z',
+                      '2026-01-01T00:00:00.000Z')
+            """,
+            ("settlement-1", reference, "operation-1"),
+        )
+        persisted = conn.execute(
+            """
+            SELECT flush_state, source
+            FROM memory_flush_settlements
+            WHERE settlement_id = 'settlement-1'
+            """
+        ).fetchone()
+    assert persisted == ("settled", "natural_boundary")
 
 
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:

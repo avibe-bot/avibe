@@ -252,10 +252,7 @@ class MemoryWorker:
                 timeout=self._add_timeout_seconds,
             )
         except asyncio.TimeoutError:
-            await self._ambiguous_failure_is_system_outage(
-                row,
-                "memory_provider_timeout",
-            )
+            await self._manual_required(row, "memory_provider_timeout")
             return False
         except MemoryProviderSystemFailure as failure:
             await self._return_system_failure(

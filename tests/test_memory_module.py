@@ -1598,7 +1598,7 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
     assert "ProviderCapture" not in memory.__all__
 
 
-async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_work(tmp_path: Path) -> None:
+async def test_ambiguous_timeout_is_manual_required_and_unblocks_later_work(tmp_path: Path) -> None:
     class PoisonProvider(FakeMemoryProvider):
         async def add(self, capture):
             if capture.text == "poison":
@@ -1608,7 +1608,9 @@ async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_wo
     provider = PoisonProvider()
     module, store, _provider = _module(tmp_path, provider=provider)
     assert await module.capture(_request(source="poison", text="poison")) == CaptureAccepted()
-    assert await module.capture(_request(source="later", text="later")) == CaptureAccepted()
+    assert await module.capture(
+        _request(source="later", session="later-session", text="later")
+    ) == CaptureAccepted()
     current = datetime(2026, 1, 1, tzinfo=UTC)
     worker = MemoryWorker(
         store=store,
@@ -1620,14 +1622,13 @@ async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_wo
     )
 
     assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].attempts == 1
-    current += timedelta(seconds=31)
-    assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].attempts == 2
-    current += timedelta(minutes=2, seconds=1)
-    assert await worker.drain_once() == 1
     poison = store.list_queue_rows()[0]
-    assert (poison.state, poison.attempts, poison.payload_text) == ("dead", 3, None)
+    assert (poison.state, poison.attempts, poison.payload_text) == (
+        "manual_required",
+        0,
+        "poison",
+    )
+    assert store.has_manual_required_fence() is True
 
     assert await worker.drain_once() == 1
     later = store.list_queue_rows()[1]
