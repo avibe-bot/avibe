@@ -1470,8 +1470,9 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=agent_system_prompt,
         )
 
-        # Create extra_args for CLI passthrough (fallback for model)
-        extra_args: Dict[str, str | None] = {}
+        # Echo native input frames so the long-lived receiver can correlate
+        # accepted steering with Claude's actual input consumption.
+        extra_args: Dict[str, str | None] = {"replay-user-messages": None}
         if runtime_model:
             extra_args["model"] = runtime_model
 

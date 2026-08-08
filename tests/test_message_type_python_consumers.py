@@ -10,6 +10,7 @@ def test_backend_failure_predicate_matches_legacy_type_and_event_pair() -> None:
         "user",
         "harness",
         "annotation",
+        "output",
         "result",
         "notify",
         "error",
@@ -47,6 +48,7 @@ def test_fork_activity_sets_match_legacy_values() -> None:
     }
     assert session_fork.SOURCE_PROGRESS_AGENT_OUTPUT_TYPES == {
         "assistant",
+        "output",
         "result",
         "error",
     }
@@ -54,6 +56,7 @@ def test_fork_activity_sets_match_legacy_values() -> None:
         "user",
         "harness",
         "annotation",
+        "output",
         "result",
         "notify",
         "error",
@@ -61,11 +64,16 @@ def test_fork_activity_sets_match_legacy_values() -> None:
 
 
 def test_show_git_input_message_types_match_legacy_values() -> None:
-    assert show_git._INPUT_TURN_MESSAGE_TYPES == ("user", "harness", "annotation")
+    assert show_git._INPUT_TURN_MESSAGE_TYPES == (
+        "user",
+        "harness",
+        "agent_initiated",
+        "annotation",
+    )
 
 
 def test_mirror_catalog_roles_match_legacy_type_sets() -> None:
-    assert set(types_with("inboxPreview")) == {"result", "notify", "error"}
+    assert set(types_with("inboxPreview")) == {"output", "result", "notify", "error"}
     assert {
         message_type
         for message_type in types_with("activityRole")

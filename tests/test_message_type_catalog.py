@@ -86,7 +86,15 @@ def test_catalog_resource_and_defaults_are_cross_language_data() -> None:
 
 
 def test_transcript_types_match_current_constant() -> None:
-    expected = ("user", "harness", "annotation", "result", "notify", "error")
+    expected = (
+        "user",
+        "harness",
+        "annotation",
+        "output",
+        "result",
+        "notify",
+        "error",
+    )
     assert types_with("transcript") == expected
     assert messages_service.TRANSCRIPT_TYPES == expected
 
@@ -95,13 +103,23 @@ def test_searchable_types_match_current_default_query() -> None:
     connection = _CaptureConnection()
     messages_service.search_messages(connection, query="catalog-probe")
 
-    expected = ("user", "harness", "annotation", "result")
+    expected = ("user", "harness", "annotation", "output", "result")
     assert types_with("searchable") == expected
     assert _message_type_sequences(connection.statements[-1]) == {expected}
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
-    expected = ("user", "harness", "annotation", "result", "notify", "error", "assistant")
+    expected = (
+        "user",
+        "harness",
+        "agent_initiated",
+        "annotation",
+        "output",
+        "result",
+        "notify",
+        "error",
+        "assistant",
+    )
     assert types_with("inboxActivity") == expected
     assert messages_service.INBOX_ACTIVITY_TYPES == expected
 
@@ -111,7 +129,7 @@ def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     messages_service.list_inbox_sessions(connection)
     current_query_sets = _message_type_sequences(connection.statements[-1])
 
-    expected_preview = ("result", "notify", "error")
+    expected_preview = ("output", "result", "notify", "error")
     expected_settlement = ("result", "notify", "error")
     expected_unread = ("result",)
     assert types_with("inboxPreview") == expected_preview
@@ -142,6 +160,7 @@ def test_input_turn_pairs_match_current_constant() -> None:
     expected = (
         ("user", "user"),
         ("harness", "harness"),
+        ("harness", "agent_initiated"),
         ("harness", "annotation"),
     )
     assert input_author_type_pairs() == expected
@@ -166,6 +185,7 @@ def test_annotation_catalog_contract_is_explicit() -> None:
 
 
 def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
+    assert spec_for("output")["activityRole"] == "boundary"
     derived_relevant = {
         message_type
         for message_type in _catalog_types()
@@ -175,6 +195,8 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
     expected_relevant = (
         "user",
         "harness",
+        "agent_initiated",
+        "output",
         "result",
         "notify",
         "error",

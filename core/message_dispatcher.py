@@ -1510,6 +1510,8 @@ class ConsolidatedMessageDispatcher:
         log_label: str = "agent run terminal result",
     ) -> None:
         semantics = output_semantics or MessageOutput(completes_turn=True)
+        if not semantics.records_run_output:
+            return
         require_confirmation = semantics.requires_delivery_for_run_settlement
         run_ids = self._terminal_agent_run_ids(context, semantics)
         if not run_ids:
@@ -2039,13 +2041,18 @@ class ConsolidatedMessageDispatcher:
         else:
             terminal_reason = "failed"
 
-        if canonical_type == "result":
+        visible_output_type = canonical_type in {"result", "output"}
+        if visible_output_type:
             if not current_runtime_turn and not output_semantics.detached:
-                logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
+                logger.info(
+                    "Dropping stale %s emit for superseded runtime turn in %s",
+                    canonical_type,
+                    self._get_session_key(context),
+                )
                 return None
         raw_text = text
         enhanced = None
-        if canonical_type == "result" and level != "silent":
+        if visible_output_type and level != "silent":
             quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
             enhanced = process_reply(raw_text, include_quick_replies=quick_replies_on)
             text = enhanced.visible_text
@@ -2184,7 +2191,7 @@ class ConsolidatedMessageDispatcher:
         # raw text would surface markup in the inbox preview / chat transcript
         # that was never shown. Computed once here and reused for delivery below.
         persist_text = text
-        if canonical_type == "result":
+        if visible_output_type:
             persist_text = enhanced.text if enhanced.text.strip() else text
 
         accepted_message = None
@@ -2331,8 +2338,8 @@ class ConsolidatedMessageDispatcher:
             try:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
-                if canonical_type == "result":
-                    result_type = "error" if is_error else "result"
+                if visible_output_type:
+                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
                             raw_text,
@@ -2468,7 +2475,7 @@ class ConsolidatedMessageDispatcher:
                     delivery.error_stage = STAGE_STREAM
             return message_id
 
-        if canonical_type == "result":
+        if visible_output_type:
             try:
                 primary_message_id: Optional[str] = None
                 scheduled_anchor_message_id: Optional[str] = None
@@ -2738,7 +2745,7 @@ class ConsolidatedMessageDispatcher:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
                     # as an unread agent reply (unread queries are result-only). Codex P2.
-                    result_type = "error" if is_error else "result"
+                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         # Keep the ``file://`` links in the persisted avibe text so the
                         # workbench media-proxy rewrite (in ``persist_agent_message``)
@@ -2848,7 +2855,7 @@ class ConsolidatedMessageDispatcher:
                         context,
                         text=display_text,
                         message_id=primary_message_id,
-                        kind="result",
+                        kind=canonical_type,
                         completes_turn=mutates_turn_lifecycle,
                     )
                 elif mutates_turn_lifecycle:

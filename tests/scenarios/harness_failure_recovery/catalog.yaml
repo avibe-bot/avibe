@@ -3871,15 +3871,17 @@ scenarios:
     # native evidence either accepts the attempt or closes it terminally.
     test: tests/test_agent_steering.py::test_opencode_keeps_reconciliation_armed_after_post_write_idle
   - id: HFR-435
-    name: a Claude steered Assistant response owns the following terminal result
+    name: Claude input echoes establish steering result ownership
     status: covered
     kind: recovery
     layer: contract
     backend: claude
-    # The accepted steering barrier suppresses only a buffered pre-steer result.
-    # Once the receiver has emitted Assistant text in the current generation,
-    # its ResultMessage is the real continuation and must settle the pending Turn.
-    test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
+    # A transport write only queues input, while Claude may merge several inputs
+    # into one response. Avibe enables the CLI's replay-user-messages protocol so
+    # each consumed input produces a native top-level UserMessage echo in FIFO
+    # order. A Result before the echo stays nonterminal; a Result after every echo
+    # can settle the shared Turn.
+    test: tests/test_claude_agent_sessions.py::test_user_echo_allows_one_result_to_own_primary_and_steer
   - id: HFR-436
     name: Watch waiter health is independent from downstream event processing
     status: covered
@@ -4122,6 +4124,26 @@ scenarios:
     # Activity completions reserve SQLite's writer slot before reading deferred
     # participants or their owner, so one Turn cannot elect competing fallbacks.
     test: tests/test_harness_failure_visibility.py::test_hfr_459_deferred_owner_election_reserves_writer_before_reads
+  - id: HFR-460
+    name: delayed Claude steering remains user-owned across the primary Result
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # Claude can finish the active query before it dequeues an accepted steer.
+    # The primary Result remains visible as nonterminal output, the same logical
+    # Turn stays open, and the later steered Result settles it without creating
+    # an agent-initiated Harness Message.
+    test: tests/test_claude_agent_sessions.py::test_presteer_result_stays_visible_without_agent_initiated_turn
+  - id: HFR-461
+    name: genuine backend-initiated continuation keeps a hidden lifecycle input
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The durable input keeps Turn ownership, Stop, and audit history intact but
+    # is not a human instruction and therefore never renders in the transcript.
+    test: tests/test_session_delivery_fsm.py::test_agent_initiated_continuation_materializes_as_hidden_turn_input
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

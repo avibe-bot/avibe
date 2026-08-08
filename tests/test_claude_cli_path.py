@@ -314,7 +314,10 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
     assert captured["connected"] is True
     assert captured["options"].resume == "claude-source"
     assert captured["options"].fork_session is True
-    assert captured["options"].extra_args == {"model": "claude-sonnet-4-5"}
+    assert captured["options"].extra_args == {
+        "replay-user-messages": None,
+        "model": "claude-sonnet-4-5",
+    }
     assert captured["options"].settings == '{"autoMemoryEnabled":false}'
     assert captured["options"].effort == "high"
     assert not hasattr(client, "_vibe_native_session_id")
@@ -1103,7 +1106,10 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
 
     assert first_client is second_client
     assert len(captured["clients"]) == 1
-    assert captured["options"].extra_args == {"model": "claude-sonnet-4-5"}
+    assert captured["options"].extra_args == {
+        "replay-user-messages": None,
+        "model": "claude-sonnet-4-5",
+    }
     assert first_client.model_calls == []
 
 
@@ -1431,7 +1437,7 @@ def test_session_handler_does_not_send_none_model_control_request_for_cached_def
     client = _run_session(handler, context)
     _run_session(handler, context)
 
-    assert captured["options"].extra_args == {}
+    assert captured["options"].extra_args == {"replay-user-messages": None}
     assert client.model_calls == []
 
 

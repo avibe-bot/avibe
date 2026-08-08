@@ -30,8 +30,9 @@ TERMINAL_AGENT_OUTPUT_TYPES = {
 }
 SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
     message_type
-    for message_type in types_with("activityRole")
+    for message_type in set(types_with("activityRole")) | set(types_with("transcript"))
     if spec_for(message_type)["activityRole"] in {"activity", "terminal"}
+    or spec_for(message_type)["render"] == "agent"
 }
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)

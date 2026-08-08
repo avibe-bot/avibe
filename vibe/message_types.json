@@ -34,12 +34,27 @@
       "activityRole": "turn_start",
       "render": "harness"
     },
+    "agent_initiated": {
+      "inboxActivity": true,
+      "inputAuthors": [
+        "harness"
+      ],
+      "activityRole": "turn_start"
+    },
     "annotation": {
       "transcript": true,
       "searchable": true,
       "inboxActivity": true,
       "inputAuthors": ["harness"],
       "render": "annotation"
+    },
+    "output": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inboxPreview": true,
+      "activityRole": "boundary",
+      "render": "agent"
     },
     "result": {
       "transcript": true,
