@@ -184,6 +184,21 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored.map((item) => item.id)).toEqual(['late']);
   });
 
+  it('keeps a delayed reply when the next input arrives after request creation', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const reply = message('owner-reply', '2026-07-30T10:01:00Z', 'agent');
+    const laterUser = message('later-user', '2026-07-30T10:03:00Z', 'user');
+    const unrelatedReply = message('unrelated-reply', '2026-07-30T10:04:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [source, reply, laterUser, unrelatedReply],
+      [request('late', 'provision', '2026-07-30T10:02:00Z', null, { message_id: source.id })],
+    );
+
+    expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['late']);
+    expect(placed.byMessageId.has(unrelatedReply.id)).toBe(false);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('ignores a stale requester message when a later turn owns the request', () => {
     const source = message('stale-source', '2026-07-30T10:00:00Z', 'user');
     const oldReply = message('old-reply', '2026-07-30T10:00:10Z', 'agent');

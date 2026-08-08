@@ -408,6 +408,8 @@ export const ChatPage: React.FC = () => {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const vaultAnchorFetchesRef = useRef<Set<string>>(new Set());
+  const vaultAnchorInFlightRef = useRef(false);
+  const [vaultAnchorCycle, setVaultAnchorCycle] = useState(0);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
@@ -665,51 +667,61 @@ export const ChatPage: React.FC = () => {
   // is outside the retained tail, fetch a small around-window once so the card
   // can join its real turn instead of falling back to a fixed-looking footer.
   useEffect(() => {
-    if (!sessionId || provisionPlacement.unanchored.length === 0) return;
-    const candidates = provisionPlacement.unanchored.filter((request) => vaultRequestSourceMessageId(request));
-    for (const request of candidates) {
-      const sourceMessageId = vaultRequestSourceMessageId(request);
-      if (!sourceMessageId) continue;
-      const fetchKey = `${request.id}:${sourceMessageId}`;
-      if (vaultAnchorFetchesRef.current.has(fetchKey)) continue;
-      vaultAnchorFetchesRef.current.add(fetchKey);
-      void api
-        .listSessionMessages(sessionId, { aroundId: sourceMessageId, limit: 50, cache: false })
-        .then((res) => {
-          if (sessionId !== sessionIdRef.current) return;
-          const incoming = res.messages.filter(isTranscriptMessage);
-          if (incoming.length === 0) return;
-          const existing = messagesRef.current;
-          const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
-          // An around-fetch can land wholly outside the retained live tail. Do
-          // not union those ranges: the missing rows would be rendered as if
-          // they were adjacent. Replace the tail with a historical window,
-          // matching the existing deep-link behavior, so the anchor stays in a
-          // coherent transcript and the user gets an explicit latest reload.
-          const anchorWindow = disjoint ? incoming : mergeById(existing, incoming);
-          const placement = placeVaultProvisionRequests(anchorWindow, [request]);
-          if (!placement.byMessageId.size) return;
-          if (disjoint) {
-            const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
-            setMessages(incoming);
-            setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
-          } else {
-            setMessages((previous) => {
-              const merged = mergeById(previous, incoming);
-              if (merged.length <= MAX_RETAINED_MESSAGES) return merged;
-              return followingTailRef.current
-                ? merged.slice(-MAX_RETAINED_MESSAGES)
-                : merged.slice(0, MAX_RETAINED_MESSAGES);
-            });
-          }
-          setOlderCursor(res.next_before_id ?? null);
-        })
-        .catch(() => {
-          // The footer remains visible if the around-fetch fails; a fresh mount
-          // or explicit history load can still recover the anchored turn.
-        });
-    }
-  }, [api, provisionPlacement.unanchored, sessionId]);
+    if (!sessionId || loading || session?.id !== sessionId || provisionPlacement.unanchored.length === 0) return;
+    if (vaultAnchorInFlightRef.current) return;
+    const request = provisionPlacement.unanchored.find((candidate) => {
+      const sourceMessageId = vaultRequestSourceMessageId(candidate);
+      return Boolean(sourceMessageId) && !vaultAnchorFetchesRef.current.has(`${candidate.id}:${sourceMessageId}`);
+    });
+    if (!request) return;
+    const sourceMessageId = vaultRequestSourceMessageId(request);
+    if (!sourceMessageId) return;
+    const fetchKey = `${request.id}:${sourceMessageId}`;
+    vaultAnchorFetchesRef.current.add(fetchKey);
+    vaultAnchorInFlightRef.current = true;
+    void api
+      .listSessionMessages(sessionId, { aroundId: sourceMessageId, limit: 50, cache: false })
+      .then((res) => {
+        if (sessionId !== sessionIdRef.current) return;
+        const incoming = res.messages.filter(isTranscriptMessage);
+        if (incoming.length === 0) return;
+        const existing = messagesRef.current;
+        const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
+        // An around-fetch can land wholly outside the retained live tail. Do
+        // not union those ranges: the missing rows would be rendered as if
+        // they were adjacent. Replace the tail with a historical window,
+        // matching the existing deep-link behavior, so the anchor stays in a
+        // coherent transcript and the user gets an explicit latest reload.
+        const anchorWindow = disjoint ? incoming : mergeById(existing, incoming);
+        const placement = placeVaultProvisionRequests(anchorWindow, [request]);
+        if (!placement.byMessageId.size) return;
+        if (disjoint) {
+          const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
+          const anchorMessageId = placement.byMessageId.keys().next().value;
+          setMessages(incoming);
+          setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
+          if (typeof anchorMessageId === 'string') setJumpTarget(anchorMessageId);
+        } else {
+          setMessages((previous) => {
+            const merged = mergeById(previous, incoming);
+            if (merged.length <= MAX_RETAINED_MESSAGES) return merged;
+            return followingTailRef.current
+              ? merged.slice(-MAX_RETAINED_MESSAGES)
+              : merged.slice(0, MAX_RETAINED_MESSAGES);
+          });
+        }
+        setOlderCursor(res.next_before_id ?? null);
+      })
+      .catch(() => {
+        // The footer remains visible if the around-fetch fails; a fresh mount
+        // or explicit history load can still recover the anchored turn.
+      })
+      .finally(() => {
+        if (sessionId !== sessionIdRef.current) return;
+        vaultAnchorInFlightRef.current = false;
+        setVaultAnchorCycle((cycle) => cycle + 1);
+      });
+  }, [api, loading, provisionPlacement.unanchored, session?.id, sessionId, vaultAnchorCycle]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1138,6 +1150,7 @@ export const ChatPage: React.FC = () => {
     setSession(null);
     setMessages([]);
     vaultAnchorFetchesRef.current.clear();
+    vaultAnchorInFlightRef.current = false;
     setOlderCursor(null);
     setHistoricalWindow(false);
     oldestLoadedIdRef.current = null;

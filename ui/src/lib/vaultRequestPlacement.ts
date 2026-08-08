@@ -83,8 +83,16 @@ function inferReplyFromSourceMessage(
   let replyBeforeRequest: WorkbenchMessage | undefined;
 
   for (const message of messages.slice(sourceIndex + 1)) {
-    // A later input starts a different turn, so a reply after it cannot own this request.
-    if (isInputTurn(message)) return undefined;
+    if (isInputTurn(message)) {
+      // A request may be persisted after its reply but before the next input.
+      // In that case the recorded pre-request reply is still the owner. Only
+      // discard the source identity when the later input predates the request.
+      const messageTime = messageOrderTimeMs(message);
+      return replyBeforeRequest && !Number.isNaN(requestTime) &&
+        !Number.isNaN(messageTime) && messageTime >= requestTime
+        ? replyBeforeRequest
+        : undefined;
+    }
     if (!isAgentReply(message)) continue;
     if (Number.isNaN(requestTime) || messageOrderTimeMs(message) >= requestTime) return message;
     // Some legacy request rows point at an older input even though the request
