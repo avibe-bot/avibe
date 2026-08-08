@@ -931,7 +931,7 @@ class MemoryStore:
                 conn,
                 MemorySettlementRecord(
                     provider_session_ref=provider_session_ref,
-                    generation=state.generation,
+                    generation=row.flush_generation,
                     fence_epoch=fence_epoch,
                     operation_id=f"manual-add-{row.source_message_digest}",
                     operation_kind="add",
@@ -1251,12 +1251,11 @@ class MemoryStore:
                         settlement,
                         now=now,
                     )
-                    if retry_exhausted:
-                        self._set_last_error_in_connection(
-                            conn,
-                            "memory_processing_failed",
-                            now,
-                        )
+                    self._set_last_error_in_connection(
+                        conn,
+                        "memory_processing_failed",
+                        now,
+                    )
                 else:
                     self._record_settlement_in_connection(conn, settlement)
                     remaining = conn.execute(

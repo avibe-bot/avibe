@@ -327,6 +327,7 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     unknown_state = store.get_session_flush_state(unknown_row.provider_session_ref)
     assert unknown_state is not None
     assert unknown_state.flush_state == "manual_required"
+    assert store.ensure_meta().last_error == "memory_processing_failed"
     unknown_settlement = store.list_flush_settlements(unknown_row.provider_session_ref)[0]
     assert (unknown_settlement.watermark_after, unknown_settlement.confirmed_watermark_ms) == (
         unknown_row.provider_timestamp_ms,
@@ -515,6 +516,48 @@ def test_stale_flush_token_cannot_clear_newer_manual_fence(tmp_path: Path) -> No
     assert [item.outcome for item in store.list_flush_settlements(provider_session_ref)] == [
         "manual_required"
     ]
+
+
+def test_ambiguous_add_settlement_uses_its_pinned_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "first", session_ref="ambiguous-next-generation")
+    token = _flush_claim(store, provider_session_ref)
+    accepted = store.enqueue_request(
+        source_message_id="ambiguous-next",
+        session_id="ambiguous-next-generation",
+        principal_id=provider_session_ref.principal_id,
+        project_ref=provider_session_ref.project_ref,
+        provenance="user_input",
+        payload_text="ambiguous next-generation payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+    assert accepted.row.flush_generation == token.generation + 1
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("rejected", "INVALID_INPUT", server_fault=False, retryable=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    row = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:03.000Z")
+    assert row is not None
+    assert store.settle(
+        row,
+        AmbiguousAdd(add_request_id="ambiguous-add"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:04.000Z"),
+    ).settled
+
+    add_settlement = next(
+        item
+        for item in store.list_flush_settlements(provider_session_ref)
+        if item.operation_kind == "add"
+    )
+    assert (add_settlement.generation, add_settlement.outcome) == (
+        token.generation + 1,
+        "manual_required",
+    )
 
 
 def test_flush_claim_waits_for_a_processing_add(tmp_path: Path) -> None:

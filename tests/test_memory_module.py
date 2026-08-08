@@ -504,6 +504,31 @@ async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breake
     assert fault.processing_fault_kind == "engine"
     assert fault.processing_fault_since == "2026-01-01T00:00:00.000Z"
     assert fault.processing_alert_active is True
+    assert fault.last_error == "memory_processing_failed"
+
+
+async def test_unknown_flush_fence_persists_degraded_status_before_worker_recovery(
+    tmp_path: Path,
+) -> None:
+    module, store, _provider = _module(tmp_path)
+    assert await module.capture(_request(source="unknown-status")) == CaptureAccepted()
+    row = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.settle(
+        row,
+        Delivered(add_request_id="unknown-status-add"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+    token = _flush_claim(store, row)
+    assert store.record_flush_verdict(
+        token,
+        FlushUnknown("transport"),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    status = await module.status()
+    assert (status.state, status.error) == ("degraded", "memory_processing_failed")
 
 
 async def test_pre_submission_flush_retries_without_a_manual_fence(tmp_path: Path) -> None:
