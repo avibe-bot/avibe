@@ -90,7 +90,7 @@ export const mergeAnchorWindow = (
   }
   // The capped union would discard the owning reply. Keep the coherent centered
   // response instead; the caller marks it historical and can scroll to the anchor.
-  return { messages: incoming, replaced: true, detachedTail: true };
+  return { messages: incoming, replaced: true, detachedTail };
 };
 
 // Union two row sets, deduped by id and re-sorted into durable order. Used by the
