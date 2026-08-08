@@ -603,7 +603,9 @@ async def test_half_open_4xx_does_not_refresh_breaker_anchor(tmp_path: Path) -> 
     assert await worker.drain(max_rows=2) == 1
 
     assert store.ensure_meta().processing_fault_since == opened_at
-    assert store.list_queue_rows()[1].flush_observation == "rejected"
+    rows = store.list_queue_rows()
+    assert rows[0].flush_observation == "rejected"
+    assert rows[1].flush_observation == "not_attempted"
 
 
 async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:

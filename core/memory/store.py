@@ -861,24 +861,33 @@ class MemoryStore:
             meta = self._meta_in_connection(conn)
             if meta is None or provider_session_ref.epoch != meta.epoch:
                 return None
-            candidate = conn.execute(
-                """
-                SELECT 1 FROM memory_capture_queue
-                WHERE epoch = ? AND provider_session_ref = ?
-                  AND state = 'delivered'
-                  AND flush_observation = 'not_attempted'
-                LIMIT 1
-                """,
-                (meta.epoch, provider_session_ref.serialize()),
-            ).fetchone()
-            if candidate is None:
-                return None
             state = self._ensure_session_state_in_connection(
                 conn,
                 provider_session_ref,
                 now=now,
             )
             if state.flush_state in {"in_flight", "manual_required"}:
+                return None
+            if conn.execute(
+                """
+                SELECT 1 FROM memory_capture_queue
+                WHERE epoch = ? AND provider_session_ref = ? AND state = 'processing'
+                LIMIT 1
+                """,
+                (meta.epoch, provider_session_ref.serialize()),
+            ).fetchone() is not None:
+                return None
+            flush_observation = "rejected" if state.flush_state == "due" else "not_attempted"
+            candidate = conn.execute(
+                """
+                SELECT 1 FROM memory_capture_queue
+                WHERE epoch = ? AND provider_session_ref = ?
+                  AND state = 'delivered' AND flush_observation = ?
+                LIMIT 1
+                """,
+                (meta.epoch, provider_session_ref.serialize(), flush_observation),
+            ).fetchone()
+            if candidate is None:
                 return None
             result = conn.execute(
                 """
@@ -888,9 +897,9 @@ class MemoryStore:
                     flush_observed_at = NULL
                 WHERE epoch = ? AND provider_session_ref = ?
                   AND state = 'delivered'
-                  AND flush_observation = 'not_attempted'
+                  AND flush_observation = ?
                 """,
-                (meta.epoch, provider_session_ref.serialize()),
+                (meta.epoch, provider_session_ref.serialize(), flush_observation),
             )
             if not result.rowcount:
                 return None

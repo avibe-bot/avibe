@@ -25,7 +25,7 @@ from core.memory.store import (
     derive_principal_id,
     _keyed_digest,
 )
-from core.memory.types import ProviderSessionRef
+from core.memory.types import MemorySettlementRecord, ProviderSessionRef
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -388,27 +388,27 @@ def test_claim_and_admission_respect_session_flush_fences(tmp_path: Path) -> Non
 def test_stale_flush_token_cannot_clear_newer_manual_fence(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     provider_session_ref = _deliver(store, "first", session_ref="racing-session")
-    pending = store.enqueue_request(
-        source_message_id="second",
-        session_id="racing-session",
-        principal_id="u-11111111111111111111111111111111",
-        project_ref=PROJECT,
-        provenance="user_input",
-        payload_text="queued payload",
-        occurred_at_ms=1_001,
-        max_provider_timestamp_ms=4_102_444_800_000,
-    )
-    assert pending.row is not None
-    processing = store.claim_due(lease_owner="add-worker", now="2026-01-01T00:00:02.000Z")
-    assert processing is not None
     token = _flush_claim(store, provider_session_ref)
 
-    assert store.settle(
-        processing,
-        AmbiguousAdd(add_request_id="ambiguous-add", error="memory_provider_timeout"),
-        lease_owner="add-worker",
-        now=_dt("2026-01-01T00:00:03.000Z"),
-    ).settled
+    newer_manual = MemorySettlementRecord(
+        provider_session_ref=provider_session_ref,
+        generation=token.generation,
+        fence_epoch=token.fence_epoch + 1,
+        operation_id="manual-newer",
+        operation_kind="add",
+        outcome="manual_required",
+        observed_at="2026-01-01T00:00:03.000Z",
+        last_known_state="pending",
+        last_observed_outcome="manual_required",
+        flush_state="manual_required",
+        source="add",
+    )
+    with store._transaction() as conn:
+        store._mark_manual_required_in_connection(
+            conn,
+            newer_manual,
+            now="2026-01-01T00:00:03.000Z",
+        )
     assert store.record_flush_verdict(
         token,
         FlushSucceeded("stale-flush", "extracted"),
@@ -418,11 +418,63 @@ def test_stale_flush_token_cannot_clear_newer_manual_fence(tmp_path: Path) -> No
     state = store.get_session_flush_state(provider_session_ref)
     assert state is not None
     assert state.flush_state == "manual_required"
-    assert state.fence_operation_id == "manual-add-" + pending.row.source_message_digest
+    assert state.fence_operation_id == "manual-newer"
     assert store.list_queue_rows()[0].flush_observation == "in_flight"
     assert [item.outcome for item in store.list_flush_settlements(provider_session_ref)] == [
         "manual_required"
     ]
+
+
+def test_flush_claim_waits_for_a_processing_add(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "delivered", session_ref="processing-session")
+    pending = store.enqueue_request(
+        source_message_id="processing",
+        session_id="processing-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert pending.outcome == "accepted"
+    processing = store.claim_due(lease_owner="add-worker", now="2026-01-01T00:00:02.000Z")
+    assert processing is not None
+
+    assert store.mark_flush_in_flight(provider_session_ref) is None
+    assert store.list_queue_rows()[0].flush_observation == "not_attempted"
+    assert store.get_session_flush_state(provider_session_ref).flush_state == "not_due"
+
+
+def test_due_rejected_generation_can_acquire_a_retry_token(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "retryable")
+    first_token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        first_token,
+        FlushRejected("rejected", "TEMPORARY", server_fault=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    rejected = store.list_queue_rows()[0]
+    assert rejected.flush_observation == "rejected"
+    due = store.get_session_flush_state(provider_session_ref)
+    assert due is not None
+    assert due.flush_state == "due"
+
+    retry_token = store.mark_flush_in_flight(provider_session_ref)
+    assert retry_token is not None
+    assert retry_token.generation == first_token.generation
+    assert retry_token.fence_epoch > first_token.fence_epoch
+    assert store.list_queue_rows()[0].flush_observation == "in_flight"
+    assert store.record_flush_verdict(
+        retry_token,
+        FlushSucceeded("retried", "extracted"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+    settled = store.get_session_flush_state(provider_session_ref)
+    assert settled is not None
+    assert (settled.generation, settled.flush_state) == (1, "not_due")
 
 
 def test_malformed_flush_success_is_recorded_as_manual_required(tmp_path: Path) -> None:
