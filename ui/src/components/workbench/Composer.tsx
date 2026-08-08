@@ -920,6 +920,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             session.realtimeFirstPreviewAt ??= Date.now();
             setRealtimePreview(`${preview.text}${preview.stash}`.trim());
           },
+          onError: () => {
+            if (abortController.signal.aborted) return;
+            session.realtimeState = 'failed';
+            activateHttpFallback(session);
+          },
         });
         void session.realtime.start().then(() => {
           if (abortController.signal.aborted) return;

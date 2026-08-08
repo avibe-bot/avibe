@@ -9,6 +9,8 @@ import {
 
 class FakeSocket {
   readyState = 0;
+  autoReady = true;
+  autoFinal = true;
   sent: string[] = [];
   private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
 
@@ -25,10 +27,10 @@ class FakeSocket {
   send(value: string): void {
     this.sent.push(value);
     const message = JSON.parse(value) as { type?: string };
-    if (message.type === 'start') {
+    if (message.type === 'start' && this.autoReady) {
       this.emit('message', { data: JSON.stringify({ type: 'ready', protocol: VOICE_REALTIME_PROTOCOL }) });
     }
-    if (message.type === 'finish') {
+    if (message.type === 'finish' && this.autoFinal) {
       this.emit('message', {
         data: JSON.stringify({ type: 'final', text: '最终文本', cleanup: 'success' }),
       });
@@ -51,6 +53,7 @@ class FakeSocket {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -107,5 +110,84 @@ describe('voice realtime client protocol', () => {
     socket.close();
 
     await expect(session.finish()).rejects.toThrow('realtime_closed');
+  });
+
+  it('closes a socket when the handshake deadline expires', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', { OPEN: 1, CLOSED: 3 });
+    const socket = new FakeSocket();
+    socket.autoReady = false;
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      openSocket: async () => socket as unknown as WebSocket,
+    });
+    const start = session.start();
+    await Promise.resolve();
+    socket.open();
+    const expectation = expect(start).rejects.toThrow('realtime_timeout');
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    await expectation;
+    expect(socket.readyState).toBe(3);
+  });
+
+  it('reports an active socket failure and stops accepting PCM', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1, CLOSED: 3 });
+    const socket = new FakeSocket();
+    const onError = vi.fn();
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      onError,
+      openSocket: async () => socket as unknown as WebSocket,
+    });
+    const start = session.start();
+    socket.open();
+    await start;
+
+    socket.close();
+
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'realtime_closed' }));
+    expect(session.sendPcm(new Int16Array([1]))).toBe(false);
+  });
+
+  it('rejects the open phase when the socket fails before opening', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1, CLOSED: 3 });
+    const socket = new FakeSocket();
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      openSocket: async () => socket as unknown as WebSocket,
+    });
+    const start = session.start();
+    await Promise.resolve();
+    socket.emit('error', {});
+
+    await expect(start).rejects.toThrow('realtime_socket_error');
+    expect(socket.readyState).toBe(3);
+  });
+
+  it('closes the socket when finalization times out', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', { OPEN: 1, CLOSED: 3 });
+    const socket = new FakeSocket();
+    socket.autoFinal = false;
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      openSocket: async () => socket as unknown as WebSocket,
+    });
+    const start = session.start();
+    await Promise.resolve();
+    socket.open();
+    await start;
+    const finish = session.finish();
+    const expectation = expect(finish).rejects.toThrow('realtime_timeout');
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await expectation;
+    expect(socket.readyState).toBe(3);
   });
 });

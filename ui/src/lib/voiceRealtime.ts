@@ -25,6 +25,7 @@ export type VoiceRealtimeOptions = {
   ) => Promise<AvibeWebSocket>;
   onReady?: () => void;
   onPreview?: (preview: VoiceRealtimePreview) => void;
+  onError?: (error: Error) => void;
 };
 
 const asError = (code: string): Error => {
@@ -113,6 +114,7 @@ export class VoiceRealtimeSession {
   private finalResolve: ((value: VoiceRealtimeFinal) => void) | null = null;
   private finalReject: ((error: unknown) => void) | null = null;
   private terminalError: unknown | null = null;
+  private errorNotified = false;
   private pendingAudio: string[] = [];
 
   constructor(options: VoiceRealtimeOptions) {
@@ -133,46 +135,75 @@ export class VoiceRealtimeSession {
       this.options.signal,
     );
     this.socket = socket;
-    const readyPromise = new Promise<void>((resolve, reject) => {
-      const onMessage = (event: MessageEvent) => {
-        const message = parseVoiceRealtimeMessage(event.data);
-        if (!message) return;
-        if (message.type === 'ready') {
-          this.ready = true;
-          socket.removeEventListener('message', onMessage);
-          this.options.onReady?.();
-          resolve();
-        }
-      };
-      socket.addEventListener('message', onMessage);
-      socket.addEventListener('error', () => reject(asError('realtime_socket_error')), { once: true });
-      socket.addEventListener('close', () => reject(asError('realtime_closed')), { once: true });
-    });
+    let openReject: ((error: unknown) => void) | null = null;
+    let readyReject: ((error: unknown) => void) | null = null;
+    let openListener: ((event: unknown) => void) | null = null;
+    let readyListener: ((event: unknown) => void) | null = null;
+    const cleanupHandshakeListeners = (): void => {
+      if (openListener) socket.removeEventListener('open', openListener);
+      if (readyListener) socket.removeEventListener('message', readyListener);
+      openListener = null;
+      readyListener = null;
+      openReject = null;
+      readyReject = null;
+    };
+    const failHandshake = (error: unknown): void => {
+      const normalized = this.fail(error);
+      openReject?.(normalized);
+      readyReject?.(normalized);
+    };
+    const onSocketError = (): void => failHandshake(asError('realtime_socket_error'));
+    const onSocketClose = (): void => {
+      if (!this.finished && !this.aborted) failHandshake(asError('realtime_closed'));
+    };
+    socket.addEventListener('error', onSocketError);
+    socket.addEventListener('close', onSocketClose);
     socket.addEventListener('message', (event) => this.handleMessage(event));
-    socket.addEventListener('error', () => this.rejectFinal(asError('realtime_socket_error')), { once: true });
-    socket.addEventListener('close', () => {
-      if (!this.finished && !this.aborted) this.rejectFinal(asError('realtime_closed'));
-    }, { once: true });
-    await waitWithTimeout(new Promise<void>((resolve, reject) => {
-      const sendStart = () => {
-        try {
-          socket.send(JSON.stringify({
-            type: 'start',
-            before: this.options.before,
-            after: this.options.after,
-            ...(this.options.language ? { language: this.options.language } : {}),
-          }));
-          resolve();
-        } catch (error) {
-          reject(error);
-        }
+
+    const openPromise = new Promise<void>((resolve, reject) => {
+      openReject = reject;
+      openListener = () => {
+        if (openListener) socket.removeEventListener('open', openListener);
+        openListener = null;
+        resolve();
       };
-      if (socket.readyState === WebSocket.OPEN) sendStart();
-      else socket.addEventListener('open', sendStart, { once: true });
-    }), VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
-    await waitWithTimeout(readyPromise, VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
-    while (this.pendingAudio.length > 0 && this.socket?.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ type: 'audio', audio: this.pendingAudio.shift() }));
+      if (socket.readyState === WebSocket.OPEN) resolve();
+      else if (socket.readyState === WebSocket.CLOSED) failHandshake(asError('realtime_closed'));
+      else socket.addEventListener('open', openListener);
+    });
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      readyReject = reject;
+      readyListener = (event: unknown) => {
+        const message = parseVoiceRealtimeMessage((event as MessageEvent).data);
+        if (!message || message.type !== 'ready') return;
+        this.ready = true;
+        if (readyListener) socket.removeEventListener('message', readyListener);
+        readyListener = null;
+        this.options.onReady?.();
+        resolve();
+      };
+      socket.addEventListener('message', readyListener);
+    });
+    // The ready promise may reject while the open phase is still pending. Keep
+    // that rejection observed until the sequential handshake awaits it.
+    void readyPromise.catch(() => undefined);
+    try {
+      await waitWithTimeout(openPromise, VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
+      socket.send(JSON.stringify({
+        type: 'start',
+        before: this.options.before,
+        after: this.options.after,
+        ...(this.options.language ? { language: this.options.language } : {}),
+      }));
+      await waitWithTimeout(readyPromise, VOICE_REALTIME_HANDSHAKE_TIMEOUT_MS);
+      while (this.pendingAudio.length > 0 && this.socket?.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify({ type: 'audio', audio: this.pendingAudio.shift() }));
+      }
+    } catch (error) {
+      this.fail(error);
+      throw error;
+    } finally {
+      cleanupHandshakeListeners();
     }
   }
 
@@ -192,7 +223,7 @@ export class VoiceRealtimeSession {
   }
 
   sendPcm(samples: Int16Array<ArrayBuffer>): boolean {
-    if (this.finished || this.aborted) {
+    if (this.finished || this.aborted || this.terminalError) {
       return false;
     }
     const audio = encodeVoiceRealtimePcm(samples);
@@ -226,7 +257,10 @@ export class VoiceRealtimeSession {
         this.socket.send(JSON.stringify({ type: 'finish' }));
       }).catch(reject);
     });
-    this.finalPromise = waitWithTimeout(pending, VOICE_REALTIME_FINISH_TIMEOUT_MS);
+    this.finalPromise = waitWithTimeout(pending, VOICE_REALTIME_FINISH_TIMEOUT_MS).catch((error) => {
+      this.fail(error);
+      throw error;
+    });
     return this.finalPromise;
   }
 
@@ -237,11 +271,28 @@ export class VoiceRealtimeSession {
   }
 
   private rejectFinal(error: unknown): void {
-    if (this.finished || this.aborted) return;
-    this.terminalError ??= error;
-    this.finalReject?.(error);
+    this.fail(error);
+  }
+
+  private fail(error: unknown): Error {
+    const normalized = error instanceof Error ? error : asError('realtime_failed');
+    if (this.finished || this.aborted) return normalized;
+    const firstFailure = this.terminalError === null;
+    this.terminalError ??= normalized;
+    if (!firstFailure) {
+      return this.terminalError instanceof Error ? this.terminalError : normalized;
+    }
+    if (!this.errorNotified) {
+      this.errorNotified = true;
+      this.options.onError?.(normalized);
+    }
+    this.finalReject?.(normalized);
     this.finalResolve = null;
     this.finalReject = null;
+    if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+      this.socket.close(4000, normalized.message.slice(0, 120));
+    }
+    return normalized;
   }
 }
 
