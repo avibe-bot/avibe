@@ -176,22 +176,26 @@ The Source workflow is complete at both entry points:
   expose an explicit “Fetch models” action in both Add Source and Source details.
   Discovery uses the selected protocol adapter, replaces only the discovered slice,
   preserves manual entries, and renders added, removed, unchanged, and failed results.
-- **Manual model entries.** A user may add and remove exact model ids. Every model-list
-  item has `{id, origin: "discovered" | "manual", reasoning_effort}`; discovery creates
-  `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
-  `reasoning_effort` is a required nullable string, where `null` means the upstream
-  default and a non-null value is adapter-validated for that model. Existing optional
-  `display_name` and `discovered_at` metadata remain part of the entry and survive
-  migration and refresh. This property belongs to Source model inventory, not the
-  deferred Configure Agents module: it
-  describes how that exact
-  upstream model is called, not which model an Agent selects.
-  Editing a manual entry's reasoning effort uses the atomic
+- **Model inventory and manual entries.** A user may add and remove exact manual model
+  ids. Every model-list item has
+  `{id, origin: "discovered" | "manual", reasoning_efforts: string[]}`; discovery
+  creates `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
+  `reasoning_efforts` is required and may be empty. It declares the exact reasoning
+  effort values that the upstream model supports; it does not select one value. An
+  empty list declares none, and no entry receives a default, selected value, or
+  prefilled value. Existing optional `display_name` and `discovered_at` metadata remain
+  part of the entry and survive migration and refresh. This capability list belongs to
+  Source model inventory, not the deferred Configure Agents module: it describes which
+  invocation values that exact upstream model accepts, not which model or effort an
+  Agent selects.
+  Editing the list on either a discovered or manual entry uses the atomic
   `PATCH /api/models/custom-models` mutation with
-  `{source_id, model_id, reasoning_effort}`; the adapter validates that the entry is
-  manual and re-echoes the canonical stored value as `{source: Source}`. Discovered
-  entries are not changed through this route, and the mutation never edits a route
-  chain.
+  `{source_id, model_id, reasoning_efforts}`; the adapter validates the submitted list
+  and re-echoes the canonical stored value as `{source: Source}`. Editing the list never
+  changes `origin` or a route chain. Manual add/remove and the guarded-removal distinction
+  remain unchanged. This all-inventory editing scope is an owner-vetoable orchestrator
+  ruling dated 2026-08-08: discovery endpoints commonly return only ids, so a
+  discovered-only immutable list would leave the capability permanently undeclarable.
 
 The user-selected `protocol` is authoritative. Neither the connectivity test nor model
 discovery guesses, changes, or backfills it; a wrong choice is reported as the resulting
@@ -350,6 +354,8 @@ policy:
      from inventory. A fixed-menu Hub Source resolves a native-vendor built-in alias
      only against that Source's own inventory. Every other case requires advertised
      exact model identity. Follow never invents a foreign-vendor substitution.
+   - Whenever a sanctioned native alias is admitted under either policy, retain the
+     concrete inventory entry that proved the alias as that hop's capability evidence.
    - Annotate every emitted hop from the current Source inventory, source-global
      health, and current process availability. `healthy` and an elapsed cooldown are
      health-ready; `needs_action`, `error`, an unelapsed cooldown, unavailable native
@@ -368,9 +374,14 @@ policy:
    predicates. Never trust the snapshot used to construct the chain. If an earlier
    hop placed a Source into cooldown, every later hop naming that same Source is
    skipped immediately unless it has become runnable again. For an attempted hop,
-   read the canonical inventory entry and pass its stored `reasoning_effort` to the
-   adapter; `null` omits the override. Parameter, protocol, and tool-compatibility
-   errors surface without fallback. A 401 refreshes once and retries that hop once.
+   resolve the hop to its phase-1 capability-evidence inventory entry: the literal
+   entry for an exact model id, or the concrete entry retained for a sanctioned native
+   alias. If the turn-requested reasoning effort is an exact member of that entry's
+   `reasoning_efforts`, pass that one value to the adapter; otherwise pass `null` and
+   let the upstream use its own default. The list never selects a value, and resolution
+   performs no approximate mapping or downgrade fallback. Parameter, protocol, and
+   tool-compatibility errors surface without fallback. A 401 refreshes once and retries
+   that hop once.
    Before output starts, explicit quota exhaustion, 429, transient 5xx, or network
    failure sets the classified source-global cooldown and continues to the next hop.
    After any output starts, never replay the request: record the interrupted turn and
@@ -952,9 +963,11 @@ Source. An empty v4 chain follows the same comparison rule. No v5 eligibility or
 change is allowed to alter the baseline being compared.
 
 The same config conversion preserves every v4 Source model entry. It renames required
-`provenance` to `origin` without changing `discovered`/`manual`, initializes a missing
-`reasoning_effort` to `null`, and preserves optional `display_name` and `discovered_at`
-exactly. A manual entry's `discovered_at` remains `null`; no model entry is dropped.
+`provenance` to `origin` without changing `discovered`/`manual` and converts the legacy
+scalar effort capability into required `reasoning_efforts`: missing or `null` becomes
+`[]`, while `"x"` becomes `["x"]`. Optional `display_name` and `discovered_at` are
+preserved exactly. A manual entry's `discovered_at` remains `null`; no model entry is
+dropped.
 
 The upgrade also converts the two persisted diagnostic stores before publishing v5.
 Every attempt slot in `model_hub_turn_provenance.json` replaces `via_mapping` with the
@@ -1057,8 +1070,9 @@ Required interaction rules:
 - Add Source and Source details both expose the §4.1 connectivity test and compatible
   model discovery. Results stay in the current flow and use compact status plus an
   info affordance for explanation; the page does not grow permanent instructional
-  paragraphs. Manual models expose their per-model `reasoning_effort` value beside the
-  exact id.
+  paragraphs. Every inventory model exposes an editable per-model `reasoning_efforts`
+  list beside the exact id. The list has no default item or selected state; the control
+  form follows the owner-approved `design.pen` baseline and is not prescribed here.
 - Compatibility detail for converted or cross-vendor supply stays behind a compact
   info affordance: functionality is supported while reasoning content may degrade.
   There is no per-hop warning or alert treatment.
@@ -1174,8 +1188,8 @@ one pinned hop it receives.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 - No v3 Configure Agents module (§5), runtime plugin UI, or GA scope beyond the
-  three directions recorded in §10. Source-level manual-model `reasoning_effort` is
-  in scope and does not create Agent-definition configuration.
+  three directions recorded in §10. Source-inventory `reasoning_efforts` capability
+  lists are in scope and do not create Agent-definition configuration.
 
 ## 10. Open items and GA research directions
 
@@ -1226,8 +1240,9 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] §4.1 defaults Claude to `native_cli` and ChatGPT to `hub`; explicit hub-held
       Claude is the only branch with a warning, no flag or consent remains, and each
       backend has at most one native Source.
-- [ ] §4.1 defines manual connectivity testing, model discovery, and manual model
-      `reasoning_effort`; protocol choice stays authoritative and unchanged.
+- [ ] §4.1 defines manual connectivity testing, model discovery, manual model
+      add/remove, and editable `reasoning_efforts` lists for every inventory entry;
+      protocol choice stays authoritative and unchanged.
 - [ ] §4.2 keeps own-vendor subscription supply first in the vendor-recommended form
       and never reorders a custom backend order or custom model chain.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
