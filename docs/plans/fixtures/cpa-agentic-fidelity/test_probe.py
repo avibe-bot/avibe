@@ -39,6 +39,22 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
 
+    def test_responses_stream_rejects_done_argument_snapshot_mismatch(self) -> None:
+        result = probe.TransportResult(
+            200,
+            None,
+            [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
+                {"kind": "event", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"city":"Shanghai"}'}},
+                {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Paris"}'}}},
+                {"kind": "event", "event": {"type": "response.completed", "response": {"status": "completed", "output": []}}},
+            ],
+            False,
+            0,
+        )
+        turn = probe._parse_responses_stream(result)
+        self.assertIn("stream_item_snapshot_mismatch", turn.parse_errors)
+
     def test_responses_stream_does_not_trust_terminal_snapshot_arguments(self) -> None:
         result = probe.TransportResult(
             200,
@@ -94,6 +110,15 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
+
+    def test_chat_stream_allows_sparse_continuation_type(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '{"city":'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": '"Shanghai"}'}}]}}]}},
+        ]
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
+        self.assertNotIn("tool_call_type_invalid", turn.parse_errors)
 
     def test_chat_stream_requires_argument_fragments(self) -> None:
         events = [
@@ -202,6 +227,14 @@ class ProbeParserTests(unittest.TestCase):
         ]
         self.assertFalse(probe._stream_order_ok("chat", events))
 
+    def test_chat_stream_allows_indices_to_restart_each_chunk(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertTrue(probe._stream_order_ok("chat", events))
+
     def test_responses_stream_rejects_text_after_item_completion(self) -> None:
         events = [
             {"kind": "event", "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message"}}},
@@ -244,6 +277,22 @@ class ProbeParserTests(unittest.TestCase):
             {"content": [{"type": "thinking", "thinking": "internal"}, {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Shanghai"}}], "stop_reason": "tool_use"}
         )
         self.assertIn("thinking_signature_missing", turn.parse_errors)
+
+    def test_anthropic_response_requires_message_envelope(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {"type": "error", "role": "user", "content": [], "stop_reason": "end_turn"}
+        )
+        self.assertIn("message_type_invalid", turn.parse_errors)
+        self.assertIn("message_role_invalid", turn.parse_errors)
+
+    def test_anthropic_stream_requires_message_start_envelope(self) -> None:
+        events = [
+            {"kind": "event", "type": "message_start", "event": {"type": "message_start", "message": {"type": "error", "role": "user"}}},
+            {"kind": "event", "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("message_type_invalid", turn.parse_errors)
+        self.assertIn("message_role_invalid", turn.parse_errors)
 
     def test_anthropic_stream_requires_text_delta_for_final_text(self) -> None:
         events = [

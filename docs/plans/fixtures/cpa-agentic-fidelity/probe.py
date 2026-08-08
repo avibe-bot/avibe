@@ -455,7 +455,6 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             elif event_type in {"error", "response.failed", "response.incomplete"}:
                 return False
         return terminal is not None and terminal == len(events) - 1
-    last_tool_index = -1
     terminal = None
     done_seen = False
     for index, item in enumerate(events):
@@ -484,13 +483,14 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             delta = choice.get("delta", {})
             if not isinstance(delta, dict):
                 return False
+            chunk_last_tool_index = -1
             for call in delta.get("tool_calls", []) if isinstance(delta, dict) else []:
                 tool_index = _stream_index(call.get("index"))
                 if tool_index is None:
                     return False
-                if tool_index < last_tool_index:
+                if tool_index < chunk_last_tool_index:
                     return False
-                last_tool_index = max(last_tool_index, tool_index)
+                chunk_last_tool_index = tool_index
             if choice.get("finish_reason") is not None:
                 terminal = index
         elif usage is not None and not isinstance(usage, dict):
@@ -644,6 +644,13 @@ def _reasoning_item_has_signal(item: dict[str, Any]) -> bool:
 
 def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
+    if not isinstance(document, dict):
+        errors.append("message_envelope_invalid")
+        document = {}
+    if document.get("type") != "message":
+        errors.append("message_type_invalid")
+    if document.get("role") != "assistant":
+        errors.append("message_role_invalid")
     content = document.get("content") if isinstance(document, dict) else None
     if not isinstance(content, list):
         errors.append("content_missing")
@@ -691,6 +698,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     stop_reason: str | None = None
     errors: list[str] = []
     text_delta_count = 0
+    envelope: dict[str, Any] = {}
     for item in result.events:
         event = item.get("event", {})
         event_type = event.get("type")
@@ -748,6 +756,12 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                     block["signature"] = block.get("signature", "") + signature
             else:
                 errors.append("stream_delta_type_invalid")
+        elif event_type == "message_start":
+            message = event.get("message")
+            if not isinstance(message, dict):
+                errors.append("message_envelope_invalid")
+            else:
+                envelope = {"type": message.get("type"), "role": message.get("role")}
         elif event_type == "message_delta":
             stop_reason = event.get("delta", {}).get("stop_reason")
     content: list[dict[str, Any]] = []
@@ -759,7 +773,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
             if error:
                 errors.append(error)
         content.append(block)
-    document = {"content": content, "stop_reason": stop_reason}
+    document = {"type": envelope.get("type"), "role": envelope.get("role"), "content": content, "stop_reason": stop_reason}
     turn = _parse_anthropic_document(
         document,
         event_count=len(result.events),
@@ -887,6 +901,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     for field in ("id", "type", "call_id", "name")
                 ):
                     errors.append("stream_item_snapshot_mismatch")
+                if key in args_by_item and isinstance(raw.get("arguments"), str):
+                    delta_arguments, delta_error = _parse_arguments(args_by_item[key])
+                    done_arguments, done_error = _parse_arguments(raw["arguments"])
+                    if delta_error or done_error or delta_arguments != done_arguments:
+                        errors.append("stream_item_snapshot_mismatch")
                 output[key] = copy.deepcopy(raw)
                 if raw.get("type") == "reasoning" and _reasoning_item_has_signal(raw):
                     reasoning = True
@@ -1043,6 +1062,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     usage: dict[str, Any] | None = None
     errors: list[str] = []
     argument_fragment_indexes: set[int] = set()
+    tool_type_seen: set[int] = set()
     assistant_role_seen = False
     for item in result.events:
         event = item.get("event", {})
@@ -1079,7 +1099,13 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                 errors.append("stream_index_invalid")
                 continue
             call = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-            if raw.get("type") != "function":
+            raw_type = raw.get("type")
+            if index not in tool_type_seen:
+                if raw_type != "function":
+                    errors.append("tool_call_type_invalid")
+                    continue
+                tool_type_seen.add(index)
+            elif raw_type not in {None, "function"}:
                 errors.append("tool_call_type_invalid")
                 continue
             if "id" in raw:
