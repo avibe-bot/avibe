@@ -1924,6 +1924,9 @@ class MemoryStore:
                 state.flush_state != "manual_required"
                 or record.outcome in {"unknown", "manual_required"}
                 or manual_resolution
+                # Migration replay is ordered by legacy observation time. A
+                # newer definitive observation must replace an older ambiguity.
+                or record.source == "migration"
             )
         )
         if not projection_allowed:
@@ -1939,6 +1942,8 @@ class MemoryStore:
             if record.confirmed_watermark_ms is not None or record.watermark_after is not None
             else state.watermark
         )
+        if manual_resolution and record.operation_kind == "flush":
+            self._reconcile_manual_flush_rows_in_connection(conn, record)
         if record.outcome in {"unknown", "manual_required"}:
             conn.execute(
                 """
@@ -2021,7 +2026,8 @@ class MemoryStore:
                     """
                     UPDATE memory_session_flush_state
                     SET flush_state = 'settled', due_at = NULL,
-                        next_attempt_at = NULL, watermark = ?, updated_at = ?
+                        next_attempt_at = NULL, fence_owner = NULL,
+                        fence_acquired_at = NULL, watermark = ?, updated_at = ?
                     WHERE provider_session_ref = ? AND generation = ?
                     """,
                     (
@@ -2112,6 +2118,47 @@ class MemoryStore:
                 ),
             )
         return True
+
+    def _reconcile_manual_flush_rows_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        record: MemorySettlementRecord,
+    ) -> None:
+        """Make the compatibility queue agree with an audited flush decision."""
+
+        provider_session_ref = record.provider_session_ref.serialize()
+        if record.outcome == "not_committed":
+            conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET flush_observation = 'not_attempted', flush_status = NULL,
+                    flush_error_code = NULL, flush_request_id = NULL,
+                    flush_observed_at = NULL
+                WHERE provider_session_ref = ? AND target_generation = ?
+                  AND state = 'delivered'
+                  AND flush_observation IN ('unknown', 'in_flight')
+                """,
+                (provider_session_ref, record.generation),
+            )
+            return
+
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET flush_observation = 'succeeded', flush_status = NULL,
+                flush_error_code = NULL, flush_request_id = ?,
+                flush_observed_at = ?
+            WHERE provider_session_ref = ? AND target_generation = ?
+              AND state = 'delivered'
+              AND flush_observation IN ('unknown', 'in_flight')
+            """,
+            (
+                _bounded_opaque_text(record.request_id),
+                record.observed_at,
+                provider_session_ref,
+                record.generation,
+            ),
+        )
 
     def _first_unsettled_generation_created_at(
         self,
@@ -2212,7 +2259,7 @@ class MemoryStore:
                 for row in group
                 if row["state"] in {"pending", "processing", "delivered"}
             ]
-            ambiguous = any(
+            has_ambiguous_observation = any(
                 row["flush_observation"] in {"in_flight", "unknown"}
                 for row in group
             )
@@ -2224,7 +2271,22 @@ class MemoryStore:
             succeeded = [
                 row for row in group if row["flush_observation"] == "succeeded"
             ]
-            rejected = any(row["flush_observation"] == "rejected" for row in group)
+            now = utc_now_iso()
+            observations: list[tuple[str, str]] = []
+            for observation in {"succeeded", "rejected", "unknown", "in_flight"}:
+                observed_at = max(
+                    (
+                        str(row["flush_observed_at"] or row["completed_at"] or row["created_at"])
+                        for row in group
+                        if row["flush_observation"] == observation
+                    ),
+                    default=now,
+                )
+                if any(row["flush_observation"] == observation for row in group):
+                    observations.append((observed_at, observation))
+            observations.sort(key=lambda item: (item[0], item[1]))
+            latest_observation = observations[-1][1] if observations else None
+            latest_is_ambiguous = latest_observation in {"unknown", "in_flight"}
             first_unflushed_at = min(
                 (str(row["created_at"]) for row in active_rows),
                 default=None,
@@ -2237,11 +2299,14 @@ class MemoryStore:
                 (int(row["provider_timestamp_ms"]) for row in succeeded),
                 default=0,
             )
-            state = "manual_required" if ambiguous else (
-                "due" if needs_flush or rejected else "settled" if succeeded else "not_due"
+            state = "manual_required" if latest_is_ambiguous else (
+                "due"
+                if needs_flush or latest_observation == "rejected"
+                else "settled"
+                if latest_observation == "succeeded"
+                else "not_due"
             )
-            now = utc_now_iso()
-            fence_epoch = 1 if ambiguous else 0
+            fence_epoch = 1 if has_ambiguous_observation else 0
             conn.execute(
                 """
                 INSERT OR IGNORE INTO memory_session_flush_state (
@@ -2264,24 +2329,11 @@ class MemoryStore:
                     state,
                     watermark,
                     fence_epoch,
-                    "memory-migration" if ambiguous else None,
-                    now if ambiguous else None,
+                    "memory-migration" if latest_is_ambiguous else None,
+                    now if latest_is_ambiguous else None,
                     now,
                 ),
             )
-            observations: list[tuple[str, str]] = []
-            for observation in {"succeeded", "rejected", "unknown", "in_flight"}:
-                observed_at = max(
-                    (
-                        str(row["flush_observed_at"] or row["completed_at"] or row["created_at"])
-                        for row in group
-                        if row["flush_observation"] == observation
-                    ),
-                    default=now,
-                )
-                if any(row["flush_observation"] == observation for row in group):
-                    observations.append((observed_at, observation))
-            observations.sort(key=lambda item: (item[0], item[1]))
             for observed_at, observation in observations:
                 outcome = (
                     "manual_required"
