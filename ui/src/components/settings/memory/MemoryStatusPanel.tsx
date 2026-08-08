@@ -196,15 +196,27 @@ const ClearRecoveryCard: React.FC<{
           <Field label={t('memory.processingRecord.field.errorCode')} value={recovery.error_code} />
         ) : null}
       </div>
-      <div className="flex flex-wrap gap-2">
-        <Button size="xs" variant="secondary" disabled={action !== null} onClick={() => onResume(recovery.operation_id)}>
-          {action === 'resume' ? <Loader2 className="animate-spin" /> : <RotateCcw />}
-          {t('memory.processingRecord.clearRecovery.resume')}
-        </Button>
-        <Button size="xs" variant="destructive" disabled={action !== null} onClick={() => onAbort(recovery.operation_id)}>
-          {action === 'abort' ? <Loader2 className="animate-spin" /> : <XCircle />}
-          {t('memory.processingRecord.clearRecovery.abort')}
-        </Button>
+      <div className="grid gap-1.5">
+        <div className="flex flex-wrap gap-2">
+          <Button size="xs" variant="secondary" disabled={action !== null} onClick={() => onResume(recovery.operation_id)}>
+            {action === 'resume' ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+            {t('memory.processingRecord.clearRecovery.resume')}
+          </Button>
+          <Button
+            size="xs"
+            variant="destructive"
+            disabled={action !== null || !recovery.can_abort}
+            onClick={() => onAbort(recovery.operation_id)}
+          >
+            {action === 'abort' ? <Loader2 className="animate-spin" /> : <XCircle />}
+            {t('memory.processingRecord.clearRecovery.abort')}
+          </Button>
+        </div>
+        {!recovery.can_abort ? (
+          <div className="text-[11px] text-muted">
+            {t('memory.processingRecord.clearRecovery.abortUnavailable')}
+          </div>
+        ) : null}
       </div>
     </div>
   );

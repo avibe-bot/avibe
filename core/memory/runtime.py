@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config
@@ -63,6 +63,9 @@ from core.memory.worker import ProcessingEvent
 
 
 logger = logging.getLogger(__name__)
+
+
+_SnapshotIOResult = TypeVar("_SnapshotIOResult")
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
@@ -144,6 +147,7 @@ class MemoryRuntime:
                 operation_guard=self._clear_journal.assert_backup_allowed,
             )
             self._clear_journal.mark_boot_recovery_needed()
+            self._reconcile_completed_clear_snapshots()
         except Exception as exc:
             self._clear_journal_error = exc
             logger.exception("Memory clear journal initialization failed; maintenance is fenced")
@@ -410,6 +414,8 @@ class MemoryRuntime:
         if self._maintenance_open():
             self.module._worker.pause_claims()
             return {"ok": False, "error": "memory_clear_failed"}
+
+        await self._run_snapshot_io(self._reconcile_completed_clear_snapshots)
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -899,7 +905,9 @@ class MemoryRuntime:
                         self.module._clear_active = False
 
     @staticmethod
-    async def _run_snapshot_io(operation: Callable[[], MemorySnapshot]) -> MemorySnapshot:
+    async def _run_snapshot_io(
+        operation: Callable[[], _SnapshotIOResult],
+    ) -> _SnapshotIOResult:
         """Keep the maintenance fence until a cancelled snapshot thread settles."""
 
         task = asyncio.create_task(asyncio.to_thread(operation))
@@ -1000,11 +1008,12 @@ class MemoryRuntime:
                     digests = self._journal_surface_digests(operation.operation_id)
                     if operation.manifest_sha256 is None or operation.snapshot_path is None:
                         raise RuntimeError("clear snapshot is not sealed")
-                    await asyncio.to_thread(
-                        manager.restore,
-                        operation.operation_id,
-                        expected_manifest_sha256=operation.manifest_sha256,
-                        expected_surface_digests=digests,
+                    await self._run_snapshot_io(
+                        lambda: manager.restore(
+                            operation.operation_id,
+                            expected_manifest_sha256=operation.manifest_sha256,
+                            expected_surface_digests=digests,
+                        )
                     )
                     await asyncio.to_thread(self._store.release_clear_fence)
                     for surface in journal.get_surfaces(operation.operation_id):
@@ -1048,12 +1057,16 @@ class MemoryRuntime:
                         expected_revision=operation.revision,
                         execution_token=self._clear_execution_token(operation),
                     ) as permit:
-                        await asyncio.to_thread(manager.discard_unrecorded, permit)
+                        await self._run_snapshot_io(
+                            lambda: manager.discard_unrecorded(permit)
+                        )
                     refreshed = journal.get_operation(operation.operation_id)
                     if refreshed is None:
                         raise RuntimeError("Memory clear operation disappeared")
                     operation = refreshed
-                snapshot = await asyncio.to_thread(manager.create, operation.operation_id)
+                snapshot = await self._run_snapshot_io(
+                    lambda: manager.create(operation.operation_id)
+                )
                 operation = await asyncio.to_thread(
                     journal.record_snapshot,
                     operation.operation_id,
@@ -1134,11 +1147,14 @@ class MemoryRuntime:
     async def _verify_clear_snapshot(self, operation: ClearOperation) -> MemorySnapshot:
         if operation.manifest_sha256 is None or operation.snapshot_path is None:
             raise RuntimeError("clear snapshot is not sealed")
-        return await asyncio.to_thread(
-            self._require_snapshot_manager().verify,
-            operation.operation_id,
-            expected_manifest_sha256=operation.manifest_sha256,
-            expected_surface_digests=self._journal_surface_digests(operation.operation_id),
+        return await self._run_snapshot_io(
+            lambda: self._require_snapshot_manager().verify(
+                operation.operation_id,
+                expected_manifest_sha256=operation.manifest_sha256,
+                expected_surface_digests=self._journal_surface_digests(
+                    operation.operation_id
+                ),
+            )
         )
 
     async def _quiesce_for_clear(self) -> None:
@@ -1184,20 +1200,29 @@ class MemoryRuntime:
 
     async def _finish_clear(self, operation: ClearOperation) -> dict[str, Any]:
         try:
-            await asyncio.to_thread(
-                self._require_snapshot_manager().remove,
-                self._require_clear_journal().completed_snapshot_permit(
-                    operation.operation_id
-                ),
-            )
-        except Exception:
-            logger.warning("Completed Memory clear snapshot could not be removed")
-        await self._resume_after_clear()
+            await self._run_snapshot_io(self._reconcile_completed_clear_snapshots)
+        finally:
+            await self._resume_after_clear()
         return {
             "status": "completed",
             "operation_id": operation.operation_id,
             "epoch": operation.target_epoch,
         }
+
+    def _reconcile_completed_clear_snapshots(self) -> None:
+        """Retry GC whose durable completion preceded snapshot removal."""
+
+        journal = self._require_clear_journal()
+        manager = self._require_snapshot_manager()
+        for permit in journal.completed_snapshot_permits():
+            try:
+                manager.remove(permit)
+            except Exception:
+                logger.warning(
+                    "Completed Memory clear snapshot %s could not be removed",
+                    permit.snapshot_id,
+                    exc_info=True,
+                )
 
     async def _resume_after_clear(self) -> None:
         if not self._config.enabled:
@@ -1228,11 +1253,17 @@ class MemoryRuntime:
         operation = self._open_clear_operation()
         if operation is None:
             return None
+        can_abort = False
+        try:
+            can_abort = self._require_clear_journal().can_abort(operation.operation_id)
+        except Exception:
+            pass
         return {
             "state": operation.state,
             "operation_id": operation.operation_id,
             "occurred_at": operation.updated_at,
             "error_code": operation.closed_error,
+            "can_abort": can_abort,
         }
 
     def _clear_blocked_payload(self) -> dict[str, Any]:

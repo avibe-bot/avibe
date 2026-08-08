@@ -512,6 +512,7 @@ def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
     victim = outside / "victim.txt"
     victim.write_text("outside must survive")
     snapshot_dir = manager.snapshot_path(snapshot.snapshot_id)
+    tombstone = manager.snapshot_root / f".{snapshot.snapshot_id}.gc"
     moved = manager.snapshot_root / "held-remove-race"
     real_scandir = snapshot_module.os.scandir
     swapped = False
@@ -520,8 +521,8 @@ def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
         nonlocal swapped
         if isinstance(path, int) and not swapped:
             swapped = True
-            snapshot_dir.rename(moved)
-            snapshot_dir.symlink_to(outside, target_is_directory=True)
+            tombstone.rename(moved)
+            tombstone.symlink_to(outside, target_is_directory=True)
         return real_scandir(path)
 
     monkeypatch.setattr(snapshot_module.os, "scandir", swap_directory_for_symlink)
@@ -529,6 +530,7 @@ def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
         manager.remove(permit)
 
     assert swapped
+    assert not snapshot_dir.exists()
     assert victim.read_text() == "outside must survive"
 
 
@@ -582,8 +584,59 @@ def test_only_completed_journal_operation_can_authorize_snapshot_removal(tmp_pat
     )
 
     permit = journal.completed_snapshot_permit(operation.operation_id)
+    snapshot_path = manager.snapshot_path(operation.operation_id)
+    tombstone = manager.snapshot_root / f".{operation.operation_id}.gc"
+    manifest_path = snapshot_path / "manifest.json"
+    manifest = manifest_path.read_bytes()
+    manifest_path.write_bytes(b"corrupt")
+    with pytest.raises(MemorySnapshotVerificationError):
+        manager.remove(permit)
+    assert snapshot_path.is_dir()
+    assert not tombstone.exists()
+    manifest_path.write_bytes(manifest)
+
     manager.remove(permit)
-    assert not manager.snapshot_path(operation.operation_id).exists()
+    assert not snapshot_path.exists()
+    assert not tombstone.exists()
+    manager.remove(permit)
+
+
+def test_completed_snapshot_removal_retries_a_partially_deleted_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    queue_connection = _build_all_surfaces(home)
+    journal = MemoryClearJournal(home)
+    manager = MemorySnapshotManager(home)
+    _complete_clear_audit(journal, manager, "remove-retry")
+    queue_connection.close()
+    permit = journal.completed_snapshot_permit("remove-retry")
+    snapshot_path = manager.snapshot_path(permit.snapshot_id)
+    tombstone = manager.snapshot_root / f".{permit.snapshot_id}.gc"
+    real_unlink = snapshot_module.os.unlink
+    interrupted = False
+
+    def interrupt_after_unlink(path, *args, **kwargs):
+        nonlocal interrupted
+        real_unlink(path, *args, **kwargs)
+        if not interrupted:
+            interrupted = True
+            raise OSError("injected tombstone removal failure")
+
+    monkeypatch.setattr(snapshot_module.os, "unlink", interrupt_after_unlink)
+    with pytest.raises(OSError, match="injected tombstone removal failure"):
+        manager.remove(permit)
+
+    assert interrupted
+    assert not snapshot_path.exists()
+    assert tombstone.is_dir()
+
+    monkeypatch.setattr(snapshot_module.os, "unlink", real_unlink)
+    manager.remove(permit)
+
+    assert not tombstone.exists()
+    assert not snapshot_path.exists()
 
 
 def test_preparing_journal_discards_snapshot_published_before_record_and_rebuilds(

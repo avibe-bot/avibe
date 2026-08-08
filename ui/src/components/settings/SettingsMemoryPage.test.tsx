@@ -115,6 +115,23 @@ afterEach(() => {
 });
 
 describe('SettingsMemoryPage Processing Record', () => {
+  it('observes provider health before loading recorder anomalies', async () => {
+    let resolveStatus: ((status: MemoryStatus) => void) | undefined;
+    api.getMemoryStatus.mockReturnValue(
+      new Promise<MemoryStatus>((resolve) => {
+        resolveStatus = resolve;
+      }),
+    );
+
+    renderPage();
+
+    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(1));
+    expect(api.getMemoryFailures).not.toHaveBeenCalled();
+
+    resolveStatus?.(readyStatus());
+    await waitFor(() => expect(api.getMemoryFailures).toHaveBeenCalledTimes(1));
+  });
+
   it('merges status and log into one tab and performs no interval polling', async () => {
     const setInterval = vi.spyOn(window, 'setInterval');
     renderPage();
@@ -183,7 +200,11 @@ describe('SettingsMemoryPage Processing Record', () => {
     api.getMemoryMaintenance.mockResolvedValue({
       status: 'ok',
       data_exists: true,
-      clear_recovery: { operation_id: 'clear-maintenance', state: 'recovery_required' },
+      clear_recovery: {
+        operation_id: 'clear-maintenance',
+        state: 'recovery_required',
+        can_abort: true,
+      },
     });
     renderPage();
 
@@ -199,7 +220,11 @@ describe('SettingsMemoryPage Processing Record', () => {
     api.getMemoryFailures.mockResolvedValue({
       status: 'ok',
       items: [],
-      recovery: { operation_id: 'clear-42', state: 'recovery_required' },
+      recovery: {
+        operation_id: 'clear-42',
+        state: 'recovery_required',
+        can_abort: true,
+      },
     });
     const user = userEvent.setup();
     renderPage();
@@ -219,14 +244,22 @@ describe('SettingsMemoryPage Processing Record', () => {
     api.clearMemory.mockResolvedValue({
       status: 'failed',
       error: 'memory_clear_failed',
-      recovery: { operation_id: 'clear-interrupted', state: 'recovery_needed' },
+      recovery: {
+        operation_id: 'clear-interrupted',
+        state: 'recovery_needed',
+        can_abort: false,
+      },
     });
     api.getMemoryFailures
       .mockResolvedValueOnce({ status: 'ok', items: [], recovery: null })
       .mockResolvedValueOnce({
         status: 'ok',
         items: [],
-        recovery: { operation_id: 'clear-interrupted', state: 'recovery_needed' },
+        recovery: {
+          operation_id: 'clear-interrupted',
+          state: 'recovery_needed',
+          can_abort: false,
+        },
       });
     const user = userEvent.setup();
     renderPage();

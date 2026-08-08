@@ -486,19 +486,30 @@ class MemorySnapshotManager:
         ):
             raise TypeError("Memory snapshot removal requires a completed journal permit")
         directory = self.snapshot_path(permit.snapshot_id)
+        tombstone = self._snapshot_root / f".{permit.snapshot_id}.gc"
         expected_relative = (PurePosixPath(self._snapshot_root_relative) / permit.snapshot_id).as_posix()
         if permit.relative_path != expected_relative:
             raise MemorySnapshotVerificationError("Memory snapshot removal permit path is invalid")
+
+        # A prior removal may have crashed after the verified snapshot was
+        # renamed.  The deterministic tombstone is already authorized by this
+        # permit and can be retried without requiring its partial tree to verify.
+        if _managed_source_info(self._effective_home, tombstone) is not None:
+            _remove_safe_path(self._effective_home, tombstone)
+            _fsync_directory(self._snapshot_root)
+
+        info = _managed_source_info(self._effective_home, directory)
+        if info is None:
+            return
+        _require_directory_private(info, "Memory snapshot directory")
         self.verify(
             permit.snapshot_id,
             expected_manifest_sha256=permit.manifest_sha256,
             expected_surface_digests=dict(permit.surface_digests),
         )
-        info = _managed_source_info(self._effective_home, directory)
-        if info is None:
-            return
-        _require_directory_private(info, "Memory snapshot directory")
-        _remove_safe_path(self._effective_home, directory)
+        os.replace(directory, tombstone)
+        _fsync_directory(self._snapshot_root)
+        _remove_safe_path(self._effective_home, tombstone)
         _fsync_directory(self._snapshot_root)
 
     def discard_unrecorded(self, permit: _PreparingSnapshotDiscardPermit) -> None:

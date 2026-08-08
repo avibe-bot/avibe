@@ -312,52 +312,53 @@ class SessionFlushCoordinator:
             )
             if pending or processing:
                 return
-            submitted_at = _iso(self._current_time())
-            if not await self._store_call(
-                self._store.mark_flush_submission_started,
-                lease,
-                now=submitted_at,
-            ):
-                return
             result: FlushResult
-            try:
-                async with self._write_slots:
-                    result = await asyncio.wait_for(
-                        self._provider.flush(lease.provider_session_ref),
-                        timeout=self._flush_timeout_seconds,
-                    )
-            except asyncio.CancelledError:
-                await asyncio.shield(
-                    self._store_call(
-                        self._store.settle_flush,
+            async with self._write_slots:
+                try:
+                    submitted_at = _iso(self._current_time())
+                    if not await self._store_call(
+                        self._store.mark_flush_submission_started,
                         lease,
-                        FlushUnknown(reason="transport"),
-                        now=_iso(self._current_time()),
-                    )
-                )
-                raise
-            except asyncio.TimeoutError:
-                result = FlushUnknown(reason="timeout")
-            except MemoryProviderSystemFailure as failure:
-                result = (
-                    FlushUnknown(reason="transport")
-                    if failure.ambiguous
-                    else FlushRetryable()
-                )
-            except MemoryProviderFailure as failure:
-                result = (
-                    FlushUnknown(
-                        reason=(
-                            "timeout"
-                            if failure.error == "memory_provider_timeout"
-                            else "transport"
+                        now=submitted_at,
+                    ):
+                        return
+                    try:
+                        result = await asyncio.wait_for(
+                            self._provider.flush(lease.provider_session_ref),
+                            timeout=self._flush_timeout_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        result = FlushUnknown(reason="timeout")
+                    except MemoryProviderSystemFailure as failure:
+                        result = (
+                            FlushUnknown(reason="transport")
+                            if failure.ambiguous
+                            else FlushRetryable()
+                        )
+                    except MemoryProviderFailure as failure:
+                        result = (
+                            FlushUnknown(
+                                reason=(
+                                    "timeout"
+                                    if failure.error == "memory_provider_timeout"
+                                    else "transport"
+                                )
+                            )
+                            if failure.ambiguous
+                            else FlushRetryable()
+                        )
+                    except Exception:
+                        result = FlushUnknown(reason="transport")
+                except asyncio.CancelledError:
+                    await asyncio.shield(
+                        self._store_call(
+                            self._store.settle_flush,
+                            lease,
+                            FlushUnknown(reason="transport"),
+                            now=_iso(self._current_time()),
                         )
                     )
-                    if failure.ambiguous
-                    else FlushRetryable()
-                )
-            except Exception:
-                result = FlushUnknown(reason="transport")
+                    raise
 
             if isinstance(result, FlushRetryable):
                 await self._store_call(

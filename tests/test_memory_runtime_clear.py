@@ -59,6 +59,7 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     assert recovery is not None
     assert recovery.state == "recovery_needed"
     assert recovery.recovery_from_state == "deleting"
+    assert failed["recovery"]["can_abort"] is True
     assert runtime._store.ensure_meta().epoch == pre_epoch + 1
     assert runtime._store.list_queue_rows() == ()
 
@@ -72,6 +73,34 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     assert completed["epoch"] == pre_epoch + 1
     assert runtime._store.ensure_meta().epoch == pre_epoch + 1
     assert journal.get_open_operation() is None
+    await runtime.close()
+
+
+async def test_recovery_payload_disables_abort_before_initial_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    journal = runtime._clear_journal
+    assert journal is not None
+    operation = journal.start(
+        operation_id="incomplete-snapshot",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    recovery = journal.mark_boot_recovery_needed()
+
+    assert recovery is not None
+    maintenance = await runtime.maintenance_payload()
+    assert maintenance["clear_recovery"] == {
+        "state": "recovery_needed",
+        "operation_id": operation.operation_id,
+        "occurred_at": recovery.updated_at,
+        "error_code": "memory_clear_failed",
+        "can_abort": False,
+    }
     await runtime.close()
 
 
@@ -109,6 +138,256 @@ async def test_abort_restores_all_surfaces_after_destructive_work(
     assert restored_meta.epoch == pre_meta.epoch
     assert restored_meta.clear_in_progress is False
     assert len(runtime._store.list_queue_rows()) == 1
+    assert runtime._clear_journal.get_open_operation() is None
+    await runtime.close()
+
+
+async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    manager = runtime._snapshot_manager
+    assert manager is not None
+    original_remove = manager.remove
+    removal_attempts: list[str] = []
+
+    def fail_removal(permit) -> None:
+        if manager.snapshot_path(permit.snapshot_id).exists():
+            removal_attempts.append(permit.snapshot_id)
+            raise OSError("injected snapshot removal failure")
+        original_remove(permit)
+
+    monkeypatch.setattr(manager, "remove", fail_removal)
+    completed = await runtime.clear(operator_ref="user:owner")
+    snapshot_path = manager.snapshot_path(completed["operation_id"])
+
+    assert completed["status"] == "completed"
+    assert removal_attempts == [completed["operation_id"]]
+    assert snapshot_path.is_dir()
+
+    monkeypatch.setattr(manager, "remove", original_remove)
+    assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
+    assert not snapshot_path.exists()
+
+    monkeypatch.setattr(manager, "remove", fail_removal)
+    completed_before_restart = await runtime.clear(operator_ref="user:owner")
+    restart_snapshot_path = manager.snapshot_path(completed_before_restart["operation_id"])
+    assert restart_snapshot_path.is_dir()
+    await runtime.close()
+
+    restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    assert not restart_snapshot_path.exists()
+    assert restarted._clear_journal is not None
+    assert restarted._clear_journal.get_open_operation() is None
+    await restarted.close()
+
+
+async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fences(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_create = MemorySnapshotManager.create
+
+    def blocking_create(manager: MemorySnapshotManager, snapshot_id: str | None = None):
+        if manager is runtime._snapshot_manager:
+            started.set()
+            assert release.wait(2)
+        try:
+            return original_create(manager, snapshot_id)
+        finally:
+            if manager is runtime._snapshot_manager:
+                finished.set()
+
+    monkeypatch.setattr(MemorySnapshotManager, "create", blocking_create)
+    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    assert await asyncio.to_thread(started.wait, 1)
+    operation = runtime._clear_journal.get_open_operation()
+    assert operation is not None
+
+    clearing.cancel()
+    await asyncio.sleep(0)
+
+    assert clearing.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    resuming = asyncio.create_task(
+        runtime.resume_clear(operation.operation_id, operator_ref="user:owner")
+    )
+    await asyncio.sleep(0)
+    assert resuming.done() is False
+    resuming.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await resuming
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await clearing
+
+    assert finished.is_set()
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.state == "recovery_needed"
+    assert recovery.recovery_from_state == "preparing"
+
+    discard_started = threading.Event()
+    discard_release = threading.Event()
+    discard_finished = threading.Event()
+    original_discard = MemorySnapshotManager.discard_unrecorded
+
+    def blocking_discard(manager: MemorySnapshotManager, permit) -> None:
+        if manager is runtime._snapshot_manager:
+            discard_started.set()
+            assert discard_release.wait(2)
+        try:
+            original_discard(manager, permit)
+        finally:
+            if manager is runtime._snapshot_manager:
+                discard_finished.set()
+
+    monkeypatch.setattr(MemorySnapshotManager, "discard_unrecorded", blocking_discard)
+    resuming = asyncio.create_task(
+        runtime.resume_clear(recovery.operation_id, operator_ref="user:owner")
+    )
+    assert await asyncio.to_thread(discard_started.wait, 1)
+    resuming.cancel()
+    await asyncio.sleep(0)
+    assert resuming.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+
+    discard_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await resuming
+
+    assert discard_finished.is_set()
+    pending = runtime._clear_journal.get_open_operation()
+    assert pending is not None
+    assert pending.state == "recovery_needed"
+    assert pending.resolution == "resume"
+
+    monkeypatch.setattr(MemorySnapshotManager, "discard_unrecorded", original_discard)
+    completed = await runtime.resume_clear(pending.operation_id, operator_ref="user:owner")
+    assert completed["status"] == "completed"
+    await runtime.close()
+
+
+async def test_cancelled_clear_waits_for_snapshot_verification_before_releasing_fences(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_verify = MemorySnapshotManager.verify
+
+    def blocking_verify(manager: MemorySnapshotManager, snapshot_id: str, **kwargs):
+        if manager is runtime._snapshot_manager:
+            started.set()
+            assert release.wait(2)
+        try:
+            return original_verify(manager, snapshot_id, **kwargs)
+        finally:
+            if manager is runtime._snapshot_manager:
+                finished.set()
+
+    monkeypatch.setattr(MemorySnapshotManager, "verify", blocking_verify)
+    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    clearing.cancel()
+    await asyncio.sleep(0)
+
+    assert clearing.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await clearing
+
+    assert finished.is_set()
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.state == "recovery_needed"
+    assert recovery.recovery_from_state == "prepared"
+
+    monkeypatch.setattr(MemorySnapshotManager, "verify", original_verify)
+    completed = await runtime.resume_clear(recovery.operation_id, operator_ref="user:owner")
+    assert completed["status"] == "completed"
+    await runtime.close()
+
+
+async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    _enqueue(runtime, "cancel-abort-source")
+    original_delete = runtime._delete_clear_surface
+
+    async def interrupt_provider(surface, *, target_epoch):
+        if surface.surface == "provider":
+            raise OSError("injected provider delete failure")
+        await original_delete(surface, target_epoch=target_epoch)
+
+    monkeypatch.setattr(runtime, "_delete_clear_surface", interrupt_provider)
+    failed = await runtime.clear(operator_ref="user:owner")
+    recovery = runtime._clear_journal.get_open_operation()
+    assert failed["status"] == "failed"
+    assert recovery is not None
+    monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_restore = MemorySnapshotManager.restore
+
+    def blocking_restore(manager: MemorySnapshotManager, snapshot_id: str, **kwargs):
+        if manager is runtime._snapshot_manager:
+            started.set()
+            assert release.wait(2)
+        try:
+            return original_restore(manager, snapshot_id, **kwargs)
+        finally:
+            if manager is runtime._snapshot_manager:
+                finished.set()
+
+    monkeypatch.setattr(MemorySnapshotManager, "restore", blocking_restore)
+    aborting = asyncio.create_task(
+        runtime.abort_clear(recovery.operation_id, operator_ref="user:owner")
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    aborting.cancel()
+    await asyncio.sleep(0)
+
+    assert aborting.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await aborting
+
+    assert finished.is_set()
+    pending = runtime._clear_journal.get_open_operation()
+    assert pending is not None
+    assert pending.state == "recovery_needed"
+    assert pending.resolution == "abort"
+    assert pending.execution_token is None
+
+    monkeypatch.setattr(MemorySnapshotManager, "restore", original_restore)
+    aborted = await runtime.abort_clear(pending.operation_id, operator_ref="user:owner")
+    assert aborted["status"] == "aborted"
     assert runtime._clear_journal.get_open_operation() is None
     await runtime.close()
 

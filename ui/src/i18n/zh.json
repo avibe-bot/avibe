@@ -3708,6 +3708,7 @@
         "description": "可从日志记录处继续删除，或中止并恢复已捕获的快照。",
         "resume": "继续清除",
         "abort": "中止并恢复",
+        "abortUnavailable": "初始快照完整后才能中止并恢复。",
         "resumeSuccess": "清除操作已继续并完成。",
         "abortSuccess": "清除操作已中止，快照已恢复。",
         "actionFailed": "无法更新清除恢复状态。",

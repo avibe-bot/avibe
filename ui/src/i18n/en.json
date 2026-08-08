@@ -3708,6 +3708,7 @@
         "description": "Resume deletion from its journal, or abort and restore the captured snapshot.",
         "resume": "Resume Clear",
         "abort": "Abort and restore",
+        "abortUnavailable": "Abort is unavailable until the initial snapshot is complete.",
         "resumeSuccess": "Clear resumed and completed.",
         "abortSuccess": "Clear aborted and the snapshot was restored.",
         "actionFailed": "Couldn't update Clear recovery.",

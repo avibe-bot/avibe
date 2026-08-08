@@ -532,6 +532,77 @@ def test_shutdown_does_not_initiate_a_provider_flush(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_cancelled_flush_waiting_for_write_slot_remains_retryable(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        first_flush_entered = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def flush(self, session_ref):
+                self.flushes.append(session_ref)
+                if session_ref == first.provider_session_ref:
+                    first_flush_entered.set()
+                    await asyncio.Event().wait()
+                return FlushSucceeded("flush", "extracted")
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            max_concurrent_writes=1,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        first = _enqueue(store, "first", session="first")
+        waiting = _enqueue(store, "waiting", session="waiting")
+        assert await worker.drain(max_rows=2) == 2
+
+        first_call = asyncio.create_task(
+            coordinator.final_flush(first.provider_session_ref, deadline_seconds=5)
+        )
+        await asyncio.wait_for(first_flush_entered.wait(), timeout=1)
+        waiting_call = asyncio.create_task(
+            coordinator.final_flush(waiting.provider_session_ref, deadline_seconds=5)
+        )
+
+        async def wait_for_queued_slot() -> None:
+            while not getattr(coordinator._write_slots, "_waiters", None):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_queued_slot(), timeout=1)
+        await coordinator.prepare_shutdown()
+
+        with pytest.raises(asyncio.CancelledError):
+            await first_call
+        with pytest.raises(asyncio.CancelledError):
+            await waiting_call
+
+        first_state = store.get_session_flush_state(first.provider_session_ref)
+        assert first_state is not None and first_state.state == "manual_required"
+        waiting_state = store.get_session_flush_state(waiting.provider_session_ref)
+        assert waiting_state is not None
+        assert waiting_state.state == "due"
+        assert waiting_state.submission_started_at is None
+        assert provider.flushes == [first.provider_session_ref]
+
+        coordinator.resume()
+        assert await coordinator.final_flush(
+            waiting.provider_session_ref,
+            deadline_seconds=1,
+        )
+        assert provider.flushes == [
+            first.provider_session_ref,
+            waiting.provider_session_ref,
+        ]
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_error"),
     [

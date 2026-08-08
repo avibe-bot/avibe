@@ -69,6 +69,10 @@ export const SettingsMemoryPage: React.FC = () => {
   const { reload: loadMaintenance } = maintenanceRead;
   const settings = settingsRead.data;
   const status = statusRead.data;
+  const loadProcessingRecord = useCallback(async () => {
+    await loadStatus();
+    await loadFailures();
+  }, [loadFailures, loadStatus]);
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
@@ -97,11 +101,10 @@ export const SettingsMemoryPage: React.FC = () => {
 
   useEffect(() => {
     void loadSettings();
-    void loadStatus();
-    void loadFailures();
+    void loadProcessingRecord();
     void loadMaintenance();
     void loadDependency();
-  }, [loadSettings, loadStatus, loadFailures, loadMaintenance, loadDependency]);
+  }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
     setClearing(true);
@@ -114,17 +117,16 @@ export const SettingsMemoryPage: React.FC = () => {
       if (res.status === 'completed') {
         showToast(t('memory.clear.cleared'), 'success');
         setClearOpen(false);
-        void loadStatus();
-        void loadFailures();
+        void loadProcessingRecord();
         void loadMaintenance();
         void loadSettings();
       } else {
-        void loadFailures();
+        void loadProcessingRecord();
         void loadMaintenance();
         showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
       }
     } catch {
-      void loadFailures();
+      void loadProcessingRecord();
       void loadMaintenance();
       showToast(t('memory.clear.failed'), 'error');
     } finally {
@@ -133,8 +135,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const refreshProcessingRecord = () => {
-    void loadStatus();
-    void loadFailures();
+    void loadProcessingRecord();
     void loadMaintenance();
     setLogRefreshToken((token) => token + 1);
   };
@@ -149,8 +150,7 @@ export const SettingsMemoryPage: React.FC = () => {
         showToast(t(`memory.processingRecord.clearRecovery.${action}Success`), 'success');
         setLogGeneration((generation) => generation + 1);
         setLogSections(null);
-        void loadStatus();
-        void loadFailures();
+        void loadProcessingRecord();
         void loadMaintenance();
         void loadSettings();
       } else {
@@ -169,8 +169,7 @@ export const SettingsMemoryPage: React.FC = () => {
       const res = await api.restartMemoryRuntime();
       if (res.ok) {
         showToast(t('memory.status.engineRestartCompleted'), 'success');
-        void loadStatus();
-        void loadFailures();
+        void loadProcessingRecord();
       } else {
         showToast(memoryErrorMessage(t, res.error), 'error');
       }
@@ -200,7 +199,7 @@ export const SettingsMemoryPage: React.FC = () => {
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
-        void loadStatus();
+        void loadProcessingRecord();
         void loadMaintenance();
         void loadDependency();
       }}

@@ -124,7 +124,7 @@ describe('MemoryStatusPanel', () => {
     render(
       <MemoryStatusPanel
         {...baseProps}
-        recovery={{ operation_id: 'clear-42', state: 'recovery_required' }}
+        recovery={{ operation_id: 'clear-42', state: 'recovery_required', can_abort: true }}
         onResumeClear={onResumeClear}
         onAbortClear={onAbortClear}
       />,
@@ -135,5 +135,26 @@ describe('MemoryStatusPanel', () => {
 
     expect(onResumeClear).toHaveBeenCalledWith('clear-42');
     expect(onAbortClear).toHaveBeenCalledWith('clear-42');
+  });
+
+  it('keeps abort unavailable until the journal verifies a complete snapshot', async () => {
+    const onAbortClear = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{ operation_id: 'clear-incomplete', state: 'recovery_needed', can_abort: false }}
+        onAbortClear={onAbortClear}
+      />,
+    );
+
+    const resume = screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' });
+    const abort = screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' });
+    expect((resume as HTMLButtonElement).disabled).toBe(false);
+    expect((abort as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('memory.processingRecord.clearRecovery.abortUnavailable')).toBeTruthy();
+
+    await user.click(abort);
+    expect(onAbortClear).not.toHaveBeenCalled();
   });
 });

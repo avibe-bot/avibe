@@ -293,6 +293,27 @@ class MemoryClearJournal:
             raise ClearOperationNotFound(identifier)
         return tuple(_surface_from_row(row) for row in rows)
 
+    def can_abort(self, operation_id: str) -> bool:
+        """Report whether the current recovery claim may restore its snapshot."""
+
+        identifier = _validated_operation_id(operation_id)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM clear_operation WHERE operation_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                raise ClearOperationNotFound(identifier)
+            return bool(
+                row["state"] == "recovery_needed"
+                and row["execution_token"] is None
+                and row["resolution"] != "resume"
+                and self._abort_snapshot_complete(connection, row)
+            )
+        finally:
+            connection.close()
+
     def get_events(self, operation_id: str) -> tuple[ClearEvent, ...]:
         identifier = _validated_operation_id(operation_id)
         connection = self._connect()
@@ -334,6 +355,25 @@ class MemoryClearJournal:
             surface_digests=tuple(
                 (surface.relative_path, surface.snapshot_digest) for surface in surfaces
             ),
+        )
+
+    def completed_snapshot_permits(self) -> tuple[_CompletedSnapshotPermit, ...]:
+        """Return durable GC work left by every completed clear."""
+
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT operation_id FROM clear_operation
+                WHERE state = 'completed'
+                ORDER BY terminal_at, operation_id
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(
+            self.completed_snapshot_permit(row["operation_id"])
+            for row in rows
         )
 
     def record_snapshot(
@@ -848,23 +888,7 @@ class MemoryClearJournal:
             row = self._recovery_claim_row(connection, identifier, actor, expected_revision)
             if row["resolution"] == "resume":
                 raise ClearTransitionError("a resume decision cannot be changed to abort")
-            incomplete = connection.execute(
-                """
-                SELECT COUNT(*) FROM clear_surface
-                WHERE operation_id = ? AND (
-                    state NOT IN ('snapshotted', 'deleted', 'restored') OR
-                    present IS NULL OR
-                    (present = 1 AND (
-                        pre_clear_digest IS NULL OR snapshot_digest IS NULL
-                    )) OR
-                    (present = 0 AND (
-                        pre_clear_digest IS NOT NULL OR snapshot_digest IS NOT NULL
-                    ))
-                )
-                """,
-                (identifier,),
-            ).fetchone()[0]
-            if incomplete or row["snapshot_path"] is None or row["manifest_sha256"] is None:
+            if not self._abort_snapshot_complete(connection, row):
                 raise ClearTransitionError("abort requires a complete verified Memory snapshot")
             now = _utc_now()
             revision = row["revision"] + 1
@@ -1150,6 +1174,38 @@ class MemoryClearJournal:
         if row["operator_ref"] != operator_ref:
             raise ClearOperationCASMismatch("Memory clear operator does not own this operation")
         return row
+
+    @staticmethod
+    def _abort_snapshot_complete(
+        connection: sqlite3.Connection,
+        operation: sqlite3.Row,
+    ) -> bool:
+        if operation["snapshot_path"] is None or operation["manifest_sha256"] is None:
+            return False
+        summary = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS surface_count,
+                COUNT(CASE WHEN (
+                    state NOT IN ('snapshotted', 'deleted', 'restored') OR
+                    present IS NULL OR
+                    (present = 1 AND (
+                        pre_clear_digest IS NULL OR snapshot_digest IS NULL
+                    )) OR
+                    (present = 0 AND (
+                        pre_clear_digest IS NOT NULL OR snapshot_digest IS NOT NULL
+                    ))
+                ) THEN 1 END) AS invalid_count
+            FROM clear_surface
+            WHERE operation_id = ?
+            """,
+            (operation["operation_id"],),
+        ).fetchone()
+        return bool(
+            summary is not None
+            and summary["surface_count"] == len(_SURFACE_NAMES)
+            and summary["invalid_count"] == 0
+        )
 
     def _operation_transition(
         self,
