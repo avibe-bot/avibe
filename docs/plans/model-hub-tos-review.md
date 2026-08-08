@@ -331,3 +331,90 @@ cross-vendor, cn-sub)
   Re-verify §2.1/§3.1 language and the §7 architectural conclusion **immediately before**
   enabling any subscription flow default-on. This memo gates *defaults*, per impl plan §4; the
   build may proceed on API-key paths in parallel.
+
+---
+
+## 12. Owner addendum — 2026-08-07
+
+This dated product ruling supersedes the parts of §8 recommendations **#1** and **#5**
+that would make API-key-only supply or native-client binding a blanket restriction on
+Hub-held subscriptions. The preceding research, evidence, and original recommendations
+remain intact as the historical risk record; they are not product gates where this
+addendum differs.
+
+The recommended and default subscription path is native: Claude stays in Claude Code's
+local login and ChatGPT stays in Codex's local login. Native supply leads that backend's
+recommended Follow resolution. A Custom chain remains authoritative and may put a Hub
+hop first with no hidden native pre-pass. When the leading native hop reports quota
+exhaustion or cooldown before any output starts, the same turn automatically continues
+to the next runnable hop in that chain. A later native hop remains native; selecting Hub
+is the Gateway takeover. If native output has already streamed, the interrupted turn
+ends without retry and the next turn selects the next runnable candidate while native
+remains cooling. After native supply recovers, subsequent Follow turns return to it
+automatically.
+
+Users may explicitly add either a Claude or ChatGPT subscription as a Hub-held Source.
+Once added, that Source may supply any configured backend and may appear in a
+cross-vendor per-model route chain. Native subscription origins remain bound to their
+own client; this restriction does not apply to Hub-held Sources. The
+`subscription_hub_experimental` flag and per-Source consent mechanism are retired.
+
+The only subscription-routing warning appears when a user explicitly adds a Claude
+subscription as a Hub-held Source. It must state that Anthropic explicitly prohibits
+this use, enforces server-side blocks, real account bans have occurred, and the path may
+fail intermittently. It is informational, not a consent gate. No warning appears for
+Claude native login, any ChatGPT path, automatic Gateway takeover, automatic return to
+native, or cross-vendor routing.
+
+## 13. Owner addendum — 2026-08-07 afternoon (amendment #2)
+
+This later ruling supersedes §12 where they differ and, for product behavior, all
+conflicting portions of §8 recommendations **#1 through #5**. The original memo,
+evidence, risk matrix, and recommendation text remain unchanged as historical research;
+they do not override this addendum. Recommendation #1's API-key support remains valid,
+but it is not an API-key-only product gate. Recommendations #2–#5 no longer make
+Claude Direct-only, gate ChatGPT behind consent, require an experimental flag, or bind
+Hub-held subscription credentials to their native client.
+
+Subscription custody is vendor-specific:
+
+- Claude subscriptions recommend and default to Claude Code's native local login.
+  Adding Claude as a Hub-held Source is optional and shows the sole factual warning:
+  Anthropic explicitly prohibits this use, enforces server-side blocks, real account
+  bans have occurred, and the path may fail intermittently.
+- ChatGPT subscriptions recommend and default to a Hub-held Source. Native Codex login
+  remains supported but is not recommended and is not the default add-flow guidance.
+  The owner bases this product recommendation on Codex OAuth supporting login from
+  third-party applications. No warning or consent prompt appears for either ChatGPT
+  path.
+- Any Hub-held subscription may serve any configured backend and may join a
+  cross-vendor Custom chain. Native credentials remain usable only by their sanctioned
+  client. Neither `subscription_hub_experimental` nor per-Source consent survives.
+
+When a native subscription leads the effective chain, pre-stream quota exhaustion or
+cooldown advances to the next runnable chain hop regardless of channel; after streamed
+output begins, the turn is not replayed. A later native hop remains native, while the
+first selected Hub hop is the Gateway takeover. The first such native-to-Gateway
+takeover in a conversation may emit one lightweight informational notice when the default-on
+`native_takeover_notice_enabled` setting is enabled. This is active-conversation copy,
+not a warning, risk prompt, resolution-event delivery, or proactive push system; the
+2026-07-29 proactive-push cut remains in force.
+
+## 14. Owner addendum — 2026-08-08 (amendment #3)
+
+This ruling supersedes §13's successful-takeover notice and setting, while retaining
+its vendor-specific subscription custody recommendation and every other routing rule.
+No automatic native-to-Gateway takeover emits a conversation message, and
+`native_takeover_notice_enabled` does not enter the v5 contract.
+
+The rationale matches the 2026-07-29 proactive-push cut and the ruling that provenance
+is a debug affordance: model supply should feel like tap water or air. A user stays
+focused on the current task rather than supplier identity, switching, or remaining
+balance. The Model Gateway and Usage pages are the pull surfaces for experts who choose
+to inspect the takeover badge, connector state, recent-switch record, and usage.
+
+This silence applies only to a successful handoff. If every candidate is unavailable,
+the turn still reports the existing truthful failure; if streamed output prevents a
+transparent retry, the existing retry copy remains. Page state and recorded switching
+evidence also remain. This amendment removes a message and setting, not routing,
+failure reporting, or observability.
