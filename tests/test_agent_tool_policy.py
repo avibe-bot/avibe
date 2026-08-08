@@ -409,10 +409,17 @@ def test_native_query_boundary_hook_is_wired(monkeypatch):
     monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
     monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
     handler = _handler()
+    captured = []
 
-    hooks = handler._build_claude_tool_policy_hooks()
+    class _Client:
+        async def enqueue_native_prompt_boundary(self, *, session_id=None):
+            captured.append(session_id)
+
+    client_ref = {"client": _Client()}
+    hooks = handler._build_claude_tool_policy_hooks(client_ref)
     callback = hooks["UserPromptSubmit"][0].hooks[0]
-    assert asyncio.run(callback({}, None, None)) == {}
+    assert asyncio.run(callback({"session_id": "session-1"}, None, None)) == {}
+    assert captured == ["session-1"]
 
 
 def test_older_sdk_falls_back_to_a_name_level_deny_list(monkeypatch):

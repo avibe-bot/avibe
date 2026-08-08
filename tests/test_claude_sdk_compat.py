@@ -2,6 +2,7 @@ import asyncio
 import builtins
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +51,33 @@ def test_receive_messages_skips_unknown_types_returning_none():
     messages = asyncio.run(_collect_messages([{"type": "mystery_event"}]))
 
     assert messages == []
+
+
+@requires_claude_sdk
+def test_native_prompt_boundary_uses_the_ordered_sdk_message_stream():
+    from claude_agent_sdk._internal.message_parser import parse_message
+
+    sent = []
+
+    class _Sender:
+        async def send(self, message):
+            sent.append(message)
+
+    client = compat.ClaudeSDKClient()
+    client._query = SimpleNamespace(_message_send=_Sender())
+
+    assert client.supports_native_prompt_boundary() is True
+    asyncio.run(client.enqueue_native_prompt_boundary(session_id="session-1"))
+
+    assert len(sent) == 1
+    assert sent[0]["type"] == "system"
+    assert sent[0]["subtype"] == "hook_started"
+    assert sent[0]["hook_event"] == "UserPromptSubmit"
+    assert sent[0]["session_id"] == "session-1"
+    assert sent[0]["avibe_native_prompt_boundary"] is True
+    parsed = parse_message(sent[0])
+    assert parsed.__class__.__name__ == "HookEventMessage"
+    assert parsed.hook_event_name == "UserPromptSubmit"
 
 
 @requires_claude_sdk
