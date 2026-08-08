@@ -41,6 +41,13 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** The transcript message that started the turn which created a request. */
+export function vaultRequestSourceMessageId(request: VaultRequest): string | null {
+  const requester = record(request.requester);
+  const messageId = requester.message_id;
+  return typeof messageId === 'string' && messageId.trim() ? messageId : null;
+}
+
 function sameRequestTurn(request: VaultRequest, message: WorkbenchMessage): boolean {
   const requester = record(request.requester);
   const metadata = record(message.metadata);
@@ -64,6 +71,28 @@ function inferReplyWithinTurn(
     if (isAgentReply(message)) return message;
   }
   return undefined;
+}
+
+function inferReplyFromSourceMessage(
+  messages: WorkbenchMessage[],
+  sourceMessageId: string,
+  requestTime: number,
+): WorkbenchMessage | undefined {
+  const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
+  if (sourceIndex < 0) return undefined;
+  let replyBeforeRequest: WorkbenchMessage | undefined;
+
+  for (const message of messages.slice(sourceIndex + 1)) {
+    // A later input starts a different turn, so a reply after it cannot own this request.
+    if (isInputTurn(message)) return undefined;
+    if (!isAgentReply(message)) continue;
+    if (Number.isNaN(requestTime) || messageOrderTimeMs(message) >= requestTime) return message;
+    // Some legacy request rows point at an older input even though the request
+    // was persisted after that turn's reply. Keep it as a fallback only when
+    // the source turn never crosses another input boundary.
+    replyBeforeRequest ??= message;
+  }
+  return replyBeforeRequest;
 }
 
 /** Attach provision requests to the Agent reply that announced them.
@@ -94,13 +123,16 @@ export function placeVaultProvisionRequests(
 
     const requestTime = timestampOrderTimeMs(request.created_at);
     const sameTurn = agentMessages.find((message) => sameRequestTurn(request, message));
+    // The request row can be written after the Agent reply has already been
+    // persisted, so its creation timestamp is not a reliable turn boundary.
+    // Newer requesters carry the input message id; use that identity first.
+    const fromSource = vaultRequestSourceMessageId(request);
     // Do not guess when the request predates the retained message window: its
     // real owner may have been trimmed, and attaching it to the first visible
     // later reply would move the card to an unrelated turn.
     const windowCoversRequest = Number.isNaN(firstLoadedTime) || firstLoadedTime <= requestTime;
-    const inferred = sameTurn ?? (Number.isNaN(requestTime) || !windowCoversRequest
-      ? undefined
-      : inferReplyWithinTurn(messages, requestTime));
+    const inferred = sameTurn ?? (fromSource ? inferReplyFromSourceMessage(messages, fromSource, requestTime) : undefined)
+      ?? (Number.isNaN(requestTime) || !windowCoversRequest ? undefined : inferReplyWithinTurn(messages, requestTime));
     if (inferred) appendRequest(byMessageId, inferred.id, request);
     else unanchored.push(request);
   }

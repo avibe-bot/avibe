@@ -20,7 +20,7 @@ import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessa
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
-import { isVaultApprovalRequest, placeVaultProvisionRequests } from '../../lib/vaultRequestPlacement';
+import { isVaultApprovalRequest, placeVaultProvisionRequests, vaultRequestSourceMessageId } from '../../lib/vaultRequestPlacement';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
 import { downloadFile, fileMeta } from '../../lib/filesApi';
@@ -406,6 +406,7 @@ export const ChatPage: React.FC = () => {
   // can still read the current transcript without listing ``messages`` as a dep.
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const vaultAnchorFetchesRef = useRef<Set<string>>(new Set());
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
@@ -657,6 +658,42 @@ export const ChatPage: React.FC = () => {
   // session's rows into the current one (Codex P2).
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+
+  // Legacy provision rows may be created after their Agent reply and therefore
+  // cannot be placed from `created_at` alone. When the originating user message
+  // is outside the retained tail, fetch a small around-window once so the card
+  // can join its real turn instead of falling back to a fixed-looking footer.
+  useEffect(() => {
+    if (!sessionId || provisionPlacement.unanchored.length === 0) return;
+    const candidates = provisionPlacement.unanchored.filter((request) => vaultRequestSourceMessageId(request));
+    for (const request of candidates) {
+      const sourceMessageId = vaultRequestSourceMessageId(request);
+      if (!sourceMessageId) continue;
+      const fetchKey = `${request.id}:${sourceMessageId}`;
+      if (vaultAnchorFetchesRef.current.has(fetchKey)) continue;
+      vaultAnchorFetchesRef.current.add(fetchKey);
+      void api
+        .listSessionMessages(sessionId, { aroundId: sourceMessageId, limit: 50, cache: false })
+        .then((res) => {
+          if (sessionId !== sessionIdRef.current) return;
+          const incoming = res.messages.filter(isTranscriptMessage);
+          if (incoming.length === 0) return;
+          const combined = mergeById(messagesRef.current, incoming);
+          const placement = placeVaultProvisionRequests(combined, [request]);
+          if (!placement.byMessageId.size) return;
+          setMessages((previous) => {
+            const merged = mergeById(previous, incoming);
+            if (merged.length <= MAX_RETAINED_MESSAGES) return merged;
+            return followingTailRef.current ? merged.slice(-MAX_RETAINED_MESSAGES) : merged.slice(0, MAX_RETAINED_MESSAGES);
+          });
+          setOlderCursor(res.next_before_id ?? null);
+        })
+        .catch(() => {
+          // The footer remains visible if the around-fetch fails; a fresh mount
+          // or explicit history load can still recover the anchored turn.
+        });
+    }
+  }, [api, provisionPlacement.unanchored, sessionId]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1084,6 +1121,7 @@ export const ChatPage: React.FC = () => {
     // loading state until refresh() resolves the new session.
     setSession(null);
     setMessages([]);
+    vaultAnchorFetchesRef.current.clear();
     setOlderCursor(null);
     setHistoricalWindow(false);
     oldestLoadedIdRef.current = null;

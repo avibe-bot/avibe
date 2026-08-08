@@ -159,6 +159,46 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.byMessageId.has('agent-owner')).toBe(false);
   });
 
+  it('uses the requester input message when the request was persisted after its reply', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const reply = message('owner-reply', '2026-07-30T10:01:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [source, reply],
+      [request('late', 'provision', '2026-07-30T10:02:00Z', null, { message_id: source.id })],
+    );
+
+    expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['late']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
+  it('does not cross a later input when resolving from the requester message', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const boundary = message('later-user', '2026-07-30T10:01:00Z', 'user');
+    const reply = message('unrelated-reply', '2026-07-30T10:02:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [source, boundary, reply],
+      [request('late', 'provision', '2026-07-30T10:03:00Z', null, { message_id: source.id })],
+    );
+
+    expect([...placed.byMessageId]).toEqual([]);
+    expect(placed.unanchored.map((item) => item.id)).toEqual(['late']);
+  });
+
+  it('ignores a stale requester message when a later turn owns the request', () => {
+    const source = message('stale-source', '2026-07-30T10:00:00Z', 'user');
+    const oldReply = message('old-reply', '2026-07-30T10:00:10Z', 'agent');
+    const actualSource = message('actual-source', '2026-07-30T10:01:00Z', 'user');
+    const actualReply = message('actual-reply', '2026-07-30T10:02:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [source, oldReply, actualSource, actualReply],
+      [request('late', 'provision', '2026-07-30T10:01:30Z', null, { message_id: source.id })],
+    );
+
+    expect(placed.byMessageId.get(actualReply.id)?.map((item) => item.id)).toEqual(['late']);
+    expect(placed.byMessageId.has(oldReply.id)).toBe(false);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('keeps approvals out of message placement and leaves unmatched provisions visible', () => {
     const placed = placeVaultProvisionRequests(messages, [
       request('approval', 'access', '2026-07-30T10:00:00Z'),
