@@ -41,6 +41,11 @@ import {
   isVoiceControlDisabled,
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
+import {
+  isVoiceRealtimeEnabled,
+  VoiceRealtimeSession,
+  type VoiceRealtimeFinal,
+} from '../../lib/voiceRealtime';
 import { Button } from '../ui/button';
 import {
   MentionEditor,
@@ -94,6 +99,7 @@ const newLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)
 
 type VoiceSegment = VoiceTranscriptionSegment & {
   task: Promise<void>;
+  transcriptionStarted?: boolean;
 };
 
 type VoiceRecordingSession = {
@@ -118,6 +124,10 @@ type VoiceRecordingSession = {
   insertion: VoiceInsertionSnapshot;
   cleanupOutcome?: VoiceCleanupOutcome;
   cleanupElapsedMs?: number;
+  realtime?: VoiceRealtimeSession;
+  realtimeState?: 'connecting' | 'active' | 'failed' | 'finalized';
+  realtimeFirstPreviewAt?: number;
+  realtimeFinalAt?: number;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
@@ -167,26 +177,28 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
   }
 };
 
+const runVoiceFinalization = async (session: VoiceRecordingSession): Promise<void> => {
+  await Promise.all(session.segments.map((segment) => segment.task));
+  if (session.abortController.signal.aborted) {
+    deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+    return;
+  }
+  if (session.captureError !== undefined) {
+    session.transcript = undefined;
+    session.error = session.captureError;
+    session.status = 'failed';
+    return;
+  }
+  await settleVoiceSession(session);
+  if (session.abortController.signal.aborted) {
+    deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+  }
+};
+
 const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
   if (session.finalization) return session.finalization;
   session.status = 'transcribing';
-  session.finalization = (async () => {
-    await Promise.all(session.segments.map((segment) => segment.task));
-    if (session.abortController.signal.aborted) {
-      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
-      return;
-    }
-    if (session.captureError !== undefined) {
-      session.transcript = undefined;
-      session.error = session.captureError;
-      session.status = 'failed';
-      return;
-    }
-    await settleVoiceSession(session);
-    if (session.abortController.signal.aborted) {
-      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
-    }
-  })();
+  session.finalization = runVoiceFinalization(session);
   return session.finalization;
 };
 
@@ -254,6 +266,13 @@ const reportVoiceFinalization = (
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
       : session.stoppedAt - session.startedAt,
+    realtime: session.realtimeState !== undefined,
+    firstPreviewMs: session.realtimeFirstPreviewAt == null || session.startedAt == null
+      ? undefined
+      : session.realtimeFirstPreviewAt - session.startedAt,
+    stopToFinalMs: session.realtimeFinalAt == null || session.stoppedAt == null
+      ? undefined
+      : session.realtimeFinalAt - session.stoppedAt,
     retry: session.retryCount > 0,
   });
   session.reportedAttemptCount = attemptCount;
@@ -273,6 +292,13 @@ const reportVoiceInsertion = (session: VoiceRecordingSession): void => {
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
       : session.stoppedAt - session.startedAt,
+    realtime: session.realtimeState !== undefined,
+    firstPreviewMs: session.realtimeFirstPreviewAt == null || session.startedAt == null
+      ? undefined
+      : session.realtimeFirstPreviewAt - session.startedAt,
+    stopToFinalMs: session.realtimeFinalAt == null || session.stoppedAt == null
+      ? undefined
+      : session.realtimeFinalAt - session.stoppedAt,
     stopToInsertionMs: session.stoppedAt == null
       ? undefined
       : Date.now() - session.stoppedAt,
@@ -388,6 +414,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [realtimePreview, setRealtimePreview] = useState('');
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
@@ -512,6 +539,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
+    setRealtimePreview('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
       sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
@@ -662,7 +690,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       task: Promise.resolve(),
     };
     session.segments.push(segment);
+    if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
+      return;
+    }
+    segment.transcriptionStarted = true;
     segment.task = session.transcriptionQueue.enqueue(segment);
+  };
+
+  const activateHttpFallback = (session: VoiceRecordingSession): void => {
+    if (session.realtimeState === 'failed') {
+      for (const segment of session.segments) {
+        if (!segment.transcriptionStarted && segment.blob && !segment.final) {
+          segment.transcriptionStarted = true;
+          segment.task = session.transcriptionQueue.enqueue(segment);
+        }
+      }
+    }
   };
 
   const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
@@ -710,6 +753,53 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       await finalizeVoiceSession(session);
       presentVoiceSession(session);
     } finally {
+      if (recordingSessionRef.current === session) recordingSessionRef.current = null;
+      if (activeHere) {
+        transcribingRef.current = false;
+        if (!unmountedRef.current) setTranscribing(false);
+      }
+    }
+  };
+
+  const finishRealtimeVoiceSession = async (session: VoiceRecordingSession) => {
+    const activeHere = !unmountedRef.current && sessionId === session.sessionId;
+    if (activeHere) {
+      transcribingRef.current = true;
+      setTranscribing(true);
+      setVoiceRetainedSession(session);
+    }
+    session.status = 'transcribing';
+    session.finalization = (async () => {
+      try {
+        if (session.captureError !== undefined || !session.realtime) {
+          throw session.captureError ?? new Error('realtime_unavailable');
+        }
+        const result: VoiceRealtimeFinal = await session.realtime.finish();
+        if (session.abortController.signal.aborted) return;
+        if (!result.text.trim()) throw new VoiceTranscriptionError('empty');
+        session.realtimeState = 'finalized';
+        session.realtimeFinalAt = Date.now();
+        session.cleanupOutcome = result.cleanup;
+        session.cleanupElapsedMs = session.realtimeFinalAt - (session.stoppedAt ?? session.realtimeFinalAt);
+        session.finalizedSegmentCount = session.segments.filter((segment) => segment.blob).length;
+        session.finalizedFailedSegmentCount = 0;
+        session.transcript = result.text;
+        session.segments = [];
+        session.error = undefined;
+        session.status = 'ready';
+      } catch (_error) {
+        if (session.abortController.signal.aborted) return;
+        session.realtimeState = 'failed';
+        activateHttpFallback(session);
+        session.status = 'transcribing';
+        await runVoiceFinalization(session);
+      }
+    })();
+    try {
+      await session.finalization;
+      presentVoiceSession(session);
+    } finally {
+      setRealtimePreview('');
       if (recordingSessionRef.current === session) recordingSessionRef.current = null;
       if (activeHere) {
         transcribingRef.current = false;
@@ -819,6 +909,32 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           dictationId,
         }),
       };
+      if (isVoiceRealtimeEnabled()) {
+        session.realtimeState = 'connecting';
+        session.realtime = new VoiceRealtimeSession({
+          before: insertion.before,
+          after: insertion.after,
+          signal: abortController.signal,
+          onPreview: (preview) => {
+            if (recordingSessionRef.current !== session || unmountedRef.current) return;
+            session.realtimeFirstPreviewAt ??= Date.now();
+            setRealtimePreview(`${preview.text}${preview.stash}`.trim());
+          },
+          onError: () => {
+            if (abortController.signal.aborted) return;
+            session.realtimeState = 'failed';
+            activateHttpFallback(session);
+          },
+        });
+        void session.realtime.start().then(() => {
+          if (abortController.signal.aborted) return;
+          session.realtimeState = 'active';
+        }).catch(() => {
+          if (abortController.signal.aborted) return;
+          session.realtimeState = 'failed';
+          activateHttpFallback(session);
+        });
+      }
       startingSession = session;
       const pipeline = new VoiceRecordingPipeline({
         stream,
@@ -831,6 +947,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           metadata.overlapMs,
           metadata.final,
         ),
+        onPcm: (samples) => {
+          if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
+            session.realtime?.sendPcm(samples);
+          }
+        },
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
@@ -840,6 +961,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
         onError: (error) => {
           session.captureError = error;
+          if (session.realtime) {
+            session.realtimeState = 'failed';
+            session.realtime.abort();
+            activateHttpFallback(session);
+          }
           if (!voiceSessionsById.has(session.sessionId)) {
             voiceSessionsById.set(session.sessionId, session);
           }
@@ -852,11 +978,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
           if (reason === 'abort') {
             session.abortController.abort();
+            session.realtime?.abort();
+            setRealtimePreview('');
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
           if (!session.segments.length && session.captureError === undefined) {
+            session.realtime?.abort();
+            setRealtimePreview('');
             reportVoiceFinalization(session, 'empty');
             if (!unmountedRef.current && sessionId === session.sessionId) {
               showToast(t('chat.compose.voiceEmpty'), 'error');
@@ -873,7 +1003,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               task: Promise.resolve(),
             });
           }
-          void finishVoiceSession(session);
+          if (session.realtime && session.realtimeState !== 'failed') {
+            void finishRealtimeVoiceSession(session);
+          } else {
+            void finishVoiceSession(session);
+          }
         },
       });
       startingPipeline = pipeline;
@@ -905,6 +1039,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before capture setup
       // threw. Release it so the mic does not stay on.
+      startingSession?.abortController.abort();
+      startingSession?.realtime?.abort();
+      setRealtimePreview('');
       if (recorderRef.current === startingPipeline) recorderRef.current = null;
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       clearRecordingTimers();
@@ -1073,6 +1210,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Button>
             </div>
           ))}
+        </div>
+      )}
+      {recording && realtimePreview && (
+        <div
+          className="truncate px-3 text-xs text-muted"
+          aria-live="polite"
+          aria-label={t('chat.compose.voicePreview')}
+        >
+          {realtimePreview}
         </div>
       )}
       <div
