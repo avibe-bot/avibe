@@ -700,10 +700,14 @@ export const ChatPage: React.FC = () => {
     if (vaultAnchorInFlightRef.current) return;
     const request = provisionPlacement.unanchored.find((candidate) => {
       const sourceMessageId = vaultRequestSourceMessageId(candidate);
+      const requestMessageId = typeof candidate.message_id === 'string' && candidate.message_id.trim()
+        ? candidate.message_id
+        : null;
       const sourceTurnId = vaultRequestSourceTurnId(candidate);
       const sourceRunId = vaultRequestSourceRunId(candidate);
-      const anchorKey = sourceMessageId
-        ? `message:${sourceMessageId}`
+      const messageAnchorId = sourceMessageId ?? requestMessageId;
+      const anchorKey = messageAnchorId
+        ? `message:${messageAnchorId}`
         : sourceTurnId
           ? `turn:${sourceTurnId}`
           : sourceRunId
@@ -717,10 +721,14 @@ export const ChatPage: React.FC = () => {
     });
     if (!request) return;
     const sourceMessageId = vaultRequestSourceMessageId(request);
+    const requestMessageId = typeof request.message_id === 'string' && request.message_id.trim()
+      ? request.message_id
+      : null;
     const sourceTurnId = vaultRequestSourceTurnId(request);
     const sourceRunId = vaultRequestSourceRunId(request);
-    const anchorKey = sourceMessageId
-      ? `message:${sourceMessageId}`
+    const messageAnchorId = sourceMessageId ?? requestMessageId;
+    const anchorKey = messageAnchorId
+      ? `message:${messageAnchorId}`
       : sourceTurnId
         ? `turn:${sourceTurnId}`
         : sourceRunId
@@ -732,7 +740,7 @@ export const ChatPage: React.FC = () => {
     vaultAnchorInFlightRef.current = true;
     let retryableFailure = false;
     const loadedSource = messagesRef.current.find(
-      (message) => message.id === sourceMessageId || message.native_message_id === sourceMessageId,
+      (message) => message.id === messageAnchorId || message.native_message_id === messageAnchorId,
     );
     const fetchAnchorWindow = async () => {
       const first = await api.listSessionMessages(sessionId, {
@@ -740,9 +748,11 @@ export const ChatPage: React.FC = () => {
           ? { aroundId: loadedSource.id }
           : sourceMessageId
             ? { aroundNativeId: sourceMessageId }
-            : sourceTurnId
-              ? { aroundTurnId: sourceTurnId }
-              : { aroundRunId: sourceRunId! }),
+            : requestMessageId
+              ? { aroundId: requestMessageId }
+              : sourceTurnId
+                ? { aroundTurnId: sourceTurnId }
+                : { aroundRunId: sourceRunId! }),
         limit: 50,
         cache: false,
       });
@@ -790,7 +800,13 @@ export const ChatPage: React.FC = () => {
               !hiddenVaultRequestIdsRef.current.has(candidate.id),
           ),
         );
-        if (disjoint && preservesVisibleAnchor) return;
+        if (disjoint && preservesVisibleAnchor) {
+          // Another request currently owns the visible historical window. Let
+          // the next placement cycle retry this request once that anchor is
+          // fulfilled or dismissed.
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
         // An around-fetch can land wholly outside the retained live tail. Do
         // not union those ranges: the missing rows would be rendered as if
         // they were adjacent. Replace the tail with a historical window,
@@ -806,9 +822,11 @@ export const ChatPage: React.FC = () => {
         if (typeof anchorMessageId !== 'string') return;
         if (disjoint) {
           const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
+          const nextHistoricalWindow = Boolean(res.next_after_id) || incomingBeforeExisting;
+          if (nextHistoricalWindow) historicalWindowRef.current = true;
           setMessages(incoming);
           setOlderCursor(res.next_before_id ?? null);
-          setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
+          setHistoricalWindow(nextHistoricalWindow);
           setJumpTarget(anchorMessageId);
         } else {
           setMessages((previous) => {
@@ -819,6 +837,7 @@ export const ChatPage: React.FC = () => {
               MAX_RETAINED_MESSAGES,
               followingTailRef.current,
             );
+            if (result.replaced || result.detachedTail) historicalWindowRef.current = true;
             vaultAnchorMergeRef.current = {
               anchorMessageId,
               nextBeforeId: res.next_before_id ?? null,
