@@ -489,6 +489,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     if protocol == "responses":
         added: set[str] = set()
         closed: set[str] = set()
+        completed_items: dict[str, dict[str, Any]] = {}
         argument_done: set[str] = set()
         message_text_started: set[tuple[str, int]] = set()
         message_text_done: set[tuple[str, int]] = set()
@@ -531,7 +532,12 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 response_created = True
                 response = event.get("response")
-                if not isinstance(response, dict) or response.get("object") != "response":
+                if (
+                    not isinstance(response, dict)
+                    or response.get("object") != "response"
+                    or response.get("status") != "in_progress"
+                    or response.get("output") != []
+                ):
                     return False
                 if response.get("id") is not None:
                     if not isinstance(response.get("id"), str) or not response["id"]:
@@ -688,7 +694,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     message_text_started.add(key)
                     message_text[item_id] = message_text.get(item_id, "") + delta
                 else:
-                    summary_index = _stream_index(event.get("summary_index", 0))
+                    summary_index = _stream_index(event.get("summary_index"))
                     if summary_index is None:
                         return False
                     indexes = reasoning_summary_indexes.setdefault(item_id, set())
@@ -722,7 +728,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         return False
                     message_text_done.add(key)
                 else:
-                    summary_index = _stream_index(event.get("summary_index", 0))
+                    summary_index = _stream_index(event.get("summary_index"))
                     summary_key = (item_id, summary_index if summary_index is not None else -1)
                     if summary_index is None or item_id not in reasoning_text_started or summary_key in reasoning_text_done:
                         return False
@@ -791,6 +797,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     for part_item_id, part_index in content_parts
                 ):
                     return False
+                completed_items[item_id] = copy.deepcopy(raw)
                 closed.add(item_id)
             elif event_type in {"response.completed", "response.done"}:
                 terminal_response = event.get("response")
@@ -833,6 +840,13 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     and item.get("encrypted_content") is not None
                     and not isinstance(item.get("encrypted_content"), str)
                     for item in terminal_response["output"]
+                ):
+                    return False
+                completed_output = [completed_items[index_items[index]] for index in sorted(index_items)]
+                if (
+                    _responses_output_projection(completed_output) is None
+                    or _responses_output_projection(terminal_response["output"]) is None
+                    or _responses_output_projection(completed_output) != _responses_output_projection(terminal_response["output"])
                 ):
                     return False
                 if terminal_response.get("id") is not None and terminal_response.get("id") != response_id:
@@ -979,11 +993,14 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                     event_name = line[6:]
                     if event_name.startswith(" "):
                         event_name = event_name[1:]
-                elif line.startswith("data:"):
-                    data_value = line[5:]
-                    if data_value.startswith(" "):
-                        data_value = data_value[1:]
-                    data_lines.append(data_value)
+                else:
+                    field, separator, value = line.partition(":")
+                    if separator and value.startswith(" "):
+                        value = value[1:]
+                    if field == "event":
+                        event_name = value
+                    elif field == "data":
+                        data_lines.append(value)
                 return False
 
             while True:
@@ -1302,6 +1319,10 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
         if not isinstance(item_type, str) or item_type not in RESPONSES_OUTPUT_ITEM_TYPES:
             errors.append("output_item_type_invalid")
             continue
+        item_status = item.get("status")
+        if item_status is not None and item_status != "completed":
+            errors.append("output_item_status_invalid")
+            continue
         if item_type == "function_call":
             arguments, error = _parse_arguments(item.get("arguments"), expected_wire="json")
             if error:
@@ -1401,8 +1422,14 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
                         return None
             projected.update(
                 {
-                    "summary": _reasoning_text_parts(item.get("summary")),
-                    "content": _reasoning_text_parts(item.get("content")),
+                    "summary": [
+                        {"type": part["type"], "text": part["text"]}
+                        for part in item.get("summary") or []
+                    ],
+                    "content": [
+                        {"type": part["type"], "text": part["text"]}
+                        for part in item.get("content") or []
+                    ],
                     "encrypted_content": encrypted,
                 }
             )
@@ -1445,7 +1472,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             errors.append("stream_failure_event")
         elif event_type == "response.created":
             response = event.get("response")
-            if not isinstance(response, dict) or response.get("object") != "response":
+            if (
+                not isinstance(response, dict)
+                or response.get("object") != "response"
+                or response.get("status") != "in_progress"
+                or response.get("output") != []
+            ):
                 errors.append("response_start_snapshot_invalid")
         elif event_type == "response.in_progress":
             response = event.get("response")
@@ -1622,7 +1654,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 if not isinstance(delta, str):
                     errors.append("stream_reasoning_delta_invalid")
                     continue
-                summary_index = _stream_index(event.get("summary_index", 0))
+                summary_index = _stream_index(event.get("summary_index"))
                 if summary_index is None:
                     errors.append("summary_index_invalid")
                     continue
@@ -1665,7 +1697,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 errors.append("stream_text_done_invalid")
                 continue
             if expected_type == "reasoning":
-                summary_index = _stream_index(event.get("summary_index", 0))
+                summary_index = _stream_index(event.get("summary_index"))
                 if summary_index is None:
                     errors.append("summary_index_invalid")
                     reconstructed_text = ""
