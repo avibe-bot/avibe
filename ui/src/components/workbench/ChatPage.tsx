@@ -739,9 +739,11 @@ export const ChatPage: React.FC = () => {
     vaultAnchorFetchesRef.current.add(fetchKey);
     vaultAnchorInFlightRef.current = true;
     let retryableFailure = false;
-    const loadedSource = messagesRef.current.find(
-      (message) => message.id === messageAnchorId || message.native_message_id === messageAnchorId,
-    );
+    const loadedSource = messageAnchorId
+      ? messagesRef.current.find(
+        (message) => message.id === messageAnchorId || message.native_message_id === messageAnchorId,
+      )
+      : undefined;
     const fetchAnchorWindow = async () => {
       const first = await api.listSessionMessages(sessionId, {
         ...(loadedSource
