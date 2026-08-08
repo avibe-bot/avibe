@@ -895,7 +895,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
 
     async def test_steered_assistant_and_result_settle_the_pending_turn(self):
-        """HFR-435: native EOF gives the steered Result ownership."""
+        """HFR-435: accepted input reserves the preceding Result slot."""
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
         controller.emit_agent_message = AsyncMock()
@@ -919,7 +919,16 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ack_reaction_emoji=None,
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent._advance_steering_generation(composite_key)
+        agent._advance_steering_generation(composite_key, barrier="accepted")
+        primary_result = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "primary final answer",
+                "duration_ms": 1,
+            },
+        )()
         text_block = TextBlock("steered final answer")
         assistant_message = type(
             "AssistantMessage",
@@ -932,13 +941,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             {
                 "subtype": "success",
                 "result": "steered final answer",
-                "duration_ms": 1,
+                "duration_ms": 2,
             },
         )()
 
         class _Client:
             def receive_messages(self):
                 async def _iterate():
+                    yield primary_result
                     yield assistant_message
                     yield result_message
 
@@ -956,9 +966,16 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "steered final answer",
             subtype="success",
-            duration_ms=1,
+            duration_ms=2,
             parse_mode="markdown",
             request=pending_request,
+        )
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "output",
+            "primary final answer",
+            parse_mode="markdown",
+            output=ANY,
         )
         self.assertNotIn(composite_key, agent._pending_requests)
 
@@ -1011,7 +1028,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ack_reaction_emoji=None,
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent._advance_steering_generation(composite_key)
+        agent._advance_steering_generation(composite_key, barrier="accepted")
         primary_assistant = type(
             "AssistantMessage",
             (),

@@ -917,8 +917,9 @@ class ClaudeAgent(BaseAgent):
 
         A successful transport write only enqueues native input. Claude may emit
         the current query's Assistant/Result before it dequeues that input, so
-        output arrival time alone cannot assign the terminal owner. Steering
-        reconciliation buffers Results until the half-closed input reaches EOF.
+        output arrival time alone cannot assign the terminal owner. Each accepted
+        steer therefore reserves one FIFO Result slot before the final Result can
+        settle the shared Turn.
         """
         generation_changed = expected_steering_generation != self._steering_generation(
             composite_key
@@ -953,10 +954,9 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         end_input,
     ) -> str | None:
-        """Half-close native input so EOF determines the steering result owner."""
-        # Claude does not acknowledge when a streamed prompt begins execution.
-        # Closing stdin after the accepted write makes EOF the sole causal
-        # boundary: every queued prompt finishes before the receiver settles.
+        """Half-close input after a write whose acceptance is ambiguous."""
+        # An ambiguous writer cannot accept another steer safely. EOF bounds the
+        # reconciliation while preserving any prompt that reached Claude.
         self._steering_input_shutdown_keys().add(composite_key)
         try:
             await end_input()
@@ -1099,24 +1099,25 @@ class ClaudeAgent(BaseAgent):
                 or len(primary_requests) != primary_request_count
                 or primary_requests[0] is not target.agent_request
             )
-            self._advance_steering_generation(composite_key)
-            close_diagnostic = await self._close_steering_input(
-                composite_key,
-                end_input,
-            )
-            if close_diagnostic is not None:
-                return steer_result(
-                    SteerOutcome.UNKNOWN,
-                    reason="native_input_close_failed",
-                    backend=self.name,
-                    diagnostic=close_diagnostic,
-                )
             if not runtime_stable:
+                self._advance_steering_generation(composite_key)
+                close_diagnostic = await self._close_steering_input(
+                    composite_key,
+                    end_input,
+                )
+                if close_diagnostic is not None:
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="native_input_close_failed",
+                        backend=self.name,
+                        diagnostic=close_diagnostic,
+                    )
                 return steer_result(
                     SteerOutcome.UNKNOWN,
                     reason="receiver_generation_changed",
                     backend=self.name,
                 )
+            self._advance_steering_generation(composite_key, barrier="accepted")
             return steer_result(
                 SteerOutcome.ACCEPTED,
                 backend=self.name,
@@ -1815,6 +1816,11 @@ class ClaudeAgent(BaseAgent):
                                     "output",
                                     superseded_result_text,
                                     parse_mode="markdown",
+                                    output=MessageOutput(
+                                        completes_turn=False,
+                                        completes_run=False,
+                                        records_run_output=False,
+                                    ),
                                 )
                             self._last_assistant_text.pop(composite_key, None)
                             self._foreground_tool_use_ids.pop(composite_key, None)
