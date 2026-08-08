@@ -807,6 +807,7 @@ export const ChatPage: React.FC = () => {
         if (disjoint) {
           const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
           setMessages(incoming);
+          setOlderCursor(res.next_before_id ?? null);
           setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
           setJumpTarget(anchorMessageId);
         } else {
