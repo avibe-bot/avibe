@@ -75,9 +75,14 @@ Session platform, when a delivery override redirects the notification.
 
 Fallback ownership uses the complete notice-writability predicate: malformed
 metadata, an owned escalation, and a callback child whose parent already owns the
-notice are all ineligible. Callback child insertion and the parent's armed marker
-commit in one SQLite transaction, so cancellation cannot expose an accepted child
-without the callback evidence that defers or suppresses the fallback.
+notice are all ineligible. Eligibility is projected in terminal-write order before
+the stable owner tie-breaker, so a parent that acquires its notice in the same batch
+removes the callback child that notice suppresses. Callback child insertion and the
+parent's armed marker commit in one SQLite transaction. The transaction rejects a
+new failure callback after a settled parent is cancel-requested, but still repairs
+the armed marker for a child accepted before cancellation. A Run whose terminal
+outcome is `canceled` still reports that outcome to its delegator because it never
+owns a failure fallback.
 
 Waiter health is observed only from completed outcome fields. Starting the first
 cycle does not prove success, so a Watch with no prior exit, finish, or error remains
@@ -159,6 +164,10 @@ does not claim that an event was detected.
   the Turn fallback owner.
 - `HFR-453`: callback child enqueue and parent arming commit atomically.
 - `HFR-454`: transport-only acknowledgement follows the routed target platform.
+- `HFR-455`: Turn fallback election excludes callback children suppressed by a
+  parent notice created in the same batch.
+- `HFR-456`: late-canceled failed parents reject new callbacks while preserving
+  accepted children.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

@@ -2520,7 +2520,7 @@ class TaskExecutionStore:
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         callback_parent_to_arm: Optional[str] = None,
-    ) -> TaskExecutionRequest:
+    ) -> Optional[TaskExecutionRequest]:
         if not (message or "").strip():
             # Refuse at the door: a blank prompt never reaches an agent backend
             # (``MessageHandler`` returns early), so the run could never be settled
@@ -2559,6 +2559,8 @@ class TaskExecutionStore:
                 parent_run_id=normalized_callback_parent,
                 source_actor=str(source_actor or ""),
             )
+            if callback_run_id is None:
+                return None
             stored = self._sqlite.get_run(callback_run_id)
             return TaskExecutionRequest.from_dict(stored) if stored is not None else request
         if normalized_callback_parent:
@@ -2573,6 +2575,14 @@ class TaskExecutionStore:
                     callback_run_id=str(existing["id"]),
                 )
                 return TaskExecutionRequest.from_dict(existing)
+            parent = self.get_run(normalized_callback_parent)
+            if parent is None:
+                raise ValueError(
+                    f"callback parent Run not found: {normalized_callback_parent}"
+                )
+            parent_status = _normalize_requested_run_status(parent.get("status"))
+            if bool(parent.get("cancel_requested")) and parent_status != "canceled":
+                return None
         queued = self.enqueue(
             request,
             expected_enabled_agent_id=expected_enabled_agent_id,

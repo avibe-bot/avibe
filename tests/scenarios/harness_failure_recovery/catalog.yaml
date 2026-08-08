@@ -4077,6 +4077,24 @@ scenarios:
     # A transport-only id acknowledges a real IM target but never a synthetic Avibe
     # target, regardless of the source Session platform before delivery_override.
     test: tests/test_backend_failure.py::BackendFailureTests::test_hfr_454_delivery_only_ack_uses_the_routed_target_platform
+  - id: HFR-455
+    name: Turn fallback excludes same-batch parent suppression
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # A parent processed before its callback child owns the Turn fallback before
+    # that new parent notice suppresses the child, independent of lexical Run ids.
+    test: tests/test_harness_failure_visibility.py::test_hfr_455_turn_owner_excludes_same_batch_parent_suppression
+  - id: HFR-456
+    name: late-canceled failed parents reject only new callbacks
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # The SQLite writer refuses a new failure callback after late cancellation but
+    # still arms an already-durable child as authoritative callback evidence.
+    test: tests/test_harness_failure_visibility.py::test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

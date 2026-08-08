@@ -7954,6 +7954,125 @@ def test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction(
     assert insert_position < parent_update_position
 
 
+def test_hfr_455_turn_owner_excludes_same_batch_parent_suppression(
+    tmp_path: Path,
+) -> None:
+    """A child cannot own when its earlier parent acquires a notice in the batch."""
+
+    sqlite, requests = _store(tmp_path)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-b-callback-parent",
+            request_type="agent_run",
+            message="parent",
+        )
+    )
+    callback_child = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-a-callback-child",
+            request_type="agent_run",
+            message="callback child",
+            source_kind="callback",
+            parent_run_id=parent.id,
+        )
+    )
+    assert requests.claim(parent.id) is not None
+    assert requests.claim(callback_child.id) is not None
+    turn_id = "turn-parent-before-callback-child"
+
+    sqlite.record_turn_run_outputs(
+        [parent.id, callback_child.id],
+        output_id="turn-terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": callback_child.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    parent_notice = sqlite.owed_failure_notice(parent.id)
+    assert parent_notice["turn_fallback_run_id"] == parent.id
+    assert sqlite.owed_failure_notice(callback_child.id) is None
+
+
+def test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks(
+    tmp_path: Path,
+) -> None:
+    """Late cancellation blocks new failure callbacks but preserves accepted evidence."""
+
+    sqlite, requests = _store(tmp_path)
+
+    def failed_parent(run_id: str) -> TaskExecutionRequest:
+        parent = requests.enqueue(
+            TaskExecutionRequest(
+                id=run_id,
+                request_type="agent_run",
+                message="parent",
+                callback_session_id="ses-callback-target",
+                callback_status="pending",
+            )
+        )
+        assert requests.claim(parent.id) is not None
+        sqlite.record_run_output(
+            parent.id,
+            output_id=f"{run_id}-terminal",
+            text="",
+            terminal_status="failed",
+            error="parent failed",
+        )
+        assert sqlite.cancel_run(parent.id)
+        return parent
+
+    rejected_parent = failed_parent("run-canceled-callback-parent")
+    rejected_actor = f"{rejected_parent.id}:terminal:failed"
+    rejected = requests.enqueue_agent_run(
+        message="new callback",
+        source_kind="callback",
+        source_actor=rejected_actor,
+        parent_run_id=rejected_parent.id,
+        callback_parent_to_arm=rejected_parent.id,
+    )
+    assert rejected is None
+    assert (
+        requests.find_callback_run(
+            parent_run_id=rejected_parent.id,
+            source_actor=rejected_actor,
+        )
+        is None
+    )
+
+    armed_parent = failed_parent("run-armed-callback-parent")
+    armed_actor = f"{armed_parent.id}:terminal:failed"
+    existing = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-existing-callback-child",
+            request_type="agent_run",
+            message="accepted callback",
+            source_kind="callback",
+            source_actor=armed_actor,
+            parent_run_id=armed_parent.id,
+        )
+    )
+    recovered = requests.enqueue_agent_run(
+        message="accepted callback",
+        source_kind="callback",
+        source_actor=armed_actor,
+        parent_run_id=armed_parent.id,
+        callback_parent_to_arm=armed_parent.id,
+    )
+    assert recovered is not None
+    assert recovered.id == existing.id
+    stored_parent = sqlite.get_run(armed_parent.id)
+    assert stored_parent["callback_status"] == "sent"
+    assert stored_parent["callback_run_id"] == existing.id
+
+
 @pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])
 def test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane(
     tmp_path: Path,

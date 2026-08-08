@@ -1767,15 +1767,25 @@ def _decoded_failure_notice_metadata(raw: Any) -> Optional[dict[str, Any]]:
     return decoded if isinstance(decoded, dict) else None
 
 
-def _run_can_own_failure_notice(conn: Any, row: Any) -> bool:
-    """Whether the notice writer can make this Run the durable fallback owner."""
+def _run_can_own_failure_notice(
+    conn: Any,
+    row: Any,
+    *,
+    turn_id: str,
+    will_settle_failed: bool,
+) -> bool:
+    """Whether this transaction leaves the Run owning this Turn's notice."""
 
     metadata = _decoded_failure_notice_metadata(row["metadata_json"])
     if metadata is None:
         return False
     existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
     if isinstance(existing, dict) and str(existing.get("state") or "").strip():
-        return True
+        return bool(turn_id) and (
+            str(existing.get("turn_id") or "").strip() == turn_id
+        )
+    if not will_settle_failed:
+        return False
     if str(metadata.get("escalation_run_id") or "").strip():
         return False
     return not _callback_parent_owns_failure_notice(
@@ -3155,13 +3165,20 @@ class SQLiteBackgroundTaskStore:
         *,
         parent_run_id: str,
         source_actor: str,
-    ) -> str:
-        """Find-or-enqueue a callback child and arm its parent atomically."""
+    ) -> Optional[str]:
+        """Find-or-enqueue a callback child and arm its live parent atomically."""
 
         values = self._run_values(payload)
         now = str(values.get("updated_at") or _utc_now_iso())
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
+            parent = conn.execute(
+                select(agent_runs.c.status, agent_runs.c.cancel_requested)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).mappings().first()
+            if parent is None:
+                raise ValueError(f"callback parent Run not found: {parent_run_id}")
             callback_run_id = conn.execute(
                 select(agent_runs.c.id)
                 .where(agent_runs.c.run_type == "agent_run")
@@ -3171,6 +3188,12 @@ class SQLiteBackgroundTaskStore:
                 .order_by(agent_runs.c.created_at, agent_runs.c.id)
                 .limit(1)
             ).scalar_one_or_none()
+            parent_status = normalize_run_status(parent["status"])
+            parent_refuses_new_child = bool(parent["cancel_requested"]) and (
+                parent_status != "canceled"
+            )
+            if callback_run_id is None and parent_refuses_new_child:
+                return None
             if callback_run_id is None:
                 enqueue_run_in_connection(conn, values)
                 callback_run_id = str(values["id"])
@@ -4918,12 +4941,39 @@ class SQLiteBackgroundTaskStore:
                 run_id: self._run_from_row(row)
                 for run_id, row in rows.items()
             }
-            eligible_run_ids = sorted(
-                run_id
-                for run_id in normalized_run_ids
-                if failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
-                and _run_can_own_failure_notice(conn, rows[run_id])
-            )
+            turn_id = str(terminal_provenance.get("turn_id") or "").strip()
+            settles_failed_now = normalize_run_status(terminal_status) == "failed"
+            # Project notice ownership in the same order as the terminal writes below.
+            # A callback child whose earlier parent will acquire a notice is removed
+            # before the remaining candidates use their stable lexical tie-breaker.
+            same_batch_notice_owners: set[str] = set()
+            eligible_run_ids: list[str] = []
+            for run_id in normalized_run_ids:
+                row = rows[run_id]
+                parent_id = (
+                    str(row["parent_run_id"] or "").strip()
+                    if str(row["source_kind"] or "").strip() == "callback"
+                    else ""
+                )
+                can_own = (
+                    failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
+                    and _run_can_own_failure_notice(
+                        conn,
+                        row,
+                        turn_id=turn_id,
+                        will_settle_failed=(
+                            settles_failed_now
+                            and run_id not in deferred_ids
+                            and normalize_run_status(runs[run_id].get("status"))
+                            not in TERMINAL_RUN_STATUSES
+                        ),
+                    )
+                    and parent_id not in same_batch_notice_owners
+                )
+                if can_own:
+                    eligible_run_ids.append(run_id)
+                    same_batch_notice_owners.add(run_id)
+            eligible_run_ids.sort()
             immediate_owner_ids = [
                 run_id for run_id in eligible_run_ids if run_id not in deferred_ids
             ]
@@ -5282,7 +5332,12 @@ class SQLiteBackgroundTaskStore:
                         fallback_owner = str(
                             notification.get("fallback_run_id") or ""
                         ).strip()
-                        current_can_own = _run_can_own_failure_notice(conn, row)
+                        current_can_own = _run_can_own_failure_notice(
+                            conn,
+                            row,
+                            turn_id=turn_id,
+                            will_settle_failed=True,
+                        )
                         owner_has_notice = (
                             fallback_owner == run_id and current_can_own
                         )
