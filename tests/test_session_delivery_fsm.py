@@ -5936,6 +5936,8 @@ async def test_terminal_commit_publishes_replyless_inbox_settlement(
 async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
     managers,
 ) -> None:
+    """HFR-461: backend continuation keeps a hidden lifecycle input."""
+
     manager, _other, engine, _engine_b, _starts = managers
     manager.controller.config.language = "zh"
     context = _context()

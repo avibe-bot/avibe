@@ -1310,7 +1310,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_user_echo_allows_one_result_to_own_primary_and_steer(self):
-        """HFR-460: Claude may merge a steer into the primary Result."""
+        """HFR-435: Claude may merge a steer into the primary Result."""
 
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
@@ -1382,6 +1382,84 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertNotIn(composite_key, agent._native_input_receipts)
+
+    async def test_user_echo_retires_primary_assistant_before_result_only_steer(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock(return_value="primary-output")
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-assistant-receipt:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield type(
+                        "AssistantMessage",
+                        (),
+                        {"content": [TextBlock("primary answer")]},
+                    )()
+                    yield UserMessage("steered prompt")
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "steered result",
+                            "duration_ms": 2,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-assistant-receipt",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "output",
+            "primary answer",
+            parse_mode="markdown",
+            output=ANY,
+        )
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered result",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._last_assistant_text)
 
     async def test_repeated_user_echoes_allow_one_merged_result_to_settle(self):
         """HFR-460: repeated steering does not require one Result per input."""

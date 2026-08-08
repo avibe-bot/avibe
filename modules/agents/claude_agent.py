@@ -1451,7 +1451,7 @@ class ClaudeAgent(BaseAgent):
                                 message,
                             )
                             if receipt is not None and receipt.kind == "steer":
-                                await self._emit_buffered_primary_phase(
+                                await self._retire_primary_phase_on_steer_receipt(
                                     context,
                                     composite_key,
                                 )
@@ -2954,6 +2954,26 @@ class ClaudeAgent(BaseAgent):
                 buffered_text,
             )
         return True
+
+    async def _retire_primary_phase_on_steer_receipt(
+        self,
+        context: MessageContext,
+        composite_key: str,
+    ) -> None:
+        """Close all response-local primary state at the native input boundary."""
+
+        if not await self._emit_buffered_primary_phase(context, composite_key):
+            pending = self._pending_requests.get(composite_key) or []
+            primary_request = pending[0] if pending else None
+            primary_text = self._select_terminal_text(composite_key, None)
+            if primary_text or self._request_activities(primary_request):
+                self._adopt_pending_turn_token(context, primary_request)
+                await self._emit_primary_phase_output(
+                    context,
+                    primary_request,
+                    primary_text,
+                )
+        self._clear_result_phase_state(composite_key)
 
     def _select_buffered_terminal_text(self, composite_key: str, buffered) -> str:
         """Render a buffered pre-steer result without using newer assistant text."""
