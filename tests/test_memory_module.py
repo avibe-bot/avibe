@@ -744,7 +744,10 @@ async def test_malformed_add_ack_becomes_manual_required_without_replay(
     assert row.payload_text == "remember this"
     assert row.add_request_id == "ambiguous-ack"
     assert store.has_manual_required_fence() is True
-    assert (await module.status()).error == "memory_processing_failed"
+    status = await module.status()
+    assert status.error == "memory_processing_failed"
+    assert status.receipt_unknown == 1
+    assert status.buckets.unknown == 1
 
 
 @pytest.mark.parametrize("request_id", [None, "", "x" * 129])

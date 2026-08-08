@@ -274,6 +274,9 @@ class EverOSPort:
                     except MemoryProviderFailure:
                         raw = None
                     status_code = response.status_code
+        except httpx.ConnectTimeout as exc:
+            logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
+            raise MemoryProviderSystemFailure() from exc
         except httpx.TimeoutException as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc

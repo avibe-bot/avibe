@@ -954,8 +954,9 @@ class MemoryStore:
                         ('not_attempted', 'in_flight') THEN 1 ELSE 0 END) AS awaiting_receipt,
                     SUM(CASE WHEN state = 'delivered' AND flush_observation = 'succeeded'
                         THEN 1 ELSE 0 END) AS succeeded,
-                    SUM(CASE WHEN state = 'delivered' AND
-                        (flush_observation = 'unknown' OR flush_observation IS NULL)
+                    SUM(CASE WHEN state = 'manual_required'
+                        OR (state = 'delivered' AND
+                        (flush_observation = 'unknown' OR flush_observation IS NULL))
                         THEN 1 ELSE 0 END) AS receipt_unknown,
                     SUM(CASE WHEN state = 'delivered' AND flush_observation = 'rejected'
                         THEN 1 ELSE 0 END) AS distill_failed,

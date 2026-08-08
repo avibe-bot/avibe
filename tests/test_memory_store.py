@@ -204,7 +204,9 @@ def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> No
     assert store.has_manual_required_fence() is True
     assert store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:02.000Z") is None
     assert store.ensure_meta().last_error == "memory_provider_response_invalid"
-    assert store.queue_stats().queue_plaintext_bytes == len("queued payload")
+    stats = store.queue_stats()
+    assert stats.receipt_unknown == 1
+    assert stats.queue_plaintext_bytes == len("queued payload")
     assert (
         store.enqueue_request(
             source_message_id="bounded-after-manual",

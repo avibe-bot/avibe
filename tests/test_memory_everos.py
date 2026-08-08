@@ -103,6 +103,22 @@ def test_add_marks_response_disconnect_as_ambiguous() -> None:
     assert raised.value.ambiguous is True
 
 
+def test_add_keeps_connect_timeout_on_retryable_system_outage_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connection stalled", request=request)
+
+    async def run() -> None:
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        await provider.add(ProviderCapture("owner", "session", "capture", 1, PROJECT))
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderSystemFailure) as raised:
+            asyncio.run(run())
+
+    assert raised.value.error == "memory_sidecar_unavailable"
+    assert raised.value.ambiguous is False
+
+
 @pytest.mark.parametrize("failure_type", [httpx.WriteError, httpx.CloseError])
 def test_add_marks_post_submission_transport_failures_as_ambiguous(
     failure_type: type[httpx.TransportError],
