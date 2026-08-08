@@ -15,6 +15,7 @@ from core.memory.everos import (
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
+    MemoryProviderSystemFailure,
     ProviderAttachment,
     ProviderCapture,
 )
@@ -85,6 +86,39 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
             {"session_id": "src--one--e1", "app_id": "avibe", "project_id": PROJECT},
         ),
     ]
+
+
+def test_add_marks_response_disconnect_as_ambiguous() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("response lost", request=request)
+
+    async def run() -> None:
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        await provider.add(ProviderCapture("owner", "session", "capture", 1, PROJECT))
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderSystemFailure) as raised:
+            asyncio.run(run())
+
+    assert raised.value.ambiguous is True
+
+
+def test_add_rejects_overlong_receipt_without_truncating() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"request_id": "x" * 129, "data": {"status": "accumulated"}},
+        )
+
+    async def run() -> AddAck:
+        return await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture("owner", "session", "capture", 1, PROJECT)
+        )
+
+    with _sidecar_transport(handler):
+        ack = asyncio.run(run())
+
+    assert ack == AddAck(request_id=None, status="accumulated")
 
 
 @pytest.mark.parametrize(

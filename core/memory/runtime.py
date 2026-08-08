@@ -1401,7 +1401,7 @@ class MemoryRuntime:
                 raise
             except Exception:
                 logger.warning("Memory drain activation failed; retrying recovery")
-                self.module._worker.begin_activation()
+                self.module._worker.begin_new_lease_activation()
             await asyncio.sleep(1.0)
 
     def _data_exists(self) -> bool:

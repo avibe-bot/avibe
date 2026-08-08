@@ -788,6 +788,24 @@ async def test_adapter_classified_timeout_is_manual_required_without_replay(tmp_
     assert store.has_manual_required_fence() is True
 
 
+async def test_ambiguous_transport_failure_is_manual_required_without_replay(
+    tmp_path: Path,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    provider.ingest_failures.append(MemoryProviderSystemFailure(ambiguous=True))
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert row.state == "manual_required"
+    assert row.attempts == 0
+    assert row.payload_text == "remember this"
+    assert row.last_error == "memory_sidecar_unavailable"
+    assert len(provider.captures) == 0
+    assert store.has_manual_required_fence() is True
+
+
 async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_path: Path) -> None:
     provider = FakeMemoryProvider(
         search_items=(MemoryItem(kind="fact", text="bounded fact", date="2026-01-01"),),

@@ -65,10 +65,10 @@ This phase initializes a clean Avibe-owned schema; legacy Memory databases and
 schema migration are intentionally not supported for the currently unused
 feature.
 
-An incomplete, malformed, or otherwise ambiguous provider add is terminal for
-automatic delivery: the row is retained and its provider session is fenced as
-`manual_required`. Boot recovery applies the same fence to any abandoned
-`processing` row, so it never silently replays an add whose provider outcome is
-unknown. The status surface reports an active manual fence as degraded. Flush
-coordination, generation routing, and per-generation settlement projection are
-owned by the later flush coordinator.
+An incomplete, malformed, overlong-receipt, timed-out, or response-disconnected
+provider add is terminal for automatic delivery: the row is retained and its
+provider session is fenced as `manual_required`. Boot recovery applies the same
+fence to any abandoned `processing` row, so it never silently replays an add
+whose provider outcome is unknown. The status surface reports an active manual
+fence as degraded. Flush coordination, generation routing, and per-generation
+settlement projection are owned by the later flush coordinator.

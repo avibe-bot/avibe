@@ -98,12 +98,7 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
         artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
         effective_home=tmp_path,
     )
-    activation_calls = 0
     drain_calls = 0
-
-    def begin_activation() -> None:
-        nonlocal activation_calls
-        activation_calls += 1
 
     async def drain() -> int:
         nonlocal drain_calls
@@ -116,7 +111,7 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     async def no_wait(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr(runtime.module._worker, "begin_activation", begin_activation)
+    initial_boot_id = runtime.module._worker._boot_id
     monkeypatch.setattr(runtime.module._worker, "drain", drain)
     monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
 
@@ -127,7 +122,7 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
 
     asyncio.run(run())
     assert drain_calls == 2
-    assert activation_calls == 2
+    assert runtime.module._worker._boot_id != initial_boot_id
 
 
 def _settings() -> EverOSProcessSettings:

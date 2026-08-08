@@ -255,9 +255,13 @@ class MemoryWorker:
             await self._manual_required(row, "memory_provider_timeout")
             return False
         except MemoryProviderSystemFailure as failure:
+            error = _provider_error_code(failure, "memory_sidecar_unavailable")
+            if failure.ambiguous:
+                await self._manual_required(row, error)
+                return False
             await self._return_system_failure(
                 row,
-                _provider_error_code(failure, "memory_sidecar_unavailable"),
+                error,
             )
             return False
         except MemoryProviderFailure as failure:
