@@ -274,6 +274,7 @@ export const ChatPage: React.FC = () => {
   // render that flips ``readOnly``. An effect would first commit one frame with
   // the chat surface still hidden and the iframe already gone — a blank chat.
   const showPageActive = isShowPageActive(readOnly, showPageMode);
+  const showPageActiveRef = useLatestRef(showPageActive);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -759,6 +760,7 @@ export const ChatPage: React.FC = () => {
     let retryDelayMs: number | null = null;
     let deferredByVisibleAnchor = false;
     let deferredByMissingReply = false;
+    let deferredByHiddenSurface = false;
     const loadedSource = messageAnchorId
       ? messagesRef.current.find(
         (message) => message.id === messageAnchorId || (
@@ -800,6 +802,14 @@ export const ChatPage: React.FC = () => {
           deepLinkMessageIdRef.current ||
           jumpTargetRef.current
         ) {
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
+        if (showPageActiveRef.current) {
+          // The request may resolve after the user switches to Show Page. Release
+          // the key so leaving that surface re-arms the fetch without committing a
+          // historical transcript window into the hidden chat view.
+          deferredByHiddenSurface = true;
           vaultAnchorFetchesRef.current.delete(fetchKey);
           return;
         }
@@ -909,7 +919,7 @@ export const ChatPage: React.FC = () => {
             vaultAnchorRetryWaitingRef.current.delete(fetchKey);
             if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
           }, retryDelayMs);
-        } else if (!deferredByVisibleAnchor && !deferredByMissingReply) {
+        } else if (!deferredByVisibleAnchor && !deferredByMissingReply && !deferredByHiddenSurface) {
           setVaultAnchorCycle((cycle) => cycle + 1);
         }
       });
