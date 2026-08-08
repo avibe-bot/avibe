@@ -834,11 +834,12 @@ export const ChatPage: React.FC = () => {
         vaultAnchorRetryAttemptsRef.current.delete(fetchKey);
         vaultAnchorRetryExhaustedRef.current.delete(fetchKey);
         vaultAnchorRetryWaitingRef.current.delete(fetchKey);
-        if (res.anchor_id) {
+        const resolvedAnchorId = res.anchor_id;
+        if (resolvedAnchorId) {
           setVaultResolvedSourceIds((previous) => {
-            if (previous.get(request.id) === res.anchor_id) return previous;
+            if (previous.get(request.id) === resolvedAnchorId) return previous;
             const next = new Map(previous);
-            next.set(request.id, res.anchor_id);
+            next.set(request.id, resolvedAnchorId);
             return next;
           });
         }
@@ -914,6 +915,9 @@ export const ChatPage: React.FC = () => {
             return result.messages;
           });
         }
+        // A completed anchor is gated by placement itself. Release the fetch key
+        // so a later retained-window trim can re-arm the request and recover it.
+        vaultAnchorFetchesRef.current.delete(fetchKey);
       })
       .catch(() => {
         // Retry transient failures with bounded exponential backoff. Once the
