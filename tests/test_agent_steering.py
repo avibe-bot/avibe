@@ -90,6 +90,7 @@ class _ClaudeClient:
         self.error = error
         self.queries = [("primary", "runtime-key")]
         self._transport = SimpleNamespace(end_input=AsyncMock())
+        self._vibe_native_prompt_boundary_supported = True
 
     async def query(self, text: str, *, session_id: str) -> None:
         self.queries.append((text, session_id))
@@ -449,6 +450,36 @@ async def test_claude_refuses_steering_without_ambiguous_input_reconciliation() 
 
         assert receipt.outcome is SteerOutcome.REFUSED
         assert receipt.reason == "native_input_reconciliation_unsupported"
+        assert client.queries == [("primary", "runtime-key")]
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
+async def test_claude_refuses_steering_without_native_prompt_boundary() -> None:
+    primary = _primary_request(backend="claude")
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    client = _ClaudeClient()
+    client._vibe_native_prompt_boundary_supported = False
+    agent = object.__new__(ClaudeAgent)
+    agent.claude_sessions = {"runtime-key": client}
+    agent.receiver_tasks = {"runtime-key": receiver_task}
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
+    agent._pending_requests = {"runtime-key": [primary]}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "claude", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(
+            controller,
+            "claude",
+            _steer_request(identity[1]),
+        )
+
+        assert receipt.outcome is SteerOutcome.REFUSED
+        assert receipt.reason == "native_prompt_boundary_unsupported"
         assert client.queries == [("primary", "runtime-key")]
     finally:
         await _cancel_tasks(gate_task, receiver_task)

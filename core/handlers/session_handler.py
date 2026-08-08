@@ -968,20 +968,28 @@ class SessionHandler(BaseHandler):
             return {}
 
     def _build_claude_tool_policy_hooks(self) -> Optional[Dict[str, Any]]:
-        """Hook config enforcing the shared tool policy, or None when unavailable."""
+        """Build Claude hooks, including the native query-consumption fence."""
         if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
             return None
-        if native_background_tools_allowed():
-            return None
-        matcher = "|".join(session_only_background_tool_names())
-        return {
-            "PreToolUse": [
+
+        hooks: Dict[str, Any] = {}
+        if not native_background_tools_allowed():
+            matcher = "|".join(session_only_background_tool_names())
+            hooks["PreToolUse"] = [
                 HookMatcher(
                     matcher=matcher,
                     hooks=[self._guard_session_only_background_tools],
                 )
             ]
-        }
+
+        async def _expose_native_prompt_boundary(_input_data, _tool_use_id, _context):
+            return {}
+
+        hooks["UserPromptSubmit"] = [
+            HookMatcher(hooks=[_expose_native_prompt_boundary]),
+        ]
+
+        return hooks or None
 
     def _claude_disallowed_tools(self, hooks: Optional[Dict[str, Any]]) -> list:
         """Disallowed tool names for this launch.
@@ -1530,6 +1538,12 @@ class SessionHandler(BaseHandler):
             "stderr": _capture_claude_stderr,
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
             "can_use_tool": self._allow_claude_bypass_tool,
+            # UserPromptSubmit hook events share the ordered native message
+            # stream with Results, making prompt ownership independent of task
+            # scheduling and repeated System(init) frames.
+            "include_hook_events": bool(
+                tool_policy_hooks and "UserPromptSubmit" in tool_policy_hooks
+            ),
         }
         if tool_policy_hooks:
             option_kwargs["hooks"] = tool_policy_hooks
@@ -1566,6 +1580,11 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(
+            client,
+            "_vibe_native_prompt_boundary_supported",
+            bool(tool_policy_hooks and "UserPromptSubmit" in tool_policy_hooks),
+        )
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(client, "_vibe_git_path_state", git_path_state)

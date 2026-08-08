@@ -44,6 +44,11 @@ class SystemMessage:
     data = {"subtype": "init"}
 
 
+class HookEventMessage(SystemMessage):
+    subtype = "hook_started"
+    hook_event_name = "UserPromptSubmit"
+
+
 def _one_result_client():
     class _Client:
         def receive_messages(self):
@@ -57,6 +62,7 @@ def _one_result_client():
 
 def _with_input_closer(client):
     client._transport = SimpleNamespace(end_input=AsyncMock())
+    client._vibe_native_prompt_boundary_supported = True
     return client
 
 
@@ -285,7 +291,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     first = _ResultMessage()
                     first.result = "primary result"
                     yield first
-                    yield SystemMessage()
+                    yield HookEventMessage()
                     await second_result_ready.wait()
                     second = _ResultMessage()
                     second.result = "steered result"
@@ -368,7 +374,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     buffered = _ResultMessage()
                     buffered.result = "buffered primary result"
                     yield buffered
-                    yield SystemMessage()
+                    yield HookEventMessage()
                     await final_result_ready.wait()
                     final = _ResultMessage()
                     final.result = "steered result"
@@ -467,6 +473,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
         client = _AmbiguousClient()
         client._transport = SimpleNamespace(end_input=AsyncMock())
+        client._vibe_native_prompt_boundary_supported = True
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -547,6 +554,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         client._transport = SimpleNamespace(
             end_input=AsyncMock(side_effect=lambda: input_ended.set())
         )
+        client._vibe_native_prompt_boundary_supported = True
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -628,6 +636,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         client._transport = SimpleNamespace(
             end_input=AsyncMock(side_effect=RuntimeError("stdin close failed"))
         )
+        client._vibe_native_prompt_boundary_supported = True
         client.disconnect = AsyncMock()
         receiver_task = asyncio.create_task(
             agent._receive_messages(
@@ -1253,12 +1262,12 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     failed = _ResultMessage()
                     failed.result = "primary failed"
                     yield failed
-                    yield SystemMessage()
+                    yield HookEventMessage()
                     await first_steered_result_ready.wait()
                     first_steered = _ResultMessage()
                     first_steered.result = "first steered result"
                     yield first_steered
-                    yield SystemMessage()
+                    yield HookEventMessage()
                     await second_steered_result_ready.wait()
                     second_steered = _ResultMessage()
                     second_steered.result = "second steered result"

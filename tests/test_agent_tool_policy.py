@@ -378,12 +378,10 @@ def test_guard_never_raises_on_a_malformed_payload():
 
 
 def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
-    captured = {}
-
     class _HookMatcher:
         def __init__(self, matcher=None, hooks=None, timeout=None):
-            captured["matcher"] = matcher
-            captured["hooks"] = hooks
+            self.matcher = matcher
+            self.hooks = hooks
 
     monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
     monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
@@ -392,11 +390,29 @@ def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
     handler = _handler()
     hooks = handler._build_claude_tool_policy_hooks()
 
-    assert list(hooks) == ["PreToolUse"]
-    assert set(captured["matcher"].split("|")) == set(policy.session_only_background_tool_names())
-    assert captured["hooks"] == [handler._guard_session_only_background_tools]
+    assert list(hooks) == ["PreToolUse", "UserPromptSubmit"]
+    pre_tool = hooks["PreToolUse"][0]
+    assert set(pre_tool.matcher.split("|")) == set(
+        policy.session_only_background_tool_names()
+    )
+    assert pre_tool.hooks == [handler._guard_session_only_background_tools]
     # The precise hook path owns enforcement, so nothing extra is denied by name.
     assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
+
+
+def test_native_query_boundary_hook_is_wired(monkeypatch):
+    class _HookMatcher:
+        def __init__(self, matcher=None, hooks=None, timeout=None):
+            self.matcher = matcher
+            self.hooks = hooks
+
+    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
+    handler = _handler()
+
+    hooks = handler._build_claude_tool_policy_hooks()
+    callback = hooks["UserPromptSubmit"][0].hooks[0]
+    assert asyncio.run(callback({}, None, None)) == {}
 
 
 def test_older_sdk_falls_back_to_a_name_level_deny_list(monkeypatch):
@@ -420,8 +436,9 @@ def test_escape_hatch_disables_both_enforcement_paths(monkeypatch):
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
 
     handler = _handler()
-    assert handler._build_claude_tool_policy_hooks() is None
-    assert handler._claude_disallowed_tools(None) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
+    hooks = handler._build_claude_tool_policy_hooks()
+    assert list(hooks) == ["UserPromptSubmit"]
+    assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
 
 
 def test_disallowed_tools_constant_is_not_mutated(monkeypatch):

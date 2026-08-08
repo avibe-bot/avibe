@@ -57,13 +57,10 @@ logger = logging.getLogger(__name__)
 @dataclass(eq=False)
 class _SteeringInputFence:
     observed: bool = False
-    native_generation: int | None = None
-    receive_boundary_crossed: bool = False
 
 
 @dataclass(eq=False)
 class _NativeQueryFence:
-    generation: int
     steering: _SteeringInputFence | None = None
 
 
@@ -101,9 +98,7 @@ class ClaudeAgent(BaseAgent):
         self._steering_generations: dict[str, int] = {}
         self._steering_terminal_barriers: dict[str, list[str]] = {}
         self._steering_input_fences: dict[str, list[_SteeringInputFence]] = {}
-        self._native_query_generations: dict[str, int] = {}
         self._native_query_fences: dict[str, list[_NativeQueryFence]] = {}
-        self._native_query_receive_generations: dict[str, int] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._ambiguous_input_shutdowns: set[str] = set()
         self._ambiguous_interrupts: set[str] = set()
@@ -896,17 +891,9 @@ class ClaudeAgent(BaseAgent):
         input_fences = getattr(self, "_steering_input_fences", None)
         if input_fences is not None:
             input_fences.pop(composite_key, None)
-        native_query_generations = getattr(self, "_native_query_generations", None)
-        if native_query_generations is not None:
-            native_query_generations.pop(composite_key, None)
         native_query_fences = getattr(self, "_native_query_fences", None)
         if native_query_fences is not None:
             native_query_fences.pop(composite_key, None)
-        native_query_receive_generations = getattr(
-            self, "_native_query_receive_generations", None
-        )
-        if native_query_receive_generations is not None:
-            native_query_receive_generations.pop(composite_key, None)
         ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
         if ambiguous_results is not None:
             ambiguous_results.pop(composite_key, None)
@@ -946,15 +933,7 @@ class ClaudeAgent(BaseAgent):
         *,
         steering: _SteeringInputFence | None = None,
     ) -> _NativeQueryFence:
-        generations = getattr(self, "_native_query_generations", None)
-        if generations is None:
-            generations = {}
-            self._native_query_generations = generations
-        generation = generations.get(composite_key, 0) + 1
-        generations[composite_key] = generation
-        if steering is not None:
-            steering.native_generation = generation
-        fence = _NativeQueryFence(generation=generation, steering=steering)
+        fence = _NativeQueryFence(steering=steering)
         pending = getattr(self, "_native_query_fences", None)
         if pending is None:
             pending = {}
@@ -979,13 +958,12 @@ class ClaudeAgent(BaseAgent):
     def _observe_native_query_start(
         self,
         composite_key: str,
-        observed_generation: int,
     ) -> bool:
-        """Claim an SDK init frame for the query write that preceded it."""
+        """Claim the next native UserPromptSubmit hook for a queued query."""
 
         all_pending = getattr(self, "_native_query_fences", None) or {}
         pending = all_pending.get(composite_key) or []
-        if not pending or pending[0].generation > observed_generation:
+        if not pending:
             return False
         query_fence = pending.pop(0)
         if not pending:
@@ -1004,11 +982,16 @@ class ClaudeAgent(BaseAgent):
             index = fences.index(steering_fence)
         except ValueError:
             return False
-        # A transport-ambiguous write becomes native-accepted once Claude emits
-        # the init boundary for that exact queued query.
+        # A transport-ambiguous write becomes native-accepted once Claude's
+        # UserPromptSubmit hook confirms the input was consumed.
         if index < len(barriers) and barriers[index] == "unknown":
             barriers[index] = "accepted"
         return True
+
+    async def observe_native_query_start(self, composite_key: str) -> bool:
+        """Record Claude consuming one queued prompt through UserPromptSubmit."""
+        async with self._steering_lock(composite_key):
+            return self._observe_native_query_start(composite_key)
 
     def _next_terminal_barrier(self, composite_key: str) -> str | None:
         barriers = getattr(self, "_steering_terminal_barriers", None) or {}
@@ -1034,8 +1017,8 @@ class ClaudeAgent(BaseAgent):
 
         A successful transport write only enqueues native input. Claude may emit
         the current query's Assistant/Result before it dequeues that input. The
-        next SystemMessage(init) is the first causal proof that a later terminal
-        frame can belong to the steer; output arrival time alone is not proof.
+        UserPromptSubmit hook is the causal proof that a later terminal frame can
+        belong to the steer; output arrival time alone is not proof.
         """
         generation_changed = expected_steering_generation != self._steering_generation(
             composite_key
@@ -1047,19 +1030,9 @@ class ClaudeAgent(BaseAgent):
         fence = fences[0] if fences else None
         if barrier == "accepted" and fence is not None:
             if not fence.observed:
-                # Reused Claude SDK sessions may omit a second init frame. In
-                # that case the receive-boundary generation is the remaining
-                # causal signal: a stale sample still defers the primary frame,
-                # while a current sample after the native write owns the only
-                # terminal result. A frame that was already in flight before the
-                # write remains conservatively deferred.
-                if generation_changed or not fence.receive_boundary_crossed:
-                    return True
-                self._consume_terminal_barrier(composite_key)
-                fences.pop(0)
-                if not fences:
-                    self._steering_input_fences.pop(composite_key, None)
-                return False
+                # A Result received before the native hook is still owned by the
+                # primary query, even when the transport write already returned.
+                return True
             # Claude normally dequeues one queued prompt per Result, but if it
             # dequeues several before answering, that Result owns every observed
             # FIFO input instead of leaving an already-consumed prompt hanging.
@@ -1072,10 +1045,9 @@ class ClaudeAgent(BaseAgent):
                 fences.pop(0)
             if not fences:
                 self._steering_input_fences.pop(composite_key, None)
-            # The sampled generation can still predate the query transport ack:
-            # the receiver observed this exact input's native init while the writer
-            # held the steering lock. Once that exact fence is consumed, ownership
-            # comes from the fence, not from the stale generation sample.
+            # The sampled generation can still predate the query transport ack.
+            # Once the exact hook fence is consumed, ownership comes from that
+            # fence, not from the stale generation sample.
             return bool(fences)
         buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
@@ -1166,6 +1138,12 @@ class ClaudeAgent(BaseAgent):
                 return steer_result(
                     SteerOutcome.REFUSED,
                     reason="native_input_reconciliation_unsupported",
+                    backend=self.name,
+                )
+            if not getattr(client, "_vibe_native_prompt_boundary_supported", False):
+                return steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="native_prompt_boundary_unsupported",
                     backend=self.name,
                 )
 
@@ -1434,51 +1412,28 @@ class ClaudeAgent(BaseAgent):
             message_stream = client.receive_messages().__aiter__()
             while True:
                 settling_ambiguous_primary = False
-                terminal_steering_generation = None
-                native_query_generation = 0
+                settling_ambiguous_assistant_text = None
+                # Capture the steering generation before waiting for the next
+                # native frame. A frame already buffered in the SDK must retain
+                # the ownership state at the time its receive was started.
+                terminal_steering_generation = self._steering_generation(composite_key)
                 try:
                     message = await anext(message_stream)
-                    # Capture ownership at the receive boundary. The receiver may
-                    # yield while it captures session metadata or opens an
-                    # agent-initiated turn; sampling generation later can relabel a
-                    # buffered pre-steer frame as the steered continuation.
-                    terminal_steering_generation = self._steering_generation(composite_key)
-                    native_query_generation = (
-                        getattr(self, "_native_query_generations", None) or {}
-                    ).get(composite_key, 0)
-                    receive_generations = getattr(
-                        self, "_native_query_receive_generations", None
-                    )
-                    previous_native_query_generation = (
-                        receive_generations.get(composite_key)
-                        if receive_generations is not None
-                        else None
-                    )
-                    if receive_generations is None:
-                        receive_generations = {}
-                        self._native_query_receive_generations = receive_generations
-                    if previous_native_query_generation is not None:
-                        for input_fence in (
-                            getattr(self, "_steering_input_fences", None) or {}
-                        ).get(composite_key, ()):
-                            native_generation = input_fence.native_generation
-                            if (
-                                native_generation is not None
-                                and previous_native_query_generation
-                                < native_generation
-                                <= native_query_generation
-                            ):
-                                input_fence.receive_boundary_crossed = True
-                    receive_generations[composite_key] = native_query_generation
                 except StopAsyncIteration:
-                    message = self._ambiguous_primary_results.pop(composite_key, None)
-                    if message is None:
+                    buffered = self._ambiguous_primary_results.pop(composite_key, None)
+                    if buffered is None:
                         break
+                    message, settling_ambiguous_assistant_text = (
+                        self._unpack_buffered_terminal(buffered)
+                    )
                     settling_ambiguous_primary = True
                 except Exception:
-                    message = self._ambiguous_primary_results.pop(composite_key, None)
-                    if message is None:
+                    buffered = self._ambiguous_primary_results.pop(composite_key, None)
+                    if buffered is None:
                         raise
+                    message, settling_ambiguous_assistant_text = (
+                        self._unpack_buffered_terminal(buffered)
+                    )
                     settling_ambiguous_primary = True
                     logger.warning(
                         "Settling buffered Claude primary result after receiver failure for %s",
@@ -1491,6 +1446,10 @@ class ClaudeAgent(BaseAgent):
                         current_receiver_task=asyncio.current_task(),
                         preserve_pending_request_state=True,
                     )
+                    if settling_ambiguous_assistant_text:
+                        self._last_assistant_text[composite_key] = (
+                            settling_ambiguous_assistant_text
+                        )
                 try:
                     claude_session_id = self._maybe_capture_session_id(
                         message,
@@ -1510,6 +1469,22 @@ class ClaudeAgent(BaseAgent):
                                 owner=AVIBE_CLAUDE_SESSION_OWNER,
                             )
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
+
+                    if message.__class__.__name__ == "HookEventMessage":
+                        if (
+                            getattr(message, "subtype", None) == "hook_started"
+                            and getattr(message, "hook_event_name", None)
+                            == "UserPromptSubmit"
+                        ):
+                            observed_steer = await self.observe_native_query_start(
+                                composite_key
+                            )
+                            if observed_steer:
+                                logger.info(
+                                    "Observed Claude UserPromptSubmit for native query on %s",
+                                    composite_key,
+                                )
+                        continue
 
                     if self._handle_activity_message(
                         message,
@@ -1538,21 +1513,6 @@ class ClaudeAgent(BaseAgent):
                         if is_model_refusal_fallback
                         else None
                     )
-
-                    if (
-                        message_type == "system"
-                        and getattr(message, "subtype", None) == "init"
-                    ):
-                        async with self._steering_lock(composite_key):
-                            observed_steer = self._observe_native_query_start(
-                                composite_key,
-                                native_query_generation,
-                            )
-                        if observed_steer:
-                            logger.info(
-                                "Observed Claude init for steered input on %s",
-                                composite_key,
-                            )
 
                     # Unsolicited backend output (a background-task completion or
                     # a ScheduleWakeup re-invoked the agent inside this SDK
@@ -1899,18 +1859,42 @@ class ClaudeAgent(BaseAgent):
                                 self._foreground_tool_use_ids.pop(composite_key, None)
                                 self._turns_with_foreground_tools.discard(composite_key)
                                 continue
+                            if not settling_ambiguous_primary:
+                                buffered_primary = self._ambiguous_primary_results.get(
+                                    composite_key
+                                )
+                                if buffered_primary is not None:
+                                    # A later Result proves the earlier buffered
+                                    # frame was pre-steer. Emit it before either
+                                    # retaining or settling the current frame.
+                                    buffered_text = self._select_buffered_terminal_text(
+                                        composite_key,
+                                        buffered_primary,
+                                    )
+                                    if buffered_text:
+                                        await self.controller.emit_agent_message(
+                                            context,
+                                            "output",
+                                            buffered_text,
+                                            parse_mode="markdown",
+                                        )
+                                    self._ambiguous_primary_results.pop(
+                                        composite_key,
+                                        None,
+                                    )
                             if (
                                 not settling_ambiguous_primary
                                 and self._next_terminal_barrier(composite_key) == "unknown"
                             ):
-                                self._ambiguous_primary_results[composite_key] = message
+                                self._ambiguous_primary_results[composite_key] = (
+                                    message,
+                                    self._last_assistant_text.get(composite_key),
+                                )
                                 logger.info(
                                     "Deferring Claude primary result until ambiguous steering reaches native EOF or a later result for %s",
                                     composite_key,
                                 )
                                 continue
-                            if not settling_ambiguous_primary:
-                                self._ambiguous_primary_results.pop(composite_key, None)
 
                             if composite_key in self._steering_closing_keys():
                                 logger.info(
@@ -2949,6 +2933,22 @@ class ClaudeAgent(BaseAgent):
         if composite_key in self._turns_with_foreground_tools:
             return "<silent>Claude turn completed without assistant text.</silent>"
         return str(sdk_result or "")
+
+    def _select_buffered_terminal_text(self, composite_key: str, buffered) -> str:
+        """Render a buffered pre-steer result without using newer assistant text."""
+        message, assistant_text = self._unpack_buffered_terminal(buffered)
+        if assistant_text:
+            return str(assistant_text).strip()
+        if composite_key in self._turns_with_foreground_tools:
+            return "<silent>Claude turn completed without assistant text.</silent>"
+        return str(getattr(message, "result", "") or "")
+
+    @staticmethod
+    def _unpack_buffered_terminal(buffered) -> tuple[object, str | None]:
+        if isinstance(buffered, tuple) and len(buffered) == 2:
+            message, assistant_text = buffered
+            return message, assistant_text
+        return buffered, None
 
     def _select_detached_result_text(
         self,

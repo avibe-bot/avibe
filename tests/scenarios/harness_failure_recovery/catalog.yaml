@@ -3886,9 +3886,9 @@ scenarios:
     kind: recovery
     layer: contract
     backend: claude
-    # A transport write only queues the input. The next native SystemMessage(init)
-    # is the causal boundary after which a Result can settle the accepted steering;
-    # unrelated Assistant output arriving after the write is not sufficient.
+    # A transport write only queues the input. The ordered UserPromptSubmit hook
+    # event is the causal boundary after which a Result can settle the accepted
+    # steering; unrelated Assistant output after the write is not sufficient.
     test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
   - id: HFR-436
     name: delayed Claude steering remains user-owned across the primary Result

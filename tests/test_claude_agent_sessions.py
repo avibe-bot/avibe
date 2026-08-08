@@ -502,6 +502,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         interrupt_called = asyncio.Event()
 
         class _Client:
+            _vibe_native_prompt_boundary_supported = True
+
             async def query(self, _text, *, session_id):
                 query_started.set()
                 await release_query.wait()
@@ -888,7 +890,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent = ClaudeAgent(controller)
         composite_key = "session-1:/tmp/work"
         input_fence = _SteeringInputFence()
-        native_query_fence = agent._queue_native_query(
+        agent._queue_native_query(
             composite_key,
             steering=input_fence,
         )
@@ -897,14 +899,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             input_fence=input_fence,
         )
         self.assertTrue(
-            agent._observe_native_query_start(
-                composite_key,
-                native_query_fence.generation,
-            )
+            agent._observe_native_query_start(composite_key)
         )
 
-        # The init may arrive before client.query() returns and increments the
-        # steering generation. The exact observed fence still owns this result.
+        # Hook consumption is authoritative even if query() has not returned.
         self.assertFalse(agent._terminal_claim_superseded(composite_key, 0))
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
         self.assertNotIn(composite_key, agent._steering_input_fences)
@@ -919,20 +917,46 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(agent._terminal_claim_superseded(composite_key, 1))
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
 
-    def test_unobserved_fence_with_current_generation_settles_terminal(self):
+    def test_unobserved_fence_defers_until_native_prompt_is_observed(self):
         controller = _StubController()
         agent = ClaudeAgent(controller)
         composite_key = "session-1:/tmp/work"
         input_fence = _SteeringInputFence()
+        agent._queue_native_query(composite_key, steering=input_fence)
         agent._advance_steering_generation(
             composite_key,
             input_fence=input_fence,
         )
-        input_fence.receive_boundary_crossed = True
-
-        # Some reused native sessions do not emit a second init frame. The
-        # receiver's current generation still proves this terminal is post-steer.
+        self.assertTrue(agent._terminal_claim_superseded(composite_key, 1))
+        self.assertTrue(agent._observe_native_query_start(composite_key))
         self.assertFalse(agent._terminal_claim_superseded(composite_key, 1))
+        self.assertIsNone(agent._next_terminal_barrier(composite_key))
+        self.assertNotIn(composite_key, agent._steering_input_fences)
+
+    def test_terminal_stays_open_for_remaining_unobserved_prompt(self):
+        controller = _StubController()
+        agent = ClaudeAgent(controller)
+        composite_key = "session-1:/tmp/work"
+        first_fence = _SteeringInputFence()
+        second_fence = _SteeringInputFence()
+        agent._queue_native_query(composite_key, steering=first_fence)
+        agent._advance_steering_generation(
+            composite_key,
+            input_fence=first_fence,
+        )
+        agent._queue_native_query(composite_key, steering=second_fence)
+        agent._advance_steering_generation(
+            composite_key,
+            input_fence=second_fence,
+        )
+
+        self.assertTrue(agent._observe_native_query_start(composite_key))
+        self.assertTrue(agent._terminal_claim_superseded(composite_key, 2))
+        self.assertEqual(agent._next_terminal_barrier(composite_key), "accepted")
+        self.assertEqual(agent._steering_input_fences[composite_key], [second_fence])
+
+        self.assertTrue(agent._observe_native_query_start(composite_key))
+        self.assertFalse(agent._terminal_claim_superseded(composite_key, 2))
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
         self.assertNotIn(composite_key, agent._steering_input_fences)
 
@@ -971,10 +995,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             input_fence=input_fence,
         )
 
-        init_message = type(
-            "SystemMessage",
+        hook_message = type(
+            "HookEventMessage",
             (),
-            {"subtype": "init", "data": {"subtype": "init"}},
+            {
+                "subtype": "hook_started",
+                "hook_event_name": "UserPromptSubmit",
+            },
         )()
         text_block = TextBlock("steered final answer")
         assistant_message = type(
@@ -995,7 +1022,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         class _Client:
             def receive_messages(self):
                 async def _iterate():
-                    yield init_message
+                    yield hook_message
                     yield assistant_message
                     yield result_message
 
@@ -1061,10 +1088,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             input_fence=input_fence,
         )
 
-        init_message = type(
-            "SystemMessage",
+        self.assertFalse(agent._observe_native_query_start(composite_key))
+        steering_hook_message = type(
+            "HookEventMessage",
             (),
-            {"subtype": "init", "data": {"subtype": "init"}},
+            {
+                "subtype": "hook_started",
+                "hook_event_name": "UserPromptSubmit",
+            },
         )()
         primary_assistant = type(
             "AssistantMessage",
@@ -1098,10 +1129,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         class _Client:
             def receive_messages(self):
                 async def _iterate():
-                    yield init_message
                     yield primary_assistant
                     yield primary_result
-                    yield init_message
+                    yield steering_hook_message
                     yield steered_assistant
                     yield steered_result
 
@@ -1133,6 +1163,115 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent._steering_input_fences)
         begin_agent_initiated_turn.assert_not_awaited()
 
+    async def test_ambiguous_results_emit_each_answer_in_order(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        emissions = []
+
+        async def _emit_output(_context, message_type, text, **_kwargs):
+            emissions.append((message_type, text))
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit_output)
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        async def _emit_result(_context, text, **_kwargs):
+            emissions.append(("result", text))
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-ambiguous:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        input_fence = _SteeringInputFence()
+        agent._queue_native_query(composite_key, steering=input_fence)
+        agent._advance_steering_generation(
+            composite_key,
+            barrier="unknown",
+            input_fence=input_fence,
+        )
+
+        primary_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("primary answer")]},
+        )()
+        primary_result = type(
+            "ResultMessage",
+            (),
+            {"subtype": "success", "result": "primary answer", "duration_ms": 1},
+        )()
+        steered_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("steered answer")]},
+        )()
+        steered_result = type(
+            "ResultMessage",
+            (),
+            {"subtype": "success", "result": "steered answer", "duration_ms": 2},
+        )()
+        hook_message = type(
+            "HookEventMessage",
+            (),
+            {
+                "subtype": "hook_started",
+                "hook_event_name": "UserPromptSubmit",
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield primary_assistant
+                    yield primary_result
+                    yield hook_message
+                    yield steered_assistant
+                    yield steered_result
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-ambiguous",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "output",
+            "primary answer",
+            parse_mode="markdown",
+        )
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered answer",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._ambiguous_primary_results)
+        self.assertNotIn(composite_key, agent._pending_requests)
+        self.assertEqual(
+            emissions,
+            [("output", "primary answer"), ("result", "steered answer")],
+        )
+
     async def test_buffered_pre_steer_assistant_keeps_primary_result_ownership(self):
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
@@ -1159,6 +1298,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[composite_key] = [pending_request]
         assistant_received = asyncio.Event()
         release_assistant = asyncio.Event()
+        result_receive_waiting = asyncio.Event()
+        release_result = asyncio.Event()
         terminal_processed = asyncio.Event()
         end_stream = asyncio.Event()
 
@@ -1198,6 +1339,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             def receive_messages(self):
                 async def _iterate():
                     yield assistant_message
+                    result_receive_waiting.set()
+                    await release_result.wait()
                     yield result_message
                     await end_stream.wait()
 
@@ -1213,8 +1356,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await assistant_received.wait()
-        agent._advance_steering_generation(composite_key)
         release_assistant.set()
+        await result_receive_waiting.wait()
+        agent._advance_steering_generation(composite_key)
+        release_result.set()
         await asyncio.wait_for(terminal_processed.wait(), timeout=1)
 
         self.assertEqual(agent._pending_requests[composite_key], [pending_request])
