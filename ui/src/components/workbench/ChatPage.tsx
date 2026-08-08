@@ -409,9 +409,6 @@ export const ChatPage: React.FC = () => {
   const provisionPlacementRef = useLatestRef(provisionPlacement);
   const vaultRequestsRef = useLatestRef(vaultRequests);
   const hiddenVaultRequestIdsRef = useRef<Set<string>>(new Set());
-  const markVaultRequestHidden = useCallback((requestId: string) => {
-    hiddenVaultRequestIdsRef.current.add(requestId);
-  }, []);
   const transcriptTailVaultRequests = useMemo(
     () => [...pendingApprovals, ...provisionPlacement.unanchored],
     [pendingApprovals, provisionPlacement],
@@ -431,6 +428,13 @@ export const ChatPage: React.FC = () => {
   } | null>(null);
   const deepLinkWindowHandledRef = useRef(false);
   const [vaultAnchorCycle, setVaultAnchorCycle] = useState(0);
+  const markVaultRequestHidden = useCallback((requestId: string) => {
+    hiddenVaultRequestIdsRef.current.add(requestId);
+    // A deferred request is intentionally left un-fetched while another card
+    // owns the visible historical window. Hiding that card is the state change
+    // that makes the deferred request eligible for its next anchor attempt.
+    setVaultAnchorCycle((cycle) => cycle + 1);
+  }, []);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
