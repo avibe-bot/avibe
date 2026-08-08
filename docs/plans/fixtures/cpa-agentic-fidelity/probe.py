@@ -448,6 +448,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 if block_index != len(open_blocks) + len(closed_blocks) or block_index in open_blocks or block_index in closed_blocks:
                     return False
+                block = event.get("content_block")
+                if isinstance(block, dict) and block.get("type") == "thinking" and any(
+                    block.get(field, "") != "" for field in ("thinking", "signature")
+                ):
+                    return False
                 open_blocks.add(block_index)
                 last_start = block_index
             elif event_type == "content_block_delta":
@@ -513,7 +518,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
             wire_sequence = item.get("wire_sequence")
             if type(wire_sequence) is not int or wire_sequence < 0 or (
-                previous_wire_sequence is not None and wire_sequence != previous_wire_sequence + 1
+                previous_wire_sequence is not None and wire_sequence <= previous_wire_sequence
             ):
                 return False
             previous_wire_sequence = wire_sequence
@@ -596,15 +601,26 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 if event_type == "response.content_part.added":
                     expected_content_index = sum(part_item_id == item_id for part_item_id, _ in content_parts)
-                    if content_index != expected_content_index or key in content_parts or not isinstance(part.get("type"), str):
+                    part_type = part.get("type")
+                    if (
+                        content_index != expected_content_index
+                        or key in content_parts
+                        or not isinstance(part_type, str)
+                        or part_type not in RESPONSES_MESSAGE_PART_TYPES
+                    ):
                         return False
-                    if part.get("type") == "output_text" and (
+                    if part_type == "output_text" and (
                         not isinstance(part.get("text", ""), str) or part.get("text", "")
                     ):
                         return False
                     content_parts.add(key)
-                    content_part_types[key] = part["type"]
-                elif key not in content_parts or key in content_parts_closed or part.get("type") != content_part_types.get(key):
+                    content_part_types[key] = part_type
+                elif (
+                    key not in content_parts
+                    or key in content_parts_closed
+                    or not isinstance(part.get("type"), str)
+                    or part.get("type") != content_part_types.get(key)
+                ):
                     return False
                 else:
                     content_parts_closed.add(key)
@@ -725,18 +741,24 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     content = raw.get("content")
                     if not isinstance(content, list):
                         return False
+                    expected_parts = [
+                        content_part_types[(part_item_id, part_index)]
+                        for part_item_id, part_index in sorted(content_parts)
+                        if part_item_id == item_id
+                    ]
+                    if len(content) != len(expected_parts):
+                        return False
                     snapshot_parts: list[str] = []
-                    for part in content:
+                    for part, expected_type in zip(content, expected_parts):
                         if not isinstance(part, dict):
                             return False
                         part_type = part.get("type")
-                        if not isinstance(part_type, str) or part_type not in {"output_text", "text"}:
+                        if part_type not in RESPONSES_MESSAGE_PART_TYPES or part_type != expected_type:
                             return False
-                        if part_type in {"output_text", "text"}:
-                            text = part.get("text")
-                            if not isinstance(text, str):
-                                return False
-                            snapshot_parts.append(text)
+                        text = part.get("text")
+                        if not isinstance(text, str):
+                            return False
+                        snapshot_parts.append(text)
                     if "".join(snapshot_parts) != message_text.get(item_id, ""):
                         return False
                 if item_types.get(item_id) == "reasoning" and any(
@@ -775,6 +797,29 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or terminal_response.get("status") != "completed"
                 ):
                     return False
+                terminal_items = {
+                    item_id: item
+                    for item in terminal_response["output"]
+                    if isinstance(item, dict) and (item_id := _stream_item_id(item.get("id"))) is not None
+                }
+                for item_id, item_type in item_types.items():
+                    if item_type != "message":
+                        continue
+                    expected_parts = [
+                        content_part_types[(part_item_id, part_index)]
+                        for part_item_id, part_index in sorted(content_parts)
+                        if part_item_id == item_id
+                    ]
+                    snapshot = terminal_items.get(item_id)
+                    content = snapshot.get("content") if snapshot is not None else None
+                    if not isinstance(content, list) or len(content) != len(expected_parts):
+                        return False
+                    if any(
+                        not isinstance(part, dict)
+                        or part.get("type") != expected_type
+                        for part, expected_type in zip(content, expected_parts)
+                    ):
+                        return False
                 if any(
                     isinstance(item, dict)
                     and item.get("type") == "reasoning"
@@ -852,6 +897,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     seen_tool_indexes.add(tool_index)
                 raw_type = call.get("type")
                 if raw_type is not None and not isinstance(raw_type, str):
+                    return False
+                function = call.get("function", {})
+                if not isinstance(function, dict):
+                    return False
+                if any(field in function and not isinstance(function[field], str) for field in ("name", "arguments")):
                     return False
                 chunk_last_tool_index = tool_index
             finish_reason = choice.get("finish_reason")
@@ -1126,9 +1176,12 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                     block["text"] = ""
             elif block.get("type") == "thinking":
                 for field in ("thinking", "signature"):
-                    if not isinstance(block.get(field, ""), str):
+                    value = block.get(field, "")
+                    if not isinstance(value, str):
                         errors.append(f"stream_{field}_snapshot_invalid")
-                        block[field] = ""
+                    elif value:
+                        errors.append(f"stream_{field}_opening_snapshot_invalid")
+                    block[field] = ""
             blocks[index] = block
         elif event_type == "content_block_delta":
             index = _stream_index(event.get("index"))
@@ -1362,6 +1415,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     argument_fragment_items: set[str] = set()
     argument_done_items: set[str] = set()
     content_parts_closed: set[tuple[str, int]] = set()
+    content_part_types: dict[tuple[str, int], str] = {}
     text_delta_count = 0
     terminal_response: dict[str, Any] | None = None
     streamed_output_seen = False
@@ -1459,11 +1513,18 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     if not isinstance(content, list):
                         errors.append("message_content_invalid")
                         continue
+                    expected_parts = [
+                        content_part_types[(part_item_id, part_index)]
+                        for part_item_id, part_index in sorted(content_part_types)
+                        if part_item_id == key
+                    ]
+                    if len(content) != len(expected_parts):
+                        errors.append("stream_content_part_snapshot_mismatch")
                     item_snapshot_parts: list[str] = []
-                    for part in content:
-                        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                    for part, expected_type in zip(content, expected_parts):
+                        if not isinstance(part, dict) or part.get("type") != expected_type:
                             errors.append("message_part_type_invalid")
-                        elif part.get("type") in {"output_text", "text"}:
+                        elif part.get("type") in RESPONSES_MESSAGE_PART_TYPES:
                             text = part.get("text", "")
                             if not isinstance(text, str):
                                 errors.append("message_text_invalid")
@@ -1484,11 +1545,19 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if not isinstance(part, dict):
                 errors.append("content_part_invalid")
                 continue
-            if event_type == "response.content_part.added" and part.get("type") == "output_text":
+            part_type = part.get("type")
+            if not isinstance(part_type, str) or part_type not in RESPONSES_MESSAGE_PART_TYPES:
+                errors.append("content_part_type_invalid")
+                continue
+            if event_type == "response.content_part.added":
+                content_part_types[(key, content_index)] = part_type
+            if event_type == "response.content_part.added" and part_type == "output_text":
                 opening_text = part.get("text", "")
                 if not isinstance(opening_text, str) or opening_text:
                     errors.append("content_part_opening_snapshot_invalid")
             elif event_type == "response.content_part.done":
+                if content_part_types.get((key, content_index)) != part_type:
+                    errors.append("content_part_type_mismatch")
                 part_text = part.get("text")
                 if not isinstance(part_text, str):
                     errors.append("content_part_text_invalid")
@@ -1849,13 +1918,17 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             if not isinstance(function, dict):
                 errors.append("tool_function_invalid")
                 continue
-            if function.get("name"):
-                call["function"]["name"] += str(function["name"])
-            if function.get("arguments"):
+            if "name" in function:
+                name_fragment = function["name"]
+                if not isinstance(name_fragment, str):
+                    errors.append("stream_name_invalid")
+                else:
+                    call["function"]["name"] += name_fragment
+            if "arguments" in function:
                 fragment = function["arguments"]
                 if not isinstance(fragment, str):
                     errors.append("stream_arguments_invalid")
-                else:
+                elif fragment:
                     argument_fragment_indexes.add(index)
                     call["function"]["arguments"] += fragment
     for index in calls:

@@ -268,6 +268,16 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
 
+    def test_chat_stream_rejects_falsey_malformed_tool_fields(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant", "tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": "{"}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": [], "arguments": []}}]}, "finish_reason": "tool_calls"}]}},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events + [{"kind": "done", "type": None}]))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("stream_name_invalid", turn.parse_errors)
+        self.assertIn("stream_arguments_invalid", turn.parse_errors)
+
     def test_chat_stream_allows_sparse_continuation_type(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '{"city":'}}]}}]}},
@@ -1674,12 +1684,16 @@ class ProbeParserTests(unittest.TestCase):
             self.assertIn("terminal_status_invalid", turn.parse_errors)
             self.assertFalse(turn.terminal)
 
-    def test_responses_wire_sequence_must_be_contiguous(self) -> None:
-        events = [
-            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
-            {"kind": "event", "sequence": 1, "wire_sequence": 2, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": []}}},
-        ]
-        self.assertFalse(probe._stream_order_ok("responses", events))
+    def test_responses_wire_sequence_must_increase(self) -> None:
+        events = _responses_wire(
+            {"type": "response.created", "response": {}},
+            {"type": "response.completed", "response": {"status": "completed", "output": []}},
+        )
+        events[1]["wire_sequence"] = 2
+        self.assertTrue(probe._stream_order_ok("responses", events))
+        duplicate = copy.deepcopy(events)
+        duplicate[1]["wire_sequence"] = 0
+        self.assertFalse(probe._stream_order_ok("responses", duplicate))
 
     def test_responses_content_part_done_must_match_text(self) -> None:
         events = [
@@ -1785,6 +1799,40 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", invalid))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
+
+    def test_responses_stream_rejects_unsupported_content_part_type(self) -> None:
+        for part_type in ("future_part", []):
+            invalid = _response_message_stream()
+            invalid[2]["event"]["part"]["type"] = part_type
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            self.assertIn("content_part_type_invalid", turn.parse_errors)
+
+    def test_responses_stream_content_parts_match_item_snapshot(self) -> None:
+        invalid = _response_message_stream()
+        invalid[-1]["event"]["response"]["output"][0]["content"][0]["type"] = "text"
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("terminal_output_mismatch", turn.parse_errors)
+
+    def test_anthropic_thinking_opening_snapshot_must_be_empty(self) -> None:
+        valid = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}},
+            {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "thought"}}},
+            {"kind": "event", "sequence": 3, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
+            {"kind": "event", "sequence": 4, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "sequence": 5, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}},
+            {"kind": "event", "sequence": 6, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        invalid = copy.deepcopy(valid)
+        invalid[1]["event"]["content_block"]["thinking"] = "prefilled"
+        invalid[1]["event"]["content_block"]["signature"] = "sig"
+        self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        self.assertFalse(probe._stream_order_ok("anthropic", invalid))
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("stream_thinking_opening_snapshot_invalid", turn.parse_errors)
+        self.assertIn("stream_signature_opening_snapshot_invalid", turn.parse_errors)
 
     def test_anthropic_message_start_requires_initial_snapshot(self) -> None:
         valid = [
