@@ -111,7 +111,7 @@ function inferReplyFromSourceMessage(
       // A request may be persisted after its reply but before the next input.
       // In that case the recorded pre-request reply is still the owner. Only
       // discard the source identity when the later input predates the request.
-      const messageTime = messageOrderTimeMs(message);
+      const messageTime = transcriptOrderTimeMs(message);
       return replyBeforeRequest && !Number.isNaN(requestTime) &&
         !Number.isNaN(messageTime) && messageTime >= requestTime
         ? replyBeforeRequest

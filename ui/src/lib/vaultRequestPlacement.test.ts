@@ -266,6 +266,26 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored).toEqual([]);
   });
 
+  it('uses transcript time for queued source-turn boundaries', () => {
+    const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
+    const ownerReply = message('owner-reply', '2026-07-30T10:00:30Z', 'agent');
+    const queuedInput = message(
+      'queued-input',
+      '2026-07-30T09:59:00Z',
+      'user',
+      '2026-07-30T10:02:00Z',
+    );
+    const unrelatedReply = message('unrelated-reply', '2026-07-30T10:03:00Z');
+    const placed = placeVaultProvisionRequests(
+      [source, ownerReply, queuedInput, unrelatedReply],
+      [request('late', 'provision', '2026-07-30T10:01:00Z', null, { message_id: source.id })],
+    );
+
+    expect(placed.byMessageId.get(ownerReply.id)?.map((item) => item.id)).toEqual(['late']);
+    expect(placed.byMessageId.has(unrelatedReply.id)).toBe(false);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('ignores a stale requester message when a later turn owns the request', () => {
     const source = message('stale-source', '2026-07-30T10:00:00Z', 'user');
     const oldReply = message('old-reply', '2026-07-30T10:00:10Z', 'agent');
