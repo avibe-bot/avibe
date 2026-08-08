@@ -156,7 +156,13 @@ def _response_function_stream():
             "type": "response.function_call_arguments.delta",
             "item_id": "fc_1",
             "output_index": 0,
-            "delta": '{"city":"Shanghai"}',
+            "delta": '{"city":',
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": '"Shanghai"}',
         },
         {
             "type": "response.function_call_arguments.done",
@@ -309,14 +315,13 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("stream_item_snapshot_mismatch", turn.parse_errors)
 
     def test_responses_stream_rejects_argument_done_mismatch(self) -> None:
-        events = [
-            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}}},
-            {"kind": "event", "sequence": 1, "wire_sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
-            {"kind": "event", "sequence": 2, "wire_sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": '{"city":"Shanghai"}'}},
-            {"kind": "event", "sequence": 3, "wire_sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0, "arguments": '{"city":"Paris"}'}},
-            {"kind": "event", "sequence": 4, "wire_sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
-            {"kind": "event", "sequence": 5, "wire_sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"id": "resp_1", "object": "response", "status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
-        ]
+        events = _response_function_stream()
+        done = next(
+            event
+            for event in events
+            if event["type"] == "response.function_call_arguments.done"
+        )
+        done["event"]["arguments"] = '{"city":"Paris"}'
         self.assertTrue(probe._stream_order_ok("responses", events))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, True))
         self.assertIn("stream_arguments_done_mismatch", turn.parse_errors)
@@ -367,6 +372,34 @@ class ProbeParserTests(unittest.TestCase):
         )
         turn = probe._parse_responses_stream(result)
         self.assertIn("stream_arguments_missing", turn.parse_errors)
+
+    def test_responses_stream_requires_split_argument_fragments(self) -> None:
+        events = _response_function_stream()
+        single_delta = [
+            event
+            for event in events
+            if event["type"] != "response.function_call_arguments.delta"
+        ]
+        single_delta.insert(
+            2,
+            {
+                "kind": "event",
+                "sequence": 2,
+                "wire_sequence": 2,
+                "type": "response.function_call_arguments.delta",
+                "event": {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_1",
+                    "output_index": 0,
+                    "delta": '{"city":"Shanghai"}',
+                },
+            },
+        )
+        self.assertFalse(probe._stream_order_ok("responses", single_delta))
+        turn = probe._parse_responses_stream(
+            probe.TransportResult(200, None, single_delta, False, 0, False)
+        )
+        self.assertIn("stream_arguments_not_fragmented", turn.parse_errors)
 
     def test_chat_stream_reassembles_tool_fragments(self) -> None:
         events = [
@@ -2266,14 +2299,20 @@ class ProbeParserTests(unittest.TestCase):
 
         valid = _response_function_stream()
         valid[1]["event"]["item"]["status"] = "in_progress"
-        valid[4]["event"]["item"]["status"] = "completed"
+        done = next(event for event in valid if event["type"] == "response.output_item.done")
+        done["event"]["item"]["status"] = "completed"
         valid[-1]["event"]["response"]["output"][0]["status"] = "completed"
         self.assertTrue(probe._stream_order_ok("responses", valid))
         valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
         self.assertNotIn("stream_output_item_status_invalid", valid_turn.parse_errors)
 
         missing_done_status = copy.deepcopy(valid)
-        missing_done_status[4]["event"]["item"].pop("status")
+        missing_done = next(
+            event
+            for event in missing_done_status
+            if event["type"] == "response.output_item.done"
+        )
+        missing_done["event"]["item"].pop("status")
         self.assertFalse(probe._stream_order_ok("responses", missing_done_status))
         missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing_done_status, False, 0, False))
         self.assertIn("stream_output_item_status_invalid", missing_turn.parse_errors)
@@ -2294,7 +2333,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_responses_stream_rejects_noncompleted_terminal_item_status(self) -> None:
         valid = _response_function_stream()
-        valid[4]["event"]["item"]["status"] = "completed"
+        done = next(event for event in valid if event["type"] == "response.output_item.done")
+        done["event"]["item"]["status"] = "completed"
         valid[-1]["event"]["response"]["output"][0]["status"] = "completed"
         self.assertTrue(probe._stream_order_ok("responses", valid))
         valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
@@ -2351,12 +2391,18 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_responses_content_part_opening_text_must_be_empty(self) -> None:
         valid = _response_message_stream()
-        invalid = copy.deepcopy(valid)
-        invalid[2]["event"]["part"]["text"] = "WRONG"
         self.assertTrue(probe._stream_order_ok("responses", valid))
-        self.assertFalse(probe._stream_order_ok("responses", invalid))
-        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
-        self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
+        for opening_text in (None, "WRONG"):
+            invalid = copy.deepcopy(valid)
+            if opening_text is None:
+                invalid[2]["event"]["part"].pop("text")
+            else:
+                invalid[2]["event"]["part"]["text"] = opening_text
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            turn = probe._parse_responses_stream(
+                probe.TransportResult(200, None, invalid, False, 0, False)
+            )
+            self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
 
     def test_responses_stream_preserves_multiple_content_parts(self) -> None:
         events = _response_multi_content_stream()
@@ -2378,14 +2424,22 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(turn.parse_errors, [])
 
     def test_responses_text_content_part_opening_text_must_be_empty(self) -> None:
-        events = [
+        valid = [
             {"kind": "event", "type": "response.created", "event": {"type": "response.created", "response": {}}},
             {"kind": "event", "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message", "role": "assistant"}}},
-            {"kind": "event", "type": "response.content_part.added", "event": {"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "text", "text": "prefilled"}}},
+            {"kind": "event", "type": "response.content_part.added", "event": {"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "text", "text": ""}}},
         ]
-        self.assertFalse(probe._stream_order_ok("responses", events))
-        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
-        self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
+        for opening_text in (None, "prefilled"):
+            events = copy.deepcopy(valid)
+            if opening_text is None:
+                events[2]["event"]["part"].pop("text")
+            else:
+                events[2]["event"]["part"]["text"] = opening_text
+            self.assertFalse(probe._stream_order_ok("responses", events))
+            turn = probe._parse_responses_stream(
+                probe.TransportResult(200, None, events, False, 0, False)
+            )
+            self.assertIn("content_part_opening_snapshot_invalid", turn.parse_errors)
 
     def test_responses_stream_rejects_unsupported_content_part_type(self) -> None:
         for part_type in ("future_part", []):

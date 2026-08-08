@@ -543,6 +543,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         closed: set[str] = set()
         completed_items: dict[str, dict[str, Any]] = {}
         argument_done: set[str] = set()
+        argument_fragment_counts: dict[str, int] = {}
         message_text_started: set[tuple[str, int]] = set()
         message_text_done: set[tuple[str, int]] = set()
         reasoning_text_done: set[tuple[str, int]] = set()
@@ -690,7 +691,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     ):
                         return False
                     if part_type in RESPONSES_MESSAGE_PART_TYPES and (
-                        not isinstance(part.get("text", ""), str) or part.get("text", "")
+                        "text" not in part or not isinstance(part["text"], str) or part["text"]
                     ):
                         return False
                     content_parts.add(key)
@@ -713,6 +714,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 if output_index is None or item_indexes.get(item_id) != output_index:
                     return False
+                delta = event.get("delta")
+                if not isinstance(delta, str):
+                    return False
+                if delta:
+                    argument_fragment_counts[item_id] = argument_fragment_counts.get(item_id, 0) + 1
             elif event_type == "response.function_call_arguments.done":
                 if not response_started:
                     return False
@@ -725,6 +731,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or item_id in argument_done
                     or item_types.get(item_id) != "function_call"
                     or not isinstance(event.get("arguments"), str)
+                    or argument_fragment_counts.get(item_id, 0) < 2
                     or output_index is None
                     or item_indexes.get(item_id) != output_index
                 ):
@@ -1610,7 +1617,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     status: str | None = None
     response_id: str | None = None
     args_by_item: dict[str, str] = {}
-    argument_fragment_items: set[str] = set()
+    argument_fragment_counts: dict[str, int] = {}
     argument_done_items: set[str] = set()
     content_parts_closed: set[tuple[str, int]] = set()
     content_part_types: dict[tuple[str, int], str] = {}
@@ -1800,8 +1807,8 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if event_type == "response.content_part.added":
                 content_part_types[(key, content_index)] = part_type
             if event_type == "response.content_part.added" and part_type in RESPONSES_MESSAGE_PART_TYPES:
-                opening_text = part.get("text", "")
-                if not isinstance(opening_text, str) or opening_text:
+                opening_text = part.get("text")
+                if "text" not in part or not isinstance(opening_text, str) or opening_text:
                     errors.append("content_part_opening_snapshot_invalid")
             elif event_type == "response.content_part.done":
                 if content_part_types.get((key, content_index)) != part_type:
@@ -1824,7 +1831,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 errors.append("stream_arguments_invalid")
                 continue
             if delta:
-                argument_fragment_items.add(key)
+                argument_fragment_counts[key] = argument_fragment_counts.get(key, 0) + 1
             args_by_item[key] = args_by_item.get(key, "") + delta
         elif event_type == "response.function_call_arguments.done":
             key = _parsed_stream_item_id(event.get("item_id"), errors)
@@ -1946,8 +1953,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     items: list[dict[str, Any]] = []
     for key, raw in output.items():
         if raw.get("type") == "function_call":
-            if key not in argument_fragment_items:
+            fragment_count = argument_fragment_counts.get(key, 0)
+            if fragment_count == 0:
                 errors.append("stream_arguments_missing")
+            elif fragment_count < 2:
+                errors.append("stream_arguments_not_fragmented")
             if key not in argument_done_items:
                 errors.append("stream_arguments_done_missing")
             if key in args_by_item:
