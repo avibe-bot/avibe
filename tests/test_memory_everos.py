@@ -241,7 +241,7 @@ def test_write_routes_log_and_drop_unsupported_status_values(caplog) -> None:
     [
         (
             httpx.Response(400, json={"request_id": "bad-request", "error": {"code": "INVALID_INPUT"}}),
-            FlushRejected("bad-request", "INVALID_INPUT", server_fault=False),
+            FlushRejected("bad-request", "INVALID_INPUT", server_fault=False, retryable=False),
         ),
         (
             httpx.Response(500, json={"request_id": "server-request", "error": {"code": "INTERNAL_ERROR"}}),

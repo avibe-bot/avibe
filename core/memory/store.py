@@ -995,6 +995,7 @@ class MemoryStore:
             "extracted",
             "no_extraction",
         }
+        retryable_rejection = isinstance(result, FlushRejected) and result.retryable
         if valid_success:
             observation = "succeeded"
             status = result.status
@@ -1115,6 +1116,8 @@ class MemoryStore:
                         "not_due"
                         if observation == "succeeded"
                         else "due"
+                        if observation == "rejected" and retryable_rejection
+                        else "not_due"
                         if observation == "rejected"
                         else "manual_required"
                     ),
@@ -1165,9 +1168,16 @@ class MemoryStore:
                             settlement_outcome,
                             first_unflushed_at,
                             state.fence_epoch,
-                            "not_due" if settlement_outcome == "succeeded" else "due",
-                            now if settlement_outcome == "rejected" else None,
-                            now if settlement_outcome == "rejected" else None,
+                            "not_due"
+                            if settlement_outcome == "succeeded"
+                            or (settlement_outcome == "rejected" and not retryable_rejection)
+                            else "due",
+                            now
+                            if settlement_outcome == "rejected" and retryable_rejection
+                            else None,
+                            now
+                            if settlement_outcome == "rejected" and retryable_rejection
+                            else None,
                             watermark if settlement_outcome == "succeeded" else state.watermark,
                             now,
                             provider_session_ref.serialize(),
@@ -2103,6 +2113,7 @@ class MemoryStore:
             """
             DELETE FROM memory_capture_queue
             WHERE state IN ('delivered', 'dead')
+              AND (flush_observation IS NULL OR flush_observation != 'in_flight')
               AND COALESCE(flush_observed_at, completed_at) IS NOT NULL
               AND COALESCE(flush_observed_at, completed_at) < ?
             """,
@@ -2121,7 +2132,8 @@ class MemoryStore:
                 WHERE source_message_digest IN (
                     SELECT source_message_digest FROM memory_capture_queue
                     WHERE state IN ('delivered', 'dead')
-                    ORDER BY COALESCE(flush_observed_at, completed_at), source_message_digest
+                      AND (flush_observation IS NULL OR flush_observation != 'in_flight')
+                      ORDER BY COALESCE(flush_observed_at, completed_at), source_message_digest
                     LIMIT ?
                 )
                 """,

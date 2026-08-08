@@ -623,7 +623,7 @@ async def test_half_open_4xx_does_not_refresh_breaker_anchor(tmp_path: Path) -> 
     provider.flush_results.extend(
         [
             FlushRejected("server", "INTERNAL_ERROR", server_fault=True),
-            FlushRejected("content", "INVALID_INPUT", server_fault=False),
+            FlushRejected("content", "INVALID_INPUT", server_fault=False, retryable=False),
         ]
     )
     current = datetime(2026, 1, 1, tzinfo=UTC)
@@ -638,6 +638,23 @@ async def test_half_open_4xx_does_not_refresh_breaker_anchor(tmp_path: Path) -> 
     rows = store.list_queue_rows()
     assert rows[0].flush_observation == "rejected"
     assert (rows[1].state, rows[1].flush_observation) == ("pending", None)
+    assert store.get_session_flush_state(rows[0].provider_session_ref).flush_state == "not_due"
+
+
+async def test_permanent_flush_rejection_does_not_starve_other_sessions(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="permanent", session="bad")) == CaptureAccepted()
+    provider.flush_results.append(
+        FlushRejected("permanent", "INVALID_INPUT", server_fault=False, retryable=False)
+    )
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    assert await module.capture(_request(source="unrelated", session="good")) == CaptureAccepted()
+    assert await worker.drain_once() == 1
+    rows = store.list_queue_rows()
+    assert [row.state for row in rows] == ["delivered", "delivered"]
+    assert [row.flush_observation for row in rows] == ["rejected", "succeeded"]
 
 
 async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:

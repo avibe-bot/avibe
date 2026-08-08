@@ -164,6 +164,10 @@ class MemoryWorker:
                     if _opens_breaker(result):
                         await self._open_processing_fault()
                         break
+                    if isinstance(result, FlushRejected) and not result.retryable:
+                        if half_open:
+                            break
+                        continue
                     if not isinstance(result, FlushSucceeded):
                         break
                     half_open_flush_recovered = half_open

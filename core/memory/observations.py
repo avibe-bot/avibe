@@ -23,6 +23,7 @@ class FlushRejected:
     request_id: str | None
     error_code: str | None
     server_fault: bool
+    retryable: bool = True
 
 
 @dataclass(frozen=True)

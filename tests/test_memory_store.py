@@ -504,6 +504,40 @@ def test_claim_due_blocks_new_adds_until_due_generation_is_retried(tmp_path: Pat
     )
 
 
+def test_permanent_flush_rejection_does_not_schedule_a_retry(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "permanent")
+    token = _flush_claim(store, provider_session_ref)
+
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("permanent", "INVALID_INPUT", server_fault=False, retryable=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "not_due"
+    assert store.list_due_flush_sessions(now="2026-01-01T00:00:03.000Z") == ()
+
+
+def test_compaction_preserves_in_flight_flush_evidence(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "in-flight-compaction")
+    _flush_claim(store, provider_session_ref)
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE memory_capture_queue SET completed_at = ? WHERE source_message_digest = 'in-flight-compaction'",
+            (old.isoformat().replace("+00:00", "Z"),),
+        )
+
+    reference = old + TERMINAL_TOMBSTONE_RETENTION + timedelta(seconds=1)
+    assert store.compact_terminal_tombstones(now=reference) == 0
+    row = _row_for_source(store, "in-flight-compaction")
+    assert row is not None
+    assert row.flush_observation == "in_flight"
+
+
 def test_malformed_flush_success_is_recorded_as_manual_required(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "malformed-flush")

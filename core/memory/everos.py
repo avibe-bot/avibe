@@ -243,6 +243,7 @@ class EverOSPort:
             request_id=request_id,
             error_code=_bounded_opaque_string(error_code),
             server_fault=status_code >= 500,
+            retryable=not _deterministic_client_rejection(status_code, raw),
         )
 
     async def _sidecar_write(
