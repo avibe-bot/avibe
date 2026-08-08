@@ -522,7 +522,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 open_blocks.remove(block_index)
                 closed_blocks.add(block_index)
             elif event_type == "message_stop":
-                if open_blocks:
+                if open_blocks or not message_delta_seen:
                     return False
                 message_stop = index
             elif event_type == "message_delta":
@@ -542,7 +542,12 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 ):
                     return False
                 message_delta_seen = True
-        return message_started and message_stop is not None and message_stop == len(events) - 1
+        return (
+            message_started
+            and message_delta_seen
+            and message_stop is not None
+            and message_stop == len(events) - 1
+        )
     if protocol == "responses":
         added: set[str] = set()
         closed: set[str] = set()
@@ -1315,6 +1320,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     errors: list[str] = []
     text_delta_count = 0
     envelope: dict[str, Any] = {}
+    message_delta_seen = False
     for item in result.events:
         if item.get("kind") == "done":
             errors.append("stream_done_sentinel")
@@ -1419,6 +1425,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 ):
                     errors.append("message_start_terminal_invalid")
         elif event_type == "message_delta":
+            message_delta_seen = True
             delta = event.get("delta")
             if not isinstance(delta, dict):
                 errors.append("message_delta_invalid")
@@ -1436,6 +1443,8 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 else:
                     stop_reason = candidate_reason
                     stop_sequence = candidate_sequence
+        elif event_type == "message_stop" and not message_delta_seen:
+            errors.append("message_delta_missing")
     content: list[dict[str, Any]] = []
     for index in sorted(blocks):
         block = blocks[index]

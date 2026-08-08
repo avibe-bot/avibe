@@ -1258,6 +1258,8 @@ class ProbeParserTests(unittest.TestCase):
         payload = (
             b'\xef\xbb\xbfevent: message_start\rdata: {"type":"message_start","message":'
             b'{"type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null}}\r\r'
+            b'event: message_delta\rdata: {"type":"message_delta","delta":'
+            b'{"stop_reason":"end_turn","stop_sequence":null}}\r\r'
             b'event: message_stop\rdata: {"type":"message_stop"}\r\r'
         )
 
@@ -1289,7 +1291,7 @@ class ProbeParserTests(unittest.TestCase):
             result = probe._request("/v1/messages", {}, client_protocol="anthropic", stream=True)
         finally:
             probe.OPENER = original_opener
-        self.assertEqual(len(result.events), 2)
+        self.assertEqual(len(result.events), 3)
         self.assertTrue(result.stream_order_ok)
 
     def test_chat_usage_reasoning_tokens_count_as_reasoning_signal(self) -> None:
@@ -1476,9 +1478,18 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0}},
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0}},
             {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
-            {"kind": "event", "sequence": 4, "type": "message_stop", "event": {"type": "message_stop"}},
+            {
+                "kind": "event",
+                "sequence": 4,
+                "type": "message_delta",
+                "event": {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                },
+            },
+            {"kind": "event", "sequence": 5, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
-        invalid = [ordered[2], ordered[0], ordered[3], ordered[4]]
+        invalid = [ordered[2], ordered[0], ordered[3], ordered[4], ordered[5]]
         self.assertTrue(probe._stream_order_ok("anthropic", ordered))
         self.assertFalse(probe._stream_order_ok("anthropic", invalid))
 
@@ -1508,6 +1519,36 @@ class ProbeParserTests(unittest.TestCase):
         ]
         self.assertFalse(probe._stream_order_ok("anthropic", before_start))
         self.assertFalse(probe._stream_order_ok("anthropic", while_open))
+
+    def test_anthropic_message_stop_requires_prior_message_delta(self) -> None:
+        events = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": "message_start",
+                "event": {
+                    "type": "message_start",
+                    "message": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                    },
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": "message_stop",
+                "event": {"type": "message_stop"},
+            },
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+        turn = probe._parse_anthropic_stream(
+            probe.TransportResult(200, None, events, True, 0, False)
+        )
+        self.assertIn("message_delta_missing", turn.parse_errors)
 
     def test_anthropic_error_event_invalidates_stream(self) -> None:
         events = [
