@@ -25,7 +25,6 @@ from typing import Any
 DESKTOP_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = DESKTOP_DIR.parent
 SOURCES_PATH = DESKTOP_DIR / "runtime-sources.json"
-RUNTIME_NPM_DIR = DESKTOP_DIR / "runtime-bundle"
 DEFAULT_OUTPUT = DESKTOP_DIR / "src-tauri" / "resources" / "runtime"
 COPY_CHUNK = 1024 * 1024
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
@@ -42,16 +41,6 @@ def sha256(path: Path) -> str:
 
 def run(command: list[str], *, cwd: Path = REPO_ROOT, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)
-
-
-def npm_executable(*, platform_name: str | None = None) -> str:
-    """Resolve the npm launcher without relying on shell command shims."""
-
-    name = "npm.cmd" if (platform_name or os.name) == "nt" else "npm"
-    resolved = shutil.which(name)
-    if resolved is None:
-        raise SystemExit(f"{name} is required to build the private Runtime")
-    return resolved
 
 
 def download(source: dict[str, str], cache_dir: Path) -> Path:
@@ -91,36 +80,6 @@ def extract_source(archive: Path, destination: Path) -> Path:
     if len(created) != 1 or not created[0].is_dir():
         raise SystemExit(f"Expected one top-level directory in {archive.name}")
     return created[0]
-
-
-def copy_codex_runtime(source: Path, destination: Path) -> None:
-    """Copy one complete Codex target package without overwriting payload files."""
-
-    for path in source.rglob("*"):
-        if path.is_symlink():
-            raise SystemExit(f"Codex Runtime contains an unsupported symlink: {path}")
-        if path.is_file() and (destination / path.relative_to(source)).exists():
-            raise SystemExit(f"Codex Runtime collides with an existing payload file: {path}")
-    shutil.copytree(source, destination, dirs_exist_ok=True)
-
-
-def codex_runtime_executables(root: Path, *, windows: bool) -> list[Path]:
-    """Return every executable the packaged Codex target launches directly."""
-
-    if windows:
-        return [
-            root / "bin" / "codex.exe",
-            root / "bin" / "codex-code-mode-host.exe",
-            root / "codex-path" / "rg.exe",
-            root / "codex-resources" / "codex-command-runner.exe",
-            root / "codex-resources" / "codex-windows-sandbox-setup.exe",
-        ]
-    return [
-        root / "bin" / "codex",
-        root / "bin" / "codex-code-mode-host",
-        root / "codex-path" / "rg",
-        root / "codex-resources" / "zsh" / "bin" / "zsh",
-    ]
 
 
 def ensure_show_runtime_manifest(sources: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]:
@@ -230,70 +189,69 @@ def install_python_environment(
     return completed.stdout.strip()
 
 
-def install_tools(
-    target: str,
+def install_node_toolchain(
     target_config: dict[str, Any],
     node_archive: Path,
-    codex_license: Path,
     payload: Path,
     work_dir: Path,
+    expected_npm_version: str,
 ) -> None:
     node_root = extract_source(node_archive, work_dir / "node-source")
     node_source = node_root / target_config["node_source"]
     node_destination = payload / target_config["node_entrypoint"]
+    if not node_source.is_file():
+        raise SystemExit(f"Node distribution is missing {target_config['node_source']}")
     node_destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(node_source, node_destination)
 
-    run([npm_executable(), "ci", "--ignore-scripts", "--omit=dev"], cwd=RUNTIME_NPM_DIR)
-    package_name = target_config["codex_package"].split("/")[-1]
-    candidates = [
-        RUNTIME_NPM_DIR / "node_modules" / "@openai" / "codex" / "node_modules" / "@openai" / package_name,
-        RUNTIME_NPM_DIR / "node_modules" / "@openai" / package_name,
-    ]
-    codex_package = next((candidate for candidate in candidates if candidate.is_dir()), None)
-    if codex_package is None:
-        raise SystemExit(f"npm did not install {target_config['codex_package']} for {target}")
-    windows = target_config["os"] == "windows"
-    codex_name = "codex.exe" if windows else "codex"
-    codex_sources = list(codex_package.glob(f"vendor/*/bin/{codex_name}"))
-    if len(codex_sources) != 1:
-        raise SystemExit(f"{target_config['codex_package']} contains no native Codex executable")
-    codex_source = codex_sources[0]
-    codex_runtime_source = codex_source.parent.parent
-    required_runtime_paths = [
-        *codex_runtime_executables(codex_runtime_source, windows=windows),
-        codex_runtime_source / "codex-package.json",
-    ]
-    if not all(path.is_file() for path in required_runtime_paths):
-        raise SystemExit(f"{target_config['codex_package']} contains an incomplete Codex Runtime")
-    if not windows and not all(os.access(path, os.X_OK) for path in required_runtime_paths[:-1]):
-        raise SystemExit(f"{target_config['codex_package']} contains a non-executable Codex helper")
+    npm_source = node_root / target_config["npm_source"]
+    npm_destination = payload / "tools" / "npm"
+    if not npm_source.is_dir():
+        raise SystemExit(f"Node distribution is missing npm at {target_config['npm_source']}")
+    symlinks = [path for path in npm_source.rglob("*") if path.is_symlink()]
+    if symlinks:
+        raise SystemExit(f"Bundled npm contains an unsupported symlink: {symlinks[0]}")
+    shutil.copytree(npm_source, npm_destination)
 
-    codex_destination = payload / target_config["codex_entrypoint"]
-    tools_destination = node_destination.parent.parent
-    if codex_destination.parent.parent != tools_destination:
-        raise SystemExit("Codex and Node entrypoints must share the private tools root")
-    copy_codex_runtime(codex_runtime_source, tools_destination)
-    if not codex_destination.is_file():
-        raise SystemExit("Codex Runtime copy did not produce the configured entrypoint")
+    npm_entrypoint = payload / target_config["npm_entrypoint"]
+    npm_package = npm_destination / "package.json"
+    npm_license = npm_destination / "LICENSE"
+    if not npm_entrypoint.is_file() or not npm_package.is_file() or not npm_license.is_file():
+        raise SystemExit("Node distribution contains an incomplete npm package")
+    npm_metadata = json.loads(npm_package.read_text(encoding="utf-8"))
+    if npm_metadata.get("version") != expected_npm_version:
+        raise SystemExit(
+            f"Node distribution contains npm {npm_metadata.get('version')}, expected {expected_npm_version}"
+        )
+    tools_root = payload / "tools"
+    if {path.name for path in tools_root.iterdir()} != {"bin", "npm"}:
+        raise SystemExit("Private Runtime tools must contain only Node.js and npm")
+    if {path.name for path in node_destination.parent.iterdir()} != {node_destination.name}:
+        raise SystemExit("Private Runtime tools/bin must contain only the Node.js executable")
 
     licenses = payload / "licenses"
     licenses.mkdir()
     for source, name in [
         (node_root / "LICENSE", "node-LICENSE"),
         (REPO_ROOT / "LICENSE", "avibe-LICENSE"),
-        (codex_license, "codex-LICENSE"),
-        (codex_package / "README.md", "codex-README.md"),
+        (npm_license, "npm-LICENSE"),
     ]:
-        if source.is_file():
-            shutil.copy2(source, licenses / name)
+        if not source.is_file():
+            raise SystemExit(f"Required Runtime license is missing: {source}")
+        shutil.copy2(source, licenses / name)
 
-    if not windows:
-        for executable in [
-            node_destination,
-            *codex_runtime_executables(tools_destination, windows=False),
-        ]:
-            executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if target_config["os"] != "windows":
+        node_destination.chmod(node_destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    completed = subprocess.run(
+        [str(node_destination), str(npm_entrypoint), "--version"],
+        cwd=work_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if completed.stdout.strip() != expected_npm_version:
+        raise SystemExit("Private npm entrypoint returned an unexpected version")
 
 
 def write_inventory(private_python: Path, payload: Path) -> None:
@@ -351,15 +309,26 @@ def reserve_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path) -> None:
+def verify_payload(
+    target_config: dict[str, Any],
+    payload: Path,
+    work_dir: Path,
+    expected_npm_version: str,
+) -> None:
     # Keep AVIBE_HOME short on macOS: its absolute state path is embedded in the
     # AF_UNIX dispatch address, whose platform limit is much smaller than a
     # typical CI checkout path.
     with tempfile.TemporaryDirectory(prefix="avibe-probe-") as probe_home:
-        _verify_payload_with_home(target_config, payload, work_dir, Path(probe_home))
+        _verify_payload_with_home(
+            target_config,
+            payload,
+            work_dir,
+            Path(probe_home),
+            expected_npm_version,
+        )
 
 
-def private_probe_environment(probe_home: Path, node: Path, codex: Path) -> dict[str, str]:
+def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> dict[str, str]:
     inherited_path = os.environ.get("PATH", "")
     retained_env = {
         name: value
@@ -393,12 +362,13 @@ def private_probe_environment(probe_home: Path, node: Path, codex: Path) -> dict
             part
             for part in (
                 str(node.parent),
-                str(codex.parent.parent / "codex-path"),
                 inherited_path,
             )
             if part
         ),
         "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
+        "AVIBE_DESKTOP_NPM_CLI": str(npm_cli),
+        "AVIBE_DESKTOP_BACKENDS_ROOT": str(probe_home / "backends"),
         "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
         "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
         "VIBE_INSTALL_SKIP_ASKILL": "1",
@@ -413,15 +383,16 @@ def _verify_payload_with_home(
     payload: Path,
     work_dir: Path,
     probe_home: Path,
+    expected_npm_version: str,
 ) -> None:
     python = payload / target_config["python_entrypoint"]
     node = payload / target_config["node_entrypoint"]
-    codex = payload / target_config["codex_entrypoint"]
+    npm_cli = payload / target_config["npm_entrypoint"]
     config_dir = probe_home / "config"
     config_dir.mkdir(parents=True)
     port = reserve_loopback_port()
     config_path = config_dir / "config.json"
-    env = private_probe_environment(probe_home, node, codex)
+    env = private_probe_environment(probe_home, node, npm_cli)
     command = [str(python), "-I", "-m", "vibe"]
     endpoint = subprocess.run(
         [*command, "desktop", "endpoint", "--json"],
@@ -461,10 +432,16 @@ def _verify_payload_with_home(
         raise SystemExit("Private Runtime did not honor the isolated desktop endpoint")
 
     run([str(node), "--version"], cwd=work_dir, env=env)
-    run([str(codex), "--version"], cwd=work_dir, env=env)
-    ripgrep_name = "rg.exe" if target_config["os"] == "windows" else "rg"
-    ripgrep = codex.parent.parent / "codex-path" / ripgrep_name
-    run([str(ripgrep), "--version"], cwd=work_dir, env=env)
+    npm_version = subprocess.run(
+        [str(node), str(npm_cli), "--version"],
+        cwd=work_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if npm_version != expected_npm_version:
+        raise SystemExit("Private Runtime npm version does not match runtime-sources.json")
 
     ready_url = f"http://127.0.0.1:{port}/ready"
     stop_result: subprocess.CompletedProcess[str] | None = None
@@ -527,7 +504,7 @@ def main() -> int:
     args = parser.parse_args()
 
     sources = json.loads(SOURCES_PATH.read_text(encoding="utf-8"))
-    if sources.get("schema_version") != 1:
+    if sources.get("schema_version") != 2:
         raise SystemExit("Unsupported runtime-sources.json schema")
     try:
         target_config = sources["targets"][args.target]
@@ -537,7 +514,6 @@ def main() -> int:
     args.cache.mkdir(parents=True, exist_ok=True)
     python_archive = download(target_config["python"], args.cache)
     node_archive = download(target_config["node"], args.cache)
-    codex_license = download(sources["codex_license"], args.cache)
 
     work_parent = DESKTOP_DIR / "target"
     work_parent.mkdir(exist_ok=True)
@@ -555,9 +531,15 @@ def main() -> int:
             work_dir,
             sources.get("sdist_build_allowlist", []),
         )
-        install_tools(args.target, target_config, node_archive, codex_license, payload, work_dir)
+        install_node_toolchain(
+            target_config,
+            node_archive,
+            payload,
+            work_dir,
+            sources["npm_version"],
+        )
         write_inventory(private_python, payload)
-        verify_payload(target_config, payload, work_dir)
+        verify_payload(target_config, payload, work_dir, sources["npm_version"])
         prune_payload(payload)
 
         output_parent = args.output.parent
@@ -568,7 +550,7 @@ def main() -> int:
             unpacked_size, entry_count, tree_sha256 = create_runtime_zip(payload, archive)
             wheel_digest = sha256(wheel)
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "runtime_version": runtime_version,
                 "os": target_config["os"],
                 "arch": target_config["arch"],
@@ -580,10 +562,10 @@ def main() -> int:
                 "tree_sha256": tree_sha256,
                 "python_entrypoint": target_config["python_entrypoint"],
                 "node_entrypoint": target_config["node_entrypoint"],
-                "codex_entrypoint": target_config["codex_entrypoint"],
+                "npm_entrypoint": target_config["npm_entrypoint"],
                 "python_distribution": target_config["python"],
                 "node_distribution": target_config["node"],
-                "codex_version": sources["codex_version"],
+                "npm_version": sources["npm_version"],
                 "avibe_wheel": {"name": wheel.name, "sha256": wheel_digest},
             }
             (staged_output / "runtime-manifest.json").write_text(

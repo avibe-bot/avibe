@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -22,83 +25,112 @@ def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp
 
     probe_home = tmp_path / "probe"
     node = tmp_path / "payload" / "tools" / "bin" / "node"
-    codex = tmp_path / "payload" / "tools" / "bin" / "codex"
-    environment = builder.private_probe_environment(probe_home, node, codex)
+    npm_cli = tmp_path / "payload" / "tools" / "npm" / "bin" / "npm-cli.js"
+    environment = builder.private_probe_environment(probe_home, node, npm_cli)
 
     assert "OPENAI_API_KEY" not in environment
     assert "ANTHROPIC_AUTH_TOKEN" not in environment
     assert environment["HOME"] == str(probe_home)
     assert environment["CODEX_HOME"] == str(probe_home / "codex")
     assert environment["PATH"].split(builder.os.pathsep)[0] == str(node.parent)
-    assert environment["PATH"].split(builder.os.pathsep)[1] == str(
-        codex.parent.parent / "codex-path"
+    assert environment["AVIBE_DESKTOP_NPM_CLI"] == str(npm_cli)
+    assert environment["AVIBE_DESKTOP_BACKENDS_ROOT"] == str(probe_home / "backends")
+
+
+def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
+    sources = json.loads((SCRIPT.parents[1] / "runtime-sources.json").read_text(encoding="utf-8"))
+
+    assert sources["schema_version"] == 2
+    assert sources["npm_version"] == "10.9.8"
+    assert "codex_version" not in sources
+    assert "codex_license" not in sources
+    for target, config in sources["targets"].items():
+        expected_source = "node_modules/npm" if "windows" in target else "lib/node_modules/npm"
+        assert config["npm_source"] == expected_source
+        assert config["npm_entrypoint"] == "tools/npm/bin/npm-cli.js"
+        assert not any(key.startswith("codex") for key in config)
+
+
+def test_node_toolchain_normalizes_bundled_npm_without_command_shims(monkeypatch, tmp_path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "LICENSE").write_text("avibe license", encoding="utf-8")
+    node_root = tmp_path / "node-distribution"
+    (node_root / "bin").mkdir(parents=True)
+    (node_root / "bin" / "node").write_bytes(b"node")
+    npm = node_root / "lib" / "node_modules" / "npm"
+    (npm / "bin").mkdir(parents=True)
+    (npm / "bin" / "npm-cli.js").write_text("npm cli", encoding="utf-8")
+    (npm / "lib").mkdir()
+    (npm / "lib" / "npm.js").write_text("npm library", encoding="utf-8")
+    (npm / "package.json").write_text('{"version":"10.9.8"}', encoding="utf-8")
+    (npm / "LICENSE").write_text("npm license", encoding="utf-8")
+    (node_root / "LICENSE").write_text("node license", encoding="utf-8")
+    monkeypatch.setattr(builder, "REPO_ROOT", repository)
+    monkeypatch.setattr(builder, "extract_source", lambda _archive, _destination: node_root)
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="10.9.8\n", stderr="")
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    payload = tmp_path / "payload"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    builder.install_node_toolchain(
+        {
+            "os": "macos",
+            "node_source": "bin/node",
+            "node_entrypoint": "tools/bin/node",
+            "npm_source": "lib/node_modules/npm",
+            "npm_entrypoint": "tools/npm/bin/npm-cli.js",
+        },
+        tmp_path / "node.tar.gz",
+        payload,
+        work_dir,
+        "10.9.8",
     )
 
-
-def test_copy_codex_runtime_preserves_the_complete_target_package(tmp_path):
-    source = tmp_path / "package" / "vendor" / "target"
-    (source / "bin").mkdir(parents=True)
-    (source / "codex-path").mkdir()
-    (source / "codex-resources" / "zsh" / "bin").mkdir(parents=True)
-    (source / "bin" / "codex").write_bytes(b"codex")
-    (source / "bin" / "codex-code-mode-host").write_bytes(b"host")
-    (source / "codex-path" / "rg").write_bytes(b"rg")
-    (source / "codex-resources" / "zsh" / "bin" / "zsh").write_bytes(b"zsh")
-    (source / "codex-package.json").write_text("{}", encoding="utf-8")
-    destination = tmp_path / "payload" / "tools"
-    (destination / "bin").mkdir(parents=True)
-    (destination / "bin" / "node").write_bytes(b"node")
-
-    builder.copy_codex_runtime(source, destination)
-
-    assert (destination / "bin" / "node").read_bytes() == b"node"
-    assert (destination / "bin" / "codex").read_bytes() == b"codex"
-    assert (destination / "bin" / "codex-code-mode-host").read_bytes() == b"host"
-    assert (destination / "codex-path" / "rg").read_bytes() == b"rg"
-    assert (destination / "codex-resources" / "zsh" / "bin" / "zsh").read_bytes() == b"zsh"
+    assert {path.name for path in (payload / "tools").iterdir()} == {"bin", "npm"}
+    assert {path.name for path in (payload / "tools" / "bin").iterdir()} == {"node"}
+    assert (payload / "tools" / "npm" / "lib" / "npm.js").read_text() == "npm library"
+    assert (payload / "licenses" / "npm-LICENSE").read_text() == "npm license"
+    assert calls == [
+        [
+            str(payload / "tools" / "bin" / "node"),
+            str(payload / "tools" / "npm" / "bin" / "npm-cli.js"),
+            "--version",
+        ]
+    ]
 
 
-@pytest.mark.parametrize(
-    ("windows", "expected"),
-    [
-        (
-            False,
-            [
-                "bin/codex",
-                "bin/codex-code-mode-host",
-                "codex-path/rg",
-                "codex-resources/zsh/bin/zsh",
-            ],
-        ),
-        (
-            True,
-            [
-                "bin/codex.exe",
-                "bin/codex-code-mode-host.exe",
-                "codex-path/rg.exe",
-                "codex-resources/codex-command-runner.exe",
-                "codex-resources/codex-windows-sandbox-setup.exe",
-            ],
-        ),
-    ],
-)
-def test_codex_runtime_executables_cover_all_packaged_helpers(tmp_path, windows, expected):
-    assert [
-        path.relative_to(tmp_path).as_posix()
-        for path in builder.codex_runtime_executables(tmp_path, windows=windows)
-    ] == expected
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation requires extra Windows privileges")
+def test_node_toolchain_rejects_symlinks_inside_bundled_npm(monkeypatch, tmp_path):
+    node_root = tmp_path / "node-distribution"
+    (node_root / "bin").mkdir(parents=True)
+    (node_root / "bin" / "node").write_bytes(b"node")
+    npm = node_root / "lib" / "node_modules" / "npm"
+    npm.mkdir(parents=True)
+    (npm / "target").write_text("target", encoding="utf-8")
+    (npm / "link").symlink_to("target")
+    monkeypatch.setattr(builder, "extract_source", lambda _archive, _destination: node_root)
 
-
-def test_npm_executable_resolves_the_windows_command_shim(monkeypatch):
-    lookups = []
-    monkeypatch.setattr(
-        builder.shutil,
-        "which",
-        lambda name: lookups.append(name) or (r"C:\node\npm.cmd" if name == "npm.cmd" else None),
-    )
-
-    assert builder.npm_executable(platform_name="nt") == r"C:\node\npm.cmd"
-    assert lookups == ["npm.cmd"]
+    with pytest.raises(SystemExit, match="unsupported symlink"):
+        builder.install_node_toolchain(
+            {
+                "os": "macos",
+                "node_source": "bin/node",
+                "node_entrypoint": "tools/bin/node",
+                "npm_source": "lib/node_modules/npm",
+                "npm_entrypoint": "tools/npm/bin/npm-cli.js",
+            },
+            tmp_path / "node.tar.gz",
+            tmp_path / "payload",
+            tmp_path,
+            "10.9.8",
+        )
 
 
 def test_existing_show_manifest_must_match_the_pinned_digest(monkeypatch, tmp_path):
@@ -127,3 +159,17 @@ def test_runtime_zip_uses_portable_relative_path_order(tmp_path):
 
     with zipfile.ZipFile(archive) as runtime:
         assert runtime.namelist() == ["A/entry", "z/entry"]
+
+
+def test_runtime_zip_is_byte_for_byte_deterministic(tmp_path):
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "runtime").write_bytes(b"immutable runtime")
+    first = tmp_path / "first.zip"
+    second = tmp_path / "second.zip"
+
+    first_metadata = builder.create_runtime_zip(payload, first)
+    second_metadata = builder.create_runtime_zip(payload, second)
+
+    assert first_metadata == second_metadata
+    assert first.read_bytes() == second.read_bytes()
