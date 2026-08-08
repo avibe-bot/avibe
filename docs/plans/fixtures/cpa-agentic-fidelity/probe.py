@@ -221,7 +221,7 @@ def _tool_output(call: ToolCall) -> str:
     return f"tool={call.name};call_id={call.call_id};marker={TOOL_OUTPUTS.get(call.name, 'TOOL_OUTPUT_MISSING')}"
 
 
-_TOOL_OUTPUT_TUPLE_RE = re.compile(r"(?<![A-Za-z0-9_])tool=([A-Za-z0-9_-]+);call_id=([A-Za-z0-9_-]+);marker=([A-Za-z0-9_-]+)(?![A-Za-z0-9_])")
+_TOOL_OUTPUT_TUPLE_RE = re.compile(r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=([^;\s]+)(?![A-Za-z0-9_])")
 
 
 def _tool_output_tuples(text: str) -> list[tuple[str, str, str]]:
@@ -775,6 +775,14 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or terminal_response.get("status") != "completed"
                 ):
                     return False
+                if any(
+                    isinstance(item, dict)
+                    and item.get("type") == "reasoning"
+                    and item.get("encrypted_content") is not None
+                    and not isinstance(item.get("encrypted_content"), str)
+                    for item in terminal_response["output"]
+                ):
+                    return False
                 if terminal_response.get("id") is not None and terminal_response.get("id") != response_id:
                     return False
                 terminal = index
@@ -948,7 +956,10 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                     buffer.extend(chunk)
                 if invalid[0]:
                     return TransportResult(status, None, events, done, invalid[0], False, False)
-            done = _flush_sse(data_lines, event_name, events, invalid) or done
+            # SSE dispatch requires a blank line; discard a final unterminated event at EOF.
+            data_lines.clear()
+            event_name = None
+            buffer.clear()
             return TransportResult(status, None, events, done, invalid[0], _stream_order_ok(client_protocol, events), False, True)
     except urllib.error.HTTPError as error:
         return TransportResult(error.code, None, [], False, 0)
@@ -1308,6 +1319,8 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
             projected["content"] = projected_content
         elif item_type == "reasoning":
             encrypted = item.get("encrypted_content")
+            if encrypted is not None and not isinstance(encrypted, str):
+                return None
             for field in ("summary", "content"):
                 parts = item.get(field)
                 if parts is not None:
@@ -1325,7 +1338,7 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
                 {
                     "summary": _reasoning_text_parts(item.get("summary")),
                     "content": _reasoning_text_parts(item.get("content")),
-                    "encrypted_content": encrypted if isinstance(encrypted, str) else None,
+                    "encrypted_content": encrypted,
                 }
             )
         else:
@@ -1590,6 +1603,16 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             status = terminal_response.get("status") if terminal_response else None
             if status != "completed":
                 errors.append("terminal_status_invalid")
+            terminal_output = terminal_response.get("output") if terminal_response else None
+            if isinstance(terminal_output, list):
+                for raw in terminal_output:
+                    if (
+                        isinstance(raw, dict)
+                        and raw.get("type") == "reasoning"
+                        and raw.get("encrypted_content") is not None
+                        and not isinstance(raw.get("encrypted_content"), str)
+                    ):
+                        errors.append("encrypted_reasoning_snapshot_invalid")
     items: list[dict[str, Any]] = []
     for key, raw in output.items():
         if raw.get("type") == "function_call":

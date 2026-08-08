@@ -62,17 +62,17 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun (r20) exercised all eight cases after the current-head
+latest gate-complete rerun (r21) exercised all eight cases after the current-head
 parser fixes: all eight completed both turns with HTTP 200 and no fallback was
 used. Messages-to-Responses single failed both parse gates and its final exact
-tuple, while the parallel case passed first parsing but failed final parsing and
-its final exact tuple.
+tuple, while the parallel case passed both parse gates but failed final system
+scope and its exact tuple.
 Responses-to-Messages single and parallel cases lacked reasoning; their final
-system scope, tool outputs, and exact tuples passed. Both Messages-to-Chat
+system scope and exact tuples failed while tool outputs passed. Both Messages-to-Chat
 cases failed the first and final parse gates with thinking present; both final
 exact tuples failed. Chat-to-Messages single lacked reasoning and failed final
 system-scope and tuple; the parallel case lacked reasoning, failed both parse
-gates and final system-scope, but passed its final tuple and tool outputs.
+gates, final system-scope, and its exact tuple, but passed tool outputs.
 
 ## S4 matrix mapping
 

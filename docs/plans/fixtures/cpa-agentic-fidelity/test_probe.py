@@ -341,6 +341,14 @@ class ProbeParserTests(unittest.TestCase):
         projection = probe._validate_second(turn, ("lookup_weather", "lookup_time"), stream=False, expected_calls=calls)
         self.assertFalse(projection["checks"]["tool_output_call_pairs"])
 
+    def test_tool_result_tuple_preserves_punctuation_in_call_id(self) -> None:
+        call = probe.ToolCall("call.123", "lookup_weather", {"city": "Shanghai"})
+        text = probe._tool_output(call)
+        self.assertEqual(probe._tool_output_tuples(text), [("lookup_weather", "call.123", "WEATHER_OK")])
+        turn = probe._parse_anthropic_document({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"})
+        projection = probe._validate_second(turn, ("lookup_weather",), stream=False, expected_calls=[call])
+        self.assertTrue(projection["checks"]["tool_output_call_pairs"])
+
     def test_empty_responses_reasoning_item_is_not_a_signal(self) -> None:
         turn = probe._parse_responses_document(
             {"output": [{"id": "rs_1", "type": "reasoning", "summary": [], "content": []}, {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}], "status": "completed"}
@@ -573,6 +581,40 @@ class ProbeParserTests(unittest.TestCase):
             probe.OPENER = original_opener
         self.assertFalse(result.done_sentinel)
         self.assertEqual(result.invalid_event_count, 1)
+
+    def test_sse_parser_discards_unterminated_event_at_eof(self) -> None:
+        for payload in (b"data: [DONE]\n", b"data: [DONE]"):
+            class Response:
+                status = 200
+                headers = {"Content-Type": "text/event-stream"}
+
+                def __init__(self):
+                    self.offset = 0
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return None
+
+                def read(self, size: int) -> bytes:
+                    chunk = payload[self.offset : self.offset + size]
+                    self.offset += len(chunk)
+                    return chunk
+
+            class Opener:
+                def open(self, request, timeout):
+                    return Response()
+
+            original_opener = probe.OPENER
+            try:
+                probe.OPENER = Opener()
+                result = probe._request("/v1/chat/completions", {}, client_protocol="chat", stream=True)
+            finally:
+                probe.OPENER = original_opener
+            self.assertFalse(result.done_sentinel)
+            self.assertEqual(result.events, [])
+            self.assertFalse(result.stream_order_ok)
 
     def test_chat_stream_rejects_non_function_tool_type(self) -> None:
         events = [
@@ -1893,6 +1935,13 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", invalid))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("stream_reasoning_snapshot_mismatch", turn.parse_errors)
+
+    def test_responses_stream_rejects_malformed_terminal_encrypted_snapshot(self) -> None:
+        events = _response_reasoning_stream()
+        events[-1]["event"]["response"]["output"][0]["encrypted_content"] = []
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("encrypted_reasoning_snapshot_invalid", turn.parse_errors)
 
     def test_responses_stream_created_snapshot_requires_object(self) -> None:
         for response in ([], {"object": "other"}):
