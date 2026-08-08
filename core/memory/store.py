@@ -1852,6 +1852,47 @@ class MemoryStore:
             now=record.observed_at,
             first_unflushed_at=None,
         )
+        manual_resolution = (
+            record.source == "manual"
+            and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
+            and state.generation == record.generation
+            and state.fence_epoch == record.fence_epoch
+        )
+        derived_manual_watermark_ms: int | None = None
+        if (
+            manual_resolution
+            and record.operation_kind == "flush"
+            and record.outcome == "committed"
+            and record.confirmed_watermark_ms is None
+            and record.watermark_after is None
+        ):
+            watermark_row = conn.execute(
+                """
+                SELECT MAX(provider_timestamp_ms)
+                FROM memory_capture_queue
+                WHERE provider_session_ref = ? AND target_generation = ?
+                  AND state = 'delivered'
+                  AND flush_observation IN ('unknown', 'in_flight', 'succeeded')
+                """,
+                (provider_session_ref.serialize(), record.generation),
+            ).fetchone()
+            if watermark_row[0] is not None:
+                derived_manual_watermark_ms = max(
+                    state.watermark,
+                    int(watermark_row[0]),
+                )
+        settlement_watermark_after = (
+            derived_manual_watermark_ms
+            if derived_manual_watermark_ms is not None
+            else record.watermark_after
+        )
+        settlement_confirmed_watermark_ms = (
+            record.confirmed_watermark_ms
+            if record.confirmed_watermark_ms is not None
+            else derived_manual_watermark_ms
+            if derived_manual_watermark_ms is not None
+            else settlement_watermark_after
+        )
         inserted = conn.execute(
             """
             INSERT OR IGNORE INTO memory_flush_settlements (
@@ -1876,16 +1917,14 @@ class MemoryStore:
                 _bounded_opaque_text(record.request_id),
                 _bounded_opaque_text(record.error_code),
                 record.watermark_before,
-                record.watermark_after,
+                settlement_watermark_after,
                 _bounded_opaque_text(record.actor),
                 _bounded_opaque_text(record.decision),
                 _bounded_opaque_text(record.evidence_ref),
                 record.observed_at,
                 record.settled_at or record.observed_at,
                 (
-                    record.confirmed_watermark_ms
-                    if record.confirmed_watermark_ms is not None
-                    else record.watermark_after
+                    settlement_confirmed_watermark_ms
                 ),
                 record.flush_state or _settlement_flush_state(record),
                 record.source,
@@ -1908,12 +1947,6 @@ class MemoryStore:
                 (record.observed_at, record.observed_at),
             )
 
-        manual_resolution = (
-            record.source == "manual"
-            and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
-            and state.generation == record.generation
-            and state.fence_epoch == record.fence_epoch
-        )
         projection_allowed = (
             state.generation == record.generation
             and (
@@ -1935,11 +1968,12 @@ class MemoryStore:
         watermark_after = (
             max(
                 state.watermark,
-                record.confirmed_watermark_ms
-                if record.confirmed_watermark_ms is not None
-                else record.watermark_after,
+                settlement_confirmed_watermark_ms
+                if settlement_confirmed_watermark_ms is not None
+                else settlement_watermark_after,
             )
-            if record.confirmed_watermark_ms is not None or record.watermark_after is not None
+            if settlement_confirmed_watermark_ms is not None
+            or settlement_watermark_after is not None
             else state.watermark
         )
         if manual_resolution and record.operation_kind == "flush":
@@ -2022,21 +2056,49 @@ class MemoryStore:
                     )
         elif record.operation_kind == "flush" and record.outcome in {"succeeded", "committed"}:
             if record.source == "migration":
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET flush_state = 'settled', due_at = NULL,
-                        next_attempt_at = NULL, fence_owner = NULL,
-                        fence_acquired_at = NULL, watermark = ?, updated_at = ?
-                    WHERE provider_session_ref = ? AND generation = ?
-                    """,
-                    (
-                        watermark_after,
-                        record.observed_at,
-                        provider_session_ref.serialize(),
-                        record.generation,
-                    ),
+                remaining = self._first_unsettled_generation_created_at(
+                    conn,
+                    provider_session_ref,
+                    record.generation,
+                    include_historical_ambiguity=False,
                 )
+                if remaining is None:
+                    conn.execute(
+                        """
+                        UPDATE memory_session_flush_state
+                        SET flush_state = 'settled', due_at = NULL,
+                            next_attempt_at = NULL, first_unflushed_at = NULL,
+                            fence_owner = NULL, fence_acquired_at = NULL,
+                            watermark = ?, updated_at = ?
+                        WHERE provider_session_ref = ? AND generation = ?
+                        """,
+                        (
+                            watermark_after,
+                            record.observed_at,
+                            provider_session_ref.serialize(),
+                            record.generation,
+                        ),
+                    )
+                else:
+                    # Keep the legacy replay generation stable while a newer
+                    # pending row remains pinned to it.
+                    conn.execute(
+                        """
+                        UPDATE memory_session_flush_state
+                        SET flush_state = 'not_due', due_at = NULL,
+                            next_attempt_at = NULL, first_unflushed_at = ?,
+                            fence_owner = NULL, fence_acquired_at = NULL,
+                            watermark = ?, updated_at = ?
+                        WHERE provider_session_ref = ? AND generation = ?
+                        """,
+                        (
+                            remaining,
+                            watermark_after,
+                            record.observed_at,
+                            provider_session_ref.serialize(),
+                            record.generation,
+                        ),
+                    )
                 return True
             remaining = self._first_unsettled_generation_created_at(
                 conn,
@@ -2165,9 +2227,16 @@ class MemoryStore:
         conn: sqlite3.Connection,
         provider_session_ref: ProviderSessionRef,
         generation: int,
+        *,
+        include_historical_ambiguity: bool = True,
     ) -> str | None:
+        delivered_condition = (
+            "COALESCE(flush_observation, 'not_attempted') != 'succeeded'"
+            if include_historical_ambiguity
+            else "COALESCE(flush_observation, 'not_attempted') = 'not_attempted'"
+        )
         row = conn.execute(
-            """
+            f"""
             SELECT MIN(created_at)
             FROM memory_capture_queue
             WHERE provider_session_ref = ? AND target_generation = ?
@@ -2175,7 +2244,7 @@ class MemoryStore:
                   state IN ('pending', 'processing')
                   OR (
                       state = 'delivered'
-                      AND COALESCE(flush_observation, 'not_attempted') != 'succeeded'
+                      AND {delivered_condition}
                   )
               )
             """,

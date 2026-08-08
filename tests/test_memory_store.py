@@ -692,11 +692,70 @@ def test_v1_migration_allows_a_newer_definitive_verdict_after_ambiguity(
     state = store.list_session_flush_states()
     assert len(state) == 1
     assert state[0].flush_state == "settled"
+    assert state[0].generation == 0
     assert state[0].fence_owner is None
     assert [record.outcome for record in store.list_flush_settlements()] == [
         "manual_required",
         "succeeded",
     ]
+
+
+def test_v1_migration_keeps_pending_rows_in_the_active_generation(
+    tmp_path: Path,
+) -> None:
+    database = _store_path(tmp_path)
+    _create_v1_store(database)
+    principal = "u-11111111111111111111111111111111"
+
+    with sqlite3.connect(database) as conn:
+        conn.execute("DELETE FROM memory_capture_queue")
+        conn.executemany(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, principal_id, project_ref,
+                provenance, payload_text, occurred_at_ms, provider_timestamp_ms,
+                state, attempts, created_at, completed_at, flush_observation,
+                flush_observed_at
+            ) VALUES (?, 0, 'legacy-wire', ?, ?, 'user_input', ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "legacy-success",
+                    principal,
+                    PROJECT,
+                    None,
+                    1_000,
+                    1_000,
+                    "delivered",
+                    "2026-01-01T00:00:00.100Z",
+                    "2026-01-01T00:00:00.200Z",
+                    "succeeded",
+                    "2026-01-01T00:00:00.200Z",
+                ),
+                (
+                    "legacy-pending",
+                    principal,
+                    PROJECT,
+                    "pending payload",
+                    2_000,
+                    2_000,
+                    "pending",
+                    "2026-01-01T00:00:00.300Z",
+                    None,
+                    None,
+                    None,
+                ),
+            ],
+        )
+
+    store = MemoryStore(database)
+    rows = store.list_queue_rows()
+    assert {row.target_generation for row in rows} == {0}
+    state = store.list_session_flush_states()
+    assert len(state) == 1
+    assert state[0].generation == 0
+    assert state[0].flush_state == "not_due"
+    assert state[0].first_unflushed_at == "2026-01-01T00:00:00.300Z"
 
 
 def test_newer_memory_schema_is_rejected_before_schema_ddl(tmp_path: Path) -> None:
@@ -904,6 +963,14 @@ def test_manual_flush_resolution_reconciles_unknown_queue_rows(
     state = store.get_session_flush_state(provider_session_ref)
     assert state is not None
     assert state.flush_state == expected_state
+    if outcome == "committed":
+        settlement = next(
+            record
+            for record in store.list_flush_settlements(provider_session_ref)
+            if record.operation_id == "manual-committed"
+        )
+        assert settlement.confirmed_watermark_ms == 1_000
+        assert settlement.watermark_after == 1_000
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
