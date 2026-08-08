@@ -30,7 +30,9 @@ class ProbeParserTests(unittest.TestCase):
                 {"kind": "event", "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
                 {"kind": "event", "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"city":'}},
                 {"kind": "event", "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '"Shanghai"}'}},
-                {"kind": "event", "type": "response.completed", "event": {"type": "response.completed"}},
+                {"kind": "event", "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "arguments": '{"city":"Shanghai"}'}},
+                {"kind": "event", "type": "response.output_item.done", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
+                {"kind": "event", "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}]}}},
             ],
             True,
             0,
@@ -57,12 +59,12 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_responses_stream_rejects_argument_done_mismatch(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
-            {"kind": "event", "sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
-            {"kind": "event", "sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": '{"city":"Shanghai"}'}},
-            {"kind": "event", "sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0, "arguments": '{"city":"Paris"}'}},
-            {"kind": "event", "sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
-            {"kind": "event", "sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
+            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 1, "wire_sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
+            {"kind": "event", "sequence": 2, "wire_sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": '{"city":"Shanghai"}'}},
+            {"kind": "event", "sequence": 3, "wire_sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0, "arguments": '{"city":"Paris"}'}},
+            {"kind": "event", "sequence": 4, "wire_sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
+            {"kind": "event", "sequence": 5, "wire_sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
         ]
         self.assertTrue(probe._stream_order_ok("responses", events))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, True))
@@ -1198,6 +1200,74 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
         self.assertIn("usage_before_finish", turn.parse_errors)
         self.assertFalse(turn.reasoning_present)
+
+    def test_responses_done_function_snapshot_requires_arguments(self) -> None:
+        for arguments in (None, {"city": "Shanghai"}):
+            events = [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call"}}},
+                {"kind": "event", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"city":"Shanghai"}'}},
+                {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "arguments": arguments}}},
+            ]
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+            self.assertIn("stream_arguments_snapshot_invalid", turn.parse_errors)
+
+    def test_responses_function_call_requires_arguments_done_event(self) -> None:
+        events = [
+            {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call"}}},
+            {"kind": "event", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"city":"Shanghai"}'}},
+            {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "arguments": '{"city":"Shanghai"}'}}},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("stream_arguments_done_missing", turn.parse_errors)
+
+    def test_responses_completed_requires_literal_status(self) -> None:
+        for status in (None, "incomplete"):
+            events = [
+                {"kind": "event", "event": {"type": "response.completed", "response": {"status": status, "output": []}}},
+            ]
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+            self.assertIn("terminal_status_invalid", turn.parse_errors)
+            self.assertFalse(turn.terminal)
+
+    def test_responses_wire_sequence_must_be_contiguous(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 1, "wire_sequence": 2, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": []}}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
+
+    def test_responses_content_part_done_must_match_text(self) -> None:
+        events = [
+            {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message", "role": "assistant"}}},
+            {"kind": "event", "event": {"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": ""}}},
+            {"kind": "event", "event": {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "answer"}},
+            {"kind": "event", "event": {"type": "response.content_part.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "different"}}},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("content_part_snapshot_mismatch", turn.parse_errors)
+
+    def test_anthropic_block_indexes_must_be_contiguous(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 5, "content_block": {"type": "text"}}},
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+
+    def test_chat_tool_indexes_must_be_contiguous(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 5, "id": "call_1", "type": "function", "function": {"name": "lookup_weather", "arguments": "{"}}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 7, "id": "call_2", "type": "function", "function": {"name": "lookup_time", "arguments": "}"}}]}, "finish_reason": "tool_calls"}]}},
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+
+    def test_responses_duplicate_created_event_is_rejected(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {"id": "resp_1"}}},
+            {"kind": "event", "sequence": 1, "wire_sequence": 1, "type": "response.created", "event": {"type": "response.created", "response": {"id": "resp_2"}}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
 
 
 if __name__ == "__main__":

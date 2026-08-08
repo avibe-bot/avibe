@@ -61,16 +61,15 @@ target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
 latest gate-complete rerun exercised all eight cases after the current-head
-parser fixes: seven cases completed both turns with HTTP 200, the
-Responses-to-Messages single case returned no tool call and therefore skipped
-its follow-up, and no fallback was used. Messages-to-Responses single failed
-both parse gates and its final exact-tuple gate while its parallel case passed
-every gate. Both Responses-to-Messages first responses lacked reasoning; the
-parallel final failed system marker, scope, and exact-tuple gates. Both
-Messages-to-Chat cases failed the first and final parse gates with thinking
-present; the single final also failed its exact-tuple gate. Both
-Chat-to-Messages cases lacked reasoning and failed final system marker, scope,
-and exact-tuple gates; the parallel case also failed both parse gates.
+parser fixes: all eight completed both turns with HTTP 200 and no fallback was
+used. Messages-to-Responses single failed both parse gates while its parallel
+case passed every gate. Both Responses-to-Messages first responses lacked
+reasoning, and both final responses failed exact system marker, scope, and
+call-ID/result-tuple gates. Both Messages-to-Chat cases failed the first and
+final parse gates with thinking present, and both final responses failed their
+exact-tuple gate. Both Chat-to-Messages cases lacked reasoning and failed final
+system marker and scope; the single final also failed its exact-tuple gate,
+while the parallel case failed both parse gates.
 
 ## S4 matrix mapping
 
@@ -84,7 +83,7 @@ success claim.
 | Parallel tools | `CaseSpec.expected_tools`, `_user_prompt(True)`, and the same `_validate_first` tool invariants |
 | Multi-turn loop | `_run_case` observed `first_turn.tool_calls` plus `_validate_second`: `no_followup_tool_calls`, `tool_outputs`, and `_tool_output_pair_present` exact call-ID/result tuple association |
 | Streaming text | `_request` strict UTF-8/JSON and `text/event-stream` checks, `_parse_anthropic_stream`/`_parse_responses_stream` delta, done-event, item, and terminal snapshot comparison, `_parse_chat_stream` typed content and assistant-role preservation, `_stream_order_ok`, and `stream_complete` |
-| Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` opening/terminal envelopes, error/sentinel events, block/delta snapshot compatibility, item/choice/output-index/ID continuity, argument fragments, and monotonic lifecycle checks |
+| Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` opening/terminal envelopes, error/sentinel events, wire-sequence and contiguous block/item indexes, content-part and block/delta snapshot compatibility, item/choice/output-index/ID continuity, argument fragments/done events, and monotonic lifecycle checks |
 | System prompt | `_system_prompt`, `_token_present`, and `_validate_second`: exact-token `system_marker` and `system_scope` |
 | Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, `_parse_anthropic_document` payload/signature validation, `_parse_responses_stream` final-snapshot reasoning reconstruction, `_reasoning_item_has_signal`, `_chat_reasoning_usage_present` terminal integer-token gate, and `_validate_first`: `reasoning_present` plus `reasoning_not_visible` |
 | Context length/truncation | `probe.CONTEXT_LENGTH_NOT_VERIFIED` residual; no low-cost context-limit run was included in M0 |
