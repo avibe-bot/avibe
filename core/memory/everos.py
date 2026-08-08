@@ -277,7 +277,12 @@ class EverOSPort:
         except httpx.TimeoutException as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc
-        except (httpx.ReadError, httpx.RemoteProtocolError) as exc:
+        except (
+            httpx.ReadError,
+            httpx.RemoteProtocolError,
+            httpx.WriteError,
+            httpx.CloseError,
+        ) as exc:
             logger.warning(
                 "EverOS sidecar response lost route=%s latency_ms=%s",
                 route,

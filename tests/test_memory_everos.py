@@ -103,6 +103,24 @@ def test_add_marks_response_disconnect_as_ambiguous() -> None:
     assert raised.value.ambiguous is True
 
 
+@pytest.mark.parametrize("failure_type", [httpx.WriteError, httpx.CloseError])
+def test_add_marks_post_submission_transport_failures_as_ambiguous(
+    failure_type: type[httpx.TransportError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure_type("response lost", request=request)
+
+    async def run() -> None:
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        await provider.add(ProviderCapture("owner", "session", "capture", 1, PROJECT))
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderSystemFailure) as raised:
+            asyncio.run(run())
+
+    assert raised.value.ambiguous is True
+
+
 def test_add_rejects_overlong_receipt_without_truncating() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
