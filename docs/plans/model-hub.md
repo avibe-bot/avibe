@@ -1,11 +1,11 @@
 # Model Hub — Product Spec
 
-Status: **v3.0** (2026-08-07) · supersedes v2.0 (2026-07-29) outright
-Owner decisions incorporated through: 2026-08-07 (+08:00)
+Status: **v3.0** (2026-08-08) · supersedes v2.0 (2026-07-29) outright
+Owner decisions incorporated through: 2026-08-08 (+08:00)
 Design source: `../avibe-docs/design.pen`. The V6 frames remain the visual baseline;
 the v3 interaction draft for the two-module information architecture is owner-approved
-as the implementation baseline (2026-08-07 afternoon). The design lane still owes the
-takeover-notice treatment and production-complete desktop/mobile states.
+as the implementation baseline (2026-08-07 afternoon). The design lane still owes
+production-complete desktop/mobile states.
 Contracts: `model-hub-contracts/` at **FROZEN v4 (targeted)**. This docs-only revision
 does not edit them; `model-hub-implementation.md` records the coordinated v5 revision
 set for the first implementation lane.
@@ -173,7 +173,12 @@ The Source workflow is complete at both entry points:
   user may explicitly run a non-destructive test. The add-flow variant reuses the
   contracted probe/refresh classification and reports reachability plus authentication
   outcome in place; it does not save the Source, consume routing order, or run an
-  Agent turn. A failed test never blocks saving when the user chooses to proceed.
+  Agent turn. For an API key it may provision an engine credential only transiently:
+  every success, failure, timeout, and cancellation path revokes that ref before the
+  operation settles. A revoke failure enters the existing durable pending-revocation
+  reconciliation rather than leaving an unreferenced credential untracked. No test
+  response exposes the ref. A failed test never blocks saving when the user chooses to
+  proceed; Save provisions the committed Source independently.
 - **Model discovery.** Third-party Anthropic-compatible and OpenAI-compatible Sources
   expose an explicit “Fetch models” action in both Add Source and Source details.
   Discovery uses the selected protocol adapter, replaces only the discovered slice,
@@ -334,22 +339,21 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    the same turn to the **next runnable hop in the capability chain, regardless of
    channel**. If that hop is Hub, this is the native-to-Gateway takeover; if it is
    another native CLI Source, the configured native chain continues without a Gateway
-   notice. If any output was already streamed, do not replay the request: end with
+   transition. If any output was already streamed, do not replay the request: end with
    §4.5's interrupted-turn copy, keep native cooling, and let the next turn select the
    next candidate. Once the native
    source is retry-ready again, the next Follow turn returns to it automatically. The
-   UI and product copy must make this three-state story obvious: native now → Gateway
-   takeover → native restored, without implying that ChatGPT native is the default
-   recommendation.
+   Model Gateway pull surface must make this three-state story obvious: native now →
+   Gateway takeover → native restored, without implying that ChatGPT native is the
+   default recommendation.
 
-   The first automatic native-to-Gateway takeover in a conversation emits one
-   lightweight in-conversation notice: `native_takeover_notice_enabled` is a
-   user-facing setting, **default `true`**, and the notice is shown at most once per
-   conversation. It is informational session copy, never an Error or warning style;
-   the user may turn it off. No push, inbox, or other proactive delivery system is
-   introduced. Merely selecting or editing a Custom route, a Gateway-first turn, and
-   automatic return to native do not emit this notice; an actual native-to-Hub
-   failover does, whether the authoritative route is Follow or Custom.
+   **Successful takeover is silent** (owner ruling 2026-08-08, superseding the
+   2026-08-07 afternoon notice and setting). The user should experience model supply
+   like tap water or air, keeping attention on the work rather than supplier identity
+   or remaining balance. No turn message or configurable notification is created.
+   The existing failure copy still appears when the chain cannot complete the turn;
+   takeover state, connector color, and recent-switch history remain available on the
+   Model Gateway and Usage pull surfaces.
 
    This dispatch does not prepend native outside the chain. A Custom chain is an
    explicit override: when its first runnable hop is Hub, the turn uses Hub even while
@@ -368,8 +372,12 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    chain even though this turn skips them.
 3. **Supply** — use candidate #1; on quota-exhausted/429, transient 5xx or
    network failure enter cooldown and take the next **within the same turn**;
-   switch back on recovery. Convert protocol when needed. Every switch is
-   appended to the human-readable 最近切换 log.
+   switch back on recovery. Before invocation, read the selected Source's canonical
+   inventory entry for the resolved upstream model and pass its stored
+   `reasoning_effort` to the adapter; `null` means omit an override and use the upstream
+   default. The adapter translates a non-null value to the selected protocol's request
+   field. Convert protocol when needed. Every switch is appended to the human-readable
+   最近切换 log.
 
 Error taxonomy (no blind fallback): parameter/protocol/tool-compat errors
 surface to the caller; 401 → refresh once, then retry; 429 / explicit quota
@@ -562,25 +570,24 @@ the revoked key behind the fact that something else in the chain is merely cooli
 
 | Class | Where the user meets it |
 | --- | --- |
-| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill. A survived fallback remains silent except for §4.3's **first native-to-Gateway takeover in that conversation**, which may add one lightweight notice when `native_takeover_notice_enabled` is true. That narrow, owner-ruled session notice is not an Error, warning, event delivery, or push. Other in-turn copy appears only when the turn did **not** proceed transparently: the retry form when §4.3 forbids the transparent retry, the `waiting` form when nothing is runnable but every blocker is timed |
-| `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型」 — and 需处理 state on the 「模型」 page until cleared. A blocker left behind by a turn that **succeeded** is page-and-feed only, by the row above |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed, connector state, and the row's status pill on the Model Gateway and Usage pull surfaces. Every survived fallback is silent. Other in-turn copy appears only when the turn did **not** proceed transparently: the retry form when §4.3 forbids the transparent retry, or the `waiting` form when nothing is runnable but every blocker is timed |
+| `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型网关」 — and 需处理 state on the Model Gateway and Usage pages until cleared. A blocker left behind by a turn that **succeeded** is page-and-feed only, by the row above |
 
 `error` is named in the second row explicitly (07-29, review round 6). It was
 implicitly there all along — it is a blocker, and blockers are what the row is about —
 but leaving it unnamed while the status table called it 「unknown」 is how a reviewer
 ends up asking, correctly, which tier an unclassified failure belongs to.
 
-**No proactive delivery** (owner ruling 2026-07-29 10:54; retained by the
-2026-08-07 takeover-notice ruling and still superseding the recipient machinery this
-section carried through review rounds 5, 7, 8 and 9). **No resolution event is pushed
-anywhere.** Avibe does not open a conversation to report supply state:
-an interruption is surfaced **in the turn that hit it**, and otherwise waits on the
-「模型」 page for the user to come looking. That is the colleague test read strictly — a
-colleague who cannot do the work says so when you ask them to do it; they do not
-message every channel they belong to the moment their key expires. The once-per-
-conversation takeover notice in §4.3 is produced only inside the active turn that
-performed the automatic handoff and therefore does not recreate delivery machinery.
-It also dissolves
+**No proactive or successful-takeover delivery** (owner rulings 2026-07-29 10:54 and
+2026-08-08; the latter supersedes the 2026-08-07 afternoon notice and setting while
+retaining the earlier push cut). **No resolution event is pushed anywhere, and a
+successful switch produces no turn copy.** Avibe does not open or annotate a
+conversation merely to report supply state. An interruption is surfaced **in the turn
+that hit it**, and otherwise waits on the Model Gateway and Usage pages for a user who
+chooses to inspect it. The rationale is deliberate invisibility: tokens should feel
+like tap water or air, not a mechanism that competes with the user's current work. This
+also aligns with the 2026-07-29 ruling that provenance is a debug affordance rather than
+a conversation feature. It dissolves
 the recipient problem the earlier rounds kept narrowing without closing (which scopes,
 which grain of 「Agent」, what a zero-scope result means): with nothing delivered, there
 is nobody to address.
@@ -701,12 +708,9 @@ not a fourth string (clarified 07-29, review round 15 — the count read 「thre
 after the 16:35 split created the second variant, and read literally it would have forced
 one required form to be merged away):
 
-- **survived transparently → silent, except the first native takeover notice.** A
-  fallback that carried the turn produces no Error, warning, or repeat copy. When this
-  is the conversation's first automatic native-to-Gateway takeover and
-  `native_takeover_notice_enabled` is true, it adds the one lightweight notice defined
-  in §4.3; every later survived fallback remains silent. The switch
-  is recorded and surfaces where a record belongs: the 最近切换 feed and the row's
+- **survived transparently → silent.** A fallback that carried the turn produces no
+  Error, warning, informational copy, or configurable notification. The switch is
+  recorded and surfaces where a record belongs: the 最近切换 feed and the row's
   已切换 state. **This includes the case where the switch left a real problem behind** —
   a revoked key a second source covered is filed as its usual two records
   (「one `switch`, info + one `needs_action`, action_required」), and the `needs_action`
@@ -951,10 +955,15 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
      **except** for the sanctioned native-alias branch above, whose compatible
      family/version evidence is sufficient. This final guard must not discard an alias
      that the official CLI is contracted to interpret.
-4. Annotate every capability hop with its channel, source-global health, current
-   process availability, `runnable`, reason, and `retry_at`. Do not remove or reorder
-   blocked hops. The runnable candidate list is the resulting chain filtered to
-   `runnable: true`; it is not a second chain.
+4. Apply the same capability predicate used by mutation guards to every retained hop.
+   A Custom hop whose literal model is absent and whose sanctioned native-alias evidence
+   is absent or incompatible stays at its exact position with `runnable: false` and
+   `reason: "model_unsupported"`, regardless of otherwise healthy source or channel.
+   This reason takes precedence over process availability and has no `retry_at`; it is
+   an `interrupted` blocker until explicit repair. Annotate every other hop with its
+   channel, source-global health, current process availability, `runnable`, reason, and
+   `retry_at`. Do not remove or reorder blocked hops. The runnable candidate list is the
+   resulting chain filtered to `runnable: true`; it is not a second chain.
 
 Therefore a healthy native subscription at position 0 leads its own backend's Follow
 routes; when it is cooling, resolution advances to the next runnable hop later in the
@@ -1103,17 +1112,17 @@ Required interaction rules:
   info affordance for explanation; the page does not grow permanent instructional
   paragraphs. Manual models expose their per-model `reasoning_effort` value beside the
   exact id.
-- Recently switched and source/route status remain pull surfaces. A successful
-  fallback adds no error copy to the turn; the sole exception is §4.3's default-on,
-  once-per-conversation lightweight native-takeover notice.
+- Recently switched, connector state, source/route status, and usage remain pull
+  surfaces. A successful fallback adds no turn copy. If every source is unavailable,
+  the existing failure path still reports the error honestly.
 
 The existing V6 frames remain a visual baseline for row density, health states, and
 mobile treatment, but their Agent-card grouping and mapping drawer are not v3 product
 authority. The owner-approved v3 interaction draft is the implementation baseline for
 the two modules, native → Gateway takeover → native recovery, default versus custom
-model chains, and the Claude hub-add warning. The design lane adds the lightweight
-takeover-notice visual and production-complete desktop/mobile states without reopening
-the approved information architecture.
+model chains, and the Claude hub-add warning. The design lane adds production-complete
+desktop/mobile states without reopening the approved information
+architecture.
 
 **Deferred third module: Configure Agents.** The intent is to let users add models,
 reasoning effort, and related model preferences to Agent definitions from this product
@@ -1122,7 +1131,10 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
 
 ## 6. Modes & migration
 
-- **Gateway (wire value `hub`, default)**: Avibe injects runtime-only configuration into processes
+- **Gateway (wire value `hub`, default)**: every backend on a fresh installation starts
+  in Gateway mode. An in-place upgrade preserves each persisted backend mode byte-for-
+  byte, including `direct`; it never silently flips an existing user. Avibe injects
+  runtime-only configuration into processes
   it launches (env vars for Claude Code; `-c` overrides for Codex app-server;
   `OPENCODE_CONFIG` overlay for OpenCode, gateway-config hash tracked for
   long-lived `opencode serve`). Native user configs are never written.
@@ -1237,8 +1249,8 @@ directions into questions that later lanes must answer before writing mechanical
    and quota projection remain post-v3 candidates. Each needs evidence from existing
    provenance/usage data before it becomes a product promise.
 7. **Remaining UI evidence.** The approved v3 interaction draft is the implementation
-   baseline. The design lane still owes the takeover-notice treatment, complete
-   desktop/mobile frames, empty and failure states, Dark variants, and English copy;
+   baseline. The design lane still owes complete desktop/mobile frames, empty and
+   failure states, Dark variants, and English copy;
    a product re-review is required only if those artifacts change the approved
    information architecture. Rejected V5 explorations remain history until separately
    deleted.
@@ -1266,9 +1278,9 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] The owner-vetoable mapping evolution is acceptable: materialization from the v4
       resolver snapshot preserves every existing supplier and duplicate-row semantics;
       config plus both diagnostic stores upgrade recoverably; no dual routing authority.
-- [ ] §4.5 keeps state source-global, status live-derived, proactive delivery cut,
-      and only the default-on once-per-conversation native-takeover notice as the
-      successful-fallback exception.
+- [ ] §4.5 keeps state source-global, status live-derived, and every successful
+      takeover silent; terminal in-turn errors plus Model Gateway/Usage pull state
+      remain available.
 - [ ] §5 has exactly Sources + Gateway modules; the connector is state-only and
       Configure Agents is deferred without a placeholder design.
 - [ ] §6 clearly distinguishes a native hop inside Gateway mode from Direct mode.

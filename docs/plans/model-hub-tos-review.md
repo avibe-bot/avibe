@@ -399,3 +399,22 @@ takeover in a conversation may emit one lightweight informational notice when th
 `native_takeover_notice_enabled` setting is enabled. This is active-conversation copy,
 not a warning, risk prompt, resolution-event delivery, or proactive push system; the
 2026-07-29 proactive-push cut remains in force.
+
+## 14. Owner addendum — 2026-08-08 (amendment #3)
+
+This ruling supersedes §13's successful-takeover notice and setting, while retaining
+its vendor-specific subscription custody recommendation and every other routing rule.
+No automatic native-to-Gateway takeover emits a conversation message, and
+`native_takeover_notice_enabled` does not enter the v5 contract.
+
+The rationale matches the 2026-07-29 proactive-push cut and the ruling that provenance
+is a debug affordance: model supply should feel like tap water or air. A user stays
+focused on the current task rather than supplier identity, switching, or remaining
+balance. The Model Gateway and Usage pages are the pull surfaces for experts who choose
+to inspect the takeover badge, connector state, recent-switch record, and usage.
+
+This silence applies only to a successful handoff. If every candidate is unavailable,
+the turn still reports the existing truthful failure; if streamed output prevents a
+transparent retry, the existing retry copy remains. Page state and recorded switching
+evidence also remain. This amendment removes a message and setting, not routing,
+failure reporting, or observability.
