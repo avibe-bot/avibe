@@ -735,6 +735,7 @@ async def test_permanent_flush_rejection_does_not_starve_other_sessions(tmp_path
 
 async def test_retryable_flush_rejection_is_backed_off_without_starving_other_sessions(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="conflicted", session="bad")) == CaptureAccepted()
@@ -761,6 +762,11 @@ async def test_retryable_flush_rejection_is_backed_off_without_starving_other_se
     assert bad_state.flush_state == "due"
     assert bad_state.next_attempt_at == "2026-01-01T00:00:30.000Z"
     assert provider.flushes == [rows[0].session_id, rows[1].session_id]
+
+    def fail_if_session_history_is_materialized(*_args, **_kwargs):
+        raise AssertionError("status must use the due-state probe")
+
+    monkeypatch.setattr(store, "list_session_flush_states", fail_if_session_history_is_materialized)
     status = await module.status()
     assert (status.state, status.error) == ("degraded", "memory_processing_failed")
 

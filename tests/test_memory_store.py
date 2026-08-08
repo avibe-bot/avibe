@@ -204,6 +204,21 @@ def test_enqueue_creates_one_idempotent_session_state_for_the_canonical_ref(tmp_
     assert store.ensure_session_flush_state(first.row.provider_session_ref) == state
 
 
+def test_due_state_probe_avoids_materializing_session_history(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "due", session_ref="due-session")
+
+    assert store.has_due_flush_state() is False
+    token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("retry", "CONFLICT", server_fault=False),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    assert store.has_due_flush_state() is True
+
+
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     scope_key = bytes.fromhex("11" * 32)
 
@@ -1164,6 +1179,47 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert completed.clear_in_progress is False
     assert completed.epoch == clearing.epoch
     assert store.list_queue_rows() == ()
+
+
+def test_reclaim_processing_settlement_uses_pinned_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "first", session_ref="recovered-next-generation")
+    token = _flush_claim(store, provider_session_ref)
+    accepted = store.enqueue_request(
+        source_message_id="second",
+        session_id="recovered-next-generation",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+    assert accepted.row.flush_generation == token.generation + 1
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("rejected", "INVALID_INPUT", server_fault=False, retryable=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:03.000Z")
+    assert claimed is not None
+    assert claimed.flush_generation == token.generation + 1
+
+    assert store.recover_after_boot(
+        lease_owner="new-boot",
+        clock=lambda: _dt("2026-01-01T00:00:04.000Z"),
+    ).reclaimed == 1
+
+    settlement = next(
+        item
+        for item in store.list_flush_settlements(provider_session_ref)
+        if item.operation_id == f"recovered-add-{claimed.source_message_digest}"
+    )
+    assert (settlement.generation, settlement.outcome) == (
+        claimed.flush_generation,
+        "manual_required",
+    )
 
 
 @pytest.mark.parametrize("provenance", ["user_input", "agent"])

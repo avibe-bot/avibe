@@ -516,6 +516,24 @@ class MemoryStore:
                 ).fetchall()
         return tuple(_session_state_from_row(row) for row in rows)
 
+    def has_due_flush_state(self, *, epoch: int | None = None) -> bool:
+        """Check for a persisted due generation without materializing sessions."""
+
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return False
+            active_epoch = meta.epoch if epoch is None else epoch
+            row = conn.execute(
+                """
+                SELECT 1 FROM memory_session_flush_state
+                WHERE epoch = ? AND flush_state = 'due'
+                LIMIT 1
+                """,
+                (active_epoch,),
+            ).fetchone()
+        return row is not None
+
     def list_due_flush_sessions(self, *, now: str) -> tuple[ProviderSessionRef, ...]:
         """Return due sessions whose rejected generation can be retried now."""
 
@@ -1567,7 +1585,7 @@ class MemoryStore:
                     conn,
                     MemorySettlementRecord(
                         provider_session_ref=provider_session_ref,
-                        generation=state.generation,
+                        generation=int(row["flush_generation"]),
                         fence_epoch=state.fence_epoch + 1,
                         operation_id=f"recovered-add-{row['source_message_digest']}",
                         operation_kind="add",

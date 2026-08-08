@@ -355,8 +355,8 @@ class MemoryModule:
         try:
             meta = await self._store_call(self._store.get_meta)
             stats = await self._store_call(self._store.queue_stats)
-            session_states = await self._store_call(
-                self._store.list_session_flush_states,
+            has_due_flush_state = await self._store_call(
+                self._store.has_due_flush_state,
                 epoch=meta.epoch if meta is not None else None,
             )
             manual_required_fence = await self._store_call(
@@ -425,7 +425,7 @@ class MemoryModule:
             )
         if active_error is not None:
             return await self._status("degraded", meta=meta, stats=stats, error=active_error)
-        if any(state.flush_state == "due" for state in session_states):
+        if has_due_flush_state:
             return await self._status(
                 "degraded",
                 meta=meta,
