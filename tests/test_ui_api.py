@@ -1498,7 +1498,10 @@ def test_install_agent_blocks_private_desktop_codex_self_update(monkeypatch, tmp
     assert result == {
         "ok": False,
         "code": "desktop_managed_backend",
-        "message": "This Codex backend is bundled with Avibe. Update the desktop app to update Codex.",
+        "message": (
+            "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. "
+            "Reopen the current desktop app to install it privately."
+        ),
         "output": None,
         "path": str(codex_path),
     }
@@ -1587,8 +1590,7 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
 
     def fake_install(name, *, activate):
         assert name == "codex"
-        rollback = activate(str(installed))
-        assert callable(rollback)
+        assert activate(str(installed)) is None
         return SimpleNamespace(path=str(installed), version="1.2.3", output="installed")
 
     monkeypatch.setattr(api, "load_config", lambda: config)

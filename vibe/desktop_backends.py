@@ -36,7 +36,6 @@ NPM_REGISTRY = "https://registry.npmjs.org/"
 class DesktopBackendSpec:
     package: str
     package_path: tuple[str, ...]
-    package_executable: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,18 +70,15 @@ BACKEND_SPECS: dict[str, DesktopBackendSpec] = {
     "claude": DesktopBackendSpec(
         package="@anthropic-ai/claude-code",
         package_path=("@anthropic-ai", "claude-code"),
-        package_executable=("bin", "claude.exe"),
     ),
     "opencode": DesktopBackendSpec(
         package="opencode-ai",
         package_path=("opencode-ai",),
-        package_executable=("bin", "opencode.exe"),
     ),
 }
 
 
-ActivationRollback = Callable[[], None]
-ActivationCallback = Callable[[str], ActivationRollback | None]
+ActivationCallback = Callable[[str], None]
 
 
 def desktop_backend_toolchain(
@@ -179,8 +175,8 @@ def install_desktop_backend(
     """Install or update one backend and atomically publish its descriptor.
 
     ``activate`` lets the config owner persist the final executable while the
-    cross-process install lock is still held. It may return a rollback callback,
-    which is invoked if descriptor publication fails after activation.
+    cross-process install lock is still held. The descriptor is published first
+    so configuration can never point at an unpublished release.
     """
 
     spec = BACKEND_SPECS.get(backend)
@@ -208,7 +204,6 @@ def install_desktop_backend(
         ) from exc
 
     staging = backend_root / f".staging-{uuid.uuid4().hex}"
-    activation_rollback: ActivationRollback | None = None
     try:
         staging.mkdir(mode=0o700)
         user_config = staging / "npm-user.conf"
@@ -224,6 +219,7 @@ def install_desktop_backend(
             "--no-save",
             "--package-lock=false",
             "--omit=dev",
+            "--ignore-scripts",
             "--no-audit",
             "--no-fund",
             f"--registry={NPM_REGISTRY}",
@@ -270,13 +266,17 @@ def install_desktop_backend(
             "version": version,
             "executable": relative_executable,
         }
-        if activate is not None:
-            activation_rollback = activate(str(published_executable))
+        descriptor_path = backend_root / "current.json"
+        previous_descriptor = _read_descriptor_bytes(descriptor_path)
         try:
-            _write_current_descriptor(backend_root / "current.json", descriptor)
+            # The descriptor is the publication boundary. Configuration may
+            # point at a release only after this atomic replacement succeeds,
+            # so a crash can never activate an unpublished executable.
+            _write_current_descriptor(descriptor_path, descriptor)
+            if activate is not None:
+                activate(str(published_executable))
         except Exception:
-            if activation_rollback is not None:
-                activation_rollback()
+            _restore_descriptor_bytes(descriptor_path, previous_descriptor)
             raise
 
         return DesktopBackendInstallResult(
@@ -438,10 +438,8 @@ def _installed_native_executable(
     staging: Path,
     package_dir: Path,
 ) -> Path:
-    if spec.package_executable is not None:
-        candidates = [package_dir / Path(*spec.package_executable)]
-    else:
-        os_name, arch = _native_target()
+    os_name, arch = _native_target()
+    if backend == "codex":
         executable_name = "codex.exe" if os_name == "win32" else "codex"
         target_package = staging / "node_modules" / "@openai" / f"codex-{os_name}-{arch}"
         target_roots = [target_package, package_dir / "node_modules" / "@openai" / target_package.name]
@@ -450,6 +448,19 @@ def _installed_native_executable(
             for target_root in target_roots
             for candidate in target_root.glob(f"vendor/*/bin/{executable_name}")
         ]
+    elif backend == "claude":
+        executable_name = "claude.exe" if os_name == "win32" else "claude"
+        target_package = staging / "node_modules" / "@anthropic-ai" / f"claude-code-{os_name}-{arch}"
+        target_roots = [target_package, package_dir / "node_modules" / "@anthropic-ai" / target_package.name]
+        candidates = [target_root / executable_name for target_root in target_roots]
+    elif backend == "opencode":
+        target_os = "windows" if os_name == "win32" else os_name
+        executable_name = "opencode.exe" if os_name == "win32" else "opencode"
+        target_package = staging / "node_modules" / f"opencode-{target_os}-{arch}"
+        target_roots = [target_package, package_dir / "node_modules" / target_package.name]
+        candidates = [target_root / "bin" / executable_name for target_root in target_roots]
+    else:  # BACKEND_SPECS and callers keep this unreachable.
+        candidates = []
 
     unique: dict[Path, Path] = {}
     for candidate in candidates:
@@ -574,6 +585,28 @@ def _descriptor_relative_path(value: Any) -> Path | None:
 
 def _write_current_descriptor(path: Path, payload: dict[str, Any]) -> None:
     encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    if len(encoded) > MAX_DESCRIPTOR_BYTES:
+        raise ValueError("desktop backend descriptor exceeds size limit")
+    _write_descriptor_bytes(path, encoded)
+
+
+def _read_descriptor_bytes(path: Path) -> bytes | None:
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_DESCRIPTOR_BYTES:
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore_descriptor_bytes(path: Path, previous: bytes | None) -> None:
+    if previous is None:
+        path.unlink(missing_ok=True)
+        return
+    _write_descriptor_bytes(path, previous)
+
+
+def _write_descriptor_bytes(path: Path, encoded: bytes) -> None:
     if len(encoded) > MAX_DESCRIPTOR_BYTES:
         raise ValueError("desktop backend descriptor exceeds size limit")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

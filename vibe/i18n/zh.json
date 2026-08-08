@@ -667,7 +667,7 @@
     "checkUpdate": "更新由 Avibe 桌面应用统一提供。",
     "upgrade": "此 Runtime 由 Avibe 桌面应用管理。请更新桌面应用来更新 Avibe。",
     "apiUpgrade": "此 Runtime 由 Avibe 桌面应用管理。",
-    "backendUpgrade": "此 Codex 后端随 Avibe 一起提供。请更新桌面应用来更新 Codex。"
+    "backendUpgrade": "此 Codex 后端属于旧版 Avibe 桌面 Runtime，无法原地更新。请重新打开当前桌面应用，将其安装为私有后端。"
   },
   "telegram": {
     "commandMenu": {

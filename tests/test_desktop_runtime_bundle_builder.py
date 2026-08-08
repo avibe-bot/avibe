@@ -42,6 +42,7 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
 
     assert sources["schema_version"] == 2
     assert sources["npm_version"] == "10.9.8"
+    assert set(sources["sdist_build_allowlist"]) == {"claude-agent-sdk", "http-ece"}
     assert "codex_version" not in sources
     assert "codex_license" not in sources
     for target, config in sources["targets"].items():
@@ -49,6 +50,25 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
         assert config["npm_source"] == expected_source
         assert config["npm_entrypoint"] == "tools/npm/bin/npm-cli.js"
         assert not any(key.startswith("codex") for key in config)
+
+
+def test_python_runtime_verification_checks_bundled_claude_paths(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    private_python = tmp_path / "python" / "bin" / "python3"
+
+    builder.verify_python_runtime_excludes_agent_backends(private_python, tmp_path)
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[:3] == [str(private_python), "-I", "-c"]
+    assert 'for name in ("claude", "claude.exe")' in command[3]
+    assert kwargs == {"cwd": tmp_path, "check": True}
 
 
 def test_node_toolchain_normalizes_bundled_npm_without_command_shims(monkeypatch, tmp_path):

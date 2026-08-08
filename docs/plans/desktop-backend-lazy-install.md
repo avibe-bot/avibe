@@ -32,6 +32,9 @@ backends are installed only after the user requests one.
   - Claude Code: `@anthropic-ai/claude-code`
   - OpenCode: `opencode-ai`
 - npm is invoked directly as `node <npm-cli.js>` without a shell.
+- Lifecycle scripts are disabled. Avibe selects the target-specific optional
+  package and verifies its native executable instead of delegating publication
+  to an upstream postinstall script.
 - npm installs into a fresh staging prefix below the app-private backend root.
 - Avibe validates the installed package version and a target-native executable
   before publishing the release.
@@ -58,6 +61,12 @@ desktop launcher supplies these immutable paths to Python:
 The backend root is mutable app data and is separate from the content-addressed
 Runtime root. The Runtime integrity verifier therefore never treats lazy-loaded
 backends as bundled files.
+
+The desktop builder installs `claude-agent-sdk` from its pure-Python source
+distribution. Its platform wheels embed Claude Code, so accepting those wheels
+would violate the same boundary even though the executable lives inside a
+Python dependency rather than under `tools/`. The builder verifies that the
+installed SDK contains no bundled Claude executable before packaging.
 
 ## Lifecycle And Updates
 

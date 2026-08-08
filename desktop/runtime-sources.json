@@ -2,6 +2,7 @@
   "schema_version": 2,
   "npm_version": "10.9.8",
   "sdist_build_allowlist": [
+    "claude-agent-sdk",
     "http-ece"
   ],
   "show_runtime_manifest": {

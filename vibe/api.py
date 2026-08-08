@@ -6225,23 +6225,9 @@ def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = 
     return None
 
 
-def _restore_agent_cli_path(name: str, installed_path: str, previous_path: str) -> None:
-    """Rollback a managed activation unless the user changed it concurrently."""
-
-    with CONFIG_LOCK:
-        config = load_config()
-        target = getattr(getattr(config, "agents", None), name, None)
-        if target is None or (getattr(target, "cli_path", "") or name) != installed_path:
-            return
-        target.cli_path = previous_path
-        config.save()
-
-
 def _run_desktop_backend_install(name: str, truncate_output) -> dict:
-    def _activate(installed_path: str):
-        previous_path = _persist_agent_cli_path(name, installed_path, required=True)
-        assert previous_path is not None
-        return lambda: _restore_agent_cli_path(name, installed_path, previous_path)
+    def _activate(installed_path: str) -> None:
+        _persist_agent_cli_path(name, installed_path, required=True)
 
     try:
         result = install_desktop_backend(name, activate=_activate)

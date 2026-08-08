@@ -63,9 +63,15 @@ def _fake_npm_install(
             executable = target_root / "vendor" / "target-triple" / "bin" / (
                 "codex.exe" if os_name == "win32" else "codex"
             )
+        elif backend == "claude":
+            os_name, arch = desktop_backends._native_target()
+            target_root = staging / "node_modules" / "@anthropic-ai" / f"claude-code-{os_name}-{arch}"
+            executable = target_root / ("claude.exe" if os_name == "win32" else "claude")
         else:
-            assert spec.package_executable is not None
-            executable = package_dir / Path(*spec.package_executable)
+            os_name, arch = desktop_backends._native_target()
+            target_os = "windows" if os_name == "win32" else os_name
+            target_root = staging / "node_modules" / f"opencode-{target_os}-{arch}"
+            executable = target_root / "bin" / ("opencode.exe" if os_name == "win32" else "opencode")
         _write_native(executable)
         if calls is not None:
             calls.append((command, dict(env), cwd))
@@ -103,6 +109,7 @@ def test_install_publishes_verified_native_backend(monkeypatch, tmp_path, backen
     command, install_env, cwd = calls[0]
     assert command[:2] == [env["VIBE_SHOW_RUNTIME_NODE_BIN"], env["AVIBE_DESKTOP_NPM_CLI"]]
     assert command[-1] == desktop_backends.BACKEND_SPECS[backend].package
+    assert "--ignore-scripts" in command
     assert f"--registry={desktop_backends.NPM_REGISTRY}" in command
     assert cwd == Path(install_env["NPM_CONFIG_PREFIX"])
     assert install_env["NPM_CONFIG_REGISTRY"] == desktop_backends.NPM_REGISTRY
@@ -152,7 +159,7 @@ def test_failed_install_keeps_current_descriptor_and_removes_staging(monkeypatch
     assert list(backend_root.glob("releases/*")) == []
 
 
-def test_descriptor_publication_failure_rolls_back_config_activation(monkeypatch, tmp_path):
+def test_descriptor_publication_failure_does_not_activate_config(monkeypatch, tmp_path):
     env = _desktop_env(tmp_path)
     monkeypatch.setattr(desktop_backends, "_run_command", _fake_npm_install("opencode"))
     monkeypatch.setattr(
@@ -164,7 +171,6 @@ def test_descriptor_publication_failure_rolls_back_config_activation(monkeypatch
 
     def activate(path):
         state["path"] = path
-        return lambda: state.update(path="opencode")
 
     monkeypatch.setattr(
         desktop_backends,
@@ -176,6 +182,38 @@ def test_descriptor_publication_failure_rolls_back_config_activation(monkeypatch
         desktop_backends.install_desktop_backend("opencode", base_env=env, activate=activate)
 
     assert state["path"] == "opencode"
+
+
+def test_descriptor_is_published_before_activation_and_restored_on_failure(monkeypatch, tmp_path):
+    env = _desktop_env(tmp_path)
+    root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+    backend_root = root / "claude"
+    old_executable = backend_root / "releases" / "old" / "claude"
+    _write_native(old_executable)
+    old_descriptor = {
+        "schema_version": desktop_backends.CURRENT_DESCRIPTOR_SCHEMA_VERSION,
+        "backend": "claude",
+        "package": "@anthropic-ai/claude-code",
+        "version": "1.0.0",
+        "executable": old_executable.relative_to(root).as_posix(),
+    }
+    backend_root.mkdir(parents=True, exist_ok=True)
+    (backend_root / "current.json").write_text(json.dumps(old_descriptor), encoding="utf-8")
+    monkeypatch.setattr(desktop_backends, "_run_command", _fake_npm_install("claude"))
+    monkeypatch.setattr(
+        desktop_backends.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "claude 1.2.3", ""),
+    )
+
+    def fail_activation(new_path):
+        assert desktop_backends.resolve_published_desktop_backend("claude", env) == new_path
+        raise OSError("config write failed")
+
+    with pytest.raises(desktop_backends.DesktopBackendError):
+        desktop_backends.install_desktop_backend("claude", base_env=env, activate=fail_activation)
+
+    assert desktop_backends.resolve_published_desktop_backend("claude", env) == str(old_executable)
 
 
 def test_resolver_rejects_descriptor_traversal_and_non_native_file(tmp_path):

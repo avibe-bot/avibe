@@ -476,8 +476,11 @@ pins and records:
 Release CI builds the wheel from the same checkout and installs its
 hash-locked dependencies into the pinned standalone CPython distribution.
 Binary wheels are mandatory except for the explicit audited sdist allowlist in
-`desktop/runtime-sources.json`; today that list contains only `http-ece`, which
-does not publish wheels. CI builds that dependency on the target runner. The
+`desktop/runtime-sources.json`. `http-ece` does not publish wheels;
+`claude-agent-sdk` is intentionally built from its pure-Python sdist because its
+platform wheels embed a Claude Code executable, which belongs to the lazy
+backend lifecycle instead of the immutable Runtime. CI builds those dependencies
+on the target runner. The
 builder then copies native Node plus its complete npm package. The private
 launch environment exports the exact Node and npm CLI paths. A fully isolated
 `AVIBE_HOME` proves the real `start --no-open-browser -> /ready -> stop`

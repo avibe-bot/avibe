@@ -189,6 +189,26 @@ def install_python_environment(
     return completed.stdout.strip()
 
 
+def verify_python_runtime_excludes_agent_backends(private_python: Path, work_dir: Path) -> None:
+    """Reject Python dependencies that smuggle an Agent backend into the Runtime."""
+
+    probe = """
+from pathlib import Path
+import claude_agent_sdk
+
+bundled = Path(claude_agent_sdk.__file__).resolve().parent / "_bundled"
+for name in ("claude", "claude.exe"):
+    candidate = bundled / name
+    if candidate.is_file() or candidate.is_symlink():
+        raise SystemExit(f"Runtime contains bundled Agent backend: {candidate}")
+""".strip()
+    subprocess.run(
+        [str(private_python), "-I", "-c", probe],
+        cwd=work_dir,
+        check=True,
+    )
+
+
 def install_node_toolchain(
     target_config: dict[str, Any],
     node_archive: Path,
@@ -531,6 +551,7 @@ def main() -> int:
             work_dir,
             sources.get("sdist_build_allowlist", []),
         )
+        verify_python_runtime_excludes_agent_backends(private_python, work_dir)
         install_node_toolchain(
             target_config,
             node_archive,
