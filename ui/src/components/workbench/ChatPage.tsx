@@ -2078,9 +2078,10 @@ export const ChatPage: React.FC = () => {
         // reload the live tail; if not, it already reaches the tail and can keep
         // normal pinned/follow behavior.
         setMessages(window);
-        deepLinkWindowHandledRef.current = true;
+        const reachesHistoricalWindow = Boolean(res.next_after_id);
+        deepLinkWindowHandledRef.current = reachesHistoricalWindow;
         setOlderCursor(res.next_before_id ?? null);
-        setHistoricalWindow(Boolean(res.next_after_id));
+        setHistoricalWindow(reachesHistoricalWindow);
         setJumpTarget(targetMsg);
         startHighlight(targetMsg);
         clearParam();
