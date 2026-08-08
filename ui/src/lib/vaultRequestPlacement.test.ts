@@ -7,7 +7,12 @@ import {
   vaultRequestType,
 } from './vaultRequestPlacement';
 
-const message = (id: string, createdAt: string, author = 'agent'): WorkbenchMessage => ({
+const message = (
+  id: string,
+  createdAt: string,
+  author = 'agent',
+  deliveredAt: string | null = null,
+): WorkbenchMessage => ({
   id,
   scope_id: null,
   session_id: 'ses_test',
@@ -24,7 +29,7 @@ const message = (id: string, createdAt: string, author = 'agent'): WorkbenchMess
   metadata: {},
   created_at: createdAt,
   updated_at: createdAt,
-  delivered_at: null,
+  delivered_at: deliveredAt,
   read_at: null,
 });
 
@@ -268,5 +273,22 @@ describe('placeVaultProvisionRequests', () => {
 
     expect([...placed.byMessageId]).toEqual([]);
     expect(placed.unanchored.map((item) => item.id)).toEqual(['older']);
+  });
+
+  it('uses transcript-entry time when a queued row was accepted after the request', () => {
+    const queuedInput = message(
+      'queued-input',
+      '2026-07-30T09:59:00Z',
+      'user',
+      '2026-07-30T10:02:00Z',
+    );
+    const unrelatedReply = message('unrelated-reply', '2026-07-30T10:03:00Z');
+    const placed = placeVaultProvisionRequests(
+      [queuedInput, unrelatedReply],
+      [request('trimmed', 'provision', '2026-07-30T10:01:00Z')],
+    );
+
+    expect([...placed.byMessageId]).toEqual([]);
+    expect(placed.unanchored.map((item) => item.id)).toEqual(['trimmed']);
   });
 });

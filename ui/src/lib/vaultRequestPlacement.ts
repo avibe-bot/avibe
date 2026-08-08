@@ -1,7 +1,7 @@
 import type { VaultRequest, WorkbenchMessage } from '@/context/ApiContext';
 import { chatRowKind } from '@/lib/chatRowKind';
 import { specFor } from '@/lib/messageTypes';
-import { messageOrderTimeMs, timestampOrderTimeMs } from '@/lib/transcriptOrder';
+import { messageOrderTimeMs, timestampOrderTimeMs, transcriptOrderTimeMs } from '@/lib/transcriptOrder';
 
 export type VaultRequestType = 'access' | 'sign' | 'provision' | 'other';
 
@@ -139,7 +139,10 @@ export function placeVaultProvisionRequests(
   const unanchored: VaultRequest[] = [];
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   const agentMessages = messages.filter(isAgentReply);
-  const firstLoadedTime = messages.length > 0 ? messageOrderTimeMs(messages[0]) : Number.NaN;
+  // Window coverage follows transcript-entry order. A queued row can be authored
+  // before the request but only enter the visible transcript after it, so its
+  // message-id clock must not make a trimmed request look loaded.
+  const firstLoadedTime = messages.length > 0 ? transcriptOrderTimeMs(messages[0]) : Number.NaN;
 
   for (const request of requests) {
     if (vaultRequestType(request) !== 'provision') continue;
