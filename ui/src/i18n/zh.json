@@ -22,13 +22,13 @@
     "uninstall": {
       "menuLabel": "卸载 Avibe…",
       "confirmTitle": "卸载 Avibe",
-      "confirmMessage": "此操作会移除 Avibe 的私有 Runtime 并退出桌面应用。~/.avibe 下的项目、会话和设置将被保留。",
+      "confirmMessage": "此操作会移除 Avibe 的私有 Runtime 和私有安装的 Agent 后端，然后退出桌面应用。外部工具以及 ~/.avibe 下的项目、会话和设置将被保留。",
       "confirmAction": "移除 Runtime",
       "cancelAction": "取消",
       "busyTitle": "Avibe 正忙",
       "busyMessage": "请等待 Avibe 完成启动，然后再次选择“卸载 Avibe”。",
       "successTitle": "Avibe Runtime 已移除",
-      "successMessage": "私有 Runtime 已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
+      "successMessage": "私有 Runtime 和 Agent 后端已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
       "failureTitle": "卸载失败",
       "failureMessage": "Avibe 无法移除私有 Runtime。桌面应用仍保持安装状态，你的用户数据没有发生变化。"
     }
@@ -2171,7 +2171,7 @@
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "readyHint": "当前已是最新版本。",
-    "desktopManagedHint": "此后端随 Avibe 一起提供。请更新桌面应用来更新该后端。",
+    "desktopManagedHint": "由 Avibe 私有安装，不会修改系统工具。",
     "updateHint": "可升级：{{from}} → {{to}}",
     "errorHint": "{{name}} CLI 未安装，请在卡片上点击安装以启用该后端。",
     "disabledHint": "请在卡片顶部开关中启用该后端。",
