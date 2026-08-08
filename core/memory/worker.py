@@ -20,6 +20,7 @@ from core.memory.everos import (
     ProviderCapture,
 )
 from core.memory.store import (
+    AmbiguousAdd,
     Delivered,
     MemoryStore,
     MessageFailure,
@@ -251,21 +252,29 @@ class MemoryWorker:
                 timeout=self._add_timeout_seconds,
             )
         except asyncio.TimeoutError:
-            await self._ambiguous_failure_is_system_outage(
-                row,
-                "memory_provider_timeout",
-            )
+            await self._manual_required(row, "memory_provider_timeout")
             return False
         except MemoryProviderSystemFailure as failure:
+            error = _provider_error_code(failure, "memory_sidecar_unavailable")
+            if failure.ambiguous:
+                await self._manual_required(row, error)
+                return False
             await self._return_system_failure(
                 row,
-                _provider_error_code(failure, "memory_sidecar_unavailable"),
+                error,
             )
             return False
         except MemoryProviderFailure as failure:
+            error = _provider_error_code(failure, "memory_processing_failed")
+            if error == "memory_provider_timeout":
+                await self._manual_required(row, error)
+                return False
+            if not failure.retryable:
+                await self._record_message_failure(row, error, retryable=False)
+                return False
             await self._ambiguous_failure_is_system_outage(
                 row,
-                _provider_error_code(failure, "memory_processing_failed"),
+                error,
                 retryable=failure.retryable,
             )
             return False
@@ -273,8 +282,17 @@ class MemoryWorker:
             await self._ambiguous_failure_is_system_outage(row, "memory_processing_failed")
             return False
 
-        if not isinstance(ack, AddAck):
-            ack = AddAck(request_id=None, status=None)
+        if (
+            not isinstance(ack, AddAck)
+            or ack.status not in {"accumulated", "extracted"}
+            or not _valid_add_receipt_id(ack.request_id)
+        ):
+            await self._manual_required(
+                row,
+                "memory_provider_response_invalid",
+                request_id=ack.request_id if isinstance(ack, AddAck) else None,
+            )
+            return False
         settled = await self._store_call(
             self._store.settle,
             row,
@@ -434,6 +452,21 @@ class MemoryWorker:
             now=self._current_time(),
         )
 
+    async def _manual_required(
+        self,
+        row: QueueRow,
+        error: MemoryErrorCode,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        await self._store_call(
+            self._store.settle,
+            row,
+            AmbiguousAdd(add_request_id=request_id, error=error),
+            lease_owner=self._boot_id,
+            now=self._current_time(),
+        )
+
     async def _provider_healthy(self) -> bool:
         try:
             return bool(
@@ -488,6 +521,10 @@ def _opens_breaker(result: FlushResult) -> bool:
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return error.error if is_memory_error_code(error.error) else fallback
+
+
+def _valid_add_receipt_id(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= 128
 
 
 def _positive_timeout(value: float) -> float:

@@ -12,6 +12,7 @@ import pytest
 from config import paths
 from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
 from core.memory.store import (
+    AmbiguousAdd,
     MAX_MESSAGE_ATTEMPTS,
     MAX_NONTERMINAL_QUEUE_ROWS,
     Delivered,
@@ -24,6 +25,7 @@ from core.memory.store import (
     derive_principal_id,
     _keyed_digest,
 )
+from core.memory.types import ProviderSessionRef
 
 
 PROJECT = "p-22222222222222222222222222222222"
@@ -92,13 +94,21 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             row[1]
             for row in conn.execute("PRAGMA index_list('memory_capture_queue')")
         }
-        assert {"memory_meta", "memory_capture_queue"}.issubset(tables)
+        assert {
+            "memory_meta",
+            "memory_capture_queue",
+        }.issubset(tables)
+        assert not {
+            "memory_session_flush_state",
+            "memory_flush_settlements",
+        }.intersection(tables)
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
         assert {
             "principal_id",
             "project_ref",
+            "provider_session_ref",
             "provenance",
             "payload_attachments",
             "add_request_id",
@@ -123,6 +133,88 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
+
+
+def test_provider_session_ref_preserves_the_canonical_identity(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+
+    first = _enqueue(store, "identity")
+    duplicate = _enqueue(store, "identity", occurred_at_ms=2_000)
+
+    assert first.row is not None and duplicate.row is not None
+    reference = first.row.provider_session_ref
+    assert reference.as_tuple() == (
+        "u-11111111111111111111111111111111",
+        0,
+        PROJECT,
+        first.row.session_id,
+    )
+    assert ProviderSessionRef.deserialize(reference.serialize()) == reference
+    assert duplicate.row.provider_session_ref == reference
+    with sqlite3.connect(store.path) as conn:
+        persisted = conn.execute(
+            "SELECT provider_session_ref FROM memory_capture_queue"
+        ).fetchone()[0]
+    assert persisted == reference.serialize()
+
+
+def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "ambiguous")
+    claimed = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+
+    result = store.settle(
+        claimed,
+        AmbiguousAdd(add_request_id="provider-request"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    )
+
+    assert result == SettleResult(settled=True, state="manual_required")
+    row = _row_for_source(store, "ambiguous")
+    assert row is not None
+    assert (row.state, row.payload_text, row.last_error, row.add_request_id) == (
+        "manual_required",
+        "queued payload",
+        "memory_provider_response_invalid",
+        "provider-request",
+    )
+    assert store.has_manual_required_fence() is True
+    assert store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:02.000Z") is None
+    assert store.ensure_meta().last_error == "memory_provider_response_invalid"
+    stats = store.queue_stats()
+    assert stats.receipt_unknown == 1
+    assert stats.queue_plaintext_bytes == len("queued payload")
+    assert (
+        store.enqueue_request(
+            source_message_id="bounded-after-manual",
+            session_id="other-session",
+            principal_id="u-11111111111111111111111111111111",
+            project_ref=PROJECT,
+            provenance="user_input",
+            payload_text="another payload",
+            occurred_at_ms=2_000,
+            max_provider_timestamp_ms=4_102_444_800_000,
+            nonterminal_limit=1,
+        ).outcome
+        == "queue_full"
+    )
+    follow_up = store.enqueue_request(
+        source_message_id="same-session-after-manual",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="follow-up payload",
+        occurred_at_ms=2_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+        nonterminal_limit=2,
+    )
+    assert follow_up.outcome == "accepted"
+    assert follow_up.row is not None
+    assert follow_up.row.provider_session_ref == row.provider_session_ref
+    assert store.claim_due(lease_owner="worker-3", now="2026-01-01T00:00:02.000Z") is None
 
 
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
@@ -358,7 +450,7 @@ def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path)
     )
 
     assert recovery.reclaimed == 1
-    assert observed_states == ["pending"], "the clock was sampled before leases were reclaimed"
+    assert observed_states == ["manual_required"], "the clock was sampled before leases were reclaimed"
     assert _row_for_source(store, "in-flight").flush_observed_at == "2026-01-01T00:00:09.000Z"
 
 
@@ -465,8 +557,11 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert recovery.reclaimed == 1
     reclaimed = _row_for_source(store, "queued")
     assert reclaimed is not None
-    assert reclaimed.state == "pending"
+    assert reclaimed.state == "manual_required"
     assert reclaimed.attempts == 0
+    assert reclaimed.payload_text == "queued payload"
+    assert reclaimed.last_error == "memory_provider_response_invalid"
+    assert store.has_manual_required_fence() is True
 
     before = store.ensure_meta()
     clearing = store.begin_clear()

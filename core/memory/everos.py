@@ -75,6 +75,7 @@ class MemoryProviderFailure(RuntimeError):
         error: MemoryErrorCode = "memory_processing_failed",
         *,
         retryable: bool = True,
+        ambiguous: bool = False,
     ) -> None:
         closed_error: MemoryErrorCode = (
             error if is_memory_error_code(error) else "memory_processing_failed"
@@ -82,6 +83,7 @@ class MemoryProviderFailure(RuntimeError):
         super().__init__(closed_error)
         self.error = closed_error
         self.retryable = bool(retryable)
+        self.ambiguous = bool(ambiguous)
 
 
 class MemoryProviderSystemFailure(MemoryProviderFailure):
@@ -90,11 +92,13 @@ class MemoryProviderSystemFailure(MemoryProviderFailure):
     def __init__(
         self,
         error: MemoryErrorCode = "memory_sidecar_unavailable",
+        *,
+        ambiguous: bool = False,
     ) -> None:
         closed_error: MemoryErrorCode = (
             error if is_memory_error_code(error) else "memory_sidecar_unavailable"
         )
-        super().__init__(closed_error, retryable=True)
+        super().__init__(closed_error, retryable=True, ambiguous=ambiguous)
 
 
 class EverOSPort:
@@ -198,7 +202,7 @@ class EverOSPort:
         elif status is not None and status not in {"accumulated", "extracted"}:
             logger.warning("EverOS add returned an unsupported status value")
         return AddAck(
-            request_id=_bounded_opaque_string(envelope.get("request_id") if envelope else None),
+            request_id=_strict_receipt_id(envelope.get("request_id") if envelope else None),
             status=status if status in {"accumulated", "extracted"} else None,
         )
 
@@ -270,9 +274,24 @@ class EverOSPort:
                     except MemoryProviderFailure:
                         raw = None
                     status_code = response.status_code
+        except httpx.ConnectTimeout as exc:
+            logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
+            raise MemoryProviderSystemFailure() from exc
         except httpx.TimeoutException as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderFailure("memory_provider_timeout") from exc
+        except (
+            httpx.ReadError,
+            httpx.RemoteProtocolError,
+            httpx.WriteError,
+            httpx.CloseError,
+        ) as exc:
+            logger.warning(
+                "EverOS sidecar response lost route=%s latency_ms=%s",
+                route,
+                _elapsed_ms(started),
+            )
+            raise MemoryProviderSystemFailure(ambiguous=True) from exc
         except (httpx.HTTPError, OSError) as exc:
             logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
@@ -804,6 +823,12 @@ def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None
     return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
+def _strict_receipt_id(value: object, *, max_bytes: int = 128) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if len(value.encode("utf-8")) <= max_bytes else None
+
+
 def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -881,7 +906,7 @@ class FakeMemoryProvider:
         if self.ingest_failures:
             raise self.ingest_failures.popleft()
         self.captures.append(capture)
-        return AddAck(request_id=None, status="accumulated")
+        return AddAck(request_id=f"fake-add-{len(self.captures)}", status="accumulated")
 
     async def flush(self, session_ref: str, project_id: str) -> FlushResult:
         self.flushes.append(session_ref)

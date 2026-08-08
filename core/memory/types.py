@@ -69,6 +69,73 @@ def is_memory_error_code(value: object) -> bool:
 
 
 @dataclass(frozen=True)
+class ProviderSessionRef:
+    """Canonical provider identity persisted by Avibe's Memory outbox."""
+
+    principal_id: str
+    epoch: int
+    project_ref: str
+    session_id: str
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("principal_id", self.principal_id),
+            ("project_ref", self.project_ref),
+            ("session_id", self.session_id),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"provider session {name} must be non-empty")
+        if isinstance(self.epoch, bool) or not isinstance(self.epoch, int) or self.epoch < 0:
+            raise ValueError("provider session epoch must be a non-negative integer")
+
+    def as_tuple(self) -> tuple[str, int, str, str]:
+        """Return the canonical identity ordering."""
+
+        return (self.principal_id, self.epoch, self.project_ref, self.session_id)
+
+    def serialize(self) -> str:
+        """Serialize deterministically for Avibe-owned SQLite state."""
+
+        return json.dumps(
+            {
+                "principal_id": self.principal_id,
+                "epoch": self.epoch,
+                "project_ref": self.project_ref,
+                "session_id": self.session_id,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    to_json = serialize
+
+    @classmethod
+    def deserialize(cls, value: str) -> "ProviderSessionRef":
+        """Deserialize only the canonical four-field identity shape."""
+
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError):
+            raise ValueError("invalid provider session reference") from None
+        if not isinstance(payload, dict) or set(payload) != {
+            "principal_id",
+            "epoch",
+            "project_ref",
+            "session_id",
+        }:
+            raise ValueError("invalid provider session reference")
+        return cls(
+            principal_id=payload["principal_id"],
+            epoch=payload["epoch"],
+            project_ref=payload["project_ref"],
+            session_id=payload["session_id"],
+        )
+
+    from_serialized = deserialize
+
+
+@dataclass(frozen=True)
 class CaptureAttachment:
     """One Workbench-owned local file forwarded unchanged to the provider."""
 

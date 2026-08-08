@@ -353,6 +353,7 @@ class MemoryModule:
         try:
             meta = await self._store_call(self._store.get_meta)
             stats = await self._store_call(self._store.queue_stats)
+            manual_required = await self._store_call(self._store.has_manual_required_fence)
         except Exception:
             return MemoryStatus(state="error", error="memory_store_unavailable")
 
@@ -412,6 +413,13 @@ class MemoryModule:
                 meta=meta,
                 stats=stats,
                 error="memory_low_disk_space",
+            )
+        if manual_required:
+            return await self._status(
+                "degraded",
+                meta=meta,
+                stats=stats,
+                error="memory_processing_failed",
             )
         if active_error is not None:
             return await self._status("degraded", meta=meta, stats=stats, error=active_error)

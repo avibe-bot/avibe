@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     source_message_digest TEXT PRIMARY KEY,
     epoch INTEGER NOT NULL,
     session_id TEXT NOT NULL,
+    provider_session_ref TEXT NOT NULL,
     principal_id TEXT NOT NULL CHECK (
         length(principal_id) = 34
         AND substr(principal_id, 1, 2) = 'u-'
@@ -48,7 +49,9 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     payload_attachments TEXT,
     occurred_at_ms INTEGER NOT NULL,
     provider_timestamp_ms INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('pending', 'processing', 'delivered', 'dead')),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'processing', 'delivered', 'dead', 'manual_required')
+    ),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_retry_at TEXT,
     lease_owner TEXT,
@@ -78,7 +81,7 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     created_at TEXT NOT NULL,
     completed_at TEXT,
     CHECK (
-        (state IN ('pending', 'processing') AND payload_text IS NOT NULL)
+        (state IN ('pending', 'processing', 'manual_required') AND payload_text IS NOT NULL)
         OR (state IN ('delivered', 'dead') AND payload_text IS NULL)
     )
 );

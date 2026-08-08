@@ -98,12 +98,7 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
         artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
         effective_home=tmp_path,
     )
-    activation_calls = 0
     drain_calls = 0
-
-    def begin_activation() -> None:
-        nonlocal activation_calls
-        activation_calls += 1
 
     async def drain() -> int:
         nonlocal drain_calls
@@ -116,7 +111,7 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     async def no_wait(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr(runtime.module._worker, "begin_activation", begin_activation)
+    initial_boot_id = runtime.module._worker._boot_id
     monkeypatch.setattr(runtime.module._worker, "drain", drain)
     monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
 
@@ -127,7 +122,7 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
 
     asyncio.run(run())
     assert drain_calls == 2
-    assert activation_calls == 2
+    assert runtime.module._worker._boot_id != initial_boot_id
 
 
 def _settings() -> EverOSProcessSettings:
@@ -3294,11 +3289,11 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
         assert worker._boot_id != old_lease
         assert store.list_queue_rows()[0].state == "processing"
 
-        # The first tick under the replacement lease must reclaim old claimed
+        # The first tick under the replacement lease must fence old claimed
         # work before claims can resume.
         worker.pause_claims()
         assert await worker.drain_once() == 0
-        assert store.list_queue_rows()[0].state == "pending"
+        assert store.list_queue_rows()[0].state == "manual_required"
         await runtime.close()
 
     asyncio.run(run())

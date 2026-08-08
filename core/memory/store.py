@@ -18,7 +18,12 @@ from typing import Literal
 
 from config import paths
 from core.memory.observations import FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
-from core.memory.types import MemoryErrorCode, MemoryFailureLogEntry, is_memory_error_code
+from core.memory.types import (
+    MemoryErrorCode,
+    MemoryFailureLogEntry,
+    ProviderSessionRef,
+    is_memory_error_code,
+)
 
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
@@ -89,13 +94,14 @@ class QueueRow:
     source_message_digest: str
     epoch: int
     session_id: str
+    provider_session_ref: ProviderSessionRef
     principal_id: str
     project_ref: str
     provenance: Literal["user_input", "agent"]
     payload_text: str | None
     occurred_at_ms: int
     provider_timestamp_ms: int
-    state: Literal["pending", "processing", "delivered", "dead"]
+    state: Literal["pending", "processing", "delivered", "dead", "manual_required"]
     attempts: int
     next_retry_at: str | None
     lease_owner: str | None
@@ -149,6 +155,14 @@ class Delivered:
 
 
 @dataclass(frozen=True)
+class AmbiguousAdd:
+    """The provider response cannot prove whether this add was accepted."""
+
+    add_request_id: str | None = None
+    error: MemoryErrorCode = "memory_provider_response_invalid"
+
+
+@dataclass(frozen=True)
 class SystemOutage:
     """Infrastructure failed, not this row. Release it without spending an attempt."""
 
@@ -164,7 +178,7 @@ class MessageFailure:
 
 
 #: Every way a claimed row can leave the ``processing`` state.
-DeliveryOutcome = Delivered | SystemOutage | MessageFailure
+DeliveryOutcome = Delivered | AmbiguousAdd | SystemOutage | MessageFailure
 
 
 @dataclass(frozen=True)
@@ -173,7 +187,7 @@ class SettleResult:
 
     #: False when the fenced update matched no row — a lost or stolen lease.
     settled: bool
-    state: Literal["delivered", "pending", "dead"] | None = None
+    state: Literal["delivered", "pending", "dead", "manual_required"] | None = None
     #: Attempts consumed so far; only a MessageFailure spends one.
     attempts: int | None = None
 
@@ -285,7 +299,8 @@ class MemoryStore:
                 conn.execute(
                     """
                     SELECT COUNT(*) FROM memory_capture_queue
-                    WHERE epoch = ? AND state IN ('pending', 'processing')
+                    WHERE epoch = ?
+                      AND state IN ('pending', 'processing', 'manual_required')
                     """,
                     (meta.epoch,),
                 ).fetchone()[0]
@@ -299,12 +314,18 @@ class MemoryStore:
                 self._record_capture_skip_in_connection(conn, None, now)
                 return EnqueueResult(outcome="timestamp_invalid")
 
-            session_ref = _provider_session_ref(
+            session_id_ref = _provider_session_ref(
                 meta.scope_key,
                 principal_id,
                 project_ref,
                 session_id,
                 meta.epoch,
+            )
+            provider_session_ref = ProviderSessionRef(
+                principal_id=principal_id,
+                epoch=meta.epoch,
+                project_ref=project_ref,
+                session_id=session_id_ref,
             )
             conn.execute(
                 """
@@ -326,18 +347,21 @@ class MemoryStore:
             conn.execute(
                 """
                 INSERT INTO memory_capture_queue (
-                    source_message_digest, epoch, session_id, principal_id,
+                    source_message_digest, epoch, session_id, provider_session_ref,
+                    principal_id,
                     project_ref, provenance, payload_text,
-                    payload_attachments,
-                    occurred_at_ms, provider_timestamp_ms, state, attempts,
+                    payload_attachments, occurred_at_ms, provider_timestamp_ms,
+                    state, attempts,
                     next_retry_at, lease_owner, lease_at, last_error,
                     created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0,
+                          NULL, NULL, NULL, NULL, ?, NULL)
                 """,
                 (
                     source_message_digest,
                     meta.epoch,
-                    session_ref,
+                    session_id_ref,
+                    provider_session_ref.serialize(),
                     principal_id,
                     project_ref,
                     provenance,
@@ -353,7 +377,8 @@ class MemoryStore:
                 row=QueueRow(
                     source_message_digest=source_message_digest,
                     epoch=meta.epoch,
-                    session_id=session_ref,
+                    session_id=session_id_ref,
+                    provider_session_ref=provider_session_ref,
                     principal_id=principal_id,
                     project_ref=project_ref,
                     provenance=provenance,
@@ -381,11 +406,18 @@ class MemoryStore:
                 return None
             row = conn.execute(
                 """
-                SELECT * FROM memory_capture_queue
-                WHERE epoch = ?
-                  AND state = 'pending'
-                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
-                ORDER BY created_at, source_message_digest
+                SELECT q.* FROM memory_capture_queue AS q
+                WHERE q.epoch = ?
+                  AND q.state = 'pending'
+                  AND (q.next_retry_at IS NULL OR q.next_retry_at <= ?)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM memory_capture_queue AS fence
+                      WHERE fence.provider_session_ref = q.provider_session_ref
+                        AND fence.epoch = q.epoch
+                        AND fence.state = 'manual_required'
+                  )
+                ORDER BY q.created_at, q.source_message_digest
                 LIMIT 1
                 """,
                 (meta.epoch, now),
@@ -434,6 +466,18 @@ class MemoryStore:
                 add_request_id=outcome.add_request_id,
             )
             return SettleResult(settled=settled, state="delivered" if settled else None)
+        if isinstance(outcome, AmbiguousAdd):
+            settled = self._settle_ambiguous_add(
+                row,
+                lease_owner=lease_owner,
+                now=now_iso,
+                add_request_id=outcome.add_request_id,
+                error=outcome.error,
+            )
+            return SettleResult(
+                settled=settled,
+                state="manual_required" if settled else None,
+            )
         if isinstance(outcome, SystemOutage):
             settled = self._return_system_failure(
                 row,
@@ -514,6 +558,59 @@ class MemoryStore:
                 return False
             self._compact_terminal_tombstones_in_connection(conn, _datetime_from_iso(now))
             return True
+
+    def _settle_ambiguous_add(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        now: str,
+        add_request_id: str | None,
+        error: MemoryErrorCode,
+    ) -> bool:
+        """Retain an uncertain add and fence its session against auto-replay."""
+
+        safe_error = _closed_error_or(error, "memory_provider_response_invalid")
+        with self._transaction() as conn:
+            result = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET state = 'manual_required', next_retry_at = NULL,
+                    lease_owner = NULL, lease_at = NULL,
+                    last_error = ?, add_request_id = ?, completed_at = ?
+                WHERE source_message_digest = ? AND epoch = ?
+                  AND state = 'processing' AND lease_owner = ?
+                """,
+                (
+                    safe_error,
+                    _bounded_opaque_text(add_request_id),
+                    now,
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                ),
+            )
+            if result.rowcount != 1:
+                return False
+            self._set_last_error_in_connection(conn, safe_error, now)
+            return True
+
+    def has_manual_required_fence(self) -> bool:
+        """Return whether the active epoch contains a terminal session fence."""
+
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return False
+            row = conn.execute(
+                """
+                SELECT 1 FROM memory_capture_queue
+                WHERE epoch = ? AND state = 'manual_required'
+                LIMIT 1
+                """,
+                (meta.epoch,),
+            ).fetchone()
+        return row is not None
 
     def mark_flush_in_flight(self, session_id: str, project_ref: str) -> int:
         """Freeze the delivered rows consumed by one imminent session flush."""
@@ -758,20 +855,36 @@ class MemoryStore:
             return MessageFailureResult(state=state, attempts=attempts)
 
     def _reclaim_processing(self, *, lease_owner: str) -> int:
-        """Return rows leased by prior boots to pending for at-least-once delivery."""
+        """Fence rows whose provider add outcome was ambiguous at boot."""
 
+        now = utc_now_iso()
         with self._transaction() as conn:
-            result = conn.execute(
+            rows = conn.execute(
                 """
-                UPDATE memory_capture_queue
-                SET state = 'pending', lease_owner = NULL, lease_at = NULL,
-                    next_retry_at = NULL
+                SELECT * FROM memory_capture_queue
                 WHERE state = 'processing'
                   AND (lease_owner IS NULL OR lease_owner != ?)
                 """,
                 (lease_owner,),
-            )
-            return int(result.rowcount)
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE memory_capture_queue
+                    SET state = 'manual_required', lease_owner = NULL, lease_at = NULL,
+                        next_retry_at = NULL,
+                        last_error = 'memory_provider_response_invalid', completed_at = ?
+                    WHERE source_message_digest = ? AND state = 'processing'
+                    """,
+                    (now, row["source_message_digest"]),
+                )
+            if rows:
+                self._set_last_error_in_connection(
+                    conn,
+                    "memory_provider_response_invalid",
+                    now,
+                )
+            return len(rows)
 
     def queue_stats(self) -> QueueStats:
         """Return aggregate counts and retained plaintext bytes for the active epoch."""
@@ -790,13 +903,14 @@ class MemoryStore:
                         ('not_attempted', 'in_flight') THEN 1 ELSE 0 END) AS awaiting_receipt,
                     SUM(CASE WHEN state = 'delivered' AND flush_observation = 'succeeded'
                         THEN 1 ELSE 0 END) AS succeeded,
-                    SUM(CASE WHEN state = 'delivered' AND
-                        (flush_observation = 'unknown' OR flush_observation IS NULL)
+                    SUM(CASE WHEN state = 'manual_required'
+                        OR (state = 'delivered' AND
+                        (flush_observation = 'unknown' OR flush_observation IS NULL))
                         THEN 1 ELSE 0 END) AS receipt_unknown,
                     SUM(CASE WHEN state = 'delivered' AND flush_observation = 'rejected'
                         THEN 1 ELSE 0 END) AS distill_failed,
                     COALESCE(SUM(
-                        CASE WHEN state IN ('pending', 'processing')
+                        CASE WHEN state IN ('pending', 'processing', 'manual_required')
                         THEN length(CAST(payload_text AS BLOB))
                            + length(CAST(COALESCE(payload_attachments, '') AS BLOB))
                         ELSE 0 END
@@ -873,14 +987,17 @@ class MemoryStore:
                 SELECT kind, occurred_at, error_code, request_id, attempts
                 FROM (
                     SELECT
-                        'delivery_abandoned' AS kind,
+                        CASE
+                            WHEN state = 'dead' THEN 'delivery_abandoned'
+                            ELSE 'result_unknown'
+                        END AS kind,
                         COALESCE(completed_at, created_at) AS occurred_at,
                         last_error AS error_code,
                         add_request_id AS request_id,
                         attempts,
                         source_message_digest AS sort_key
                     FROM memory_capture_queue
-                    WHERE epoch = ? AND state = 'dead'
+                    WHERE epoch = ? AND state IN ('dead', 'manual_required')
 
                     UNION ALL
 
@@ -1414,6 +1531,9 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         source_message_digest=str(row["source_message_digest"]),
         epoch=int(row["epoch"]),
         session_id=str(row["session_id"]),
+        provider_session_ref=ProviderSessionRef.deserialize(
+            str(row["provider_session_ref"])
+        ),
         principal_id=str(row["principal_id"]),
         project_ref=str(row["project_ref"]),
         provenance=str(row["provenance"]),

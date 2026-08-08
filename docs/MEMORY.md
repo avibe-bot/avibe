@@ -52,3 +52,23 @@ and retained provider-call diagnostics owned by this installation. It does not
 remove original Avibe chats, copies already sent to a provider, user-created
 snapshots, general logs, crash reports, backups, or data outside the dedicated
 Memory directory. It is not a secure wipe of the storage device.
+
+## Capture outbox foundation
+
+Each captured row stores the canonical provider session reference
+`(principal_id, epoch, project_ref, session_id)` alongside the durable capture
+queue state. Duplicate source identities remain idempotent within the active
+epoch, and a claimed row is either settled successfully or retained with its
+payload for recovery.
+
+This phase initializes a clean Avibe-owned schema; legacy Memory databases and
+schema migration are intentionally not supported for the currently unused
+feature.
+
+An incomplete, malformed, overlong-receipt, timed-out, or response-disconnected
+provider add is terminal for automatic delivery: the row is retained and its
+provider session is fenced as `manual_required`. Boot recovery applies the same
+fence to any abandoned `processing` row, so it never silently replays an add
+whose provider outcome is unknown. The status surface reports an active manual
+fence as degraded. Flush scheduling and generation coordination are intentionally
+deferred to the later flush coordinator.
