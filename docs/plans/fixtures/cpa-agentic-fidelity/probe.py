@@ -223,14 +223,19 @@ def _tool_output(call: ToolCall) -> str:
     return f"tool={call.name};call_id={call.call_id};marker={TOOL_OUTPUTS.get(call.name, 'TOOL_OUTPUT_MISSING')}"
 
 
+_TOOL_OUTPUT_TUPLE_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_])tool=\S*")
 _TOOL_OUTPUT_TUPLE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=([^;\s]+)"
+    r"tool=([^;\s]*);call_id=([^;\s]*);marker=([^;\s]*)"
 )
 
 
 def _tool_output_tuples(text: str) -> list[tuple[str, str, str]]:
     tuples: list[tuple[str, str, str]] = []
-    for match in _TOOL_OUTPUT_TUPLE_RE.finditer(text):
+    for candidate in _TOOL_OUTPUT_TUPLE_CANDIDATE_RE.finditer(text):
+        match = _TOOL_OUTPUT_TUPLE_RE.fullmatch(candidate.group(0))
+        if match is None:
+            tuples.append(("", "", ""))
+            continue
         tool, call_id, raw_marker = match.groups()
         token = re.match(r"[A-Za-z0-9_]+", raw_marker)
         tuples.append((tool, call_id, token.group(0) if token else raw_marker))
@@ -559,6 +564,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         content_parts_closed: set[tuple[str, int]] = set()
         content_part_types: dict[tuple[str, int], str] = {}
         response_created = False
+        response_in_progress_seen = False
         response_id: str | None = None
         previous_wire_sequence: int | None = None
         response_started = False
@@ -598,8 +604,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 response_id = response["id"]
                 response_started = True
             elif event_type == "response.in_progress":
-                if not response_created or output_started:
+                if not response_created or response_in_progress_seen or output_started:
                     return False
+                response_in_progress_seen = True
                 response = event.get("response")
                 if (
                     not isinstance(response, dict)
@@ -964,6 +971,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     done_seen = False
     usage_seen = False
     seen_tool_indexes: set[int] = set()
+    argument_fragment_counts: dict[int, int] = {}
     tool_ids: dict[int, str] = {}
     completion_id: str | None = None
     for index, item in enumerate(events):
@@ -1048,6 +1056,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 if any(field in function and not isinstance(function[field], str) for field in ("name", "arguments")):
                     return False
+                argument_fragment = function.get("arguments")
+                if argument_fragment:
+                    argument_fragment_counts[tool_index] = argument_fragment_counts.get(tool_index, 0) + 1
                 chunk_last_tool_index = tool_index
             finish_reason = choice.get("finish_reason")
             if finish_reason is not None and not isinstance(finish_reason, str):
@@ -1059,7 +1070,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
         else:
             return False
-    return terminal is not None and done_seen
+    return (
+        terminal is not None
+        and done_seen
+        and all(argument_fragment_counts.get(index, 0) >= 2 for index in seen_tool_indexes)
+    )
 
 
 def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream: bool) -> TransportResult:
@@ -1616,6 +1631,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     opening_status_by_item: dict[str, str | None] = {}
     status: str | None = None
     response_id: str | None = None
+    response_in_progress_seen = False
     args_by_item: dict[str, str] = {}
     argument_fragment_counts: dict[str, int] = {}
     argument_done_items: set[str] = set()
@@ -1650,6 +1666,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             else:
                 response_id = response["id"]
         elif event_type == "response.in_progress":
+            if response_in_progress_seen:
+                errors.append("response_in_progress_duplicate")
+            response_in_progress_seen = True
             response = event.get("response")
             if (
                 not isinstance(response, dict)
@@ -2090,7 +2109,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     usage: dict[str, Any] | None = None
     usage_seen = False
     errors: list[str] = []
-    argument_fragment_indexes: set[int] = set()
+    argument_fragment_counts: dict[int, int] = {}
     tool_type_seen: set[int] = set()
     assistant_role_seen = False
     completion_id: str | None = None
@@ -2225,11 +2244,14 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                 if not isinstance(fragment, str):
                     errors.append("stream_arguments_invalid")
                 elif fragment:
-                    argument_fragment_indexes.add(index)
+                    argument_fragment_counts[index] = argument_fragment_counts.get(index, 0) + 1
                     call["function"]["arguments"] += fragment
     for index in calls:
-        if index not in argument_fragment_indexes:
+        fragment_count = argument_fragment_counts.get(index, 0)
+        if fragment_count == 0:
             errors.append("stream_arguments_missing")
+        elif fragment_count < 2:
+            errors.append("stream_arguments_not_fragmented")
     if not assistant_role_seen:
         errors.append("assistant_role_missing")
     message = {"role": "assistant", "content": "".join(content), "tool_calls": [calls[index] for index in sorted(calls)]}

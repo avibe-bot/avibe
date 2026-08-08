@@ -410,6 +410,78 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
         self.assertTrue(turn.terminal)
 
+    def test_chat_stream_requires_split_argument_fragments(self) -> None:
+        events = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": None,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "type": "function",
+                                        "id": "call_1",
+                                        "function": {
+                                            "name": "lookup_weather",
+                                            "arguments": '{"city":',
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": None,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {"arguments": '"Shanghai"}'},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+            },
+            {"kind": "done", "sequence": 2, "type": None},
+        ]
+        self.assertTrue(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(
+            probe.TransportResult(200, None, events, True, 0, True)
+        )
+        self.assertNotIn("stream_arguments_not_fragmented", turn.parse_errors)
+
+        single_fragment = copy.deepcopy(events)
+        single_fragment[0]["event"]["choices"][0]["delta"]["tool_calls"][0]["function"][
+            "arguments"
+        ] = '{"city":"Shanghai"}'
+        single_fragment[1]["event"]["choices"][0]["delta"] = {}
+        self.assertFalse(probe._stream_order_ok("chat", single_fragment))
+        single_turn = probe._parse_chat_stream(
+            probe.TransportResult(200, None, single_fragment, True, 0, False)
+        )
+        self.assertIn("stream_arguments_not_fragmented", single_turn.parse_errors)
+
     def test_chat_stream_rejects_falsey_malformed_tool_fields(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant", "tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": "{"}}]}}]}},
@@ -575,6 +647,26 @@ class ProbeParserTests(unittest.TestCase):
         projection = probe._validate_second(turn, ("lookup_weather",), stream=False, expected_calls=[call])
         self.assertFalse(projection["checks"]["tool_output_call_pairs"])
 
+    def test_tool_result_tuple_check_rejects_empty_or_malformed_identity_fields(self) -> None:
+        call = probe.ToolCall("call_weather", "lookup_weather", {"city": "Shanghai"})
+        for malformed in (
+            "tool=;call_id=fake;marker=BOGUS",
+            "tool=fake;call_id=;marker=BOGUS",
+            "tool=fake;call_id=fake",
+        ):
+            with self.subTest(malformed=malformed):
+                text = f"{probe._tool_output(call)} {malformed}"
+                turn = probe._parse_anthropic_document(
+                    {"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}
+                )
+                projection = probe._validate_second(
+                    turn,
+                    ("lookup_weather",),
+                    stream=False,
+                    expected_calls=[call],
+                )
+                self.assertFalse(projection["checks"]["tool_output_call_pairs"])
+
     def test_tool_result_tuple_preserves_punctuation_in_call_id(self) -> None:
         call = probe.ToolCall("call.123", "lookup_weather", {"city": "Shanghai"})
         text = f"{probe._tool_output(call)}."
@@ -709,8 +801,54 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_indices_to_restart_each_chunk(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1"}, {"index": 1, "id": "call_2"}]}}]}},
-            {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
+            {
+                "kind": "event",
+                "sequence": 0,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "function": {"arguments": '{"city":'},
+                                    },
+                                    {
+                                        "index": 1,
+                                        "id": "call_2",
+                                        "function": {"arguments": '{"city":'},
+                                    },
+                                ]
+                            },
+                        }
+                    ],
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": 0, "function": {"arguments": '"Shanghai"}'}},
+                                    {"index": 1, "function": {"arguments": '"Shanghai"}'}},
+                                ],
+                                "content": "done",
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+            },
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", events))
@@ -1546,6 +1684,33 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", missing))
         missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0, False))
         self.assertIn("response_in_progress_id_invalid", missing_turn.parse_errors)
+
+    def test_responses_stream_rejects_duplicate_in_progress_snapshot(self) -> None:
+        events = _response_message_stream()
+        events[0]["event"]["response"]["id"] = "resp_1"
+        in_progress = {
+            "kind": "event",
+            "type": "response.in_progress",
+            "event": {
+                "type": "response.in_progress",
+                "response": {
+                    "id": "resp_1",
+                    "object": "response",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            },
+        }
+        events[1:1] = [copy.deepcopy(in_progress), copy.deepcopy(in_progress)]
+        events[-1]["event"]["response"]["id"] = "resp_1"
+        for index, event in enumerate(events):
+            event["sequence"] = index
+            event["wire_sequence"] = index
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(
+            probe.TransportResult(200, None, events, False, 0, False)
+        )
+        self.assertIn("response_in_progress_duplicate", turn.parse_errors)
 
     def test_responses_stream_rejects_invalid_terminal_discriminator(self) -> None:
         events = _response_message_stream()
