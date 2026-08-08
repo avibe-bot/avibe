@@ -9,12 +9,12 @@ def _responses_wire(*events):
     normalized = []
     for event in events:
         event = copy.deepcopy(event)
-        if event["type"] == "response.created" and isinstance(event.get("response"), dict):
+        if event["type"] in {"response.created", "response.in_progress", "response.completed", "response.done"} and isinstance(event.get("response"), dict):
+            event["response"].setdefault("id", "resp_1")
             event["response"].setdefault("object", "response")
-            event["response"].setdefault("status", "in_progress")
-            event["response"].setdefault("output", [])
-        elif event["type"] in {"response.in_progress", "response.completed", "response.done"} and isinstance(event.get("response"), dict):
-            event["response"].setdefault("object", "response")
+            if event["type"] == "response.created":
+                event["response"].setdefault("status", "in_progress")
+                event["response"].setdefault("output", [])
         normalized.append(event)
     return [
         {"kind": "event", "sequence": index, "wire_sequence": index, "type": event["type"], "event": event}
@@ -287,12 +287,12 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_responses_stream_rejects_argument_done_mismatch(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {"object": "response", "status": "in_progress", "output": []}}},
+            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}}},
             {"kind": "event", "sequence": 1, "wire_sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
             {"kind": "event", "sequence": 2, "wire_sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": '{"city":"Shanghai"}'}},
             {"kind": "event", "sequence": 3, "wire_sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0, "arguments": '{"city":"Paris"}'}},
             {"kind": "event", "sequence": 4, "wire_sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
-            {"kind": "event", "sequence": 5, "wire_sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"object": "response", "status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
+            {"kind": "event", "sequence": 5, "wire_sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"id": "resp_1", "object": "response", "status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
         ]
         self.assertTrue(probe._stream_order_ok("responses", events))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, True))
@@ -745,6 +745,47 @@ class ProbeParserTests(unittest.TestCase):
             self.assertFalse(result.done_sentinel)
             self.assertEqual(result.events, [])
             self.assertFalse(result.stream_order_ok)
+
+    def test_chat_done_sentinel_ends_read_before_transport_eof(self) -> None:
+        payload = (
+            b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":'
+            b'[{"index":0,"delta":{"role":"assistant"},"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self):
+                self.offset = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, size: int) -> bytes:
+                if self.offset >= len(payload):
+                    raise TimeoutError
+                chunk = payload[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        class Opener:
+            def open(self, request, timeout):
+                return Response()
+
+        original_opener = probe.OPENER
+        try:
+            probe.OPENER = Opener()
+            result = probe._request("/v1/chat/completions", {}, client_protocol="chat", stream=True)
+        finally:
+            probe.OPENER = original_opener
+        self.assertTrue(result.done_sentinel)
+        self.assertFalse(result.deadline_expired)
+        self.assertTrue(result.stream_order_ok)
 
     def test_chat_stream_rejects_non_function_tool_type(self) -> None:
         events = [
@@ -2011,6 +2052,20 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", mismatched))
         mismatched_turn = probe._parse_responses_stream(probe.TransportResult(200, None, mismatched, False, 0, False))
         self.assertIn("terminal_response_id_invalid", mismatched_turn.parse_errors)
+
+    def test_responses_stream_requires_created_response_id(self) -> None:
+        valid = _response_message_stream()
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+
+        for invalid_id in (None, ""):
+            invalid = copy.deepcopy(valid)
+            if invalid_id is None:
+                invalid[0]["event"]["response"].pop("id")
+            else:
+                invalid[0]["event"]["response"]["id"] = invalid_id
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+            self.assertIn("response_id_invalid", turn.parse_errors)
 
     def test_responses_function_opening_snapshot_requires_identity(self) -> None:
         for field in ("call_id", "name"):

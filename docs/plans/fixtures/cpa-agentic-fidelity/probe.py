@@ -556,10 +556,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or response.get("output") != []
                 ):
                     return False
-                if response.get("id") is not None:
-                    if not isinstance(response.get("id"), str) or not response["id"]:
-                        return False
-                    response_id = response["id"]
+                if not isinstance(response.get("id"), str) or not response["id"]:
+                    return False
+                response_id = response["id"]
                 response_started = True
             elif event_type == "response.in_progress":
                 if not response_created or output_started:
@@ -573,10 +572,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 ):
                     return False
                 in_progress_id = response.get("id")
-                if response_id is not None:
-                    if not isinstance(in_progress_id, str) or in_progress_id != response_id:
-                        return False
-                elif in_progress_id is not None and in_progress_id != response_id:
+                if not isinstance(in_progress_id, str) or in_progress_id != response_id:
                     return False
                 if output_started:
                     return False
@@ -910,10 +906,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 ):
                     return False
                 terminal_id = terminal_response.get("id")
-                if response_id is not None:
-                    if not isinstance(terminal_id, str) or terminal_id != response_id:
-                        return False
-                elif terminal_id is not None and not isinstance(terminal_id, str):
+                if not isinstance(terminal_id, str) or terminal_id != response_id:
                     return False
                 terminal = index
             elif event_type in {"error", "response.failed", "response.incomplete"}:
@@ -1104,6 +1097,8 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                     buffer.extend(chunk)
                 if invalid[0]:
                     return TransportResult(status, None, events, done, invalid[0], False, False)
+                if done:
+                    break
             # SSE dispatch requires a blank line; discard a final unterminated event at EOF.
             data_lines.clear()
             event_name = None
@@ -1577,11 +1572,10 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 or response.get("output") != []
             ):
                 errors.append("response_start_snapshot_invalid")
-            if isinstance(response, dict) and response.get("id") is not None:
-                if not isinstance(response.get("id"), str) or not response["id"]:
-                    errors.append("response_id_invalid")
-                else:
-                    response_id = response["id"]
+            if not isinstance(response, dict) or not isinstance(response.get("id"), str) or not response["id"]:
+                errors.append("response_id_invalid")
+            else:
+                response_id = response["id"]
         elif event_type == "response.in_progress":
             response = event.get("response")
             if (
@@ -1592,10 +1586,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             ):
                 errors.append("response_in_progress_snapshot_invalid")
             snapshot_id = response.get("id") if isinstance(response, dict) else None
-            if response_id is not None:
-                if not isinstance(snapshot_id, str) or snapshot_id != response_id:
-                    errors.append("response_in_progress_id_invalid")
-            elif snapshot_id is not None and snapshot_id != response_id:
+            if not isinstance(snapshot_id, str) or snapshot_id != response_id:
                 errors.append("response_in_progress_id_invalid")
         elif event_type == "response.output_item.added":
             streamed_output_seen = True
@@ -1878,10 +1869,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                         and not isinstance(raw.get("encrypted_content"), str)
                     ):
                         errors.append("encrypted_reasoning_snapshot_invalid")
-            if response_id is not None:
-                terminal_id = terminal_response.get("id") if terminal_response else None
-                if not isinstance(terminal_id, str) or terminal_id != response_id:
-                    errors.append("terminal_response_id_invalid")
+            terminal_id = terminal_response.get("id") if terminal_response else None
+            if not isinstance(terminal_id, str) or terminal_id != response_id:
+                errors.append("terminal_response_id_invalid")
     items: list[dict[str, Any]] = []
     for key, raw in output.items():
         if raw.get("type") == "function_call":
