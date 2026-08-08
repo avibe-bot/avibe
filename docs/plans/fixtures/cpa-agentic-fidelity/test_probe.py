@@ -321,21 +321,40 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_empty_responses_reasoning_item_is_not_a_signal(self) -> None:
         turn = probe._parse_responses_document(
-            {"output": [{"type": "reasoning", "summary": [], "content": []}, {"type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}], "status": "completed"}
+            {"output": [{"id": "rs_1", "type": "reasoning", "summary": [], "content": []}, {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}], "status": "completed"}
         )
         self.assertFalse(turn.reasoning_present)
 
     def test_responses_encrypted_reasoning_is_a_signal(self) -> None:
         turn = probe._parse_responses_document(
-            {"output": [{"type": "reasoning", "encrypted_content": "opaque"}], "status": "completed"}
+            {"output": [{"id": "rs_1", "type": "reasoning", "encrypted_content": "opaque"}], "status": "completed"}
         )
         self.assertTrue(turn.reasoning_present)
 
     def test_responses_encrypted_reasoning_requires_string_payload(self) -> None:
         turn = probe._parse_responses_document(
-            {"output": [{"type": "reasoning", "encrypted_content": True}], "status": "completed"}
+            {"output": [{"id": "rs_1", "type": "reasoning", "encrypted_content": True}], "status": "completed"}
         )
         self.assertFalse(turn.reasoning_present)
+
+    def test_responses_reasoning_parts_require_supported_string_payloads(self) -> None:
+        for part, error in (
+            ({"type": "future_part", "text": "ignored"}, "reasoning_part_type_invalid"),
+            ({"type": "summary_text", "text": []}, "reasoning_part_text_invalid"),
+        ):
+            turn = probe._parse_responses_document(
+                {"object": "response", "output": [{"id": "rs_1", "type": "reasoning", "summary": [part]}], "status": "completed"}
+            )
+            self.assertIn(error, turn.parse_errors)
+
+    def test_responses_nonstream_output_items_require_ids(self) -> None:
+        for item in (
+            {"type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'},
+            {"id": [], "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'},
+            {"id": "", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'},
+        ):
+            turn = probe._parse_responses_document({"object": "response", "output": [item], "status": "completed"})
+            self.assertIn("output_item_id_invalid", turn.parse_errors)
 
     def test_duplicate_argument_keys_are_rejected(self) -> None:
         arguments, error = probe._parse_arguments('{"city":"Paris","city":"Shanghai"}')
@@ -489,6 +508,40 @@ class ProbeParserTests(unittest.TestCase):
         finally:
             probe.OPENER = original_opener
         self.assertFalse(result.stream_order_ok)
+
+    def test_sse_parser_preserves_extra_data_whitespace(self) -> None:
+        payload = b"data:  [DONE]\n\n"
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self):
+                self.offset = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, size: int) -> bytes:
+                chunk = payload[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        class Opener:
+            def open(self, request, timeout):
+                return Response()
+
+        original_opener = probe.OPENER
+        try:
+            probe.OPENER = Opener()
+            result = probe._request("/v1/chat/completions", {}, client_protocol="chat", stream=True)
+        finally:
+            probe.OPENER = original_opener
+        self.assertFalse(result.done_sentinel)
+        self.assertEqual(result.invalid_event_count, 1)
 
     def test_chat_stream_rejects_non_function_tool_type(self) -> None:
         events = [
@@ -1057,6 +1110,16 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", missing_opening))
         self.assertFalse(probe._stream_order_ok("responses", missing_terminal_response))
 
+    def test_responses_stream_in_progress_snapshot_requires_object(self) -> None:
+        events = _response_message_stream()
+        events.insert(1, {"kind": "event", "type": "response.in_progress", "event": {"type": "response.in_progress", "response": []}})
+        for index, event in enumerate(events):
+            event["sequence"] = index
+            event["wire_sequence"] = index
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
+
     def test_responses_stream_rejects_terminal_only_function_calls(self) -> None:
         events = [
             {"kind": "event", "type": "response.created", "event": {"type": "response.created", "response": {}}},
@@ -1164,6 +1227,13 @@ class ProbeParserTests(unittest.TestCase):
         )
         projection = probe._validate_second(turn, (), stream=False)
         self.assertFalse(projection["checks"]["reasoning_not_visible"])
+
+    def test_final_turn_requires_reasoning_signal(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {"content": [{"type": "text", "text": f"{probe.SYSTEM_MARKER} {probe.SYSTEM_SCOPE_OK} WEATHER_OK"}], "stop_reason": "end_turn"}
+        )
+        projection = probe._validate_second(turn, (), stream=False)
+        self.assertFalse(projection["checks"]["reasoning_present"])
 
     def test_each_reasoning_part_must_not_be_visible(self) -> None:
         turn = probe._parse_responses_document(
@@ -1783,6 +1853,14 @@ class ProbeParserTests(unittest.TestCase):
             self.assertFalse(probe._stream_order_ok("chat", events))
             turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, False, 0, False))
             self.assertIn("stream_event_type_invalid", turn.parse_errors)
+
+    def test_chat_stream_rejects_unknown_event_discriminator(self) -> None:
+        events = [
+            {"kind": "event", "type": "future_bogus", "event": {"object": "chat.completion.chunk", "type": "future_bogus", "choices": []}},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("stream_event_unknown", turn.parse_errors)
 
     def test_chat_stream_error_payload_is_not_a_completion(self) -> None:
         events = [

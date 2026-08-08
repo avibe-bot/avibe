@@ -73,6 +73,8 @@ ANTHROPIC_STREAM_EVENT_TYPES = {
     "ping",
 }
 RESPONSES_MESSAGE_PART_TYPES = {"output_text", "text"}
+RESPONSES_REASONING_PART_TYPES = {"reasoning_text", "summary_text", "text"}
+CHAT_STREAM_EVENT_TYPES = {None, "chat.completion.chunk", "error"}
 ANTHROPIC_CONTENT_BLOCK_TYPES = {"redacted_thinking", "text", "thinking", "tool_use"}
 MAX_503_RETRIES = 3
 
@@ -345,7 +347,7 @@ def _chat_payload(*, model: str, stream: bool, parallel: bool, followup: Turn | 
 def _flush_sse(data_lines: list[str], event_name: str | None, events: list[dict[str, Any]], invalid: list[int]) -> bool:
     if not data_lines:
         return False
-    data = "\n".join(data_lines).strip()
+    data = "\n".join(data_lines)
     data_lines.clear()
     if data == "[DONE]":
         events.append({"kind": "done", "type": event_name, "sequence": len(events)})
@@ -533,7 +535,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if not response_created or output_started:
                     return False
                 response = event.get("response")
-                if isinstance(response, dict) and response.get("id") is not None and response.get("id") != response_id:
+                if not isinstance(response, dict):
+                    return False
+                if response.get("id") is not None and response.get("id") != response_id:
                     return False
                 if output_started:
                     return False
@@ -787,6 +791,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             return False
         if event_type is not None and not isinstance(event_type, str):
             return False
+        if event_type not in CHAT_STREAM_EVENT_TYPES:
+            return False
         if not isinstance(choices, list):
             return False
         if item.get("type") is not None and item.get("type") != event_type:
@@ -894,7 +900,10 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                     if event_name.startswith(" "):
                         event_name = event_name[1:]
                 elif line.startswith("data:"):
-                    data_lines.append(line[5:].lstrip())
+                    data_value = line[5:]
+                    if data_value.startswith(" "):
+                        data_value = data_value[1:]
+                    data_lines.append(data_value)
                 return False
 
             while True:
@@ -973,7 +982,7 @@ def _reasoning_text_parts(parts: Any) -> list[str]:
         for part in parts
         if isinstance(part, dict)
         and isinstance(part.get("type"), str)
-        and part.get("type") in {"reasoning_text", "summary_text", "text"}
+        and part.get("type") in RESPONSES_REASONING_PART_TYPES
         and isinstance(part.get("text"), str)
         and part["text"]
     ]
@@ -1192,6 +1201,8 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
         if not isinstance(item, dict):
             errors.append("output_item_invalid")
             continue
+        if _stream_item_id(item.get("id")) is None:
+            errors.append("output_item_id_invalid")
         item_type = item.get("type")
         if not isinstance(item_type, str) or item_type not in RESPONSES_OUTPUT_ITEM_TYPES:
             errors.append("output_item_type_invalid")
@@ -1211,8 +1222,14 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                     errors.append("reasoning_parts_invalid")
                 elif isinstance(parts, list):
                     for part in parts:
-                        if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                        if (
+                            not isinstance(part, dict)
+                            or not isinstance(part.get("type"), str)
+                            or part.get("type") not in RESPONSES_REASONING_PART_TYPES
+                        ):
                             errors.append("reasoning_part_type_invalid")
+                        elif not isinstance(part.get("text"), str):
+                            errors.append("reasoning_part_text_invalid")
             item_parts = [*_reasoning_text_parts(item.get("summary")), *_reasoning_text_parts(item.get("content"))]
             if _reasoning_item_has_signal(item):
                 reasoning = True
@@ -1272,6 +1289,19 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
             projected["content"] = projected_content
         elif item_type == "reasoning":
             encrypted = item.get("encrypted_content")
+            for field in ("summary", "content"):
+                parts = item.get(field)
+                if parts is not None:
+                    if not isinstance(parts, list):
+                        return None
+                    if any(
+                        not isinstance(part, dict)
+                        or not isinstance(part.get("type"), str)
+                        or part.get("type") not in RESPONSES_REASONING_PART_TYPES
+                        or not isinstance(part.get("text"), str)
+                        for part in parts
+                    ):
+                        return None
             projected.update(
                 {
                     "summary": _reasoning_text_parts(item.get("summary")),
@@ -1316,6 +1346,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
         elif event_type == "response.created":
             if not isinstance(event.get("response"), dict):
                 errors.append("response_start_snapshot_invalid")
+        elif event_type == "response.in_progress":
+            if not isinstance(event.get("response"), dict):
+                errors.append("response_in_progress_snapshot_invalid")
         elif event_type == "response.output_item.added":
             streamed_output_seen = True
             raw = copy.deepcopy(event.get("item"))
@@ -1657,6 +1690,9 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if event_type is not None and not isinstance(event_type, str):
             errors.append("stream_event_type_invalid")
             continue
+        if event_type not in CHAT_STREAM_EVENT_TYPES:
+            errors.append("stream_event_unknown")
+            continue
         if event.get("object") != "chat.completion.chunk":
             errors.append("stream_object_invalid")
             continue
@@ -1833,6 +1869,7 @@ def _validate_second(
         "terminal": turn.terminal,
         "stop_reason": isinstance(turn.stop_reason, str) and turn.stop_reason in STOP_REASONS[turn.protocol]["final"],
         "no_followup_tool_calls": not turn.tool_calls,
+        "reasoning_present": turn.reasoning_present,
         "reasoning_not_visible": not any(part in turn.text for part in turn.reasoning_parts if part),
         "system_marker": _token_present(turn.text, SYSTEM_MARKER),
         "system_scope": _token_present(turn.text, SYSTEM_SCOPE_OK) and not _token_present(turn.text, USER_SCOPE_LEAK),
