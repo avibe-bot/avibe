@@ -10098,6 +10098,8 @@ class ScheduledTaskService:
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
+                "vault_request_type": (metadata or {}).get("vault_request_type"),
+                "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
