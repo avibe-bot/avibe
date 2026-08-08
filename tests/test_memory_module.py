@@ -399,9 +399,18 @@ async def test_worker_retries_due_generation_before_admitting_next_add(tmp_path:
             FlushSucceeded("second-flush", "extracted"),
         ]
     )
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+    )
 
-    assert await worker.drain(max_rows=2) == 2
+    assert await worker.drain(max_rows=2) == 1
+    current += timedelta(seconds=31)
+    assert await worker.drain(max_rows=2) == 1
     rows = store.list_queue_rows()
     assert [row.flush_observation for row in rows] == ["succeeded", "succeeded"]
     assert provider.flushes == [rows[0].session_id] * 3
@@ -655,6 +664,36 @@ async def test_permanent_flush_rejection_does_not_starve_other_sessions(tmp_path
     rows = store.list_queue_rows()
     assert [row.state for row in rows] == ["delivered", "delivered"]
     assert [row.flush_observation for row in rows] == ["rejected", "succeeded"]
+
+
+async def test_retryable_flush_rejection_is_backed_off_without_starving_other_sessions(
+    tmp_path: Path,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="conflicted", session="bad")) == CaptureAccepted()
+    assert await module.capture(_request(source="unrelated", session="good")) == CaptureAccepted()
+    provider.flush_results.append(
+        FlushRejected("conflict", "CONFLICT", server_fault=False)
+    )
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="retry-worker",
+        now=lambda: current,
+    )
+
+    assert await worker.drain(max_rows=2) == 2
+    rows = store.list_queue_rows()
+    assert [row.state for row in rows] == ["delivered", "delivered"]
+    assert rows[0].flush_observation == "rejected"
+    assert rows[1].flush_observation == "succeeded"
+    bad_state = store.get_session_flush_state(rows[0].provider_session_ref)
+    assert bad_state is not None
+    assert bad_state.flush_state == "due"
+    assert bad_state.next_attempt_at == "2026-01-01T00:00:30.000Z"
+    assert provider.flushes == [rows[0].session_id, rows[1].session_id]
 
 
 async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:
@@ -1150,16 +1189,28 @@ async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_
 
 
 @pytest.mark.parametrize(
-    ("verdict", "expected_observation"),
+    ("verdict", "expected_observation", "expected_state", "expected_error"),
     [
-        (FlushRejected("rejected", "INVALID_INPUT", server_fault=False), "rejected"),
-        (FlushUnknown("timeout"), "unknown"),
+        (
+            FlushRejected("rejected", "INVALID_INPUT", server_fault=False),
+            "rejected",
+            "ready",
+            None,
+        ),
+        (
+            FlushUnknown("timeout"),
+            "unknown",
+            "degraded",
+            "memory_processing_failed",
+        ),
     ],
 )
 async def test_latest_flush_observation_supersedes_stale_delivery_failure(
     tmp_path: Path,
     verdict,
     expected_observation: str,
+    expected_state: str,
+    expected_error: str | None,
 ) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="failed")) == CaptureAccepted()
@@ -1194,8 +1245,8 @@ async def test_latest_flush_observation_supersedes_stale_delivery_failure(
         now=(current + timedelta(seconds=1)).isoformat(),
     ) == 1
     status = await module.status()
-    assert status.state == "ready"
-    assert status.error is None
+    assert status.state == expected_state
+    assert status.error == expected_error
     assert status.last_flush_observation == expected_observation
 
 
@@ -1760,6 +1811,34 @@ async def test_healthy_timeout_sets_manual_required_and_blocks_same_session(
     later = store.list_queue_rows()[1]
     assert later.state == "pending"
     assert provider.captures == []
+
+
+async def test_manual_fence_error_survives_an_unrelated_success(tmp_path: Path) -> None:
+    class PoisonProvider(FakeMemoryProvider):
+        async def add(self, capture):
+            if capture.text == "poison":
+                await asyncio.Event().wait()
+            return await super().add(capture)
+
+    provider = PoisonProvider()
+    module, store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request(source="poison", session="bad", text="poison")) == CaptureAccepted()
+    assert await module.capture(_request(source="healthy", session="good", text="healthy")) == CaptureAccepted()
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="manual-fence-worker",
+        now=lambda: current,
+        ingest_timeout_seconds=0.01,
+    )
+
+    assert await worker.drain(max_rows=2) == 2
+    assert store.ensure_meta().last_error == "memory_provider_timeout"
+    status = await module.status()
+    assert status.state == "degraded"
+    assert status.error == "memory_provider_timeout"
 
 
 async def test_clear_rejects_a_missing_or_unsentinelized_provider_root(tmp_path: Path) -> None:

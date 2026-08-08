@@ -150,6 +150,7 @@ class MemorySessionState:
     last_add_ack_at: str | None = None
     due_at: str | None = None
     next_attempt_at: str | None = None
+    flush_retry_count: int = 0
     flush_state: MemoryFlushState = "not_due"
     watermark: int = 0
     fence_epoch: int = 0

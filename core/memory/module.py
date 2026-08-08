@@ -366,8 +366,12 @@ class MemoryModule:
         # observation supersedes delivery-era errors from older builds, while a
         # later add failure (meta.updated_at > last_flush_at) remains current.
         historical = meta.last_error if meta is not None else None
+        manual_required_fence = await self._store_call(
+            self._store.has_manual_required_fence
+        )
         flush_supersedes_error = bool(
             meta is not None
+            and not manual_required_fence
             and stats.last_flush_at is not None
             and meta.last_error_at is not None
             and stats.last_flush_at >= meta.last_error_at

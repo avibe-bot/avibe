@@ -33,6 +33,8 @@ MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
 MAX_NONTERMINAL_QUEUE_ROWS = 500
 MAX_MESSAGE_ATTEMPTS = 3
+MAX_FLUSH_RETRY_ATTEMPTS = 3
+FLUSH_RETRY_BACKOFF_SECONDS = (30, 120)
 TERMINAL_TOMBSTONE_LIMIT = 100_000
 TERMINAL_TOMBSTONE_RETENTION = timedelta(days=90)
 
@@ -104,6 +106,7 @@ class QueueRow:
     payload_text: str | None
     occurred_at_ms: int
     provider_timestamp_ms: int
+    flush_generation: int
     state: Literal["pending", "processing", "delivered", "dead"]
     attempts: int
     next_retry_at: str | None
@@ -322,7 +325,8 @@ class MemoryStore:
             fenced = conn.execute(
                 """
                 SELECT 1 FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND flush_state = 'manual_required'
+                WHERE provider_session_ref = ?
+                  AND flush_state IN ('in_flight', 'manual_required')
                 """,
                 (provider_session_ref.serialize(),),
             ).fetchone()
@@ -352,7 +356,7 @@ class MemoryStore:
                 self._record_capture_skip_in_connection(conn, None, now)
                 return EnqueueResult(outcome="timestamp_invalid")
 
-            self._ensure_session_state_in_connection(
+            session_state = self._ensure_session_state_in_connection(
                 conn,
                 provider_session_ref,
                 now=now,
@@ -382,10 +386,11 @@ class MemoryStore:
                     principal_id,
                     project_ref, provenance, payload_text,
                     payload_attachments,
-                    occurred_at_ms, provider_timestamp_ms, state, attempts,
+                    occurred_at_ms, provider_timestamp_ms, flush_generation,
+                    state, attempts,
                     next_retry_at, lease_owner, lease_at, last_error,
                     created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
                 """,
                 (
                     source_message_digest,
@@ -399,6 +404,7 @@ class MemoryStore:
                     payload_attachments,
                     occurred_at_ms,
                     provider_timestamp_ms,
+                    session_state.generation,
                     now,
                 ),
             )
@@ -415,6 +421,7 @@ class MemoryStore:
                     payload_text=payload_text,
                     occurred_at_ms=occurred_at_ms,
                     provider_timestamp_ms=provider_timestamp_ms,
+                    flush_generation=session_state.generation,
                     state="pending",
                     attempts=0,
                     next_retry_at=None,
@@ -456,6 +463,23 @@ class MemoryStore:
                 (provider_session_ref.serialize(),),
             ).fetchone()
         return _session_state_from_row(row) if row is not None else None
+
+    def has_manual_required_fence(self) -> bool:
+        """Return whether the active epoch contains a terminal manual fence."""
+
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return False
+            row = conn.execute(
+                """
+                SELECT 1 FROM memory_session_flush_state
+                WHERE epoch = ? AND flush_state = 'manual_required'
+                LIMIT 1
+                """,
+                (meta.epoch,),
+            ).fetchone()
+        return row is not None
 
     def list_session_flush_states(
         self,
@@ -503,6 +527,7 @@ class MemoryStore:
                       FROM memory_capture_queue AS q
                       WHERE q.epoch = s.epoch
                         AND q.provider_session_ref = s.provider_session_ref
+                        AND q.flush_generation = s.generation
                         AND q.state = 'delivered'
                         AND q.flush_observation = 'rejected'
                   )
@@ -784,6 +809,15 @@ class MemoryStore:
             else:
                 conn.execute(
                     """
+                    UPDATE memory_capture_queue
+                    SET flush_generation = ?
+                    WHERE source_message_digest = ? AND epoch = ?
+                      AND state = 'delivered'
+                    """,
+                    (state.generation, row.source_message_digest, row.epoch),
+                )
+                conn.execute(
+                    """
                     UPDATE memory_session_flush_state
                     SET last_add_ack_at = ?, watermark = ?, updated_at = ?
                     WHERE provider_session_ref = ?
@@ -796,6 +830,11 @@ class MemoryStore:
                     UPDATE memory_meta
                     SET last_success_at = ?,
                         last_error = CASE
+                            WHEN EXISTS (
+                                SELECT 1 FROM memory_session_flush_state
+                                WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                                  AND flush_state = 'manual_required'
+                            ) THEN last_error
                             WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
                                 THEN NULL
                             WHEN last_error = 'memory_processing_failed'
@@ -804,6 +843,11 @@ class MemoryStore:
                             ELSE last_error
                         END,
                         last_error_at = CASE
+                            WHEN EXISTS (
+                                SELECT 1 FROM memory_session_flush_state
+                                WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                                  AND flush_state = 'manual_required'
+                            ) THEN last_error_at
                             WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
                                 THEN NULL
                             WHEN last_error = 'memory_processing_failed'
@@ -897,9 +941,10 @@ class MemoryStore:
         conn.execute(
             """
             UPDATE memory_session_flush_state
-            SET fence_epoch = ?, fence_operation_id = ?, fence_owner = 'manual-required',
-                fence_acquired_at = ?, flush_state = 'manual_required',
-                due_at = NULL, next_attempt_at = NULL, updated_at = ?
+                SET fence_epoch = ?, fence_operation_id = ?, fence_owner = 'manual-required',
+                    fence_acquired_at = ?, flush_state = 'manual_required',
+                    due_at = NULL, next_attempt_at = NULL, flush_retry_count = 0,
+                    updated_at = ?
             WHERE provider_session_ref = ?
             """,
             (record.fence_epoch, record.operation_id, now, now, key),
@@ -924,6 +969,8 @@ class MemoryStore:
             )
             if state.flush_state in {"in_flight", "manual_required"}:
                 return None
+            if state.flush_state == "due" and state.next_attempt_at is not None and state.next_attempt_at > now:
+                return None
             if conn.execute(
                 """
                 SELECT 1 FROM memory_capture_queue
@@ -938,10 +985,11 @@ class MemoryStore:
                 """
                 SELECT 1 FROM memory_capture_queue
                 WHERE epoch = ? AND provider_session_ref = ?
+                  AND flush_generation = ?
                   AND state = 'delivered' AND flush_observation = ?
                 LIMIT 1
                 """,
-                (meta.epoch, provider_session_ref.serialize(), flush_observation),
+                (meta.epoch, provider_session_ref.serialize(), state.generation, flush_observation),
             ).fetchone()
             if candidate is None:
                 return None
@@ -952,10 +1000,11 @@ class MemoryStore:
                     flush_error_code = NULL, flush_request_id = NULL,
                     flush_observed_at = NULL
                 WHERE epoch = ? AND provider_session_ref = ?
+                  AND flush_generation = ?
                   AND state = 'delivered'
                   AND flush_observation = ?
                 """,
-                (meta.epoch, provider_session_ref.serialize(), flush_observation),
+                (meta.epoch, provider_session_ref.serialize(), state.generation, flush_observation),
             )
             if not result.rowcount:
                 return None
@@ -1042,11 +1091,12 @@ class MemoryStore:
                 """
                 SELECT * FROM memory_capture_queue
                 WHERE epoch = ? AND provider_session_ref = ?
+                  AND flush_generation = ?
                   AND state = 'delivered' AND flush_observation = 'in_flight'
                 ORDER BY completed_at, source_message_digest
                 LIMIT 1
                 """,
-                (provider_session_ref.epoch, provider_session_ref.serialize()),
+                (provider_session_ref.epoch, provider_session_ref.serialize(), token.generation),
             ).fetchone()
             if candidate is None:
                 return 0
@@ -1059,6 +1109,7 @@ class MemoryStore:
                 SET flush_observation = ?, flush_status = ?, flush_error_code = ?,
                     flush_request_id = ?, flush_observed_at = ?
                 WHERE epoch = ? AND provider_session_ref = ?
+                  AND flush_generation = ?
                   AND state = 'delivered'
                   AND flush_observation = 'in_flight'
                 """,
@@ -1070,6 +1121,7 @@ class MemoryStore:
                     now,
                     provider_session_ref.epoch,
                     provider_session_ref.serialize(),
+                    token.generation,
                 ),
             )
             if updated.rowcount:
@@ -1078,19 +1130,32 @@ class MemoryStore:
                     SELECT MAX(provider_timestamp_ms) AS watermark
                     FROM memory_capture_queue
                     WHERE epoch = ? AND provider_session_ref = ?
+                      AND flush_generation = ?
                       AND state = 'delivered'
                       AND flush_observation = ?
                     """,
-                    (provider_session_ref.epoch, provider_session_ref.serialize(), observation),
+                    (
+                        provider_session_ref.epoch,
+                        provider_session_ref.serialize(),
+                        token.generation,
+                        observation,
+                    ),
                 ).fetchone()
                 watermark = int(group["watermark"] or 0)
+                flush_retry_count = (
+                    state.flush_retry_count + 1 if retryable_rejection else 0
+                )
+                retry_exhausted = (
+                    retryable_rejection
+                    and flush_retry_count >= MAX_FLUSH_RETRY_ATTEMPTS
+                )
                 settlement_outcome: Literal[
                     "succeeded", "rejected", "unknown", "manual_required"
                 ] = (
                     "succeeded"
                     if observation == "succeeded"
                     else "rejected"
-                    if observation == "rejected"
+                    if observation == "rejected" and not retry_exhausted
                     else "manual_required"
                 )
                 settlement = MemorySettlementRecord(
@@ -1116,7 +1181,7 @@ class MemoryStore:
                         "not_due"
                         if observation == "succeeded"
                         else "due"
-                        if observation == "rejected" and retryable_rejection
+                        if observation == "rejected" and retryable_rejection and not retry_exhausted
                         else "not_due"
                         if observation == "rejected"
                         else "manual_required"
@@ -1159,7 +1224,8 @@ class MemoryStore:
                             END,
                             fence_epoch = ?, fence_operation_id = NULL, fence_owner = NULL,
                             fence_acquired_at = NULL, flush_state = ?,
-                            due_at = ?, next_attempt_at = ?, watermark = MAX(watermark, ?),
+                            due_at = ?, next_attempt_at = ?, flush_retry_count = ?,
+                            watermark = MAX(watermark, ?),
                             updated_at = ?
                         WHERE provider_session_ref = ?
                         """,
@@ -1168,16 +1234,18 @@ class MemoryStore:
                             settlement_outcome,
                             first_unflushed_at,
                             state.fence_epoch,
-                            "not_due"
-                            if settlement_outcome == "succeeded"
-                            or (settlement_outcome == "rejected" and not retryable_rejection)
-                            else "due",
+                            "due"
+                            if settlement_outcome == "rejected" and retryable_rejection
+                            else "not_due"
+                            if settlement_outcome in {"succeeded", "rejected"}
+                            else "manual_required",
                             now
                             if settlement_outcome == "rejected" and retryable_rejection
                             else None,
-                            now
+                            _next_flush_retry_at(now, flush_retry_count)
                             if settlement_outcome == "rejected" and retryable_rejection
                             else None,
+                            flush_retry_count,
                             watermark if settlement_outcome == "succeeded" else state.watermark,
                             now,
                             provider_session_ref.serialize(),
@@ -1191,6 +1259,11 @@ class MemoryStore:
                             ELSE last_success_at
                         END,
                         last_error = CASE
+                            WHEN EXISTS (
+                                SELECT 1 FROM memory_session_flush_state
+                                WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                                  AND flush_state = 'manual_required'
+                            ) THEN last_error
                             WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
                                 THEN NULL
                             WHEN last_error = 'memory_processing_failed'
@@ -1199,6 +1272,11 @@ class MemoryStore:
                             ELSE last_error
                         END,
                         last_error_at = CASE
+                            WHEN EXISTS (
+                                SELECT 1 FROM memory_session_flush_state
+                                WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                                  AND flush_state = 'manual_required'
+                            ) THEN last_error_at
                             WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
                                 THEN NULL
                             WHEN last_error = 'memory_processing_failed'
@@ -1240,10 +1318,11 @@ class MemoryStore:
                 """,
                 (now, meta.epoch),
             )
-            grouped: dict[str, list[sqlite3.Row]] = {}
+            grouped: dict[tuple[str, int], list[sqlite3.Row]] = {}
             for candidate in candidates:
-                grouped.setdefault(_provider_ref_from_row(candidate).serialize(), []).append(candidate)
-            for key, group in grouped.items():
+                key = (_provider_ref_from_row(candidate).serialize(), int(candidate["flush_generation"]))
+                grouped.setdefault(key, []).append(candidate)
+            for (key, generation), group in grouped.items():
                 provider_session_ref = ProviderSessionRef.deserialize(key)
                 state = self._ensure_session_state_in_connection(
                     conn,
@@ -1256,10 +1335,11 @@ class MemoryStore:
                     conn,
                     MemorySettlementRecord(
                         provider_session_ref=provider_session_ref,
-                        generation=state.generation,
+                        generation=generation,
                         fence_epoch=fence_epoch,
                         operation_id=state.fence_operation_id
-                        or _flush_operation_id(provider_session_ref, state.generation, fence_epoch),
+                        if state.generation == generation and state.fence_operation_id is not None
+                        else _flush_operation_id(provider_session_ref, generation, fence_epoch),
                         operation_kind="flush",
                         outcome="manual_required",
                         observed_at=now,
@@ -1782,11 +1862,21 @@ class MemoryStore:
                 SET processing_fault_kind = NULL, processing_fault_since = NULL,
                     processing_alert_active = 0,
                     last_error = CASE
-                        WHEN last_error = 'memory_processing_failed' THEN NULL
+                        WHEN last_error = 'memory_processing_failed'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM memory_session_flush_state
+                                 WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                                   AND flush_state = 'manual_required'
+                             ) THEN NULL
                         ELSE last_error
                     END,
                     last_error_at = CASE
-                        WHEN last_error = 'memory_processing_failed' THEN NULL
+                        WHEN last_error = 'memory_processing_failed'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM memory_session_flush_state
+                                 WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                                   AND flush_state = 'manual_required'
+                             ) THEN NULL
                         ELSE last_error_at
                     END,
                     updated_at = ?
@@ -1809,6 +1899,11 @@ class MemoryStore:
                   AND (
                     last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
                     OR (last_error = 'memory_processing_failed' AND processing_fault_since IS NULL)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM memory_session_flush_state
+                      WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                        AND flush_state = 'manual_required'
                   )
                 """,
                 (now,),
@@ -1833,6 +1928,11 @@ class MemoryStore:
                   AND (
                     last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
                     OR (last_error = 'memory_processing_failed' AND processing_fault_since IS NULL)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM memory_session_flush_state
+                      WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                        AND flush_state = 'manual_required'
                   )
                 """,
                 (now, expected_error, expected_error_at),
@@ -1886,9 +1986,9 @@ class MemoryStore:
             INSERT INTO memory_session_flush_state (
                 provider_session_ref, principal_id, epoch, project_ref, session_id,
                 generation, first_unflushed_at, last_add_ack_at, due_at,
-                next_attempt_at, flush_state, watermark, fence_epoch,
+                next_attempt_at, flush_retry_count, flush_state, watermark, fence_epoch,
                 fence_operation_id, fence_owner, fence_acquired_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, NULL, NULL, NULL, 'not_due', 0, 0, NULL, NULL, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, NULL, NULL, NULL, 0, 'not_due', 0, 0, NULL, NULL, NULL, ?)
             """,
             (
                 key,
@@ -1903,6 +2003,7 @@ class MemoryStore:
         return MemorySessionState(
             provider_session_ref=provider_session_ref,
             first_unflushed_at=first_unflushed_at,
+            flush_retry_count=0,
             updated_at=now,
         )
 
@@ -2037,8 +2138,23 @@ class MemoryStore:
             """
             UPDATE memory_meta
             SET missed_count = missed_count + 1,
-                last_error = COALESCE(?, last_error),
-                last_error_at = CASE WHEN ? IS NOT NULL THEN ? ELSE last_error_at END,
+                last_error = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM memory_session_flush_state
+                        WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                          AND flush_state = 'manual_required'
+                    ) THEN last_error
+                    ELSE COALESCE(?, last_error)
+                END,
+                last_error_at = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM memory_session_flush_state
+                        WHERE epoch = (SELECT epoch FROM memory_meta WHERE singleton = 1)
+                          AND flush_state = 'manual_required'
+                    ) THEN last_error_at
+                    WHEN ? IS NOT NULL THEN ?
+                    ELSE last_error_at
+                END,
                 updated_at = ?
             WHERE singleton = 1
             """,
@@ -2195,6 +2311,7 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         ),
         occurred_at_ms=int(row["occurred_at_ms"]),
         provider_timestamp_ms=int(row["provider_timestamp_ms"]),
+        flush_generation=int(row["flush_generation"]),
         state=str(row["state"]),
         attempts=int(row["attempts"]),
         next_retry_at=str(row["next_retry_at"]) if row["next_retry_at"] is not None else None,
@@ -2250,6 +2367,7 @@ def _session_state_from_row(row: sqlite3.Row) -> MemorySessionState:
         next_attempt_at=(
             str(row["next_attempt_at"]) if row["next_attempt_at"] is not None else None
         ),
+        flush_retry_count=int(row["flush_retry_count"]),
         flush_state=(
             str(row["flush_state"])
             if row["flush_state"] in {"not_due", "due", "in_flight", "manual_required"}
@@ -2313,6 +2431,15 @@ def _iso_from_datetime(value: datetime) -> str:
 
 def _datetime_from_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _next_flush_retry_at(now: str, retry_count: int) -> str:
+    """Return a bounded backoff instant for one retryable flush rejection."""
+
+    index = min(max(retry_count - 1, 0), len(FLUSH_RETRY_BACKOFF_SECONDS) - 1)
+    return _iso_from_datetime(
+        _datetime_from_iso(now) + timedelta(seconds=FLUSH_RETRY_BACKOFF_SECONDS[index])
+    )
 
 
 def _closed_error_or(value: object, fallback: MemoryErrorCode) -> MemoryErrorCode:

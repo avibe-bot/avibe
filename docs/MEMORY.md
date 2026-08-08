@@ -50,8 +50,9 @@ While a session flush is in flight, its queued rows cannot be claimed into that
 flush. An ambiguous or malformed add/flush acknowledgement, including an
 interrupted operation recovered at boot, is recorded as `manual_required` and
 fences that session. It is never automatically replayed. A deterministic flush
-rejection remains rejected without scheduling a retry, while active in-flight
-evidence is retained until the operation settles or is recovered.
+rejection remains rejected without scheduling a retry; retryable rejections use
+bounded backoff and become `manual_required` after three attempts. Active
+in-flight evidence is retained until the operation settles or is recovered.
 
 While Memory is enabled, **Restart engine** replaces only the managed sidecar;
 it does not change Memory settings or delete retained data. Use it when the

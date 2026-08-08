@@ -12,6 +12,7 @@ import pytest
 from config import paths
 from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
 from core.memory.store import (
+    MAX_FLUSH_RETRY_ATTEMPTS,
     MAX_MESSAGE_ATTEMPTS,
     MAX_NONTERMINAL_QUEUE_ROWS,
     AmbiguousAdd,
@@ -127,6 +128,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "flush_request_id",
             "flush_observed_at",
             "provider_session_ref",
+            "flush_generation",
         }.issubset(queue_columns)
         assert {
             "processing_fault_kind",
@@ -143,6 +145,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "fence_epoch",
             "fence_operation_id",
             "flush_state",
+            "flush_retry_count",
         }.issubset(state_columns)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
@@ -447,6 +450,26 @@ def test_flush_claim_waits_for_a_processing_add(tmp_path: Path) -> None:
     assert store.get_session_flush_state(provider_session_ref).flush_state == "not_due"
 
 
+def test_enqueue_refuses_admission_while_the_session_flush_is_in_flight(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "in-flight-admission")
+    assert _flush_claim(store, provider_session_ref) is not None
+
+    blocked = store.enqueue_request(
+        source_message_id="blocked-during-flush",
+        session_id="shared-session",
+        principal_id=provider_session_ref.principal_id,
+        project_ref=provider_session_ref.project_ref,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+
+    assert blocked.outcome == "manual_required"
+    assert len(store.list_queue_rows()) == 1
+
+
 def test_due_rejected_generation_can_acquire_a_retry_token(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     provider_session_ref = _deliver(store, "retryable")
@@ -499,7 +522,8 @@ def test_claim_due_blocks_new_adds_until_due_generation_is_retried(tmp_path: Pat
     )
     assert second.outcome == "accepted"
     assert store.claim_due(lease_owner="blocked", now="2026-01-01T00:00:03.000Z") is None
-    assert store.list_due_flush_sessions(now="2026-01-01T00:00:03.000Z") == (
+    assert store.list_due_flush_sessions(now="2026-01-01T00:00:03.000Z") == ()
+    assert store.list_due_flush_sessions(now="2026-01-01T00:00:32.000Z") == (
         provider_session_ref,
     )
 
@@ -518,6 +542,96 @@ def test_permanent_flush_rejection_does_not_schedule_a_retry(tmp_path: Path) -> 
     assert state is not None
     assert state.flush_state == "not_due"
     assert store.list_due_flush_sessions(now="2026-01-01T00:00:03.000Z") == ()
+
+
+def test_retryable_flush_rejections_back_off_then_fence_the_session(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "bounded-retry")
+
+    token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("first", "CONFLICT", server_fault=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert (state.flush_state, state.flush_retry_count, state.next_attempt_at) == (
+        "due",
+        1,
+        "2026-01-01T00:00:32.000Z",
+    )
+    assert store.list_due_flush_sessions(now="2026-01-01T00:00:31.000Z") == ()
+    assert store.list_due_flush_sessions(now="2026-01-01T00:00:32.000Z") == (
+        provider_session_ref,
+    )
+
+    token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("second", "CONFLICT", server_fault=False),
+        now="2026-01-01T00:02:00.000Z",
+    ) == 1
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert (state.flush_state, state.flush_retry_count, state.next_attempt_at) == (
+        "due",
+        2,
+        "2026-01-01T00:04:00.000Z",
+    )
+
+    token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        token,
+        FlushRejected("third", "CONFLICT", server_fault=False),
+        now="2026-01-01T00:05:00.000Z",
+    ) == 1
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert (state.flush_state, state.flush_retry_count, state.next_attempt_at) == (
+        "manual_required",
+        0,
+        None,
+    )
+    assert len(store.list_flush_settlements(provider_session_ref)) == MAX_FLUSH_RETRY_ATTEMPTS
+    assert store.list_due_flush_sessions(now="2026-01-01T00:06:00.000Z") == ()
+
+
+def test_flush_verdict_updates_only_its_exact_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "old-rejection", session_ref="generation-session")
+    first_token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        first_token,
+        FlushRejected("old", "INVALID_INPUT", server_fault=False, retryable=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    _deliver(store, "generation-success", session_ref="generation-session")
+    success_token = _flush_claim(store, provider_session_ref)
+    assert success_token.generation == first_token.generation
+    assert store.record_flush_verdict(
+        success_token,
+        FlushSucceeded("success", "extracted"),
+        now="2026-01-01T00:00:03.000Z",
+    ) == 1
+
+    _deliver(store, "current-rejection", session_ref="generation-session")
+    current_token = _flush_claim(store, provider_session_ref)
+    assert current_token.generation == first_token.generation + 1
+    assert store.record_flush_verdict(
+        current_token,
+        FlushRejected("current", "CONFLICT", server_fault=False),
+        now="2026-01-01T00:00:04.000Z",
+    ) == 1
+
+    rows = {row.source_message_digest: row for row in store.list_queue_rows()}
+    meta = store.ensure_meta()
+    assert rows[_keyed_digest(meta.scope_key, "old-rejection")].flush_observation == "rejected"
+    assert rows[_keyed_digest(meta.scope_key, "generation-success")].flush_observation == "succeeded"
+    assert rows[_keyed_digest(meta.scope_key, "current-rejection")].flush_observation == "rejected"
+    assert rows[_keyed_digest(meta.scope_key, "current-rejection")].flush_generation == current_token.generation
+    assert [record.generation for record in store.list_flush_settlements(provider_session_ref)] == [0, 0, 1]
 
 
 def test_compaction_preserves_in_flight_flush_evidence(tmp_path: Path) -> None:

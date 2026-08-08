@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     payload_attachments TEXT,
     occurred_at_ms INTEGER NOT NULL,
     provider_timestamp_ms INTEGER NOT NULL,
+    flush_generation INTEGER NOT NULL DEFAULT 0 CHECK (flush_generation >= 0),
     state TEXT NOT NULL CHECK (state IN ('pending', 'processing', 'delivered', 'dead')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_retry_at TEXT,
@@ -107,6 +108,7 @@ CREATE TABLE IF NOT EXISTS memory_session_flush_state (
     last_add_ack_at TEXT,
     due_at TEXT,
     next_attempt_at TEXT,
+    flush_retry_count INTEGER NOT NULL DEFAULT 0 CHECK (flush_retry_count >= 0),
     flush_state TEXT NOT NULL DEFAULT 'not_due' CHECK (
         flush_state IN ('not_due', 'due', 'in_flight', 'manual_required')
     ),
