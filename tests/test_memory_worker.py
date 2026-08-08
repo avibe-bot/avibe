@@ -22,6 +22,10 @@ def test_new_lease_activation_recovers_before_claiming() -> None:
         def get_meta(self):
             return None
 
+        def list_due_flush_sessions(self, *, now: str):
+            del now
+            return ()
+
         def claim_due(self, *, lease_owner: str, now: str):
             del now
             calls.append(("claim", lease_owner))

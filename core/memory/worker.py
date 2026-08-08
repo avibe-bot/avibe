@@ -150,16 +150,31 @@ class MemoryWorker:
                     return 0
 
             processed = 0
+            half_open_flush_recovered = False
             for _ in range(budget):
                 if self._claims_paused or not self._enabled():
                     break
                 now = self._current_time()
+                due_sessions = await self._store_call(
+                    self._store.list_due_flush_sessions,
+                    now=_iso_from_datetime(now),
+                )
+                if due_sessions:
+                    result = await self._flush_session(due_sessions[0])
+                    if _opens_breaker(result):
+                        await self._open_processing_fault()
+                        break
+                    if not isinstance(result, FlushSucceeded):
+                        break
+                    half_open_flush_recovered = half_open
                 row = await self._store_call(
                     self._store.claim_due,
                     lease_owner=self._boot_id,
                     now=_iso_from_datetime(now),
                 )
                 if row is None:
+                    if half_open_flush_recovered and half_open:
+                        await self._close_processing_fault()
                     break
                 processed += 1
                 delivered = await self._deliver_row(row)

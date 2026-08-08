@@ -477,6 +477,33 @@ def test_due_rejected_generation_can_acquire_a_retry_token(tmp_path: Path) -> No
     assert (settled.generation, settled.flush_state) == (1, "not_due")
 
 
+def test_claim_due_blocks_new_adds_until_due_generation_is_retried(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "first", session_ref="due-session")
+    first_token = _flush_claim(store, provider_session_ref)
+    assert store.record_flush_verdict(
+        first_token,
+        FlushRejected("rejected", "TEMPORARY", server_fault=False),
+        now="2026-01-01T00:00:02.000Z",
+    ) == 1
+
+    second = store.enqueue_request(
+        source_message_id="second",
+        session_id="due-session",
+        principal_id=provider_session_ref.principal_id,
+        project_ref=provider_session_ref.project_ref,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert second.outcome == "accepted"
+    assert store.claim_due(lease_owner="blocked", now="2026-01-01T00:00:03.000Z") is None
+    assert store.list_due_flush_sessions(now="2026-01-01T00:00:03.000Z") == (
+        provider_session_ref,
+    )
+
+
 def test_malformed_flush_success_is_recorded_as_manual_required(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "malformed-flush")

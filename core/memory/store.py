@@ -483,6 +483,36 @@ class MemoryStore:
                 ).fetchall()
         return tuple(_session_state_from_row(row) for row in rows)
 
+    def list_due_flush_sessions(self, *, now: str) -> tuple[ProviderSessionRef, ...]:
+        """Return due sessions whose rejected generation can be retried now."""
+
+        with self._connection() as conn:
+            meta = self._meta_in_connection(conn)
+            if meta is None:
+                return ()
+            rows = conn.execute(
+                """
+                SELECT s.provider_session_ref
+                FROM memory_session_flush_state AS s
+                WHERE s.epoch = ?
+                  AND s.flush_state = 'due'
+                  AND (s.due_at IS NULL OR s.due_at <= ?)
+                  AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= ?)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM memory_capture_queue AS q
+                      WHERE q.epoch = s.epoch
+                        AND q.provider_session_ref = s.provider_session_ref
+                        AND q.state = 'delivered'
+                        AND q.flush_observation = 'rejected'
+                  )
+                ORDER BY COALESCE(s.next_attempt_at, s.due_at, s.updated_at),
+                         s.provider_session_ref
+                """,
+                (meta.epoch, now, now),
+            ).fetchall()
+        return tuple(ProviderSessionRef.deserialize(str(row["provider_session_ref"])) for row in rows)
+
     def list_flush_settlements(
         self,
         provider_session_ref: ProviderSessionRef | None = None,
@@ -539,7 +569,7 @@ class MemoryStore:
                       SELECT 1
                       FROM memory_session_flush_state AS s
                       WHERE s.provider_session_ref = q.provider_session_ref
-                        AND s.flush_state IN ('in_flight', 'manual_required')
+                        AND s.flush_state IN ('due', 'in_flight', 'manual_required')
                   )
                 ORDER BY q.created_at, q.source_message_digest
                 LIMIT 1
@@ -759,6 +789,32 @@ class MemoryStore:
                     WHERE provider_session_ref = ?
                     """,
                     (now, watermark_after, now, provider_session_ref.serialize()),
+                )
+            if add_status == "extracted":
+                conn.execute(
+                    """
+                    UPDATE memory_meta
+                    SET last_success_at = ?,
+                        last_error = CASE
+                            WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                                THEN NULL
+                            WHEN last_error = 'memory_processing_failed'
+                                 AND processing_fault_since IS NULL
+                                THEN NULL
+                            ELSE last_error
+                        END,
+                        last_error_at = CASE
+                            WHEN last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
+                                THEN NULL
+                            WHEN last_error = 'memory_processing_failed'
+                                 AND processing_fault_since IS NULL
+                                THEN NULL
+                            ELSE last_error_at
+                        END,
+                        updated_at = ?
+                    WHERE singleton = 1
+                    """,
+                    (now, now),
                 )
             self._compact_terminal_tombstones_in_connection(conn, _datetime_from_iso(now))
             return True

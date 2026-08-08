@@ -367,7 +367,15 @@ async def test_natural_boundary_extraction_skips_redundant_flush(tmp_path: Path)
     provider = NaturalBoundaryProvider()
     module, store, _provider = _module(tmp_path, provider=provider)
     assert await module.capture(_request(source="natural")) == CaptureAccepted()
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+    store.set_last_error("memory_sidecar_unavailable")
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+    )
 
     assert await worker.drain_once() == 1
     row = store.list_queue_rows()[0]
@@ -376,6 +384,30 @@ async def test_natural_boundary_extraction_skips_redundant_flush(tmp_path: Path)
     state = store.get_session_flush_state(row.provider_session_ref)
     assert state is not None
     assert (state.generation, state.flush_state) == (1, "not_due")
+    assert store.ensure_meta().last_success_at == "2026-01-01T00:00:00.000Z"
+    assert store.ensure_meta().last_error is None
+
+
+async def test_worker_retries_due_generation_before_admitting_next_add(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="first", session="shared")) == CaptureAccepted()
+    assert await module.capture(_request(source="second", session="shared")) == CaptureAccepted()
+    provider.flush_results.extend(
+        [
+            FlushRejected("first-flush", "TEMPORARY", server_fault=False),
+            FlushSucceeded("retry-flush", "extracted"),
+            FlushSucceeded("second-flush", "extracted"),
+        ]
+    )
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain(max_rows=2) == 2
+    rows = store.list_queue_rows()
+    assert [row.flush_observation for row in rows] == ["succeeded", "succeeded"]
+    assert provider.flushes == [rows[0].session_id] * 3
+    state = store.get_session_flush_state(rows[0].provider_session_ref)
+    assert state is not None
+    assert (state.generation, state.flush_state) == (2, "not_due")
 
 
 async def test_malformed_add_ack_retains_payload_and_sets_manual_required_fence(
@@ -535,7 +567,7 @@ async def test_unknown_flush_fences_same_session_after_processing_breaker(
 
     assert await worker.drain(max_rows=3) == 1
     current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await worker.drain(max_rows=3) == 1
+    assert await worker.drain(max_rows=3) == 0
     current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
     assert await worker.drain(max_rows=3) == 0
 
@@ -600,12 +632,12 @@ async def test_half_open_4xx_does_not_refresh_breaker_anchor(tmp_path: Path) -> 
     assert await worker.drain(max_rows=2) == 1
     opened_at = store.ensure_meta().processing_fault_since
     current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await worker.drain(max_rows=2) == 1
+    assert await worker.drain(max_rows=2) == 0
 
     assert store.ensure_meta().processing_fault_since == opened_at
     rows = store.list_queue_rows()
     assert rows[0].flush_observation == "rejected"
-    assert rows[1].flush_observation == "not_attempted"
+    assert (rows[1].state, rows[1].flush_observation) == ("pending", None)
 
 
 async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:
