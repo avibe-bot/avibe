@@ -439,6 +439,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         message_text_done: set[tuple[str, int]] = set()
         reasoning_text_started: set[str] = set()
         reasoning_text_done: set[str] = set()
+        encrypted_reasoning: dict[str, str | None] = {}
+        message_text: dict[str, str] = {}
         item_types: dict[str, str] = {}
         item_indexes: dict[str, int] = {}
         index_items: dict[int, str] = {}
@@ -471,7 +473,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 response_created = True
                 response = event.get("response")
-                if isinstance(response, dict) and response.get("id") is not None:
+                if not isinstance(response, dict):
+                    return False
+                if response.get("id") is not None:
                     if not isinstance(response.get("id"), str) or not response["id"]:
                         return False
                     response_id = response["id"]
@@ -505,6 +509,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     opening_arguments = raw.get("arguments")
                     if opening_arguments is not None and opening_arguments != "":
                         return False
+                elif item_types[item_id] == "reasoning":
+                    opening_encrypted = raw.get("encrypted_content")
+                    if opening_encrypted is not None and not isinstance(opening_encrypted, str):
+                        return False
+                    encrypted_reasoning[item_id] = opening_encrypted
                 item_indexes[item_id] = output_index
                 index_items[output_index] = item_id
                 output_started = True
@@ -584,9 +593,17 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if expected_type == "message":
                     content_index = _stream_index(event.get("content_index"))
                     key = (item_id, content_index if content_index is not None else -1)
-                    if content_index is None or key not in content_parts or content_part_types.get(key) != "output_text" or key in message_text_done:
+                    delta = event.get("delta")
+                    if (
+                        content_index is None
+                        or key not in content_parts
+                        or content_part_types.get(key) != "output_text"
+                        or key in message_text_done
+                        or not isinstance(delta, str)
+                    ):
                         return False
                     message_text_started.add(key)
+                    message_text[item_id] = message_text.get(item_id, "") + delta
                 else:
                     if item_id in reasoning_text_done:
                         return False
@@ -634,8 +651,29 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     for part_item_id, part_index in content_parts
                 ):
                     return False
+                if item_types.get(item_id) == "message":
+                    content = raw.get("content")
+                    if not isinstance(content, list):
+                        return False
+                    snapshot_parts: list[str] = []
+                    for part in content:
+                        if not isinstance(part, dict):
+                            return False
+                        if part.get("type") in {"output_text", "text"}:
+                            text = part.get("text")
+                            if not isinstance(text, str):
+                                return False
+                            snapshot_parts.append(text)
+                    if "".join(snapshot_parts) != message_text.get(item_id, ""):
+                        return False
                 if item_types.get(item_id) == "reasoning" and item_id in reasoning_text_started and item_id not in reasoning_text_done:
                     return False
+                if item_types.get(item_id) == "reasoning":
+                    done_encrypted = raw.get("encrypted_content")
+                    if done_encrypted is not None and not isinstance(done_encrypted, str):
+                        return False
+                    if done_encrypted != encrypted_reasoning.get(item_id):
+                        return False
                 if any(
                     part_item_id == item_id and (part_item_id, part_index) not in content_parts_closed
                     for part_item_id, part_index in content_parts
@@ -671,11 +709,16 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             done_seen = True
             continue
         event = item.get("event", {})
+        event_type = event.get("type")
         choices = event.get("choices", [])
         usage = event.get("usage")
+        if event_type is not None and not isinstance(event_type, str):
+            return False
         if not isinstance(choices, list):
             return False
-        if item.get("type") not in {None, event.get("type")}:
+        if item.get("type") is not None and item.get("type") != event_type:
+            return False
+        if "error" in event:
             return False
         if terminal is not None:
             if choices or not isinstance(usage, dict):
@@ -715,6 +758,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         elif usage is not None:
             if terminal is None or not isinstance(usage, dict):
                 return False
+        else:
+            return False
     return terminal is not None and done_seen
 
 
@@ -1134,12 +1179,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     text_by_item: dict[str, str] = {}
     text_by_part: dict[tuple[str, int], str] = {}
     reasoning_by_item: dict[str, str] = {}
+    encrypted_reasoning_by_item: dict[str, str | None] = {}
     status: str | None = None
     args_by_item: dict[str, str] = {}
     argument_fragment_items: set[str] = set()
     argument_done_items: set[str] = set()
     text_delta_count = 0
-    snapshot_text_parts: list[str] = []
     terminal_response: dict[str, Any] | None = None
     streamed_output_seen = False
     errors: list[str] = []
@@ -1151,6 +1196,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             continue
         if event_type in {"error", "response.failed", "response.incomplete"}:
             errors.append("stream_failure_event")
+        elif event_type == "response.created":
+            if not isinstance(event.get("response"), dict):
+                errors.append("response_start_snapshot_invalid")
         elif event_type == "response.output_item.added":
             streamed_output_seen = True
             raw = copy.deepcopy(event.get("item"))
@@ -1169,6 +1217,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 errors.append("assistant_role_invalid")
             if raw.get("type") == "reasoning":
                 reasoning_by_item[key] = _reasoning_text(raw.get("summary")) + _reasoning_text(raw.get("content"))
+                opening_encrypted = raw.get("encrypted_content")
+                if opening_encrypted is not None and not isinstance(opening_encrypted, str):
+                    errors.append("encrypted_reasoning_snapshot_invalid")
+                    opening_encrypted = None
+                encrypted_reasoning_by_item[key] = opening_encrypted
         elif event_type == "response.output_item.done":
             streamed_output_seen = True
             raw = event.get("item")
@@ -1195,6 +1248,11 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     snapshot_reasoning = _reasoning_text(raw.get("summary")) + _reasoning_text(raw.get("content"))
                     if snapshot_reasoning != reasoning_by_item[key]:
                         errors.append("stream_reasoning_snapshot_mismatch")
+                    done_encrypted = raw.get("encrypted_content")
+                    if done_encrypted is not None and not isinstance(done_encrypted, str):
+                        errors.append("encrypted_reasoning_snapshot_invalid")
+                    elif done_encrypted != encrypted_reasoning_by_item.get(key):
+                        errors.append("stream_reasoning_snapshot_mismatch")
                 output[key] = copy.deepcopy(raw)
                 if raw.get("type") == "message" and raw.get("role") != "assistant":
                     errors.append("assistant_role_invalid")
@@ -1203,13 +1261,16 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     if not isinstance(content, list):
                         errors.append("message_content_invalid")
                         continue
+                    item_snapshot_parts: list[str] = []
                     for part in content:
                         if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
                             text = part.get("text", "")
                             if not isinstance(text, str):
                                 errors.append("message_text_invalid")
                             else:
-                                snapshot_text_parts.append(text)
+                                item_snapshot_parts.append(text)
+                    if "".join(item_snapshot_parts) != text_by_item.get(key, ""):
+                        errors.append("stream_text_snapshot_mismatch")
             else:
                 errors.append("output_item_invalid")
         elif event_type in {"response.content_part.added", "response.content_part.done"}:
@@ -1337,8 +1398,6 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 raw["content"] = [{"type": "output_text", "text": text_by_item.get(key, "")}]
         else:
             items.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "".join(text_parts)}]})
-    if snapshot_text_parts and "".join(snapshot_text_parts) != "".join(text_parts):
-        errors.append("stream_text_snapshot_mismatch")
     if terminal_response is not None:
         terminal_output = terminal_response.get("output")
         if not isinstance(terminal_output, list):
@@ -1367,6 +1426,8 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
 
 def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
+    if not isinstance(document, dict) or document.get("object") != "chat.completion":
+        errors.append("chat_object_invalid")
     choices = document.get("choices") if isinstance(document, dict) else None
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
         errors.append("choice_invalid")
@@ -1450,6 +1511,13 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     assistant_role_seen = False
     for item in result.events:
         event = item.get("event", {})
+        event_type = event.get("type")
+        if event_type is not None and not isinstance(event_type, str):
+            errors.append("stream_event_type_invalid")
+            continue
+        if "error" in event:
+            errors.append("stream_failure_event")
+            continue
         event_usage = event.get("usage")
         if event_usage is not None:
             if finish_reason is None or not isinstance(event_usage, dict):
@@ -1461,6 +1529,8 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             errors.append("choice_invalid")
             continue
         if not choices:
+            if event_usage is None:
+                errors.append("stream_envelope_invalid")
             continue
         if len(choices) != 1 or not isinstance(choices[0], dict):
             errors.append("choice_invalid")
@@ -1545,7 +1615,10 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     message = {"role": "assistant", "content": "".join(content), "tool_calls": [calls[index] for index in sorted(calls)]}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
-    document: dict[str, Any] = {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}]}
+    document: dict[str, Any] = {
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+    }
     if usage is not None:
         document["usage"] = usage
     turn = _parse_chat_document(document, event_count=len(result.events), invalid_event_count=result.invalid_event_count, terminal=result.done_sentinel or finish_reason is not None)

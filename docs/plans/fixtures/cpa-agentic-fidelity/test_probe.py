@@ -1527,6 +1527,77 @@ class ProbeParserTests(unittest.TestCase):
             turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
             self.assertIn("stream_event_type_invalid", turn.parse_errors)
 
+    def test_responses_reasoning_encrypted_snapshots_must_match(self) -> None:
+        valid = _response_reasoning_stream()
+        valid[1]["event"]["item"]["encrypted_content"] = "opaque"
+        valid[4]["event"]["item"]["encrypted_content"] = "opaque"
+        valid[5]["event"]["response"]["output"][0]["encrypted_content"] = "opaque"
+        invalid = copy.deepcopy(valid)
+        invalid[4]["event"]["item"]["encrypted_content"] = "changed"
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("stream_reasoning_snapshot_mismatch", turn.parse_errors)
+
+    def test_responses_stream_created_snapshot_requires_object(self) -> None:
+        invalid = _response_message_stream()
+        invalid[0]["event"]["response"] = []
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("response_start_snapshot_invalid", turn.parse_errors)
+
+    def test_chat_nonstream_requires_envelope_discriminator(self) -> None:
+        valid = {"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+        self.assertNotIn("chat_object_invalid", probe._parse_chat_document(valid).parse_errors)
+        for object_value in (None, "chat.chunk", []):
+            document = copy.deepcopy(valid)
+            if object_value is None:
+                document.pop("object")
+            else:
+                document["object"] = object_value
+            self.assertIn("chat_object_invalid", probe._parse_chat_document(document).parse_errors)
+
+    def test_chat_stream_event_discriminator_must_be_string(self) -> None:
+        for event_type in ([], {}):
+            events = [{"kind": "event", "type": event_type, "event": {"type": event_type, "choices": []}}]
+            self.assertFalse(probe._stream_order_ok("chat", events))
+            turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, False, 0, False))
+            self.assertIn("stream_event_type_invalid", turn.parse_errors)
+
+    def test_chat_stream_error_payload_is_not_a_completion(self) -> None:
+        events = [
+            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}},
+            {"kind": "event", "type": "error", "event": {"type": "error", "error": {"type": "server_error"}, "choices": []}},
+            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "done"},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("stream_failure_event", turn.parse_errors)
+
+    def test_responses_done_message_snapshots_are_checked_per_item(self) -> None:
+        message_one = {"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
+        message_two = {"id": "msg_2", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "AB"}]}
+        events = _responses_wire(
+            {"type": "response.created", "response": {}},
+            {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message", "role": "assistant"}},
+            {"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": ""}},
+            {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "A"},
+            {"type": "response.output_text.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "text": "A"},
+            {"type": "response.content_part.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "A"}},
+            {"type": "response.output_item.done", "output_index": 0, "item": message_one},
+            {"type": "response.output_item.added", "output_index": 1, "item": {"id": "msg_2", "type": "message", "role": "assistant"}},
+            {"type": "response.content_part.added", "item_id": "msg_2", "output_index": 1, "content_index": 0, "part": {"type": "output_text", "text": ""}},
+            {"type": "response.output_text.delta", "item_id": "msg_2", "output_index": 1, "content_index": 0, "delta": "B"},
+            {"type": "response.output_text.done", "item_id": "msg_2", "output_index": 1, "content_index": 0, "text": "B"},
+            {"type": "response.content_part.done", "item_id": "msg_2", "output_index": 1, "content_index": 0, "part": {"type": "output_text", "text": "B"}},
+            {"type": "response.output_item.done", "output_index": 1, "item": message_two},
+            {"type": "response.completed", "response": {"status": "completed", "output": [message_one, message_two]}},
+        )
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("stream_text_snapshot_mismatch", turn.parse_errors)
+
 
 if __name__ == "__main__":
     unittest.main()
