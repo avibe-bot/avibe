@@ -20,6 +20,7 @@ from config import paths
 from core.memory.observations import FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
 from core.memory.types import (
     MemoryErrorCode,
+    MemoryFlushToken,
     MemoryFailureLogEntry,
     MemorySessionState,
     MemorySettlementRecord,
@@ -139,7 +140,14 @@ class QueueStats:
 
 @dataclass(frozen=True)
 class EnqueueResult:
-    outcome: Literal["accepted", "duplicate", "queue_full", "clearing", "timestamp_invalid"]
+    outcome: Literal[
+        "accepted",
+        "duplicate",
+        "queue_full",
+        "clearing",
+        "timestamp_invalid",
+        "manual_required",
+    ]
     row: QueueRow | None = None
 
 
@@ -201,7 +209,7 @@ class BootRecovery:
 
     reclaimed: int
     interrupted_flushes: int
-    not_attempted_sessions: tuple[tuple[str, str], ...]
+    not_attempted_sessions: tuple[ProviderSessionRef, ...]
 
 
 class MemoryStore:
@@ -298,6 +306,34 @@ class MemoryStore:
             if existing is not None:
                 return EnqueueResult(outcome="duplicate", row=_queue_from_row(existing))
 
+            session_id_ref = _provider_session_ref(
+                meta.scope_key,
+                principal_id,
+                project_ref,
+                session_id,
+                meta.epoch,
+            )
+            provider_session_ref = ProviderSessionRef(
+                principal_id=principal_id,
+                epoch=meta.epoch,
+                project_ref=project_ref,
+                session_id=session_id_ref,
+            )
+            fenced = conn.execute(
+                """
+                SELECT 1 FROM memory_session_flush_state
+                WHERE provider_session_ref = ? AND flush_state = 'manual_required'
+                """,
+                (provider_session_ref.serialize(),),
+            ).fetchone()
+            if fenced is not None:
+                self._record_capture_skip_in_connection(
+                    conn,
+                    "memory_provider_response_invalid",
+                    now,
+                )
+                return EnqueueResult(outcome="manual_required")
+
             pending_count = int(
                 conn.execute(
                     """
@@ -316,19 +352,6 @@ class MemoryStore:
                 self._record_capture_skip_in_connection(conn, None, now)
                 return EnqueueResult(outcome="timestamp_invalid")
 
-            session_id_ref = _provider_session_ref(
-                meta.scope_key,
-                principal_id,
-                project_ref,
-                session_id,
-                meta.epoch,
-            )
-            provider_session_ref = ProviderSessionRef(
-                principal_id=principal_id,
-                epoch=meta.epoch,
-                project_ref=project_ref,
-                session_id=session_id_ref,
-            )
             self._ensure_session_state_in_connection(
                 conn,
                 provider_session_ref,
@@ -516,7 +539,7 @@ class MemoryStore:
                       SELECT 1
                       FROM memory_session_flush_state AS s
                       WHERE s.provider_session_ref = q.provider_session_ref
-                        AND s.flush_state = 'manual_required'
+                        AND s.flush_state IN ('in_flight', 'manual_required')
                   )
                 ORDER BY q.created_at, q.source_message_digest
                 LIMIT 1
@@ -665,14 +688,73 @@ class MemoryStore:
             watermark_after = state.watermark
             if add_status == "extracted":
                 watermark_after = max(watermark_after, row.provider_timestamp_ms)
-            conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET last_add_ack_at = ?, watermark = ?, updated_at = ?
-                WHERE provider_session_ref = ?
-                """,
-                (now, watermark_after, now, provider_session_ref.serialize()),
-            )
+                operation_id = f"add-{row.source_message_digest}"
+                self._record_settlement_in_connection(
+                    conn,
+                    MemorySettlementRecord(
+                        provider_session_ref=provider_session_ref,
+                        generation=state.generation,
+                        fence_epoch=state.fence_epoch,
+                        operation_id=operation_id,
+                        operation_kind="add",
+                        outcome="succeeded",
+                        observed_at=now,
+                        last_known_state="delivered",
+                        last_observed_outcome="succeeded",
+                        request_id=_bounded_opaque_text(add_request_id),
+                        watermark_before=state.watermark,
+                        watermark_after=watermark_after,
+                        confirmed_watermark_ms=watermark_after,
+                        flush_state="not_due",
+                        source="add",
+                    ),
+                )
+                if state.flush_state != "in_flight":
+                    remaining = conn.execute(
+                        """
+                        SELECT MIN(created_at) AS first_unflushed_at
+                        FROM memory_capture_queue
+                        WHERE epoch = ? AND provider_session_ref = ?
+                          AND source_message_digest != ?
+                          AND (
+                              state IN ('pending', 'processing')
+                              OR (state = 'delivered' AND flush_observation = 'not_attempted')
+                          )
+                        """,
+                        (row.epoch, provider_session_ref.serialize(), row.source_message_digest),
+                    ).fetchone()
+                    first_unflushed_at = (
+                        str(remaining["first_unflushed_at"])
+                        if remaining["first_unflushed_at"] is not None
+                        else None
+                    )
+                    conn.execute(
+                        """
+                        UPDATE memory_session_flush_state
+                        SET generation = generation + 1, first_unflushed_at = ?,
+                            last_add_ack_at = ?, watermark = ?,
+                            due_at = NULL, next_attempt_at = NULL,
+                            flush_state = 'not_due', fence_operation_id = NULL,
+                            fence_owner = NULL, fence_acquired_at = NULL, updated_at = ?
+                        WHERE provider_session_ref = ?
+                        """,
+                        (
+                            first_unflushed_at,
+                            now,
+                            watermark_after,
+                            now,
+                            provider_session_ref.serialize(),
+                        ),
+                    )
+            else:
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET last_add_ack_at = ?, watermark = ?, updated_at = ?
+                    WHERE provider_session_ref = ?
+                    """,
+                    (now, watermark_after, now, provider_session_ref.serialize()),
+                )
             self._compact_terminal_tombstones_in_connection(conn, _datetime_from_iso(now))
             return True
 
@@ -715,18 +797,7 @@ class MemoryStore:
                 now=now,
             )
             fence_epoch = state.fence_epoch + 1
-            key = provider_session_ref.serialize()
-            conn.execute(
-                """
-                UPDATE memory_session_flush_state
-                SET fence_epoch = ?, fence_owner = 'manual-required',
-                    fence_acquired_at = ?, flush_state = 'manual_required',
-                    due_at = NULL, next_attempt_at = NULL, updated_at = ?
-                WHERE provider_session_ref = ?
-                """,
-                (fence_epoch, now, now, key),
-            )
-            self._record_settlement_in_connection(
+            self._mark_manual_required_in_connection(
                 conn,
                 MemorySettlementRecord(
                     provider_session_ref=provider_session_ref,
@@ -742,8 +813,8 @@ class MemoryStore:
                     error_code=_closed_error_or(error, "memory_provider_response_invalid"),
                     flush_state="manual_required",
                     source="add",
-                    settlement_id=f"manual-add-{row.source_message_digest}",
                 ),
+                now=now,
             )
             self._set_last_error_in_connection(
                 conn,
@@ -752,35 +823,58 @@ class MemoryStore:
             )
             return True
 
-    def mark_flush_in_flight(self, session_id: str, project_ref: str) -> int:
-        """Freeze the delivered rows consumed by one imminent session flush."""
+    def _mark_manual_required_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        record: MemorySettlementRecord,
+        *,
+        now: str,
+    ) -> None:
+        """Fence one session and append its durable ambiguous-outcome verdict."""
+
+        key = record.provider_session_ref.serialize()
+        conn.execute(
+            """
+            UPDATE memory_session_flush_state
+            SET fence_epoch = ?, fence_operation_id = ?, fence_owner = 'manual-required',
+                fence_acquired_at = ?, flush_state = 'manual_required',
+                due_at = NULL, next_attempt_at = NULL, updated_at = ?
+            WHERE provider_session_ref = ?
+            """,
+            (record.fence_epoch, record.operation_id, now, now, key),
+        )
+        self._record_settlement_in_connection(conn, record)
+
+    def mark_flush_in_flight(
+        self,
+        provider_session_ref: ProviderSessionRef,
+    ) -> MemoryFlushToken | None:
+        """Freeze one canonical session and return its exact flush token."""
 
         now = utc_now_iso()
         with self._transaction() as conn:
             meta = self._meta_in_connection(conn)
-            if meta is None:
-                return 0
+            if meta is None or provider_session_ref.epoch != meta.epoch:
+                return None
             candidate = conn.execute(
                 """
-                SELECT * FROM memory_capture_queue
-                WHERE epoch = ? AND session_id = ? AND project_ref = ?
+                SELECT 1 FROM memory_capture_queue
+                WHERE epoch = ? AND provider_session_ref = ?
                   AND state = 'delivered'
                   AND flush_observation = 'not_attempted'
-                ORDER BY completed_at, source_message_digest
                 LIMIT 1
                 """,
-                (meta.epoch, session_id, project_ref),
+                (meta.epoch, provider_session_ref.serialize()),
             ).fetchone()
             if candidate is None:
-                return 0
-            provider_session_ref = _provider_ref_from_row(candidate)
+                return None
             state = self._ensure_session_state_in_connection(
                 conn,
                 provider_session_ref,
                 now=now,
             )
-            if state.flush_state == "manual_required":
-                return 0
+            if state.flush_state in {"in_flight", "manual_required"}:
+                return None
             result = conn.execute(
                 """
                 UPDATE memory_capture_queue
@@ -793,23 +887,34 @@ class MemoryStore:
                 """,
                 (meta.epoch, provider_session_ref.serialize()),
             )
-            if result.rowcount:
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET fence_epoch = ?, fence_owner = 'flush',
-                        fence_acquired_at = ?, flush_state = 'in_flight',
-                        due_at = NULL, next_attempt_at = NULL, updated_at = ?
-                    WHERE provider_session_ref = ?
-                    """,
-                    (state.fence_epoch + 1, now, now, provider_session_ref.serialize()),
-                )
-            return int(result.rowcount)
+            if not result.rowcount:
+                return None
+            fence_epoch = state.fence_epoch + 1
+            operation_id = _flush_operation_id(
+                provider_session_ref,
+                state.generation,
+                fence_epoch,
+            )
+            conn.execute(
+                """
+                UPDATE memory_session_flush_state
+                SET fence_epoch = ?, fence_operation_id = ?, fence_owner = 'flush',
+                    fence_acquired_at = ?, flush_state = 'in_flight',
+                    due_at = NULL, next_attempt_at = NULL, updated_at = ?
+                WHERE provider_session_ref = ?
+                """,
+                (fence_epoch, operation_id, now, now, provider_session_ref.serialize()),
+            )
+            return MemoryFlushToken(
+                provider_session_ref=provider_session_ref,
+                generation=state.generation,
+                fence_epoch=fence_epoch,
+                operation_id=operation_id,
+            )
 
     def record_flush_verdict(
         self,
-        session_id: str,
-        project_ref: str,
+        token: MemoryFlushToken,
         result: FlushResult,
         *,
         now: str,
@@ -844,27 +949,36 @@ class MemoryStore:
             raise TypeError("unsupported flush result")
 
         with self._transaction() as conn:
-            meta = self._meta_in_connection(conn)
-            if meta is None:
+            state_row = conn.execute(
+                """
+                SELECT * FROM memory_session_flush_state
+                WHERE provider_session_ref = ? AND generation = ?
+                  AND fence_epoch = ? AND fence_operation_id = ?
+                  AND flush_state = 'in_flight'
+                """,
+                (
+                    token.provider_session_ref.serialize(),
+                    token.generation,
+                    token.fence_epoch,
+                    token.operation_id,
+                ),
+            ).fetchone()
+            if state_row is None:
                 return 0
+            provider_session_ref = token.provider_session_ref
+            state = _session_state_from_row(state_row)
             candidate = conn.execute(
                 """
                 SELECT * FROM memory_capture_queue
-                WHERE epoch = ? AND session_id = ? AND project_ref = ?
+                WHERE epoch = ? AND provider_session_ref = ?
                   AND state = 'delivered' AND flush_observation = 'in_flight'
                 ORDER BY completed_at, source_message_digest
                 LIMIT 1
                 """,
-                (meta.epoch, session_id, project_ref),
+                (provider_session_ref.epoch, provider_session_ref.serialize()),
             ).fetchone()
             if candidate is None:
                 return 0
-            provider_session_ref = _provider_ref_from_row(candidate)
-            state = self._ensure_session_state_in_connection(
-                conn,
-                provider_session_ref,
-                now=now,
-            )
             if not valid_success and not isinstance(result, FlushRejected):
                 observation = "unknown"
                 status = None
@@ -883,7 +997,7 @@ class MemoryStore:
                     _bounded_opaque_text(error_code),
                     _bounded_opaque_text(request_id),
                     now,
-                    meta.epoch,
+                    provider_session_ref.epoch,
                     provider_session_ref.serialize(),
                 ),
             )
@@ -896,7 +1010,7 @@ class MemoryStore:
                       AND state = 'delivered'
                       AND flush_observation = ?
                     """,
-                    (meta.epoch, provider_session_ref.serialize(), observation),
+                    (provider_session_ref.epoch, provider_session_ref.serialize(), observation),
                 ).fetchone()
                 watermark = int(group["watermark"] or 0)
                 settlement_outcome: Literal[
@@ -908,57 +1022,43 @@ class MemoryStore:
                     if observation == "rejected"
                     else "manual_required"
                 )
-                settlement_id = _flush_settlement_id(
-                    provider_session_ref,
-                    state.fence_epoch,
-                )
-                self._record_settlement_in_connection(
-                    conn,
-                    MemorySettlementRecord(
-                        provider_session_ref=provider_session_ref,
-                        generation=state.generation,
-                        fence_epoch=state.fence_epoch,
-                        operation_id=f"flush-{state.fence_epoch}",
-                        operation_kind="flush",
-                        outcome=settlement_outcome,
-                        observed_at=now,
-                        last_known_state="delivered",
-                        last_observed_outcome=(
-                            observation if observation in {
-                                "succeeded", "rejected", "unknown"
-                            } else "unknown"
-                        ),
-                        request_id=_bounded_opaque_text(request_id),
-                        error_code=_bounded_opaque_text(error_code),
-                        watermark_before=state.watermark,
-                        watermark_after=(
-                            watermark if observation == "succeeded" else state.watermark
-                        ),
-                        confirmed_watermark_ms=watermark if observation == "succeeded" else None,
-                        flush_state=(
-                            "not_due"
-                            if observation == "succeeded"
-                            else "due"
-                            if observation == "rejected"
-                            else "manual_required"
-                        ),
-                        source="flush",
-                        settled_at=now,
-                        settlement_id=settlement_id,
+                settlement = MemorySettlementRecord(
+                    provider_session_ref=provider_session_ref,
+                    generation=state.generation,
+                    fence_epoch=state.fence_epoch,
+                    operation_id=token.operation_id,
+                    operation_kind="flush",
+                    outcome=settlement_outcome,
+                    observed_at=now,
+                    last_known_state="delivered",
+                    last_observed_outcome=(
+                        observation
+                        if observation in {"succeeded", "rejected", "unknown"}
+                        else "unknown"
                     ),
+                    request_id=_bounded_opaque_text(request_id),
+                    error_code=_bounded_opaque_text(error_code),
+                    watermark_before=state.watermark,
+                    watermark_after=watermark if observation == "succeeded" else state.watermark,
+                    confirmed_watermark_ms=watermark if observation == "succeeded" else None,
+                    flush_state=(
+                        "not_due"
+                        if observation == "succeeded"
+                        else "due"
+                        if observation == "rejected"
+                        else "manual_required"
+                    ),
+                    source="flush",
+                    settled_at=now,
                 )
                 if settlement_outcome == "manual_required":
-                    conn.execute(
-                        """
-                        UPDATE memory_session_flush_state
-                        SET fence_epoch = ?, fence_owner = 'manual-required',
-                            fence_acquired_at = ?, flush_state = 'manual_required',
-                            due_at = NULL, next_attempt_at = NULL, updated_at = ?
-                        WHERE provider_session_ref = ?
-                        """,
-                        (state.fence_epoch, now, now, provider_session_ref.serialize()),
+                    self._mark_manual_required_in_connection(
+                        conn,
+                        settlement,
+                        now=now,
                     )
                 else:
+                    self._record_settlement_in_connection(conn, settlement)
                     remaining = conn.execute(
                         """
                         SELECT MIN(created_at) AS first_unflushed_at
@@ -969,7 +1069,7 @@ class MemoryStore:
                               OR (state = 'delivered' AND flush_observation = 'not_attempted')
                           )
                         """,
-                        (meta.epoch, provider_session_ref.serialize()),
+                        (provider_session_ref.epoch, provider_session_ref.serialize()),
                     ).fetchone()
                     first_unflushed_at = (
                         str(remaining["first_unflushed_at"])
@@ -984,7 +1084,7 @@ class MemoryStore:
                                 WHEN ? = 'succeeded' THEN ?
                                 ELSE first_unflushed_at
                             END,
-                            fence_epoch = ?, fence_owner = NULL,
+                            fence_epoch = ?, fence_operation_id = NULL, fence_owner = NULL,
                             fence_acquired_at = NULL, flush_state = ?,
                             due_at = ?, next_attempt_at = ?, watermark = MAX(watermark, ?),
                             updated_at = ?
@@ -1070,25 +1170,16 @@ class MemoryStore:
                     provider_session_ref,
                     now=now,
                 )
-                fence_epoch = max(state.fence_epoch, 1)
+                fence_epoch = state.fence_epoch
                 watermark = max(int(row["provider_timestamp_ms"]) for row in group)
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET fence_epoch = ?, fence_owner = 'manual-required',
-                        fence_acquired_at = ?, flush_state = 'manual_required',
-                        due_at = NULL, next_attempt_at = NULL, updated_at = ?
-                    WHERE provider_session_ref = ?
-                    """,
-                    (fence_epoch, now, now, key),
-                )
-                self._record_settlement_in_connection(
+                self._mark_manual_required_in_connection(
                     conn,
                     MemorySettlementRecord(
                         provider_session_ref=provider_session_ref,
                         generation=state.generation,
                         fence_epoch=fence_epoch,
-                        operation_id=f"recovered-flush-{fence_epoch}",
+                        operation_id=state.fence_operation_id
+                        or _flush_operation_id(provider_session_ref, state.generation, fence_epoch),
                         operation_kind="flush",
                         outcome="manual_required",
                         observed_at=now,
@@ -1097,13 +1188,12 @@ class MemoryStore:
                         watermark_after=watermark,
                         flush_state="manual_required",
                         source="flush",
-                        settled_at=now,
-                        settlement_id=_flush_settlement_id(provider_session_ref, fence_epoch),
                     ),
+                    now=now,
                 )
             return int(result.rowcount)
 
-    def _list_not_attempted_sessions(self) -> tuple[tuple[str, str], ...]:
+    def _list_not_attempted_sessions(self) -> tuple[ProviderSessionRef, ...]:
         """Return active sessions whose acknowledged buffer still needs a flush."""
 
         with self._connection() as conn:
@@ -1112,16 +1202,16 @@ class MemoryStore:
                 return ()
             rows = conn.execute(
                 """
-                SELECT session_id, project_ref, MIN(completed_at) AS first_completed_at
+                SELECT provider_session_ref, MIN(completed_at) AS first_completed_at
                 FROM memory_capture_queue
                 WHERE epoch = ? AND state = 'delivered'
                   AND flush_observation = 'not_attempted'
-                GROUP BY session_id, project_ref
-                ORDER BY first_completed_at, session_id, project_ref
+                GROUP BY provider_session_ref
+                ORDER BY first_completed_at, provider_session_ref
                 """,
                 (meta.epoch,),
             ).fetchall()
-        return tuple((str(row["session_id"]), str(row["project_ref"])) for row in rows)
+        return tuple(ProviderSessionRef.deserialize(str(row["provider_session_ref"])) for row in rows)
 
     def _return_system_failure(
         self,
@@ -1222,20 +1312,56 @@ class MemoryStore:
             return MessageFailureResult(state=state, attempts=attempts)
 
     def _reclaim_processing(self, *, lease_owner: str) -> int:
-        """Return rows leased by prior boots to pending for at-least-once delivery."""
+        """Fence rows whose provider add outcome was ambiguous at boot."""
 
+        now = utc_now_iso()
         with self._transaction() as conn:
-            result = conn.execute(
+            rows = conn.execute(
                 """
-                UPDATE memory_capture_queue
-                SET state = 'pending', lease_owner = NULL, lease_at = NULL,
-                    next_retry_at = NULL
+                SELECT * FROM memory_capture_queue
                 WHERE state = 'processing'
                   AND (lease_owner IS NULL OR lease_owner != ?)
                 """,
                 (lease_owner,),
-            )
-            return int(result.rowcount)
+            ).fetchall()
+            for row in rows:
+                provider_session_ref = _provider_ref_from_row(row)
+                state = self._ensure_session_state_in_connection(
+                    conn,
+                    provider_session_ref,
+                    now=now,
+                )
+                error = "memory_provider_response_invalid"
+                conn.execute(
+                    """
+                    UPDATE memory_capture_queue
+                    SET state = 'pending', lease_owner = NULL, lease_at = NULL,
+                        next_retry_at = NULL, last_error = ?
+                    WHERE source_message_digest = ? AND epoch = ?
+                      AND state = 'processing'
+                    """,
+                    (error, row["source_message_digest"], row["epoch"]),
+                )
+                self._mark_manual_required_in_connection(
+                    conn,
+                    MemorySettlementRecord(
+                        provider_session_ref=provider_session_ref,
+                        generation=state.generation,
+                        fence_epoch=state.fence_epoch + 1,
+                        operation_id=f"recovered-add-{row['source_message_digest']}",
+                        operation_kind="add",
+                        outcome="manual_required",
+                        observed_at=now,
+                        last_known_state="processing",
+                        last_observed_outcome="in_flight",
+                        error_code=error,
+                        flush_state="manual_required",
+                        source="add",
+                    ),
+                    now=now,
+                )
+                self._set_last_error_in_connection(conn, error, now)
+            return len(rows)
 
     def queue_stats(self) -> QueueStats:
         """Return aggregate counts and retained plaintext bytes for the active epoch."""
@@ -1681,8 +1807,8 @@ class MemoryStore:
                 provider_session_ref, principal_id, epoch, project_ref, session_id,
                 generation, first_unflushed_at, last_add_ack_at, due_at,
                 next_attempt_at, flush_state, watermark, fence_epoch,
-                fence_owner, fence_acquired_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, NULL, NULL, NULL, 'not_due', 0, 0, NULL, NULL, ?)
+                fence_operation_id, fence_owner, fence_acquired_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, NULL, NULL, NULL, 'not_due', 0, 0, NULL, NULL, NULL, ?)
             """,
             (
                 key,
@@ -2049,6 +2175,9 @@ def _session_state_from_row(row: sqlite3.Row) -> MemorySessionState:
         ),
         watermark=int(row["watermark"]),
         fence_epoch=int(row["fence_epoch"]),
+        fence_operation_id=(
+            str(row["fence_operation_id"]) if row["fence_operation_id"] is not None else None
+        ),
         fence_owner=str(row["fence_owner"]) if row["fence_owner"] is not None else None,
         fence_acquired_at=(
             str(row["fence_acquired_at"]) if row["fence_acquired_at"] is not None else None
@@ -2181,8 +2310,12 @@ def _provider_session_ref(
     return f"src--{_keyed_digest(scope_key, f'{principal_id}:{project_ref}:{session_id}')}--e{epoch}"
 
 
-def _flush_settlement_id(provider_session_ref: ProviderSessionRef, fence_epoch: int) -> str:
+def _flush_operation_id(
+    provider_session_ref: ProviderSessionRef,
+    generation: int,
+    fence_epoch: int,
+) -> str:
     digest = hashlib.sha256(
-        f"{provider_session_ref.serialize()}:{fence_epoch}".encode("utf-8")
+        f"{provider_session_ref.serialize()}:{generation}:{fence_epoch}".encode("utf-8")
     ).hexdigest()
     return f"flush-{digest[:32]}"

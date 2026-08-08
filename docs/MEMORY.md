@@ -41,6 +41,16 @@ calls are kept.
 
 ## Recovery and Clear
 
+Memory coordination is keyed by the canonical provider session reference:
+principal, Memory epoch, project, and provider session ID. Each session keeps a
+durable generation, watermark, and fence. A flush records the exact generation
+and fence token it acquired; a late result cannot settle a newer operation.
+
+While a session flush is in flight, its queued rows cannot be claimed into that
+flush. An ambiguous or malformed add/flush acknowledgement, including an
+interrupted operation recovered at boot, is recorded as `manual_required` and
+fences that session. It is never automatically replayed.
+
 While Memory is enabled, **Restart engine** replaces only the managed sidecar;
 it does not change Memory settings or delete retained data. Use it when the
 recorder reports a transient failure. If the call-log database is corrupt,

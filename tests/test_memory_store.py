@@ -59,7 +59,12 @@ def _row_for_source(store: MemoryStore, source_message_id: str):
     return store.get_queue_row(_keyed_digest(meta.scope_key, source_message_id))
 
 
-def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-session") -> str:
+def _deliver(
+    store: MemoryStore,
+    digest: str,
+    *,
+    session_ref: str = "shared-session",
+) -> ProviderSessionRef:
     result = store.enqueue_request(
         source_message_id=digest,
         session_id=session_ref,
@@ -79,7 +84,13 @@ def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-sess
         lease_owner="boot",
         now=_dt("2026-01-01T00:00:01.000Z"),
     ).settled
-    return result.row.session_id
+    return result.row.provider_session_ref
+
+
+def _flush_claim(store: MemoryStore, provider_session_ref: ProviderSessionRef):
+    token = store.mark_flush_in_flight(provider_session_ref)
+    assert token is not None
+    return token
 
 
 def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None:
@@ -123,6 +134,16 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "processing_alert_active",
             "last_error_at",
         }.issubset(meta_columns)
+        state_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info('memory_session_flush_state')")
+        }
+        assert {
+            "generation",
+            "watermark",
+            "fence_epoch",
+            "fence_operation_id",
+            "flush_state",
+        }.issubset(state_columns)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -230,12 +251,11 @@ def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path
     session_ref = _deliver(store, "one")
     assert _deliver(store, "two") == session_ref
 
-    assert store.mark_flush_in_flight(session_ref, PROJECT) == 2
+    token = _flush_claim(store, session_ref)
     assert [row.flush_observation for row in store.list_queue_rows()] == ["in_flight", "in_flight"]
 
     assert store.record_flush_verdict(
-        session_ref,
-        PROJECT,
+        token,
         FlushSucceeded(request_id="flush-request", status="extracted"),
         now="2026-01-01T00:00:03.000Z",
     ) == 2
@@ -270,10 +290,9 @@ def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path
 def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     rejected_session = _deliver(store, "rejected", session_ref="rejected-session")
-    assert store.mark_flush_in_flight(rejected_session, PROJECT) == 1
+    rejected_token = _flush_claim(store, rejected_session)
     assert store.record_flush_verdict(
-        rejected_session,
-        PROJECT,
+        rejected_token,
         FlushRejected(
             request_id="reject-request",
             error_code="INTERNAL_ERROR",
@@ -283,10 +302,9 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     ) == 1
 
     unknown_session = _deliver(store, "unknown", session_ref="unknown-session")
-    assert store.mark_flush_in_flight(unknown_session, PROJECT) == 1
+    unknown_token = _flush_claim(store, unknown_session)
     assert store.record_flush_verdict(
-        unknown_session,
-        PROJECT,
+        unknown_token,
         FlushUnknown(reason="timeout"),
         now="2026-01-01T00:00:04.000Z",
     ) == 1
@@ -303,14 +321,115 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     assert unknown_state.flush_state == "manual_required"
 
 
+def test_extracted_add_records_generation_settlement_and_advances_watermark(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    result = _enqueue(store, "natural-boundary", occurred_at_ms=2_000)
+    assert result.row is not None
+    row = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+
+    assert store.settle(
+        row,
+        Delivered(add_request_id="add-natural", add_status="extracted"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert (state.generation, state.watermark, state.flush_state) == (1, 2_000, "not_due")
+    settlement = store.list_flush_settlements(row.provider_session_ref)
+    assert len(settlement) == 1
+    assert (
+        settlement[0].operation_kind,
+        settlement[0].generation,
+        settlement[0].outcome,
+        settlement[0].confirmed_watermark_ms,
+    ) == ("add", 0, "succeeded", 2_000)
+
+
+def test_claim_and_admission_respect_session_flush_fences(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_ref = _deliver(store, "delivered", session_ref="fenced-session")
+    pending = store.enqueue_request(
+        source_message_id="pending",
+        session_id="fenced-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert pending.outcome == "accepted"
+    _flush_claim(store, session_ref)
+
+    assert store.claim_due(lease_owner="blocked", now="2026-01-01T00:00:02.000Z") is None
+    assert store.list_queue_rows()[1].state == "pending"
+
+    manual_store = MemoryStore(_store_path(tmp_path / "manual-fence"))
+    first = _enqueue(manual_store, "manual-first")
+    assert first.row is not None
+    claimed = manual_store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+    assert manual_store.settle(
+        claimed,
+        AmbiguousAdd(add_request_id="ambiguous"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+    blocked = _enqueue(manual_store, "manual-second")
+    assert blocked.outcome == "manual_required"
+    assert manual_store.claim_due(lease_owner="blocked", now="2026-01-01T00:00:02.000Z") is None
+
+
+def test_stale_flush_token_cannot_clear_newer_manual_fence(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    provider_session_ref = _deliver(store, "first", session_ref="racing-session")
+    pending = store.enqueue_request(
+        source_message_id="second",
+        session_id="racing-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert pending.row is not None
+    processing = store.claim_due(lease_owner="add-worker", now="2026-01-01T00:00:02.000Z")
+    assert processing is not None
+    token = _flush_claim(store, provider_session_ref)
+
+    assert store.settle(
+        processing,
+        AmbiguousAdd(add_request_id="ambiguous-add", error="memory_provider_timeout"),
+        lease_owner="add-worker",
+        now=_dt("2026-01-01T00:00:03.000Z"),
+    ).settled
+    assert store.record_flush_verdict(
+        token,
+        FlushSucceeded("stale-flush", "extracted"),
+        now="2026-01-01T00:00:04.000Z",
+    ) == 0
+
+    state = store.get_session_flush_state(provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    assert state.fence_operation_id == "manual-add-" + pending.row.source_message_digest
+    assert store.list_queue_rows()[0].flush_observation == "in_flight"
+    assert [item.outcome for item in store.list_flush_settlements(provider_session_ref)] == [
+        "manual_required"
+    ]
+
+
 def test_malformed_flush_success_is_recorded_as_manual_required(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "malformed-flush")
-    assert store.mark_flush_in_flight(session_ref, PROJECT) == 1
+    token = _flush_claim(store, session_ref)
 
     assert store.record_flush_verdict(
-        session_ref,
-        PROJECT,
+        token,
         FlushSucceeded(request_id="partial-flush", status=None),
         now="2026-01-01T00:00:03.000Z",
     ) == 1
@@ -445,7 +564,7 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     store = MemoryStore(_store_path(tmp_path))
     in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
     not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
-    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
+    _flush_claim(store, in_flight_session)
 
     recovery = store.recover_after_boot(
         lease_owner="boot",
@@ -456,7 +575,8 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     assert _row_for_source(store, "in-flight").flush_observation == "unknown"
     # Sessions are listed only after interrupted flushes have been resolved;
     # recover_after_boot owns that ordering.
-    assert recovery.not_attempted_sessions == ((not_attempted_session, PROJECT),)
+    assert recovery.not_attempted_sessions == (not_attempted_session,)
+    assert store.get_session_flush_state(in_flight_session).flush_state == "manual_required"
 
 
 def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path) -> None:
@@ -469,7 +589,7 @@ def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path)
 
     store = MemoryStore(_store_path(tmp_path / "recovery-clock-order"))
     in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
-    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
+    _flush_claim(store, in_flight_session)
     _enqueue(store, "stale-lease")
     assert store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z") is not None
     observed_states: list[str] = []
@@ -484,7 +604,7 @@ def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path)
     )
 
     assert recovery.reclaimed == 1
-    assert observed_states == ["pending"], "the clock was sampled before leases were reclaimed"
+    assert observed_states == ["pending"], "the clock was sampled before leases were fenced"
     assert _row_for_source(store, "in-flight").flush_observed_at == "2026-01-01T00:00:09.000Z"
 
 
@@ -593,6 +713,8 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert reclaimed is not None
     assert reclaimed.state == "pending"
     assert reclaimed.attempts == 0
+    assert store.get_session_flush_state(reclaimed.provider_session_ref).flush_state == "manual_required"
+    assert store.claim_due(lease_owner="new-boot", now="2026-01-01T00:00:03.000Z") is None
 
     before = store.ensure_meta()
     clearing = store.begin_clear()

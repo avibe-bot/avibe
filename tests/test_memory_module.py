@@ -135,6 +135,12 @@ def _module(
     return module, store, fake
 
 
+def _flush_claim(store: MemoryStore, row):
+    token = store.mark_flush_in_flight(row.provider_session_ref)
+    assert token is not None
+    return token
+
+
 async def test_disabled_methods_are_closed_and_status_remains_readable(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path, enabled=False)
 
@@ -305,7 +311,7 @@ async def test_boot_recovery_stamps_interrupted_flushes_after_lease_reclamation(
         lease_owner="crashed-boot",
         now=_dt("2026-01-01T00:00:00.000Z"),
     ).settled
-    assert store.mark_flush_in_flight(claimed.session_id, claimed.project_ref) == 1
+    _flush_claim(store, claimed)
     current = datetime(2026, 1, 1, tzinfo=UTC)
 
     class _ContendedStore(MemoryStore):
@@ -384,6 +390,33 @@ async def test_malformed_add_ack_retains_payload_and_sets_manual_required_fence(
     )
     assert provider.flushes == []
     assert await worker.drain_once() == 0
+
+
+async def test_malformed_flush_ack_is_unknown_and_opens_processing_breaker(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="malformed-flush")) == CaptureAccepted()
+    provider.flush_results.append(FlushSucceeded("partial-flush", None))
+    current = datetime(2026, 1, 1, tzinfo=UTC)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        now=lambda: current,
+    )
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert (row.state, row.flush_observation) == ("delivered", "unknown")
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    settlement = store.list_flush_settlements(row.provider_session_ref)
+    assert (settlement[0].outcome, settlement[0].request_id) == (
+        "manual_required",
+        "partial-flush",
+    )
+    assert store.ensure_meta().processing_fault_kind == "engine"
 
 
 async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breaker(tmp_path: Path) -> None:
@@ -579,7 +612,7 @@ async def test_activation_recovery_turns_interrupted_flush_unknown_and_opens_bre
     row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
     assert row is not None
     assert store.settle(row, Delivered(), lease_owner="old", now=_dt("2026-01-01T00:00:01.000Z")).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
+    _flush_claim(store, row)
 
     worker = MemoryWorker(
         store=store,
@@ -751,17 +784,25 @@ async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path:
     assert row.last_error == "memory_processing_failed"
 
 
-async def test_old_boot_processing_row_is_reclaimed_for_at_least_once_delivery(tmp_path: Path) -> None:
+async def test_old_boot_processing_row_is_fenced_for_manual_review(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()
     claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
     assert claimed is not None and claimed.state == "processing"
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="new-boot")
 
-    assert await worker.drain_once() == 1
+    assert await worker.drain_once() == 0
     row = store.list_queue_rows()[0]
-    assert row.state == "delivered"
-    assert len(provider.captures) == 1
+    assert (row.state, row.payload_text, row.last_error) == (
+        "pending",
+        "remember this",
+        "memory_provider_response_invalid",
+    )
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    assert store.list_flush_settlements(row.provider_session_ref)[0].last_known_state == "processing"
+    assert provider.captures == []
 
 
 async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_path: Path) -> None:
@@ -957,7 +998,7 @@ async def test_status_precedence(tmp_path: Path) -> None:
     assert (await clearing.status()).state == "clearing"
 
 
-async def test_provider_timeout_retains_payload_and_blocks_same_session_replay(
+async def test_provider_timeout_retains_payload_and_blocks_same_session_admission(
     tmp_path: Path,
 ) -> None:
     module, store, provider = _module(tmp_path)
@@ -990,9 +1031,11 @@ async def test_provider_timeout_retains_payload_and_blocks_same_session_replay(
     assert state is not None
     assert state.flush_state == "manual_required"
 
-    assert await module.capture(_request(source="newer", text="newer delivery")) == CaptureAccepted()
+    assert await module.capture(_request(source="newer", text="newer delivery")) == CaptureSkipped(
+        reason="memory_provider_response_invalid"
+    )
     assert await worker.drain_once() == 0
-    assert store.list_queue_rows()[1].state == "pending"
+    assert len(store.list_queue_rows()) == 1
 
 
 async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_path: Path) -> None:
@@ -1006,10 +1049,9 @@ async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_
         lease_owner="upgrade",
         now=_dt("2026-07-01T00:00:01.000Z"),
     ).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
+    token = _flush_claim(store, row)
     assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
+        token,
         FlushSucceeded("flush", "extracted"),
         now="2026-07-01T00:00:03.000Z",
     ) == 1
@@ -1074,10 +1116,9 @@ async def test_latest_flush_observation_supersedes_stale_delivery_failure(
     assert delivered_status.state == "degraded"
     assert delivered_status.error == "memory_processing_failed"
 
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
+    token = _flush_claim(store, row)
     assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
+        token,
         verdict,
         now=(current + timedelta(seconds=1)).isoformat(),
     ) == 1
@@ -1133,7 +1174,7 @@ async def test_failure_log_includes_provider_rejections_and_unknown_results_newe
     base_iso = base.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     delivered_iso = (base + timedelta(seconds=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-    async def deliver(source: str, session: str, request_id: str) -> None:
+    async def deliver(source: str, session: str, request_id: str):
         assert await module.capture(_request(source=source, session=session)) == CaptureAccepted()
         row = store.claim_due(lease_owner=source, now=base_iso)
         assert row is not None
@@ -1143,22 +1184,18 @@ async def test_failure_log_includes_provider_rejections_and_unknown_results_newe
         lease_owner=source,
         now=_dt(delivered_iso),
     ).settled
-        assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
+        return _flush_claim(store, row)
 
-    await deliver("rejected", "rejected-session", "add-rejected")
-    rejected_session = store.list_queue_rows()[0].session_id
+    rejected_token = await deliver("rejected", "rejected-session", "add-rejected")
     assert store.record_flush_verdict(
-        rejected_session,
-        PROJECT,
+        rejected_token,
         FlushRejected("flush-rejected", "INVALID_INPUT", server_fault=False),
         now=(base + timedelta(seconds=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     ) == 1
 
-    await deliver("unknown", "unknown-session", "add-unknown")
-    unknown_session = store.list_queue_rows()[1].session_id
+    unknown_token = await deliver("unknown", "unknown-session", "add-unknown")
     assert store.record_flush_verdict(
-        unknown_session,
-        PROJECT,
+        unknown_token,
         FlushUnknown("timeout"),
         now=(base + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     ) == 1
@@ -1195,10 +1232,9 @@ async def test_failure_log_collapses_one_session_flush_into_one_entry(tmp_path: 
     ).settled
 
     session_id = store.list_queue_rows()[0].session_id
-    assert store.mark_flush_in_flight(session_id, PROJECT) == 2
+    token = _flush_claim(store, store.list_queue_rows()[0])
     assert store.record_flush_verdict(
-        session_id,
-        PROJECT,
+        token,
         FlushRejected("shared-flush", "INVALID_INPUT", server_fault=False),
         now="2026-07-01T00:00:03.000Z",
     ) == 2
@@ -1227,10 +1263,9 @@ async def test_failure_log_excludes_entries_older_than_retention(tmp_path: Path)
         lease_owner="expired",
         now=_dt(old_iso),
     ).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
+    token = _flush_claim(store, row)
     assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
+        token,
         FlushUnknown("timeout"),
         now=old_iso,
     ) == 1
@@ -1253,10 +1288,9 @@ async def test_failure_log_retention_uses_latest_flush_observation_time(tmp_path
         lease_owner="late-flush",
         now=_dt(old_iso),
     ).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
+    token = _flush_claim(store, row)
     assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
+        token,
         FlushRejected("fresh-rejection", "INVALID_INPUT", server_fault=False),
         now=observed_iso,
     ) == 1

@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS memory_session_flush_state (
     ),
     watermark INTEGER NOT NULL DEFAULT 0 CHECK (watermark >= 0),
     fence_epoch INTEGER NOT NULL DEFAULT 0 CHECK (fence_epoch >= 0),
+    fence_operation_id TEXT,
     fence_owner TEXT,
     fence_acquired_at TEXT,
     updated_at TEXT NOT NULL,

@@ -27,7 +27,12 @@ from core.memory.store import (
     QueueRow,
     SystemOutage,
 )
-from core.memory.types import MemoryErrorCode, decode_capture_attachments, is_memory_error_code
+from core.memory.types import (
+    MemoryErrorCode,
+    ProviderSessionRef,
+    decode_capture_attachments,
+    is_memory_error_code,
+)
 
 
 MAX_DRAIN_BATCH_SIZE = 32
@@ -78,7 +83,7 @@ class MemoryWorker:
         self._system_paused = False
         self._system_pause_until: datetime | None = None
         self._activation_pending = True
-        self._recovery_sessions: list[tuple[str, str]] = []
+        self._recovery_sessions: list[ProviderSessionRef] = []
 
     def begin_activation(self) -> None:
         """Require durable recovery before a recreated drain task can claim."""
@@ -170,7 +175,7 @@ class MemoryWorker:
                 # become searchable immediately. The store marks a whole session
                 # in flight only for crash recovery and previously delivered rows;
                 # it is not a license to defer this flush to the end of the tick.
-                result = await self._flush_session(row.session_id, row.project_ref)
+                result = await self._flush_session(row.provider_session_ref)
                 if _opens_breaker(result):
                     await self._open_processing_fault()
                     break
@@ -208,8 +213,8 @@ class MemoryWorker:
 
     async def _drain_recovery_sessions(self, *, half_open: bool) -> bool:
         while self._recovery_sessions:
-            session_id, project_ref = self._recovery_sessions[0]
-            result = await self._flush_session(session_id, project_ref)
+            provider_session_ref = self._recovery_sessions[0]
+            result = await self._flush_session(provider_session_ref)
             self._recovery_sessions.pop(0)
             if _opens_breaker(result):
                 await self._open_processing_fault()
@@ -291,17 +296,19 @@ class MemoryWorker:
         )
         return settled.settled
 
-    async def _flush_session(self, session_id: str, project_ref: str) -> FlushResult:
-        marked = await self._store_call(
+    async def _flush_session(self, provider_session_ref: ProviderSessionRef) -> FlushResult:
+        token = await self._store_call(
             self._store.mark_flush_in_flight,
-            session_id,
-            project_ref,
+            provider_session_ref,
         )
-        if not marked:
+        if token is None:
             return FlushUnknown(reason="transport")
         try:
             result = await asyncio.wait_for(
-                self._provider.flush(session_id, project_ref),
+                self._provider.flush(
+                    provider_session_ref.session_id,
+                    provider_session_ref.project_ref,
+                ),
                 timeout=self._flush_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -312,14 +319,19 @@ class MemoryWorker:
             result = FlushUnknown(reason="transport")
         if not isinstance(result, (FlushSucceeded, FlushRejected, FlushUnknown)):
             result = FlushUnknown(reason="transport")
+        returned_result = result
+        if isinstance(result, FlushSucceeded) and result.status not in {
+            "extracted",
+            "no_extraction",
+        }:
+            returned_result = FlushUnknown(reason="transport")
         await self._store_call(
             self._store.record_flush_verdict,
-            session_id,
-            project_ref,
+            token,
             result,
             now=_iso_from_datetime(self._current_time()),
         )
-        return result
+        return returned_result
 
     async def _health_gate_allows_claims(self) -> bool | None:
         now = self._current_time()

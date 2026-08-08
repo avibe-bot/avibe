@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
@@ -154,9 +153,20 @@ class MemorySessionState:
     flush_state: MemoryFlushState = "not_due"
     watermark: int = 0
     fence_epoch: int = 0
+    fence_operation_id: str | None = None
     fence_owner: str | None = None
     fence_acquired_at: str | None = None
     updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class MemoryFlushToken:
+    """Exact durable token acquired before one provider flush call."""
+
+    provider_session_ref: ProviderSessionRef
+    generation: int
+    fence_epoch: int
+    operation_id: str
 
 
 @dataclass(frozen=True)
@@ -195,7 +205,7 @@ class MemorySettlementRecord:
         if not self.operation_id:
             raise ValueError("settlement operation_id must be non-empty")
         if not self.settlement_id:
-            object.__setattr__(self, "settlement_id", uuid.uuid4().hex)
+            object.__setattr__(self, "settlement_id", self.operation_id)
 
 
 @dataclass(frozen=True)

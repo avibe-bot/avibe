@@ -266,6 +266,8 @@ class MemoryModule:
             return CaptureDuplicate()
         if result.outcome == "queue_full":
             return CaptureSkipped(reason="memory_queue_full")
+        if result.outcome == "manual_required":
+            return CaptureSkipped(reason="memory_provider_response_invalid")
         if result.outcome == "timestamp_invalid":
             return CaptureSkipped(reason="memory_invalid_input")
         return CaptureSkipped(reason="memory_clear_failed")
