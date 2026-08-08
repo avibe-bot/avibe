@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -67,39 +66,6 @@ try:
         return isinstance(data, dict) and data.get("type") == "rate_limit_event"
 
     class ClaudeSDKClient(_ClaudeSDKClient):
-        def supports_native_prompt_boundary(self) -> bool:
-            """Return whether the connected SDK exposes its ordered message queue."""
-            query = getattr(self, "_query", None)
-            sender = getattr(query, "_message_send", None)
-            return callable(getattr(sender, "send", None))
-
-        async def enqueue_native_prompt_boundary(
-            self,
-            *,
-            session_id: str | None = None,
-        ) -> None:
-            """Put a prompt-consumption marker in the SDK's ordered message stream.
-
-            The CLI invokes SDK hook callbacks before it can continue processing the
-            submitted prompt. Messages emitted before that callback are already ahead
-            of this marker; messages caused by the prompt can only arrive after it.
-            """
-            query = getattr(self, "_query", None)
-            sender = getattr(query, "_message_send", None)
-            send = getattr(sender, "send", None)
-            if not callable(send):
-                raise RuntimeError("Claude SDK ordered message queue is unavailable")
-            await send(
-                {
-                    "type": "system",
-                    "subtype": "hook_started",
-                    "hook_event": "UserPromptSubmit",
-                    "session_id": session_id,
-                    "uuid": str(uuid4()),
-                    "avibe_native_prompt_boundary": True,
-                }
-            )
-
         async def receive_messages(self):
             """Receive all messages from Claude, tolerating non-fatal SDK event additions."""
             if not self._query:

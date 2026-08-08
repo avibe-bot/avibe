@@ -44,11 +44,6 @@ class SystemMessage:
     data = {"subtype": "init"}
 
 
-class HookEventMessage(SystemMessage):
-    subtype = "hook_started"
-    hook_event_name = "UserPromptSubmit"
-
-
 def _one_result_client():
     class _Client:
         def receive_messages(self):
@@ -62,7 +57,6 @@ def _one_result_client():
 
 def _with_input_closer(client):
     client._transport = SimpleNamespace(end_input=AsyncMock())
-    client._vibe_native_prompt_boundary_supported = True
     return client
 
 
@@ -291,7 +285,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     first = _ResultMessage()
                     first.result = "primary result"
                     yield first
-                    yield HookEventMessage()
                     await second_result_ready.wait()
                     second = _ResultMessage()
                     second.result = "steered result"
@@ -360,7 +353,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         query_started = asyncio.Event()
         release_query = asyncio.Event()
         consume_buffered_result = asyncio.Event()
-        buffered_result_processed = asyncio.Event()
         final_result_ready = asyncio.Event()
 
         class _BufferedClient:
@@ -374,7 +366,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     buffered = _ResultMessage()
                     buffered.result = "buffered primary result"
                     yield buffered
-                    yield HookEventMessage()
                     await final_result_ready.wait()
                     final = _ResultMessage()
                     final.result = "steered result"
@@ -395,15 +386,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.claude_sessions[composite_key] = client
         agent.receiver_tasks[composite_key] = receiver_task
         agent.session_handler.active_sessions = {composite_key}
-        terminal_claim_superseded = agent._terminal_claim_superseded
-
-        def _observe_terminal_claim(*args):
-            superseded = terminal_claim_superseded(*args)
-            if asyncio.current_task() is receiver_task:
-                buffered_result_processed.set()
-            return superseded
-
-        agent._terminal_claim_superseded = _observe_terminal_claim
         target = ActiveSteerTarget(
             runtime_key=composite_key,
             logical_turn_id="logical-turn",
@@ -427,7 +409,12 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
 
         consume_buffered_result.set()
-        await buffered_result_processed.wait()
+        for _ in range(100):
+            if composite_key in agent._ambiguous_primary_results:
+                break
+            await asyncio.sleep(0)
+        else:
+            self.fail("primary Result was not buffered behind the steering EOF boundary")
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
         agent.emit_result_message.assert_not_awaited()
 
@@ -473,7 +460,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
         client = _AmbiguousClient()
         client._transport = SimpleNamespace(end_input=AsyncMock())
-        client._vibe_native_prompt_boundary_supported = True
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -554,7 +540,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         client._transport = SimpleNamespace(
             end_input=AsyncMock(side_effect=lambda: input_ended.set())
         )
-        client._vibe_native_prompt_boundary_supported = True
         receiver_task = asyncio.create_task(
             agent._receive_messages(
                 client,
@@ -636,7 +621,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         client._transport = SimpleNamespace(
             end_input=AsyncMock(side_effect=RuntimeError("stdin close failed"))
         )
-        client._vibe_native_prompt_boundary_supported = True
         client.disconnect = AsyncMock()
         receiver_task = asyncio.create_task(
             agent._receive_messages(
@@ -807,7 +791,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(retry)
-        self.assertEqual(agent._next_terminal_barrier(composite_key), "accepted")
+        self.assertEqual(agent._next_terminal_barrier(composite_key), "unknown")
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
 
     async def test_concurrent_receiver_eof_makes_steering_ack_ambiguous(self):
@@ -1247,7 +1231,6 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         failure_generation_captured = asyncio.Event()
         paired_result_ready = asyncio.Event()
         first_steered_result_ready = asyncio.Event()
-        second_steered_result_ready = asyncio.Event()
 
         class _SteeringClient:
             async def query(self, _text, *, session_id):
@@ -1262,16 +1245,10 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     failed = _ResultMessage()
                     failed.result = "primary failed"
                     yield failed
-                    yield HookEventMessage()
                     await first_steered_result_ready.wait()
                     first_steered = _ResultMessage()
                     first_steered.result = "first steered result"
                     yield first_steered
-                    yield HookEventMessage()
-                    await second_steered_result_ready.wait()
-                    second_steered = _ResultMessage()
-                    second_steered.result = "second steered result"
-                    yield second_steered
 
                 return _iterate()
 
@@ -1327,7 +1304,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(composite_key, agent._suppressed_synthetic_results)
 
         second_receipt = await agent.steer_active_turn(request, target)
-        self.assertIs(second_receipt.outcome, SteerOutcome.ACCEPTED)
+        self.assertIs(second_receipt.outcome, SteerOutcome.REFUSED)
 
         paired_result_ready.set()
         await paired_result_consumed.wait()
@@ -1335,15 +1312,10 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_not_awaited()
 
         first_steered_result_ready.set()
-        await asyncio.sleep(0)
-        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
-        agent.emit_result_message.assert_not_awaited()
-
-        second_steered_result_ready.set()
         await receiver_task
 
         agent.emit_result_message.assert_awaited_once()
-        self.assertEqual(agent.emit_result_message.await_args.args[1], "second steered result")
+        self.assertEqual(agent.emit_result_message.await_args.args[1], "first steered result")
         self.assertFalse(agent._has_pending_requests(composite_key))
 
     async def test_emit_failure_still_marks_session_idle(self):

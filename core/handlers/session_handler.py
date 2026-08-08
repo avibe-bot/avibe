@@ -967,43 +967,21 @@ class SessionHandler(BaseHandler):
             logger.exception("Session-only background tool guard failed; allowing the call")
             return {}
 
-    def _build_claude_tool_policy_hooks(
-        self,
-        native_prompt_boundary_client: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Build Claude hooks, including the native query-consumption fence."""
+    def _build_claude_tool_policy_hooks(self) -> Optional[Dict[str, Any]]:
+        """Hook config enforcing the shared tool policy, or None when unavailable."""
         if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
             return None
-
-        boundary_client = (
-            native_prompt_boundary_client
-            if native_prompt_boundary_client is not None
-            else {}
-        )
-        hooks: Dict[str, Any] = {}
-        if not native_background_tools_allowed():
-            matcher = "|".join(session_only_background_tool_names())
-            hooks["PreToolUse"] = [
+        if native_background_tools_allowed():
+            return None
+        matcher = "|".join(session_only_background_tool_names())
+        return {
+            "PreToolUse": [
                 HookMatcher(
                     matcher=matcher,
                     hooks=[self._guard_session_only_background_tools],
                 )
             ]
-
-        async def _expose_native_prompt_boundary(input_data, _tool_use_id, _context):
-            client = boundary_client.get("client")
-            enqueue = getattr(client, "enqueue_native_prompt_boundary", None)
-            if not callable(enqueue):
-                raise RuntimeError("Claude SDK native prompt boundary is unavailable")
-            session_id = input_data.get("session_id") if isinstance(input_data, dict) else None
-            await enqueue(session_id=session_id)
-            return {}
-
-        hooks["UserPromptSubmit"] = [
-            HookMatcher(hooks=[_expose_native_prompt_boundary]),
-        ]
-
-        return hooks or None
+        }
 
     def _claude_disallowed_tools(self, hooks: Optional[Dict[str, Any]]) -> list:
         """Disallowed tool names for this launch.
@@ -1532,10 +1510,7 @@ class SessionHandler(BaseHandler):
             claude_env["IS_SANDBOX"] = "1"
             logger.info("Detected Claude bypassPermissions running as root; marking Claude subprocess as isolated")
 
-        native_prompt_boundary_client: Dict[str, Any] = {}
-        tool_policy_hooks = self._build_claude_tool_policy_hooks(
-            native_prompt_boundary_client,
-        )
+        tool_policy_hooks = self._build_claude_tool_policy_hooks()
 
         option_kwargs: Dict[str, Any] = {
             "permission_mode": CLAUDE_REMOTE_PERMISSION_MODE,
@@ -1555,10 +1530,6 @@ class SessionHandler(BaseHandler):
             "stderr": _capture_claude_stderr,
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
             "can_use_tool": self._allow_claude_bypass_tool,
-            # The SDK hook callback injects Avibe's own ordered boundary marker.
-            # Do not depend on optional CLI lifecycle events: released CLIs may
-            # accept this flag without emitting UserPromptSubmit frames.
-            "include_hook_events": False,
         }
         if tool_policy_hooks:
             option_kwargs["hooks"] = tool_policy_hooks
@@ -1595,7 +1566,6 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
-        native_prompt_boundary_client["client"] = client
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
         setattr(client, "_vibe_git_path_state", git_path_state)
@@ -1619,21 +1589,6 @@ class SessionHandler(BaseHandler):
         # Connect the client
         try:
             await client.connect()
-            supports_native_prompt_boundary = getattr(
-                client,
-                "supports_native_prompt_boundary",
-                None,
-            )
-            setattr(
-                client,
-                "_vibe_native_prompt_boundary_supported",
-                bool(
-                    tool_policy_hooks
-                    and "UserPromptSubmit" in tool_policy_hooks
-                    and callable(supports_native_prompt_boundary)
-                    and supports_native_prompt_boundary()
-                ),
-            )
             governor_from_controller(self.controller).apply_to_pid(
                 get_claude_client_pid(client),
                 label="claude",

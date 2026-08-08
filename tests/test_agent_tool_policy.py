@@ -378,10 +378,12 @@ def test_guard_never_raises_on_a_malformed_payload():
 
 
 def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
+    captured = {}
+
     class _HookMatcher:
         def __init__(self, matcher=None, hooks=None, timeout=None):
-            self.matcher = matcher
-            self.hooks = hooks
+            captured["matcher"] = matcher
+            captured["hooks"] = hooks
 
     monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
     monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
@@ -390,36 +392,13 @@ def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
     handler = _handler()
     hooks = handler._build_claude_tool_policy_hooks()
 
-    assert list(hooks) == ["PreToolUse", "UserPromptSubmit"]
-    pre_tool = hooks["PreToolUse"][0]
-    assert set(pre_tool.matcher.split("|")) == set(
+    assert list(hooks) == ["PreToolUse"]
+    assert set(captured["matcher"].split("|")) == set(
         policy.session_only_background_tool_names()
     )
-    assert pre_tool.hooks == [handler._guard_session_only_background_tools]
+    assert captured["hooks"] == [handler._guard_session_only_background_tools]
     # The precise hook path owns enforcement, so nothing extra is denied by name.
     assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
-
-
-def test_native_query_boundary_hook_is_wired(monkeypatch):
-    class _HookMatcher:
-        def __init__(self, matcher=None, hooks=None, timeout=None):
-            self.matcher = matcher
-            self.hooks = hooks
-
-    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
-    monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
-    handler = _handler()
-    captured = []
-
-    class _Client:
-        async def enqueue_native_prompt_boundary(self, *, session_id=None):
-            captured.append(session_id)
-
-    client_ref = {"client": _Client()}
-    hooks = handler._build_claude_tool_policy_hooks(client_ref)
-    callback = hooks["UserPromptSubmit"][0].hooks[0]
-    assert asyncio.run(callback({"session_id": "session-1"}, None, None)) == {}
-    assert captured == ["session-1"]
 
 
 def test_older_sdk_falls_back_to_a_name_level_deny_list(monkeypatch):
@@ -443,9 +422,8 @@ def test_escape_hatch_disables_both_enforcement_paths(monkeypatch):
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
 
     handler = _handler()
-    hooks = handler._build_claude_tool_policy_hooks()
-    assert list(hooks) == ["UserPromptSubmit"]
-    assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
+    assert handler._build_claude_tool_policy_hooks() is None
+    assert handler._claude_disallowed_tools(None) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
 
 
 def test_disallowed_tools_constant_is_not_mutated(monkeypatch):

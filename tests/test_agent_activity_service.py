@@ -581,6 +581,66 @@ def test_send_while_busy_override_interrupt_anchors_backward(isolated_state):
     assert turn3["anchor_message_id"] == over3 and turn3["open"] is True
 
 
+def test_activity_after_nonterminal_output_anchors_to_that_output(isolated_state):
+    """A delayed-steer answer is the visible boundary for later interrupted work."""
+
+    engine = create_sqlite_engine()
+    sid = "ses_output_boundary"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="primary",
+            source="user",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_output",
+            mtype="output",
+            author="agent",
+            created_at="2026-06-01T10:00:01Z",
+            text="primary answer",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_after_output",
+            created_at="2026-06-01T10:00:02Z",
+            text="continued work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u2",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:03Z",
+            text="next turn",
+            source="user",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert len(groups) == 1
+    assert groups[0]["status"] == "interrupted"
+    assert groups[0]["anchor_message_id"] == "m_output"
+    assert groups[0]["anchor_position"] == "after"
+    assert groups[0]["open"] is False
+
+
 def test_get_turn_group_unknown_id_returns_none(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_none"

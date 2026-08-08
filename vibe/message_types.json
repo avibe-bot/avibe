@@ -53,6 +53,7 @@
       "searchable": true,
       "inboxActivity": true,
       "inboxPreview": true,
+      "activityRole": "turn_start",
       "render": "agent"
     },
     "result": {

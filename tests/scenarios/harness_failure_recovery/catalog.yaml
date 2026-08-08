@@ -3881,14 +3881,14 @@ scenarios:
     # native evidence either accepts the attempt or closes it terminally.
     test: tests/test_agent_steering.py::test_opencode_keeps_reconciliation_armed_after_post_write_idle
   - id: HFR-435
-    name: a Claude native query start gives the steered Result terminal ownership
+    name: Claude native EOF gives the steered Result terminal ownership
     status: covered
     kind: recovery
     layer: contract
     backend: claude
-    # A transport write only queues the input. The UserPromptSubmit SDK callback
-    # injects an Avibe boundary into the same ordered message stream before Claude
-    # can continue, so unrelated Assistant output after the write is insufficient.
+    # A transport write only queues the input and Claude exposes no consumption
+    # acknowledgement. Avibe half-closes stdin after the accepted write and buffers
+    # Results until native EOF, which makes the final Result owner deterministic.
     test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
   - id: HFR-436
     name: delayed Claude steering remains user-owned across the primary Result

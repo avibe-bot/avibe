@@ -195,6 +195,7 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         "user",
         "harness",
         "agent_initiated",
+        "output",
         "result",
         "notify",
         "error",
