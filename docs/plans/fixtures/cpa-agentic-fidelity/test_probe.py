@@ -58,10 +58,10 @@ class ProbeParserTests(unittest.TestCase):
     def test_responses_stream_rejects_argument_done_mismatch(self) -> None:
         events = [
             {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
-            {"kind": "event", "sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
-            {"kind": "event", "sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"city":"Shanghai"}'}},
-            {"kind": "event", "sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "arguments": '{"city":"Paris"}'}},
-            {"kind": "event", "sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
+            {"kind": "event", "sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
+            {"kind": "event", "sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": '{"city":"Shanghai"}'}},
+            {"kind": "event", "sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0, "arguments": '{"city":"Paris"}'}},
+            {"kind": "event", "sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
             {"kind": "event", "sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
         ]
         self.assertTrue(probe._stream_order_ok("responses", events))
@@ -736,6 +736,7 @@ class ProbeParserTests(unittest.TestCase):
         events = [
             {"kind": "event", "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "rs_1", "type": "reasoning"}}},
             {"kind": "event", "type": "response.reasoning_summary_text.delta", "event": {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "summary"}},
+            {"kind": "event", "type": "response.output_item.done", "event": {"type": "response.output_item.done", "item": {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "summary"}]}}},
         ]
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertTrue(turn.reasoning_present)
@@ -1054,6 +1055,149 @@ class ProbeParserTests(unittest.TestCase):
             probe.ANTHROPIC_FALLBACK_MODEL = original_fallback
         self.assertEqual(result["blocked"], "model changed between turns")
         self.assertEqual(result["evidence_model_scope"], "mixed")
+
+    def test_responses_text_done_must_match_reconstructed_text(self) -> None:
+        for event_type, item_type in (
+            ("response.output_text", "message"),
+            ("response.reasoning_summary_text", "reasoning"),
+        ):
+            events = [
+                {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "item_1", "type": item_type, "role": "assistant"}}},
+                {"kind": "event", "event": {"type": f"{event_type}.delta", "item_id": "item_1", "delta": "delta"}},
+                {"kind": "event", "event": {"type": f"{event_type}.done", "item_id": "item_1", "text": "different"}},
+            ]
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+            self.assertIn("stream_text_done_mismatch", turn.parse_errors)
+
+    def test_streamed_chat_content_requires_string_or_null(self) -> None:
+        events = [
+            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {"role": "assistant", "content": {"text": probe.SYSTEM_MARKER}}}]}},
+            {"kind": "event", "event": {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "done"},
+        ]
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, True))
+        self.assertIn("stream_content_invalid", turn.parse_errors)
+
+    def test_anthropic_text_blocks_require_strings(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": {"marker": probe.SYSTEM_MARKER}}],
+                "stop_reason": "end_turn",
+            }
+        )
+        self.assertIn("text_block_invalid", turn.parse_errors)
+
+    def test_responses_done_message_content_requires_list(self) -> None:
+        events = [
+            {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "msg_1", "type": "message", "role": "assistant"}}},
+            {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "msg_1", "type": "message", "role": "assistant", "content": None}}},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("message_content_invalid", turn.parse_errors)
+
+    def test_chat_tool_calls_require_list(self) -> None:
+        turn = probe._parse_chat_document(
+            {"choices": [{"index": 0, "message": {"role": "assistant", "content": "", "tool_calls": None}, "finish_reason": "stop"}]}
+        )
+        self.assertIn("tool_calls_invalid", turn.parse_errors)
+
+    def test_anthropic_message_delta_requires_object(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "sequence": 1, "type": "message_delta", "event": {"type": "message_delta", "delta": None}},
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("message_delta_invalid", turn.parse_errors)
+
+    def test_responses_reject_done_sentinel(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "done", "sequence": 1},
+            {"kind": "event", "sequence": 2, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": []}}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
+
+    def test_responses_output_index_must_remain_consistent(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message"}}},
+            {"kind": "event", "sequence": 2, "type": "response.output_text.delta", "event": {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1, "delta": "text"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", events))
+
+    def test_anthropic_tool_start_requires_empty_input_snapshot(self) -> None:
+        events = [
+            {"kind": "event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {"city": "Paris"}}}},
+            {"kind": "event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"city":"Shanghai"}'}}},
+        ]
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("stream_tool_input_snapshot_invalid", turn.parse_errors)
+
+    def test_final_markers_require_exact_tokens(self) -> None:
+        call = probe.ToolCall("call_1", "lookup_weather", {"city": "Shanghai"})
+        turn = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{probe.SYSTEM_MARKER}_BAD {probe.SYSTEM_SCOPE_OK}_BAD "
+                            "tool=lookup_weather;call_id=call_1;marker=WEATHER_OK_CORRUPTED"
+                        ),
+                    }
+                ],
+                "stop_reason": "end_turn",
+            }
+        )
+        checks = probe._validate_second(turn, ("lookup_weather",), stream=False, expected_calls=[call])["checks"]
+        self.assertFalse(checks["system_marker"])
+        self.assertFalse(checks["system_scope"])
+        self.assertFalse(checks["tool_outputs"])
+        self.assertFalse(checks["tool_output_call_pairs"])
+
+    def test_protocol_argument_wire_encodings_are_enforced(self) -> None:
+        anthropic = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": '{"city":"Shanghai"}'}],
+                "stop_reason": "tool_use",
+            }
+        )
+        responses = probe._parse_responses_document(
+            {"output": [{"type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": {"city": "Shanghai"}}], "status": "completed"}
+        )
+        chat = probe._parse_chat_document(
+            {"choices": [{"index": 0, "message": {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup_weather", "arguments": {"city": "Shanghai"}}}]}, "finish_reason": "tool_calls"}]}
+        )
+        self.assertIn("arguments_not_object", anthropic.parse_errors)
+        self.assertIn("arguments_not_json_string", responses.parse_errors)
+        self.assertIn("arguments_not_json_string", chat.parse_errors)
+
+    def test_transient_encrypted_reasoning_is_not_retained(self) -> None:
+        events = [
+            {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "rs_1", "type": "reasoning", "encrypted_content": "opaque"}}},
+            {"kind": "event", "event": {"type": "response.output_item.done", "item": {"id": "rs_1", "type": "reasoning", "summary": []}}},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertFalse(turn.reasoning_present)
+
+    def test_chat_usage_before_finish_is_rejected(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "event": {"choices": [], "usage": {"completion_tokens_details": {"reasoning_tokens": 1}}}},
+            {"kind": "event", "sequence": 1, "event": {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "tool_calls"}]}},
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("usage_before_finish", turn.parse_errors)
+        self.assertFalse(turn.reasoning_present)
 
 
 if __name__ == "__main__":
