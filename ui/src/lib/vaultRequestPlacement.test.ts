@@ -171,6 +171,18 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.unanchored).toEqual([]);
   });
 
+  it('resolves a native requester message id to its durable transcript row', () => {
+    const source = { ...message('source-user', '2026-07-30T10:00:00Z', 'user'), native_message_id: 'slack-source' };
+    const reply = message('owner-reply', '2026-07-30T10:01:00Z', 'agent');
+    const placed = placeVaultProvisionRequests(
+      [source, reply],
+      [request('native-late', 'provision', '2026-07-30T10:02:00Z', null, { message_id: 'slack-source' })],
+    );
+
+    expect(placed.byMessageId.get(reply.id)?.map((item) => item.id)).toEqual(['native-late']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('does not cross a later input when resolving from the requester message', () => {
     const source = message('source-user', '2026-07-30T10:00:00Z', 'user');
     const boundary = message('later-user', '2026-07-30T10:01:00Z', 'user');

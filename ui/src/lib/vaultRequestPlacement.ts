@@ -78,7 +78,9 @@ function inferReplyFromSourceMessage(
   sourceMessageId: string,
   requestTime: number,
 ): WorkbenchMessage | undefined {
-  const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
+  const sourceIndex = messages.findIndex(
+    (message) => message.id === sourceMessageId || message.native_message_id === sourceMessageId,
+  );
   if (sourceIndex < 0) return undefined;
   let replyBeforeRequest: WorkbenchMessage | undefined;
 

@@ -776,6 +776,7 @@ export const ChatPage: React.FC = () => {
           setHistoricalWindow(true);
           setJumpTarget(anchorMessageId);
         } else {
+          if (retained.detachedTail) setHistoricalWindow(true);
           setMessages((previous) => {
             return mergeAnchorWindow(
               previous,

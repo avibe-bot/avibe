@@ -77,17 +77,20 @@ export const mergeAnchorWindow = (
   anchorMessageId: string,
   maxMessages: number,
   followingTail: boolean,
-): { messages: WorkbenchMessage[]; replaced: boolean } => {
+): { messages: WorkbenchMessage[]; replaced: boolean; detachedTail: boolean } => {
   const merged = mergeById(existing, incoming);
-  if (merged.length <= maxMessages) return { messages: merged, replaced: false };
+  if (merged.length <= maxMessages) {
+    return { messages: merged, replaced: false, detachedTail: false };
+  }
 
   const retained = followingTail ? merged.slice(-maxMessages) : merged.slice(0, maxMessages);
+  const detachedTail = !followingTail;
   if (retained.some((message) => message.id === anchorMessageId)) {
-    return { messages: retained, replaced: false };
+    return { messages: retained, replaced: false, detachedTail };
   }
   // The capped union would discard the owning reply. Keep the coherent centered
   // response instead; the caller marks it historical and can scroll to the anchor.
-  return { messages: incoming, replaced: true };
+  return { messages: incoming, replaced: true, detachedTail: true };
 };
 
 // Union two row sets, deduped by id and re-sorted into durable order. Used by the

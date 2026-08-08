@@ -107,6 +107,7 @@ describe('mergeAnchorWindow', () => {
     expect(mergeAnchorWindow(existing, incoming, 'owner', 4, true)).toEqual({
       messages: incoming,
       replaced: true,
+      detachedTail: false,
     });
   });
 
@@ -117,6 +118,18 @@ describe('mergeAnchorWindow', () => {
     expect(mergeAnchorWindow(existing, incoming, 'owner', 4, false)).toEqual({
       messages: incoming,
       replaced: true,
+      detachedTail: true,
+    });
+  });
+
+  it('marks a newest-side trim historical even when the anchor is retained', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`head-${index}`, t(index)));
+    const incoming = [mk('head-0', t(0)), mk('new-tail', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'head-0', 4, false)).toEqual({
+      messages: existing,
+      replaced: false,
+      detachedTail: true,
     });
   });
 });
