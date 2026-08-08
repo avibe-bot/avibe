@@ -237,6 +237,29 @@ class ProbeParserTests(unittest.TestCase):
         missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0))
         self.assertIn("stream_reasoning_summary_events_missing", missing_turn.parse_errors)
 
+    def test_responses_stream_rejects_orphaned_reasoning_summary_done(self) -> None:
+        events = _response_reasoning_stream()
+        events.insert(
+            4,
+            {
+                "kind": "event",
+                "type": "response.reasoning_summary_text.done",
+                "event": {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": "rs_1",
+                    "output_index": 0,
+                    "summary_index": 1,
+                    "text": "",
+                },
+            },
+        )
+        for sequence, event in enumerate(events):
+            event["sequence"] = sequence
+            event["wire_sequence"] = sequence
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("stream_reasoning_summary_done_without_delta", turn.parse_errors)
+
     def test_responses_reasoning_opening_content_must_be_empty(self) -> None:
         valid = _response_reasoning_stream()
         self.assertTrue(probe._stream_order_ok("responses", valid))
@@ -366,7 +389,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_sparse_continuation_type(self) -> None:
         events = [
-            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "function": {"arguments": '{"city":'}}]}}]}},
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"arguments": '{"city":'}}]}}]}},
             {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0, "type": None, "function": {"arguments": '"Shanghai"}'}}]}}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
@@ -390,6 +413,56 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("tool_call_id_changed", turn.parse_errors)
         self.assertEqual(turn.tool_calls[0].call_id, "call_1")
+
+    def test_chat_stream_requires_tool_call_id_on_opening_fragment(self) -> None:
+        events = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "type": "function",
+                                        "function": {"name": "lookup_weather", "arguments": '{"city":'},
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": 0, "id": "call_1", "function": {"arguments": '"Shanghai"}'}}
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+            },
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("tool_call_id_invalid", turn.parse_errors)
 
     def test_tool_results_must_remain_paired_with_call_ids(self) -> None:
         calls = [
@@ -587,7 +660,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_indices_to_restart_each_chunk(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
+            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1"}, {"index": 1, "id": "call_2"}]}}]}},
             {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
@@ -2180,6 +2253,21 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("stream_thinking_opening_snapshot_invalid", turn.parse_errors)
         self.assertIn("stream_signature_opening_snapshot_invalid", turn.parse_errors)
+
+    def test_anthropic_thinking_rejects_deltas_after_signature(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}},
+            {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "thought"}}},
+            {"kind": "event", "sequence": 3, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
+            {"kind": "event", "sequence": 4, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "late"}}},
+            {"kind": "event", "sequence": 5, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "sequence": 6, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
+            {"kind": "event", "sequence": 7, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("stream_delta_after_signature", turn.parse_errors)
 
     def test_anthropic_message_start_requires_initial_snapshot(self) -> None:
         valid = [

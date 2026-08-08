@@ -411,6 +411,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     if protocol == "anthropic":
         open_blocks: set[int] = set()
         closed_blocks: set[int] = set()
+        signed_blocks: set[int] = set()
         last_start = -1
         message_stop = None
         message_started = False
@@ -471,6 +472,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 if block_index not in open_blocks:
                     return False
+                if block_index in signed_blocks:
+                    return False
+                delta = event.get("delta")
+                if isinstance(delta, dict) and delta.get("type") == "signature_delta":
+                    signed_blocks.add(block_index)
             elif event_type == "content_block_stop":
                 if message_delta_seen:
                     return False
@@ -510,7 +516,6 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         argument_done: set[str] = set()
         message_text_started: set[tuple[str, int]] = set()
         message_text_done: set[tuple[str, int]] = set()
-        reasoning_text_started: set[str] = set()
         reasoning_text_done: set[tuple[str, int]] = set()
         reasoning_summary_indexes: dict[str, set[int]] = {}
         reasoning_summary_text: dict[tuple[str, int], str] = {}
@@ -739,7 +744,6 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     if summary_key in reasoning_text_done:
                         return False
                     reasoning_summary_text[summary_key] = reasoning_summary_text.get(summary_key, "") + delta
-                    reasoning_text_started.add(item_id)
             elif event_type in {"response.output_text.done", "response.reasoning_summary_text.done"}:
                 if not response_started:
                     return False
@@ -765,7 +769,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 else:
                     summary_index = _stream_index(event.get("summary_index"))
                     summary_key = (item_id, summary_index if summary_index is not None else -1)
-                    if summary_index is None or item_id not in reasoning_text_started or summary_key in reasoning_text_done:
+                    if (
+                        summary_index is None
+                        or summary_key not in reasoning_summary_text
+                        or summary_key in reasoning_text_done
+                    ):
                         return False
                     reasoning_text_done.add(summary_key)
             elif event_type == "response.output_item.done":
@@ -920,6 +928,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     done_seen = False
     usage_seen = False
     seen_tool_indexes: set[int] = set()
+    tool_ids: dict[int, str] = {}
     completion_id: str | None = None
     for index, item in enumerate(events):
         if item.get("kind") == "done":
@@ -987,6 +996,14 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     if tool_index != len(seen_tool_indexes):
                         return False
                     seen_tool_indexes.add(tool_index)
+                    tool_id = call.get("id")
+                    if not isinstance(tool_id, str) or not tool_id:
+                        return False
+                    tool_ids[tool_index] = tool_id
+                elif "id" in call:
+                    tool_id = call.get("id")
+                    if not isinstance(tool_id, str) or not tool_id or tool_ids.get(tool_index) != tool_id:
+                        return False
                 raw_type = call.get("type")
                 if raw_type is not None and not isinstance(raw_type, str):
                     return False
@@ -1235,6 +1252,7 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
 
 def _parse_anthropic_stream(result: TransportResult) -> Turn:
     blocks: dict[int, dict[str, Any]] = {}
+    signed_blocks: set[int] = set()
     stop_reason: str | None = None
     stop_sequence: str | None = None
     errors: list[str] = []
@@ -1313,14 +1331,19 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 thinking = delta.get("thinking")
                 if block.get("type") != "thinking" or not isinstance(thinking, str):
                     errors.append("stream_delta_block_type_mismatch")
+                elif index in signed_blocks:
+                    errors.append("stream_delta_after_signature")
                 else:
                     block["thinking"] = block.get("thinking", "") + thinking
             elif delta_type == "signature_delta":
                 signature = delta.get("signature")
                 if block.get("type") != "thinking" or not isinstance(signature, str):
                     errors.append("stream_delta_block_type_mismatch")
+                elif index in signed_blocks:
+                    errors.append("stream_delta_after_signature")
                 else:
                     block["signature"] = block.get("signature", "") + signature
+                    signed_blocks.add(index)
             else:
                 errors.append("stream_delta_type_invalid")
         elif event_type == "message_start":
@@ -1803,9 +1826,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     continue
                 indexes.add(summary_index)
                 summary_key = (key, summary_index)
+                reasoning_by_summary[summary_key] = reasoning_by_summary.get(summary_key, "") + delta
                 if delta:
                     reasoning_by_item[key] = reasoning_by_item.get(key, "") + delta
-                    reasoning_by_summary[summary_key] = reasoning_by_summary.get(summary_key, "") + delta
             else:
                 delta = event.get("delta")
                 if not isinstance(delta, str):
@@ -1841,8 +1864,13 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     errors.append("summary_index_invalid")
                     reconstructed_text = ""
                 else:
-                    reconstructed_text = reasoning_by_summary.get((key, summary_index), "")
-                    reasoning_summary_done.add((key, summary_index))
+                    summary_key = (key, summary_index)
+                    if summary_key not in reasoning_by_summary:
+                        errors.append("stream_reasoning_summary_done_without_delta")
+                        reconstructed_text = ""
+                    else:
+                        reconstructed_text = reasoning_by_summary[summary_key]
+                        reasoning_summary_done.add(summary_key)
             else:
                     content_index = _stream_index(event.get("content_index"))
                     if content_index is None:
@@ -2108,6 +2136,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             if index is None:
                 errors.append("stream_index_invalid")
                 continue
+            opening_fragment = index not in calls
             call = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
             raw_type = raw.get("type")
             if index not in tool_type_seen:
@@ -2121,13 +2150,17 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             elif raw_type not in {None, "function"}:
                 errors.append("tool_call_type_invalid")
                 continue
-            if "id" in raw:
+            if opening_fragment:
+                raw_id = raw.get("id")
+                if not isinstance(raw_id, str) or not raw_id:
+                    errors.append("tool_call_id_invalid")
+                else:
+                    call["id"] = raw_id
+            elif "id" in raw:
                 if not isinstance(raw["id"], str) or not raw["id"]:
                     errors.append("tool_call_id_invalid")
-                elif call["id"] and call["id"] != raw["id"]:
+                elif call["id"] != raw["id"]:
                     errors.append("tool_call_id_changed")
-                else:
-                    call["id"] = raw["id"]
             function = raw.get("function", {})
             if not isinstance(function, dict):
                 errors.append("tool_function_invalid")
