@@ -110,9 +110,9 @@ the three whitelisted planning documents while K2 extends the engine survey. K3 
 | **K1 spec v3 sync** | codex | This docs-only PR: `model-hub.md`, binding §3/§8 updates here, and one dated addendum in `model-hub-tos-review.md`; no frozen-contract edit | — |
 | **K2 conversion fidelity** | codex | Preserve the recorded M0 measurements and go/no-go rows; record the 2026-08-08 owner waiver of an official-API attribution re-test and the accepted relay-attributed reasoning degradation without rewriting the evidence or adding product/UI scope | — |
 | **K3 final contracts + routing core** | codex | First implementation lane. Land the complete final-shape handoff below in one commit with its runtime consumers and tests; make per-model route policy/hops the only route structure; implement and own the sole §4.3 resolver, normalized OpenCode provider matching, the per-backend native Source singleton, Source-order enrollment versus effective-route adoption projections, fresh-install Gateway plus existing-install Direct onboarding, serializer completeness, exact-hop and supply-gap guards for every inventory mutation, vendor-specific subscription defaults, protocol observation, and the Source model shape plus all-inventory reasoning-efforts mutation | K1 |
-| **K4 channel runtime** | codex | Consume K3's sole §4.3 result for vendor-specific channel dispatch and execution; re-evaluate Source capability and runnability immediately before every hop; preserve silent native pre-stream same-turn Gateway takeover, post-stream interruption, and recovery; pass a turn-requested reasoning effort only under §4.3's exact capability-membership rule; honor Custom order without a hidden native pre-pass; implement hub-held subscription cross-backend eligibility, `allowed_origins` channel semantics, add-flow probe/model-discovery variants with all-exit credential cleanup, provenance/event consumers, and focused backend/scenario evidence; edits no frozen contract | K3 |
-| **K5 Sources + Gateway UI** | claude | Use the owner-approved v3 interaction baseline and add production-complete desktop/mobile states, then implement exactly two modules: Source add/detail probe and discovery, manual model add/remove plus editable reasoning-efforts lists on every inventory entry with no default item, backend order + per-model chain editing, state-only connectors, vendor-specific subscription custody guidance, disabled duplicate-native choice, distinct enrollment/adoption copy, pull-only takeover state, compact info-level conversion-fidelity copy with no per-hop warning, and the Claude hub-add warning matrix; remove consent/experimental UI; Configure Agents remains absent | K3; runtime wiring may land after K4 |
-| **K6 integration and GA evidence definition** | either | Check AC-1 through AC-27, scenario catalog, Incus behavior, EN/ZH user docs, and turn the K2 fidelity plus asset-mirror/platform research into proposed gates for owner approval. Does not declare GA or expand its scope | K2, K4, K5 |
+| **K4 channel runtime** | codex | Consume K3's sole §4.3 result for vendor-specific channel dispatch and execution; re-evaluate Source capability and runnability immediately before every hop; preserve silent native pre-stream same-turn Gateway takeover, post-stream interruption, and recovery; pass a turn-requested reasoning effort only under §4.3's exact capability-membership rule; honor Custom order without a hidden native pre-pass; implement hub-held subscription cross-backend eligibility, `allowed_origins` channel semantics, response-backed add-flow protocol observation, model discovery, all-exit credential cleanup, provenance/event consumers, and focused backend/scenario evidence; edits no final contract | K3 |
+| **K5 Sources + Gateway UI** | claude | Use the owner-approved v3 interaction baseline and add production-complete desktop/mobile states, then implement exactly two modules: Source add/detail probe and discovery, response-backed protocol observation with no normal protocol selector and one verified manual-hint fallback, manual model add/remove plus editable reasoning-efforts lists on every inventory entry with no default item, backend order + per-model chain editing, state-only connectors, vendor-specific subscription custody guidance, disabled duplicate-native choice, distinct enrollment/adoption copy, pull-only takeover state, compact info-level conversion-fidelity copy with no per-hop warning, and the Claude hub-add warning matrix; remove consent/experimental UI; Configure Agents remains absent | K3; runtime wiring may land after K4 |
+| **K6 integration and GA evidence definition** | either | Check AC-1 through AC-28, scenario catalog, Incus behavior, EN/ZH user docs, and turn the K2 fidelity plus asset-mirror/platform research into proposed gates for owner approval. Does not declare GA or expand its scope | K2, K4, K5 |
 
 **Merge order:** K1 first for product authority. K2 is independent evidence. K3 lands
 the final contracts, consumers, and tests atomically, then K4 and K5 may proceed in parallel at symbol/file boundaries; K6 closes
@@ -487,7 +487,7 @@ The contracts README's wording stays as written: it is still true, and still GA-
    canvas. For the v2 lanes that means **V6 01–04 and M01/M02** (§3); the frames
    this item originally named were V4's.
 
-## 8. Implementation acceptance criteria (AC-1–AC-27; v3 addenda through 2026-08-09)
+## 8. Implementation acceptance criteria (AC-1–AC-28; v3 addenda through 2026-08-09)
 
 **Current authority.** AC-1 through AC-21 retain their existing order and historical
 record. AC-22 onward are the binding v3 additions. Any contract change needed by these
@@ -664,7 +664,8 @@ text and AC-8's contract text as one criterion even though only one of them is f
 | **AC-24** | P1 | Show the sole subscription-routing warning when, and only when, Claude is added as a Hub-held Source | `model-hub.md` + Models UI/i18n + scenario evidence | K5 (flow and copy) + K6 (scenario); K3 owns any contract term if implementation proves one necessary | **settled 08-07 — informational warning, not consent** |
 | **AC-25** | P1 | Split subscription recommendations by vendor and disable duplicate native creation | `model-hub.md` + final source/OAuth/API contracts + add-flow UI evidence | **K3** (defaults + singleton guard) + K5 (guidance) + K6 (scenario) | **amended 08-08 — vendor defaults retained; 08-07 takeover notice withdrawn** |
 | **AC-26** | P1 | Complete Source add/detail operations: manual test, compatible model discovery, manual model add/remove, and editable per-model reasoning-efforts lists with no defaults | `model-hub.md` + final `source.schema.json`, probe/API/adapter contracts | **K3** (shape + routes) + K4 (adapter/service) + K5 (flows) + K6 (scenario) | **amended 08-08 — editable capability lists on all inventory entries; owner-vetoable scope** |
-| **AC-27** | P2 | Keep user-selected protocol authoritative | `model-hub.md` + final source/probe/API contracts | **K3** (contract) + K4 (negative behavior) + K5 (copy) + K6 (scenario) | **settled 08-07 afternoon — no auto-detect or backfill** |
+| **AC-27** | P1 | Make every stored protocol response-observed before Save and immutable afterward | `model-hub.md` + final source/probe/API/adapter contracts | **K3** (shape + API) + K4 (observation and immutability) + K5 (failure-only manual hint) + K6 (scenario) | **superseded 08-09 — response observation replaces 08-07 manual choice** |
+| **AC-28** | P1 | Converge protocol identity on exactly Anthropic, OpenAI Responses, and OpenAI Chat Completions | `model-hub.md` + final source/API/adapter/overlay mirrors | **K3** (atomic final contracts/consumers/tests) + K4 (transport) + K5 (failure copy only) + K6 (scenario) | **settled 08-09 — retain Chat Completions; no `openai_compatible` alias** |
 
 **Read the 「Owed by」 column as contract-then-implementation** (07-29, review round 5).
 For historical AC-1–AC-21, a cell beginning **L1 v3** records the lane that authored the
@@ -722,7 +723,7 @@ to AC-17** are not implementation work: lane L0 applied them to the blocks they 
 and they are listed so the repairs are traceable to the findings that caused them.
 
 The counts and completion statements above apply to the historical AC-1–AC-21
-inventory. The current ledger has **twenty-seven** criteria. AC-22 onward are
+inventory. The current ledger has **twenty-eight** criteria. AC-22 onward are
 owner-settled; only the explicitly owner-vetoable final-shape and vocabulary choices in
 the v3 spec remain open to veto, not to lane-level invention.
 
@@ -1300,10 +1301,12 @@ are reused. The list is editable on every inventory entry, including discovered 
 (owner-vetoable orchestrator scope ruling, 2026-08-08), because discovery commonly
 returns ids without effort metadata; editing it never changes the entry's `origin`.
 
-**Acceptance.** Add Source and Source details both expose a user-triggered connectivity
-test. The unsaved add-flow variant returns the same classified reachability and
-authentication outcomes as the saved-Source test without persisting a Source, changing
-backend order, or running an Agent turn. For an API-key test, success, authentication
+**Acceptance.** Add Source exposes one user-triggered submission that combines
+connectivity classification with response-backed protocol observation; Source details
+exposes a test of the stored adapter. The unsaved variant returns classified reachability,
+authentication, and a protocol only when a real upstream response proves it, without
+persisting a Source, changing backend order, or running an Agent turn. For an API-key
+test, success, authentication
 failure, adapter error, timeout, and cancellation each revoke the transient provisioned
 ref before the operation settles. A fault-injected revoke failure writes the existing
 durable pending-revocation record, and a reconstructed service reconciles it; no response
@@ -1336,22 +1339,47 @@ with an empty/no-default state, guarded removal, and mobile treatment. The contr
 follows `design.pen`; this spec does not prescribe it. Explanatory copy lives behind
 compact info affordances rather than permanent instruction blocks.
 
-### AC-27 — Keep the selected protocol authoritative
+### AC-27 — Observe protocol before Save and keep it immutable afterward
 
-**Owner ruling 2026-08-07 afternoon.** The user selects the protocol. Avibe does not
-auto-detect, suggest a replacement for, or backfill that choice.
+**Owner ruling 2026-08-09.** This supersedes the 2026-08-07 afternoon manual-choice
+ruling. The normal Add Source form has no protocol selector. A stored value must be
+traceable to a real response from that upstream; vendor and Base URL strings may order
+probes but cannot produce a saved conclusion.
 
-**Acceptance.** Connectivity testing invokes only the selected adapter and returns
-reachability/authentication status; model discovery invokes only that adapter and
-returns discovery status. Neither response may include a mutation of `protocol`, and
-no success or failure path writes a different value. Fixtures with an intentionally
-wrong selection prove that the stored protocol remains byte-for-byte unchanged after
-test, discovery, save, refresh, and restart. UI copy reports the operation outcome
-without claiming Avibe identified the correct protocol.
+**Acceptance.** The Add action reuses its connectivity interaction to observe protocol
+before the Source commits. A proven result is stored atomically with the Source. An
+ambiguous or failed result persists nothing and displays the only manual protocol
+entry point in the product: a one-time three-value hint whose selected adapter must
+itself receive a verifying upstream response before Save. Tests fail any vendor-table,
+Base-URL, timeout, or catch-all path that writes a protocol without that evidence.
+
+After Save, connectivity retest, discovery, refresh, credential/Base-URL replacement,
+and restart all preserve the stored value byte-for-byte and invoke only that adapter.
+Changing protocol requires a new Source. UI evidence shows no normal selector, an
+honest failure state, and the compact verified-hint fallback without inventing a
+default.
+
+### AC-28 — Converge the protocol vocabulary on three transports
+
+**Owner ruling 2026-08-09.** The final enum is exactly
+`anthropic | openai_responses | openai_chat`. `openai_chat` is the Chat
+Completions-compatible transport; no `openai_compatible` alias exists. Chat Completions
+stays because the platform API remains supported and many third-party/open-source
+upstreams expose no Responses API.
+
+**Acceptance.** Schemas, examples, adapter/runtime branches, OpenCode overlay, API
+payloads, UI types, locale keys, mirror registry, fixtures, and scenario data expose
+exactly the three values. `vibe/model_hub_runtime/config.py` and `client.py` contain one
+Chat path, and no save path or vendor metadata table synthesizes a protocol. Mechanical
+tests reject a fourth enum member and catch any `openai_compatible` occurrence outside
+the explicit absence assertion in this handoff.
 
 ### Post-consolidation review ledger — sealed 2026-08-08
 
 The orchestrator-authorized consolidation commit closes the constructive prose loop.
+The 2026-08-09 owner rulings explicitly reopen only the no-migration final shape,
+response-observed protocol, and enumerated 18-thread closeout; they do not repeal the
+seal for later review-generated scope.
 After that head, a review finding permits a normative-text edit only when it identifies
 two specific normative sentences that contradict each other. Every other actionable
 finding is copied verbatim into this ledger with its AC, implementation landing point,

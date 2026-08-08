@@ -153,7 +153,7 @@ a Source.
 ### 4.1 Supply — Sources (global assets, no ordering)
 
 Each source carries: kind (subscription | api_key), vendor, credential
-reference, protocol (anthropic | openai | openai_compatible …), an editable base
+reference, protocol (`anthropic | openai_responses | openai_chat`), an editable base
 URL (api_key kind; prefilled for known vendors), a **model list** it can supply
 (auto-discovered where possible, e.g. `/models`; manually extendable via custom
 model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
@@ -161,19 +161,23 @@ model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 
 The Source workflow is complete at both entry points:
 
-- **Manual connectivity test.** During Add Source and later from Source details, the
-  user may explicitly run a non-destructive test. The add-flow variant reuses the
-  contracted probe/refresh classification and reports reachability plus authentication
-  outcome in place; it does not save the Source, consume routing order, or run an
-  Agent turn. For an API key it may provision an engine credential only transiently:
+- **Connectivity and protocol observation.** The normal Add Source form asks only for
+  optional name, Base URL, and API key. Its user-triggered Add action reuses one
+  connectivity interaction to classify reachability/authentication and observe the
+  protocol before Save can commit; it adds no separate step and presents no protocol
+  selector. Source details retains an explicit test of the already stored protocol.
+  The unsaved variant does not save the Source, consume routing order, or run an Agent
+  turn. For an API key it may provision an engine credential only transiently:
   every success, failure, timeout, and cancellation path revokes that ref before the
   operation settles. A revoke failure enters the existing durable pending-revocation
   reconciliation rather than leaving an unreferenced credential untracked. No test
-  response exposes the ref. A failed test never blocks saving when the user chooses to
-  proceed; Save provisions the committed Source independently.
+  response exposes the ref. A reachability or authentication failure is reported
+  independently from protocol observation: Save may proceed only when that interaction
+  still produced response evidence for the protocol, and it provisions the committed
+  Source independently.
 - **Model discovery.** Third-party Anthropic-compatible and OpenAI-compatible Sources
   expose an explicit “Fetch models” action in both Add Source and Source details.
-  Discovery uses the selected protocol adapter, replaces only the discovered slice,
+  Discovery uses the observed-and-stored protocol adapter, replaces only the discovered slice,
   preserves manual entries, and renders added, removed, unchanged, and failed results.
 - **Model inventory and manual entries.** A user may add and remove exact manual model
   ids. Every model-list item has
@@ -196,11 +200,25 @@ The Source workflow is complete at both entry points:
   ruling dated 2026-08-08: discovery endpoints commonly return only ids, so a
   discovered-only immutable list would leave the capability permanently undeclarable.
 
-The user-selected `protocol` is authoritative. Neither the connectivity test nor model
-discovery guesses, changes, or backfills it; a wrong choice is reported as the resulting
-reachability or authentication failure under that adapter and remains the user's
-configuration. The product does not claim to diagnose that the protocol choice itself
-was wrong.
+**Protocol observation (owner ruling 2026-08-09, superseding AC-27's 2026-08-07
+manual-choice ruling).** Every stored `protocol` is traceable to a real response from
+that upstream before Save. Avibe never infers the value from vendor name or Base URL;
+known-vendor metadata may order the three probes but cannot produce a conclusion or a
+save-time default. When observation cannot distinguish a protocol, the failure state
+honestly asks the user for a one-time manual hint among the same three values. That is
+the only product surface that names protocol choices, and Avibe must verify the hinted
+adapter with a real response before saving it. A failed observation therefore stores
+nothing rather than guessing.
+
+Once saved, `protocol` is immutable for that Source. Connectivity retest, model
+discovery, refresh, credential replacement, Base URL replacement, and restart all use
+the stored adapter and never rewrite it. Changing protocol means creating a new Source,
+so a later operation cannot silently reinterpret existing inventory or Custom hops.
+
+`openai_chat` is the one Chat Completions-compatible transport; there is no separate
+`openai_compatible` value because both names drove the same engine section and endpoint.
+Chat Completions remains supported: OpenAI has not retired the platform API, and many
+third-party and open-source upstreams expose it as their only compatible surface.
 
 A source carries **no position, rank, or priority field anywhere** — not in
 config, not in the API, not in the UI. The 来源 list is an asset inventory sorted
@@ -1004,12 +1022,15 @@ Required interaction rules:
   Claude + Gateway branch shows §4.1's one-sentence warning; it is informational, not
   a consent flow. When a backend already has its singleton native Source, its native
   choice is disabled rather than creating an alias for the same CLI login.
-- Add Source and Source details both expose the §4.1 connectivity test and compatible
-  model discovery. Results stay in the current flow and use compact status plus an
+- Add Source exposes §4.1's combined connectivity/protocol observation without a normal
+  protocol control; Source details tests the stored protocol. Both surfaces expose
+  compatible model discovery. Results stay in the current flow and use compact status plus an
   info affordance for explanation; the page does not grow permanent instructional
   paragraphs. Every inventory model exposes an editable per-model `reasoning_efforts`
   list beside the exact id. The list has no default item or selected state; the control
-  form follows the owner-approved `design.pen` baseline and is not prescribed here.
+  form follows the owner-approved `design.pen` baseline and is not prescribed here. A
+  protocol selector appears only inside an observation-failure state and its hint still
+  requires a successful response before Save.
 - Compatibility detail for converted or cross-vendor supply stays behind a compact
   info affordance: functionality is supported while reasoning content may degrade.
   There is no per-hop warning or alert treatment.
@@ -1120,10 +1141,10 @@ one pinned hop it receives.
   upstream model for a foreign vendor. Cross-vendor supply is explicit through a
   custom Source + model hop; that hop may use an API key or a hub-held subscription
   and requires no additional warning.
-- **No protocol auto-detection or backfill.** The protocol selected by the user is
-  authoritative. Connectivity tests report only reachability and authentication under
-  that adapter; discovery reports only model-list success or failure. Neither changes
-  the selected protocol or proposes a stored replacement.
+- **No protocol guessing or post-save backfill.** A stored protocol comes from a real
+  pre-save upstream response, never a vendor/Base-URL string heuristic. If observation
+  fails, the product asks once for a manual hint and verifies it rather than persisting
+  a guess. No later operation changes the stored value.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 - No v3 Configure Agents module (§5), runtime plugin UI, or GA scope beyond the
@@ -1177,7 +1198,9 @@ directions into questions that later lanes must answer before writing mechanical
       backend has at most one native Source.
 - [ ] §4.1 defines manual connectivity testing, model discovery, manual model
       add/remove, and editable `reasoning_efforts` lists for every inventory entry;
-      protocol choice stays authoritative and unchanged.
+      stored protocol is response-observed before Save and immutable afterward.
+- [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
+      Completions, and shows protocol choices only after observation cannot decide.
 - [ ] §4.2 keeps own-vendor subscription supply first in the vendor-recommended form
       and never reorders a custom backend order or custom model chain.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
