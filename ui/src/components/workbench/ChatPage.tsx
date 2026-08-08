@@ -405,9 +405,12 @@ export const ChatPage: React.FC = () => {
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
+  const [vaultResolvedSourceIds, setVaultResolvedSourceIds] = useState<Map<string, string>>(
+    () => new Map(),
+  );
   const provisionPlacement = useMemo(
-    () => placeVaultProvisionRequests(messages, vaultRequests),
-    [messages, vaultRequests],
+    () => placeVaultProvisionRequests(messages, vaultRequests, vaultResolvedSourceIds),
+    [messages, vaultRequests, vaultResolvedSourceIds],
   );
   const provisionPlacementRef = useLatestRef(provisionPlacement);
   const vaultRequestsRef = useLatestRef(vaultRequests);
@@ -831,6 +834,14 @@ export const ChatPage: React.FC = () => {
         vaultAnchorRetryAttemptsRef.current.delete(fetchKey);
         vaultAnchorRetryExhaustedRef.current.delete(fetchKey);
         vaultAnchorRetryWaitingRef.current.delete(fetchKey);
+        if (res.anchor_id) {
+          setVaultResolvedSourceIds((previous) => {
+            if (previous.get(request.id) === res.anchor_id) return previous;
+            const next = new Map(previous);
+            next.set(request.id, res.anchor_id);
+            return next;
+          });
+        }
         const incoming = res.messages.filter(isTranscriptMessage);
         if (incoming.length === 0) {
           // A Turn anchor can be known before its initial Delivery is accepted.
@@ -1379,6 +1390,7 @@ export const ChatPage: React.FC = () => {
     // loading state until refresh() resolves the new session.
     setSession(null);
     setMessages([]);
+    setVaultResolvedSourceIds(new Map());
     vaultAnchorFetchesRef.current.clear();
     vaultAnchorRetryAttemptsRef.current.clear();
     vaultAnchorRetryExhaustedRef.current.clear();
