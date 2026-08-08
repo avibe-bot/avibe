@@ -1988,7 +1988,6 @@ export const ChatPage: React.FC = () => {
     // in-flight around-fetch — dropping the fetched window so ``msg`` never
     // scrolls/clears) (Codex P2).
     if (messagesRef.current.some((m) => m.id === targetMsg)) {
-      deepLinkWindowHandledRef.current = true;
       setJumpTarget(targetMsg);
       startHighlight(targetMsg);
       clearParam();
