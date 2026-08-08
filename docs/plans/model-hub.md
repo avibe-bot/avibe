@@ -1,14 +1,14 @@
 # Model Hub — Product Spec
 
-Status: **v3.0** (2026-08-08) · supersedes v2.0 (2026-07-29) outright
-Owner decisions incorporated through: 2026-08-08 (+08:00)
+Status: **v3.0** (2026-08-09) · supersedes v2.0 (2026-07-29) outright
+Owner decisions incorporated through: 2026-08-09 (+08:00)
 Design source: `../avibe-docs/design.pen`. The V6 frames remain the visual baseline;
 the v3 interaction draft for the two-module information architecture is owner-approved
 as the implementation baseline (2026-08-07 afternoon). The design lane still owes
 production-complete desktop/mobile states.
-Contracts: `model-hub-contracts/` at **FROZEN v4 (targeted)**. This docs-only revision
-does not edit them; `model-hub-implementation.md` records the coordinated v5 revision
-set for the first implementation lane.
+Contracts: `model-hub-contracts/` remain unchanged by this docs-only revision.
+`model-hub-implementation.md` records the exhaustive final-shape handoff that the first
+implementation lane must land atomically with every contract consumer and test.
 
 ## 0. Revision note — why v3 replaces v2
 
@@ -28,12 +28,12 @@ formally supersedes v2 §9's “No per-model ordering” non-goal on 2026-08-07.
 the only normative resolution algorithm for both policies; no mapping pipeline or
 second derivation survives elsewhere in this document.
 
-Existing fixed-menu `mappings` are absorbed rather than preserved beside the new
-chain. A mapping's one target becomes the degenerate custom-chain case in which every
-materialized hop carries that same `model_id`; richer chains may choose a different
-model per source. The atomic evolution proposal and its rationale are in §4.6 and are
-**owner-vetoable (2026-08-07)**. The feature remains pre-GA and default-off, so v3 does
-not justify a permanent compatibility layer or two live routing authorities.
+The final product has no fixed-menu `mappings` structure beside route chains. A
+single-target choice is simply the degenerate Custom-chain case in which the hops use
+the same `model_id`; richer chains may choose a different model per Source. The final
+shape and its rationale are in §4.6 and are **owner-vetoable (2026-08-07)**. Model Hub
+has not shipped, so no compatibility layer, data conversion, or second routing
+authority is part of the implementation.
 
 **Subscription ruling (owner 2026-08-07, amended later the same day).** Recommended
 custody is vendor-specific. Claude subscriptions stay in Claude Code's local login by
@@ -51,9 +51,8 @@ Gateway-held subscription may participate in a cross-vendor custom chain. The on
 warning is one factual sentence shown when the user chooses the Claude-as-Gateway
 path: Anthropic explicitly prohibits it, enforces server-side blocks, real account
 bans have occurred, and the path may fail intermittently. Native Claude, ChatGPT in
-either channel, and cross-vendor routing show no warning. The
-`subscription_hub_experimental` flag and per-source consent record are retired from
-the specification; implementation cleanup belongs to the v5 batch.
+either channel, and cross-vendor routing show no warning. No experimental flag or
+per-source consent record exists in the final specification.
 
 **Surface ruling (owner 2026-08-07).** The Models page has two product modules:
 Sources and **Gateway**. Sources answer what upstream access the user owns. Gateway is
@@ -123,7 +122,7 @@ operations console.
 | Backend-wide fallback order | 来源顺序 | Source order | Ordered subset of sources eligible for one backend; never product-global |
 | Per-model route | 路由链 | Route chain | Ordered hops for one `(backend, menu model)`; every hop is an exact Source + upstream model pair |
 | Route policy | 跟随来源顺序 / 自定义链 | Follow source order / Custom chain | §4.3 resolves both policies; Custom is user-owned and frozen |
-| Per-backend path | 网关 / 直连 | Gateway / Direct | Wire values remain `hub | direct` until the v5 contract revision; Gateway is the default product path, Direct is the diagnostic/self-managed path |
+| Per-backend path | 网关 / 直连 | Gateway / Direct | Wire values are `hub | direct`; Gateway is the default product path, Direct is the diagnostic/self-managed path |
 | Per-backend health rollup | 供给状态 | Supply status | 正常 / 降级 / 暂时全部在冷却 / 无可用来源 (§4.5) |
 
 The remaining vocabulary rulings below are **owner-vetoable (2026-08-07)**; they
@@ -184,7 +183,7 @@ The Source workflow is complete at both entry points:
   effort values that the upstream model supports; it does not select one value. An
   empty list declares none, and no entry receives a default, selected value, or
   prefilled value. Existing optional `display_name` and `discovered_at` metadata remain
-  part of the entry and survive migration and refresh. This capability list belongs to
+  part of the entry and survive refresh. This capability list belongs to
   Source model inventory, not the deferred Configure Agents module: it describes which
   invocation values that exact upstream model accepts, not which model or effort an
   Agent selects.
@@ -304,21 +303,13 @@ Claude Hub Source never outranks it merely because it was added later.
 
 Two obligations follow, and both are contract, not implementation detail:
 
-- **Creation order must be persisted**, as immutable `created_at` on the source
+- **Creation order must be persisted**, as required immutable `created_at` on the source
   (`source.schema.json`). Insertion order in the config file is not a contract and
   the sources array is explicitly unordered (`api.md`), so without a stored stamp
   rules 1 through 4 are not reproducible.
-- **Rule 5 is not decoration**, and it needs one companion rule to finish the job.
-  Two sources imported in one migration batch can legitimately share a timestamp, and
-  the id tie-break settles those. It does *not* settle how a record predating
-  `created_at` compares to a stamped one — a tie-break orders equals, and null is not
-  equal to a timestamp. The missing half is therefore stated normatively in
-  `source.schema.json`: **an absent stamp sorts before every present one** (the record
-  is older than the field itself), ties by id, and the serializer backfills such
-  records with a constant epoch stamp rather than the upgrade time, so the backfill
-  reproduces the order the user was already shown instead of reshuffling it. With both
-  halves the sort is total over every mix of stamped, unstamped and same-stamped
-  sources, so 跟随推荐 is neither ambiguous nor liable to drift on upgrade.
+- **Rule 5 is not decoration.** Sources created or imported in the same operation may
+  share a timestamp; Source `id` orders those ties. Every Source is stamped before it
+  becomes visible, so the two keys define a total order without relying on array order.
 
 **Routing configuration is per backend and per model; health is source-global.** Quota
 and reachability belong to the Source, not the Agent that touched it. §4.3 is the only
@@ -434,8 +425,8 @@ projection of server truth. This pays down a debt the v1 lanes escalated and nev
 closed — two independent implementations of one rule, free to drift silently.
 
 `reason_key` is an i18n key, so the drawer can explain structural ineligibility.
-The v5 vocabulary removes `consent_required` and `opencode_api_key_only`; Hub-held
-subscriptions are eligible for OpenCode, and risk copy is not eligibility. Native
+The final vocabulary contains neither `consent_required` nor `opencode_api_key_only`;
+Hub-held subscriptions are eligible for OpenCode, and risk copy is not eligibility. Native
 wrong-client use retains `subscription_wrong_client`.
 
 **Server-validated invariants** (07-29, review round 6). Eligibility is not the only
@@ -887,9 +878,10 @@ coverage widens.
 **That interface covers Gateway-mode turns** (07-29, review round 8): a `served` record
 requires a `source_id` matching `^src_`, and a Direct-mode turn runs from native
 configuration with no `Source` row to name — so 「每个回合都有记录」 is satisfiable
-inside Gateway mode and unsatisfiable outside it without fabricating a source. Existing users
-stay in Direct until they migrate (§6), which makes this the common case rather than
-an edge one, so it is named here instead of left to the implementer to discover.
+inside Gateway mode and unsatisfiable outside it without fabricating a source. Existing
+installations with no Model Hub state start in Direct until the user explicitly switches
+that backend (§6), which makes this a first-class onboarding case rather than an edge
+case left to the implementer to discover.
 Whether a Direct turn gets a no-source provenance representation or the route answers
 「此回合无网关记录」 is an implementation requirement recorded as **AC-1** — a question
 about the record and the route only, since 14:03 left no affordance to render it.
@@ -922,84 +914,29 @@ reconstructible by appending. That is a shape decision rather than a validation 
 it makes 「两个成功者」, 「成功者不在最后」 and 「摘要指向列表里没有的来源」 impossible to
 write down, instead of invariants prose asks every implementer to respect.
 
-### 4.6 Route-policy storage, mutation, and migration
+### 4.6 Route-policy storage and mutation
 
-§4.3 is the sole normative derivation. This section defines only its persisted input,
-mutation boundaries, and v4-to-v5 migration. For each `(backend, menu model)`, store
-either `{policy: "follow"}` or `{policy: "custom", hops: [{source_id, model_id}, ...]}`.
-Custom hop order and exact pair identity are user-owned. Writes use the capability
-predicate defined in §4.3 phase 1; reads return the §4.3 result and never project a
-second chain here.
+§4.3 is the sole normative derivation. This section defines only its persisted input
+and mutation boundary. Route-policy storage is sparse: for each `(backend, menu model)`,
+an absent row means `{policy: "follow"}`. A stored row is either `{policy: "follow"}`
+or `{policy: "custom", hops: [{source_id, model_id}, ...]}`. A newly introduced bundled
+menu model therefore follows the backend Source order automatically, while an existing
+Custom row remains untouched. Custom hop order and exact pair identity are user-owned.
+Writes use the capability predicate defined in §4.3 phase 1; reads return the §4.3
+result and never project a second chain here.
 
-**Mapping evolution proposal — owner-vetoable (2026-08-07).** Contract v5 removes
-`mappings` and `PUT /api/models/agents/<backend>/mappings`. Before changing any
-eligibility rule, `allowed_origins` interpretation, or backend Source order, the
-upgrade snapshots each backend's v4 resolver-effective Source order, eligibility
-decisions, advertised models, and **effective chain for every menu model**, including
-models with no enabled mapping. Legacy rows are then grouped by `builtin_id`. The v4
-resolver uses the first enabled row in stored order, so that resolver-effective row
-alone defines the group's target; later enabled duplicates are ignored as shadowed and
-do not overwrite it. This normalization preserves current behavior even for duplicate
-rows that the old write path accepted.
+There is no `mappings` field, mapping mutation, mapping resolver, or mapping diagnostic
+in the final product. A single-target override is a Custom chain whose hops use that
+target `model_id`; it is not a parallel data structure. This is smaller and more honest
+than coexistence: one route owner answers both “which Source?” and “which upstream
+model?”, one §4.3 result powers runtime and UI, and every validation applies to one
+shape. Keeping mappings would preserve an implicit Source choice beside an explicit
+Source choice and make precedence depend on which consumer happened to read first.
+This final-shape decision is **owner-vetoable (2026-08-07)**.
 
-Each resolver-effective mapping is then materialized into one Custom chain by walking
-that **v4 snapshot** and emitting `(source_id, target_model_id)` for every Source the
-v4 resolver would have considered for that target. All hops therefore share one target
-model while retaining exactly the old fallback supplier set: a Hub-held subscription
-made newly eligible by v5 does not enter a migrated Custom chain until the user edits
-that route. The legacy behavior is a single-target, potentially multi-hop chain, and it
-is one-hop only when exactly one Source can supply the target. If an effective mapping
-cannot produce any valid hop, the upgrade fails closed and asks for configuration
-review; it never falls through to a shadowed duplicate or keeps a live mapping beside
-an empty chain.
-
-A menu model with **no enabled mapping is not assumed safe to convert to Follow**.
-Migration records the §4.3 Follow result from the same snapshot and compares exact ordered pairs
-with the captured v4-effective chain. If they are identical, the route becomes
-`follow`; if they differ, migration materializes the captured v4 chain as `custom`.
-This preserves, for example, a v4 fixed-menu route that admitted a foreign-vendor
-Source by literal model identity even though v5 Follow deliberately filters that
-Source. An empty v4 chain follows the same comparison rule. No v5 eligibility or alias
-change is allowed to alter the baseline being compared.
-
-The same config conversion preserves every v4 Source model entry. It renames required
-`provenance` to `origin` without changing `discovered`/`manual` and converts the legacy
-scalar effort capability into required `reasoning_efforts`: missing or `null` becomes
-`[]`, while `"x"` becomes `["x"]`. Optional `display_name` and `discovered_at` are
-preserved exactly. A manual entry's `discovered_at` remains `null`; no model entry is
-dropped.
-
-The upgrade also converts the two persisted diagnostic stores before publishing v5.
-Every attempt slot in `model_hub_turn_provenance.json` replaces `via_mapping` with the
-non-lossy pair `route_policy: "legacy"` plus `requested_model_changed` derived from
-the recorded `requested_model_id` and `resolved_model_id`: it is `true` only when both
-ids are present and differ, and is `false` when they are equal or no resolved id was
-recorded. The migration never copies `via_mapping`. A historical record cannot be
-relabeled Follow or Custom from today's config,
-because the route may have changed since that turn; `legacy` states that evidence gap
-instead of inventing attribution. Migrated provenance records and converted resolution
-events carry `migrated_from_contract_version: 4`; v5 schemas permit `legacy` only with
-that discriminator and forbid the discriminator on newly written rows. New v5
-provenance records permit only `follow` or `custom`. Every
-`mapping_applied` / `mapping` row in `model_hub_resolution_events.json` becomes the v5
-`route_model_rewritten` / `configured_route` equivalent, preserving its id, timestamp,
-backend, model, billing/severity fields, and recorded human strings. K3 must stage and
-validate the converted config and both bounded stores, then publish them through one
-recoverable upgrade transaction. A crash at any commit point resumes to all-v5 or
-restores all-v4; readers never observe a mixed version, and historical feed and billing
-attribution are never deleted. Only after this transaction commits are legacy mapping
-rows removed. These retained diagnostics are historical evidence, not a second routing
-authority.
-
-This replacement is smaller and more honest than coexistence: one route owner answers
-both “which Source?” and “which upstream model?”, one §4.3 result powers runtime and UI,
-and every future validation applies to one shape. Keeping mappings would preserve an
-implicit Source choice beside an explicit Source choice, making precedence and display
-truth depend on which consumer happened to read first.
-
-The chain query remains
-`GET /api/models/agents/<backend>/chain?model=<id>`. Contract v5 adds the matching
-mutation on the same resource: `PUT` with `{policy: "follow"}` or
+The chain resource is
+`GET /api/models/agents/<backend>/chain?model=<id>`, with a matching `PUT` carrying
+`{policy: "follow"}` or
 `{policy: "custom", hops: [{source_id, model_id}, ...]}`. The read projection carries
 the policy plus the §4.3 result.
 
@@ -1093,16 +1030,18 @@ reasoning effort, and related model preferences to Agent definitions from this p
 area. v3 does not define its information architecture, data contract, controls, or
 delivery lane. It must not appear as a placeholder third module in the v3 UI.
 
-## 6. Modes & migration
+## 6. Modes & onboarding
 
 - **Gateway (wire value `hub`, default)**: every backend on a fresh installation starts
-  in Gateway mode. An in-place upgrade preserves each persisted backend mode byte-for-
-  byte, including `direct`; it never silently flips an existing user. Avibe injects
+  in Gateway mode. An existing installation with no Model Hub state starts in Direct;
+  each backend moves to Gateway only after the user explicitly switches it in the
+  Models page. This onboarding rule prevents a silent routing change for existing
+  users without introducing an internal contract-conversion path. Avibe injects
   runtime-only configuration into processes
   it launches (env vars for Claude Code; `-c` overrides for Codex app-server;
   `OPENCODE_CONFIG` overlay for OpenCode, gateway-config hash tracked for
   long-lived `opencode serve`). Native user configs are never written.
-- **Direct (legacy, kept, not recommended)**: current behavior preserved —
+- **Direct (supported diagnostic/self-managed path)**: current behavior —
   per-backend native config editing (auth tabs, API key + base URL, writes to
   `settings.json` etc.), useful for diagnostics and self-managed setups.
 - Backends can differ in mode; the Gateway module surfaces the mode per backend.
@@ -1211,23 +1150,19 @@ directions into questions that later lanes must answer before writing mechanical
    and smoke evidence for every platform the current runtime contract lists. Decide
    the minimum repeatable evidence and unsupported-host behavior. Do not add platforms
    or platform-specific product promises here.
-4. **Coordinated contract v5 and implementation batch.** The frozen v4 files remain
-   untouched by v3. The implementation plan's v5 revision-set handoff is exhaustive
-   for chain, subscription-channel, eligibility, event/provenance, and retired-consent
-   effects; its first implementation lane freezes them once before downstream work.
-5. **Configure Agents — deferred.** First-class user-added menu models, reasoning
+4. **Configure Agents — deferred.** First-class user-added menu models, reasoning
    effort, and Agent-definition configuration belong to the deferred third module.
    Its architecture and contract are intentionally absent from v3.
-6. **Later diagnostics and accounting.** Request-log UI, fallback spend attribution,
+5. **Later diagnostics and accounting.** Request-log UI, fallback spend attribution,
    and quota projection remain post-v3 candidates. Each needs evidence from existing
    provenance/usage data before it becomes a product promise.
-7. **Remaining UI evidence.** The approved v3 interaction draft is the implementation
+6. **Remaining UI evidence.** The approved v3 interaction draft is the implementation
    baseline. The design lane still owes complete desktop/mobile frames, empty and
    failure states, Dark variants, and English copy;
    a product re-review is required only if those artifacts change the approved
    information architecture. Rejected V5 explorations remain history until separately
    deleted.
-8. **Engine-owned OAuth file import.** Keep `controlled_import` deferred until a
+7. **Engine-owned OAuth file import.** Keep `controlled_import` deferred until a
    concrete adapter capability can preserve refresh semantics; explicit OAuth add is
    the only hub-held subscription path in v3.
 
@@ -1249,10 +1184,9 @@ directions into questions that later lanes must answer before writing mechanical
       native CLI's sanctioned-backend binding.
 - [ ] §4.3 is the document's only resolution derivation, including normalized
       OpenCode matching and per-hop live runnability checks; §4.6 only stores and
-      migrates exact `(source_id, model_id)` pairs.
-- [ ] The owner-vetoable mapping evolution is acceptable: materialization from the v4
-      resolver snapshot preserves every existing supplier and duplicate-row semantics;
-      config plus both diagnostic stores upgrade recoverably; no dual routing authority.
+      mutates exact `(source_id, model_id)` pairs.
+- [ ] The owner-vetoable final route shape is acceptable: sparse route rows default to
+      Follow, Custom owns exact pairs, and no mapping or dual routing authority exists.
 - [ ] §4.5 keeps state source-global, status live-derived, and every successful
       takeover silent; terminal in-turn errors plus Model Gateway/Usage pull state
       remain available.
@@ -1265,5 +1199,5 @@ directions into questions that later lanes must answer before writing mechanical
       automatic model invention out of Follow policy.
 - [ ] §10 records the owner-waived official-API fidelity re-test, preserves M0 evidence,
       and does not expand GA scope.
-- [ ] The implementation plan appends AC-22 through AC-27 and assigns the complete
-      frozen-contract impact to one coordinated v5 lane.
+- [ ] The implementation plan appends AC-22 onward and gives the first implementation
+      lane an exhaustive final-shape contract/consumer/test handoff for one atomic commit.
