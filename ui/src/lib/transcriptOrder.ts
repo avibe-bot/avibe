@@ -70,6 +70,26 @@ export const transcriptWindowsOverlap = (
   return right.some((message) => leftIds.has(message.id));
 };
 
+/** Merge a fetched anchor window without trimming away the row it is meant to reveal. */
+export const mergeAnchorWindow = (
+  existing: WorkbenchMessage[],
+  incoming: WorkbenchMessage[],
+  anchorMessageId: string,
+  maxMessages: number,
+  followingTail: boolean,
+): { messages: WorkbenchMessage[]; replaced: boolean } => {
+  const merged = mergeById(existing, incoming);
+  if (merged.length <= maxMessages) return { messages: merged, replaced: false };
+
+  const retained = followingTail ? merged.slice(-maxMessages) : merged.slice(0, maxMessages);
+  if (retained.some((message) => message.id === anchorMessageId)) {
+    return { messages: retained, replaced: false };
+  }
+  // The capped union would discard the owning reply. Keep the coherent centered
+  // response instead; the caller marks it historical and can scroll to the anchor.
+  return { messages: incoming, replaced: true };
+};
+
 // Union two row sets, deduped by id and re-sorted into durable order. Used by the
 // BATCH paths (initial snapshot, reconcile, older-page load), so a fast agent
 // result that arrives over /api/events *before* its prompt row still lands in the

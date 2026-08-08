@@ -29,9 +29,10 @@ const VaultProvisionDialogContext = createContext<VaultProvisionDialogContextVal
 export const VaultProvisionDialogProvider: React.FC<{
   requests: VaultRequest[];
   onResolved: () => void;
+  onProvisionRequestHidden?: (requestId: string) => void;
   disabled?: boolean;
   children: ReactNode;
-}> = ({ requests, onResolved, disabled = false, children }) => {
+}> = ({ requests, onResolved, onProvisionRequestHidden, disabled = false, children }) => {
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [dismissedRequestIds, setDismissedRequestIds] = useState<Set<string>>(() => new Set());
   const openProvisionDialog = useCallback((request: VaultRequest) => {
@@ -39,11 +40,12 @@ export const VaultProvisionDialogProvider: React.FC<{
   }, []);
   const dismissProvisionDialog = useCallback((requestId: string) => {
     setActiveRequestId(null);
+    onProvisionRequestHidden?.(requestId);
     setDismissedRequestIds((current) => {
       if (current.has(requestId)) return current;
       return new Set(current).add(requestId);
     });
-  }, []);
+  }, [onProvisionRequestHidden]);
   const activeRequest = useMemo(
     () => requests.find((request) => request.id === activeRequestId && requestType(request) === 'provision'),
     [activeRequestId, requests],
@@ -63,6 +65,7 @@ export const VaultProvisionDialogProvider: React.FC<{
           request={activeRequest}
           onCancel={() => dismissProvisionDialog(activeRequest.id)}
           onCreated={() => {
+            onProvisionRequestHidden?.(activeRequest.id);
             setActiveRequestId(null);
             onResolved();
           }}

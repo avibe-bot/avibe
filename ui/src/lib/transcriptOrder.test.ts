@@ -4,6 +4,7 @@ import type { WorkbenchMessage } from '../context/ApiContext';
 import {
   byCreatedThenId,
   isTranscriptWindowDisjoint,
+  mergeAnchorWindow,
   mergeById,
   insertMessageOrdered,
   messageOrderTimeMs,
@@ -95,6 +96,28 @@ describe('transcriptWindowsOverlap', () => {
     expect(transcriptWindowsOverlap([mk('a', t(1)), mk('b', t(2))], [mk('b', t(2)), mk('c', t(3))])).toBe(true);
     expect(transcriptWindowsOverlap([mk('a', t(1))], [mk('b', t(2))])).toBe(false);
     expect(transcriptWindowsOverlap([], [mk('b', t(2))])).toBe(false);
+  });
+});
+
+describe('mergeAnchorWindow', () => {
+  it('keeps the owning reply when a following-tail trim would drop it', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`tail-${index}`, t(index + 4)));
+    const incoming = [mk('owner', t(1)), mk('tail-0', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'owner', 4, true)).toEqual({
+      messages: incoming,
+      replaced: true,
+    });
+  });
+
+  it('keeps the owning reply when trimming from the newest side', () => {
+    const existing = Array.from({ length: 4 }, (_, index) => mk(`head-${index}`, t(index)));
+    const incoming = [mk('head-3', t(3)), mk('owner', t(4))];
+
+    expect(mergeAnchorWindow(existing, incoming, 'owner', 4, false)).toEqual({
+      messages: incoming,
+      replaced: true,
+    });
   });
 });
 

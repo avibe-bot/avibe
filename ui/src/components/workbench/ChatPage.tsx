@@ -49,6 +49,7 @@ import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import {
   isTranscriptWindowDisjoint,
+  mergeAnchorWindow,
   mergeById,
   insertMessageOrdered,
   transcriptWindowsOverlap,
@@ -186,6 +187,7 @@ export const ChatPage: React.FC = () => {
   // re-render / visibility gap-recovery can't re-trigger the jump.
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkMessageId = searchParams.get('msg');
+  const deepLinkMessageIdRef = useLatestRef(deepLinkMessageId);
   // A "show me the chat" navigation carries ?view=chat (see sessionChatPath({ showChat:
   // true })) — a general signal that this navigation must leave Show Page mode.
   const showChatSignal = searchParams.get('view') === 'chat';
@@ -397,6 +399,12 @@ export const ChatPage: React.FC = () => {
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
   );
+  const provisionPlacementRef = useLatestRef(provisionPlacement);
+  const vaultRequestsRef = useLatestRef(vaultRequests);
+  const hiddenVaultRequestIdsRef = useRef<Set<string>>(new Set());
+  const markVaultRequestHidden = useCallback((requestId: string) => {
+    hiddenVaultRequestIdsRef.current.add(requestId);
+  }, []);
   const transcriptTailVaultRequests = useMemo(
     () => [...pendingApprovals, ...provisionPlacement.unanchored],
     [pendingApprovals, provisionPlacement],
@@ -440,6 +448,7 @@ export const ChatPage: React.FC = () => {
   // scroll to once its window is in the DOM, the id to highlight (~3s fade), and
   // the last ``msg`` value already handled so the jump effect runs once per value.
   const [jumpTarget, setJumpTarget] = useState<string | null>(null);
+  const jumpTargetRef = useLatestRef(jumpTarget);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const handledJumpRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
@@ -667,11 +676,22 @@ export const ChatPage: React.FC = () => {
   // is outside the retained tail, fetch a small around-window once so the card
   // can join its real turn instead of falling back to a fixed-looking footer.
   useEffect(() => {
-    if (!sessionId || loading || session?.id !== sessionId || provisionPlacement.unanchored.length === 0) return;
+    if (
+      !sessionId ||
+      loading ||
+      session?.id !== sessionId ||
+      deepLinkMessageId ||
+      jumpTarget ||
+      provisionPlacement.unanchored.length === 0
+    ) return;
     if (vaultAnchorInFlightRef.current) return;
     const request = provisionPlacement.unanchored.find((candidate) => {
       const sourceMessageId = vaultRequestSourceMessageId(candidate);
-      return Boolean(sourceMessageId) && !vaultAnchorFetchesRef.current.has(`${candidate.id}:${sourceMessageId}`);
+      return (
+        Boolean(sourceMessageId) &&
+        !hiddenVaultRequestIdsRef.current.has(candidate.id) &&
+        !vaultAnchorFetchesRef.current.has(`${candidate.id}:${sourceMessageId}`)
+      );
     });
     if (!request) return;
     const sourceMessageId = vaultRequestSourceMessageId(request);
@@ -679,10 +699,48 @@ export const ChatPage: React.FC = () => {
     const fetchKey = `${request.id}:${sourceMessageId}`;
     vaultAnchorFetchesRef.current.add(fetchKey);
     vaultAnchorInFlightRef.current = true;
-    void api
-      .listSessionMessages(sessionId, { aroundId: sourceMessageId, limit: 50, cache: false })
+    const loadedSource = messagesRef.current.find(
+      (message) => message.id === sourceMessageId || message.native_message_id === sourceMessageId,
+    );
+    const fetchAnchorWindow = async () => {
+      const first = await api.listSessionMessages(sessionId, {
+        ...(loadedSource ? { aroundId: loadedSource.id } : { aroundNativeId: sourceMessageId }),
+        limit: 50,
+        cache: false,
+      });
+      if (first.messages.length > 0 || loadedSource) return first;
+      // A legacy request may already carry the durable id. Keep that compatibility
+      // path after the native lookup so IM requests resolve before window fetch.
+      return api.listSessionMessages(sessionId, {
+        aroundId: sourceMessageId,
+        limit: 50,
+        cache: false,
+      });
+    };
+    void fetchAnchorWindow()
       .then((res) => {
-        if (sessionId !== sessionIdRef.current) return;
+        if (
+          sessionId !== sessionIdRef.current ||
+          deepLinkMessageIdRef.current ||
+          jumpTargetRef.current
+        ) {
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
+        const requestStillPending = vaultRequestsRef.current.some(
+          (candidate) => candidate.id === request.id && candidate.status === 'pending',
+        );
+        const requestStillUnanchored = provisionPlacementRef.current.unanchored.some(
+          (candidate) => candidate.id === request.id,
+        );
+        if (
+          !requestStillPending ||
+          !requestStillUnanchored ||
+          hiddenVaultRequestIdsRef.current.has(request.id)
+        ) {
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
         const incoming = res.messages.filter(isTranscriptMessage);
         if (incoming.length === 0) return;
         const existing = messagesRef.current;
@@ -695,19 +753,37 @@ export const ChatPage: React.FC = () => {
         const anchorWindow = disjoint ? incoming : mergeById(existing, incoming);
         const placement = placeVaultProvisionRequests(anchorWindow, [request]);
         if (!placement.byMessageId.size) return;
+        const anchorMessageId = placement.byMessageId.keys().next().value;
+        if (typeof anchorMessageId !== 'string') return;
+        const retained = mergeAnchorWindow(
+          existing,
+          incoming,
+          anchorMessageId,
+          MAX_RETAINED_MESSAGES,
+          followingTailRef.current,
+        );
+        const replaceWithAnchorWindow = disjoint || retained.replaced;
         if (disjoint) {
           const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
-          const anchorMessageId = placement.byMessageId.keys().next().value;
           setMessages(incoming);
           setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
-          if (typeof anchorMessageId === 'string') setJumpTarget(anchorMessageId);
+          setJumpTarget(anchorMessageId);
+        } else if (replaceWithAnchorWindow) {
+          // A cap trim would otherwise discard the owner reply that the request
+          // was fetched to reveal. Keep the centered response as an explicit
+          // historical window and move the reader to its anchor.
+          setMessages(incoming);
+          setHistoricalWindow(true);
+          setJumpTarget(anchorMessageId);
         } else {
           setMessages((previous) => {
-            const merged = mergeById(previous, incoming);
-            if (merged.length <= MAX_RETAINED_MESSAGES) return merged;
-            return followingTailRef.current
-              ? merged.slice(-MAX_RETAINED_MESSAGES)
-              : merged.slice(0, MAX_RETAINED_MESSAGES);
+            return mergeAnchorWindow(
+              previous,
+              incoming,
+              anchorMessageId,
+              MAX_RETAINED_MESSAGES,
+              followingTailRef.current,
+            ).messages;
           });
         }
         setOlderCursor(res.next_before_id ?? null);
@@ -721,7 +797,7 @@ export const ChatPage: React.FC = () => {
         vaultAnchorInFlightRef.current = false;
         setVaultAnchorCycle((cycle) => cycle + 1);
       });
-  }, [api, loading, provisionPlacement.unanchored, session?.id, sessionId, vaultAnchorCycle]);
+  }, [api, deepLinkMessageId, jumpTarget, loading, provisionPlacement.unanchored, session?.id, sessionId, vaultAnchorCycle]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1151,6 +1227,7 @@ export const ChatPage: React.FC = () => {
     setMessages([]);
     vaultAnchorFetchesRef.current.clear();
     vaultAnchorInFlightRef.current = false;
+    hiddenVaultRequestIdsRef.current.clear();
     setOlderCursor(null);
     setHistoricalWindow(false);
     oldestLoadedIdRef.current = null;
@@ -1816,6 +1893,9 @@ export const ChatPage: React.FC = () => {
     // the loaded session matches the route) — before that the loaded-vs-around
     // decision and the scroll target wouldn't be meaningful.
     if (loading || session?.id !== sessionId) return;
+    // A vault anchor swap may already be in flight. Let it finish first, then
+    // re-run this effect from the cycle tick so two centered windows cannot race.
+    if (vaultAnchorInFlightRef.current) return;
 
     handledJumpRef.current = targetMsg;
     const requestSessionId = sessionId;
@@ -1891,7 +1971,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [deepLinkMessageId, sessionId, loading, session?.id, api, selectChatView, startHighlight, setSearchParams]);
+  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight, vaultAnchorCycle]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit
@@ -2170,6 +2250,7 @@ export const ChatPage: React.FC = () => {
         key={sessionId ?? 'no-session'}
         requests={vaultRequests}
         onResolved={refreshVaultRequests}
+        onProvisionRequestHidden={markVaultRequestHidden}
         disabled={readOnly}
       >
       {/* Mobile: a FIXED full-screen flex column (the AppShell brand header is

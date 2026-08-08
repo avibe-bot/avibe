@@ -48,9 +48,13 @@ const request = {
   card: { request_type: 'provision' },
 } satisfies VaultRequest;
 
-const renderProvisionCard = () => render(
+const renderProvisionCard = (onProvisionRequestHidden = vi.fn()) => render(
   <I18nextProvider i18n={i18n}>
-    <VaultProvisionDialogProvider requests={[request]} onResolved={vi.fn()}>
+    <VaultProvisionDialogProvider
+      requests={[request]}
+      onResolved={vi.fn()}
+      onProvisionRequestHidden={onProvisionRequestHidden}
+    >
       <VaultRequestCard request={request} onResolved={vi.fn()} />
     </VaultProvisionDialogProvider>
   </I18nextProvider>,
@@ -60,7 +64,8 @@ describe('VaultRequestCard provision dialog dismissal', () => {
   afterEach(() => cleanup());
 
   it('keeps the card after close and hides it after Ignore', () => {
-    renderProvisionCard();
+    const onProvisionRequestHidden = vi.fn();
+    renderProvisionCard(onProvisionRequestHidden);
 
     fireEvent.click(screen.getByRole('button', { name: /provide/i }));
     fireEvent.click(screen.getByRole('button', { name: 'close dialog' }));
@@ -69,5 +74,6 @@ describe('VaultRequestCard provision dialog dismissal', () => {
     fireEvent.click(screen.getByRole('button', { name: /provide/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Ignore' }));
     expect(screen.queryByText(request.secret_name)).toBeNull();
+    expect(onProvisionRequestHidden).toHaveBeenCalledWith(request.id);
   });
 });

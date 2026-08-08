@@ -7207,6 +7207,9 @@ def sessions_messages_list(session_id: str):
     # ``around_id`` centers the window on a specific message (search deep-link
     # jump); it takes precedence over after/before/tail in the service.
     around_id = request.args.get("around_id") or None
+    # Legacy IM caller contexts may carry only the platform-native message id;
+    # storage resolves it to the durable row before applying cursor pagination.
+    around_native_id = request.args.get("around_native_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -7228,6 +7231,7 @@ def sessions_messages_list(session_id: str):
             after_id=after_id,
             before_id=before_id,
             around_id=around_id,
+            around_native_id=around_native_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             tail=tail,

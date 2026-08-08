@@ -645,6 +645,7 @@ def list_session_messages(
     after_id: Optional[str] = None,
     before_id: Optional[str] = None,
     around_id: Optional[str] = None,
+    around_native_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
     tail: bool = False,
@@ -658,13 +659,15 @@ def list_session_messages(
     ``before_id`` returns the page immediately older than that row, still in
     chronological order. This powers upward history loading from the chat page.
 
-    ``around_id`` centers a window on a specific message (deep-link / search
-    jump): up to ``limit`` rows strictly older + the anchor + up to ``limit`` rows
-    strictly newer, merged chronologically. It takes precedence over
-    ``after_id`` / ``before_id`` / ``tail``. ``next_before_id`` is set when older
-    rows remain, ``next_after_id`` when newer rows remain, so the chat can page in
-    both directions from the centered window. An unknown ``around_id`` returns no
-    messages and null cursors.
+    ``around_id`` centers a window on a durable message id (deep-link / search
+    jump). ``around_native_id`` provides the equivalent lookup for a platform
+    native message id when a legacy caller context has not retained the durable
+    row id. Up to ``limit`` rows are returned on either side of the anchor,
+    merged chronologically. These modes take precedence over ``after_id`` /
+    ``before_id`` / ``tail``. ``next_before_id`` is set when older rows remain,
+    ``next_after_id`` when newer rows remain, so the chat can page in both
+    directions from the centered window. An unknown anchor returns no messages
+    and null cursors.
 
     ``tail`` returns the most-recent ``limit`` rows (still chronological) instead
     of the oldest page — used by the Chat page's reconnect/visibility gap
@@ -677,18 +680,35 @@ def list_session_messages(
     if types is not None:
         query = query.where(messages.c.type.in_(list(types)))
     effective_limit = min(max(int(limit), 1), 500)
-    if around_id:
+    if around_id or around_native_id:
         # Window centered on a specific message (deep-link / search jump). Resolve
         # the anchor's (created_at, id); an unknown id (or one in another session)
         # yields an empty window. ``query`` already carries the type/metadata
         # filter, so the older/anchor/newer sub-queries inherit it — the anchor
         # only appears if it is itself transcript-visible.
         order_value = transcript_order_value()
+        anchor_id = around_id
         anchor = conn.execute(
             select(order_value).where(
-                messages.c.id == around_id, messages.c.session_id == session_id
+                messages.c.id == anchor_id, messages.c.session_id == session_id
             )
         ).scalar_one_or_none()
+        if anchor is None and around_native_id:
+            anchor_id = conn.execute(
+                select(messages.c.id)
+                .where(
+                    messages.c.native_message_id == around_native_id,
+                    messages.c.session_id == session_id,
+                )
+                .order_by(messages.c.id.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if anchor_id is not None:
+                anchor = conn.execute(
+                    select(order_value).where(
+                        messages.c.id == anchor_id, messages.c.session_id == session_id
+                    )
+                ).scalar_one_or_none()
         if anchor is None:
             return {"messages": [], "next_after_id": None, "next_before_id": None}
 
@@ -696,7 +716,7 @@ def list_session_messages(
             query.where(
                 or_(
                     order_value < anchor,
-                    and_(order_value == anchor, messages.c.id < around_id),
+                    and_(order_value == anchor, messages.c.id < anchor_id),
                 )
             )
             .order_by(order_value.desc(), messages.c.id.desc())
@@ -709,14 +729,14 @@ def list_session_messages(
 
         anchor_rows = [
             _row_to_payload(dict(row))
-            for row in conn.execute(query.where(messages.c.id == around_id)).mappings().all()
+            for row in conn.execute(query.where(messages.c.id == anchor_id)).mappings().all()
         ]
 
         newer_q = (
             query.where(
                 or_(
                     order_value > anchor,
-                    and_(order_value == anchor, messages.c.id > around_id),
+                    and_(order_value == anchor, messages.c.id > anchor_id),
                 )
             )
             .order_by(order_value.asc(), messages.c.id.asc())
