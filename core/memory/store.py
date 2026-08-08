@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 from config import paths
 from core.memory.observations import FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
@@ -685,6 +686,7 @@ class MemoryStore:
     ) -> bool:
         """Finalize a fenced provider success and scrub the source payload."""
 
+        naturally_extracted = add_status == "extracted"
         with self._transaction() as conn:
             result = conn.execute(
                 """
@@ -693,13 +695,18 @@ class MemoryStore:
                     next_retry_at = NULL,
                     lease_owner = NULL, lease_at = NULL, last_error = NULL,
                     completed_at = ?, add_request_id = ?,
-                    flush_observation = 'not_attempted'
+                    flush_observation = ?, flush_status = ?,
+                    flush_error_code = NULL, flush_request_id = NULL,
+                    flush_observed_at = ?
                 WHERE source_message_digest = ? AND epoch = ?
                   AND state = 'processing' AND lease_owner = ?
                 """,
                 (
                     now,
                     _bounded_opaque_text(add_request_id),
+                    "succeeded" if naturally_extracted else "not_attempted",
+                    "extracted" if naturally_extracted else None,
+                    now if naturally_extracted else None,
                     row.source_message_digest,
                     row.epoch,
                     lease_owner,
@@ -715,7 +722,7 @@ class MemoryStore:
                 first_unflushed_at=row.created_at,
             )
             watermark_after = state.watermark
-            if add_status == "extracted":
+            if naturally_extracted:
                 watermark_after = max(watermark_after, row.provider_timestamp_ms)
             conn.execute(
                 """
@@ -1617,10 +1624,10 @@ class MemoryStore:
 
     def _initialize(self) -> None:
         schema = Path(__file__).with_name("schema.sql")
+        version = self._read_schema_version_without_mutation()
+        if version > MEMORY_SCHEMA_VERSION:
+            raise OSError("Memory store schema is newer than this Avibe build")
         with self._connection() as conn:
-            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if version > MEMORY_SCHEMA_VERSION:
-                raise OSError("Memory store schema is newer than this Avibe build")
             conn.executescript(schema.read_text(encoding="utf-8"))
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1635,6 +1642,18 @@ class MemoryStore:
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
+
+    def _read_schema_version_without_mutation(self) -> int:
+        """Read the schema marker without changing SQLite connection state."""
+
+        if not self.path.exists():
+            return 0
+        database_uri = f"file:{quote(self.path.as_posix(), safe='/')}?mode=ro"
+        conn = sqlite3.connect(database_uri, uri=True, timeout=5.0)
+        try:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            conn.close()
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

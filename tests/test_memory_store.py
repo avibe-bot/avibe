@@ -593,15 +593,19 @@ def test_newer_memory_schema_is_rejected_before_schema_ddl(tmp_path: Path) -> No
     with sqlite3.connect(database) as conn:
         conn.execute("CREATE TABLE future_marker (value TEXT NOT NULL)")
         conn.execute("INSERT INTO future_marker VALUES ('untouched')")
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         conn.execute("PRAGMA user_version = 3")
 
     with pytest.raises(OSError, match="schema is newer"):
         MemoryStore(database)
 
+    assert not database.with_name(f"{database.name}-wal").exists()
+    assert not database.with_name(f"{database.name}-shm").exists()
     with sqlite3.connect(database) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert tables == {"future_marker"}
         assert conn.execute("SELECT value FROM future_marker").fetchone()[0] == "untouched"
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))

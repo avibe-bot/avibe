@@ -488,6 +488,15 @@ async def test_extracted_add_ack_skips_a_redundant_flush(
 
     assert await worker.drain_once() == 1
     assert provider.flushes == []
+    row = store.list_queue_rows()[0]
+    assert row.flush_observation == "succeeded"
+    assert row.flush_status == "extracted"
+    assert row.flush_observed_at is not None
+    assert store.queue_stats().awaiting_receipt == 0
+    assert store.recover_after_boot(
+        lease_owner="recovery-boot",
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    ).not_attempted_sessions == ()
     assert receipt.session_ref is not None
     state = store.get_session_flush_state(receipt.session_ref)
     assert state is not None
