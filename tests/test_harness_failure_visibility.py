@@ -390,6 +390,60 @@ def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Pa
     assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
 
 
+def test_turn_output_batch_locks_before_re_electing_a_canceled_fallback_owner(
+    tmp_path: Path,
+) -> None:
+    """One locked snapshot owns election and every participant's terminal write."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-owner-a")
+    _task(sqlite, "watch-owner-b")
+    runs = [
+        requests.enqueue_task_run(definition_id)
+        for definition_id in ("watch-owner-a", "watch-owner-b")
+    ]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    assert sqlite.cancel_run(runs[0].id)
+
+    statements: list[str] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().upper())
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    try:
+        sqlite.record_turn_run_outputs(
+            [run.id for run in runs],
+            output_id="terminal",
+            text="",
+            provenance={
+                "turn_id": "turn-shared",
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-shared",
+                    "delivered": False,
+                    "fallback_run_id": runs[0].id,
+                },
+            },
+            terminal_status="failed",
+            error="stream disconnected",
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+
+    lock_index = statements.index("BEGIN IMMEDIATE")
+    participant_read_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("SELECT") and "FROM AGENT_RUNS" in statement
+    )
+    assert lock_index < participant_read_index
+    assert sqlite.get_run(runs[0].id)["status"] == "canceled"
+    assert sqlite.get_run(runs[1].id)["status"] == "failed"
+    notice = sqlite.owed_failure_notice(runs[1].id)
+    assert notice["turn_fallback_run_id"] == runs[1].id
+
+
 # --- group 2: the owed-notice drain ---------------------------------------
 #
 # The policy decisions are tested against ``core.failure_notices.decide`` directly:

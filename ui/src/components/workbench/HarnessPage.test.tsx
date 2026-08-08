@@ -808,6 +808,19 @@ describe('WatchDetail runtime', () => {
     else expect(html).not.toContain('process exited');
     if (expected.pid) expect(html).toContain(expected.pid);
   });
+
+  it('keeps unknown event-processing health visible in the detail pane', () => {
+    const html = render(
+      <WatchDetail
+        watch={watch({ processing_health: 'unknown' })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.detail.eventProcessing')}<`);
+    expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
+  });
 });
 
 describe('RunTriggerChip', () => {

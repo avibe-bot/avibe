@@ -1052,10 +1052,15 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
   );
 };
 
+const visibleProcessingHealth = (row: HarnessWatch) => {
+  const health = definitionProcessingHealth(row);
+  return health === 'failing' || health === 'degraded' || health === 'unknown' ? health : null;
+};
+
 export const ProcessingHealthBadge: React.FC<{ row: HarnessWatch }> = ({ row }) => {
   const { t } = useTranslation();
-  const health = definitionProcessingHealth(row);
-  if (health !== 'failing' && health !== 'degraded' && health !== 'unknown') return null;
+  const health = visibleProcessingHealth(row);
+  if (!health) return null;
   const count =
     health === 'unknown'
       ? 0
@@ -1624,7 +1629,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
           </div>
         </DetailField>
       )}
-      {['failing', 'degraded'].includes(definitionProcessingHealth(watch) || '') && (
+      {visibleProcessingHealth(watch) && (
         <DetailField label={t('harness.detail.eventProcessing')}>
           <ProcessingHealthBadge row={watch} />
         </DetailField>

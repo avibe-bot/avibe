@@ -3911,7 +3911,9 @@ scenarios:
     # If primary delivery is not acknowledged, Turn identity elects one fallback
     # across definitions and every other linked Run records the shared outcome.
     # Canceled participants cannot own it, and late participants reuse the durable
-    # Turn-wide election instead of electing again from their subset.
+    # Turn-wide election instead of electing again from their subset. Election and
+    # every participant write share one reserved SQLite writer transaction, so a
+    # cancellation cannot invalidate the owner midway through the batch.
     test: tests/test_harness_failure_visibility.py::test_hfr_438_missing_turn_notification_delivers_one_fallback
   - id: HFR-439
     name: Turn failure notification evidence reaches every linked Run settlement
@@ -3920,10 +3922,11 @@ scenarios:
     layer: contract
     backend: shared
     # Terminal settlement copies the Turn notification identity and delivery proof
-    # into each owed notice atomically with the failed Run transition. The fallback
-    # owner is elected before the immutable Turn snapshot is stored. If an Activity
-    # still owns the Run, the same evidence is first committed with its deferred
-    # terminal intent and survives into the eventual transition.
+    # into each owed notice atomically with the failed Run transition. The immutable
+    # Turn snapshot supplies the initial fallback owner; the locked participant
+    # settlement validates it against current cancellation state before any Run is
+    # written. If an Activity still owns the Run, the same evidence is first committed
+    # with its deferred terminal intent and survives into the eventual transition.
     test: tests/test_scheduled_tasks.py::test_hfr_439_turn_failure_metadata_reaches_every_linked_run
 manual_evidence:
   - local Incus backend process death after prompt acceptance

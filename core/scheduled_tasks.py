@@ -8711,29 +8711,6 @@ class ScheduledTaskService:
         output_provenance = (
             dict(output_provenance) if isinstance(output_provenance, Mapping) else {}
         )
-        notification = output_provenance.get("turn_failure_notification")
-        if isinstance(notification, Mapping) and execution_ids:
-            notification = dict(notification)
-            eligible_ids = sorted(
-                {
-                    str(execution_id or "").strip()
-                    for execution_id in execution_ids
-                    if str(execution_id or "").strip()
-                    and failure_notices.turn_fallback_owner_eligible(
-                        store.get_run(str(execution_id or "").strip())
-                    )
-                }
-            )
-            if eligible_ids:
-                current_owner = str(notification.get("fallback_run_id") or "").strip()
-                if not (
-                    current_owner
-                    and failure_notices.turn_fallback_owner_eligible(
-                        store.get_run(current_owner)
-                    )
-                ):
-                    notification["fallback_run_id"] = eligible_ids[0]
-            output_provenance["turn_failure_notification"] = notification
         output_id = str(output_provenance.get("output_id") or "").strip()
         if not output_id and output_provenance.get("sequence") is not None:
             output_id = f"sequence:{output_provenance['sequence']}"
@@ -8745,55 +8722,37 @@ class ScheduledTaskService:
             None,
         )
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
-        settled_any = False
-        for raw_execution_id in execution_ids:
-            execution_id = str(raw_execution_id or "").strip()
-            if not execution_id:
-                continue
-            run_terminal_status = terminal_status
-            if callable(has_blocker) and has_blocker(execution_id):
-                deferred_metadata = {
-                    key: value
-                    for key, value in {
-                        "turn_id": turn_id,
-                        "turn_failure_notification": output_provenance.get(
-                            "turn_failure_notification"
-                        ),
-                    }.items()
-                    if value is not None
-                }
-                if not store.defer_run_terminal(
-                    execution_id,
-                    terminal_status=terminal_status,
-                    result_text=result_text,
-                    error=(
-                        str(terminal_error) if terminal_error is not None else None
-                    ),
-                    metadata=deferred_metadata or None,
-                ):
-                    logger.warning(
-                        "failed to defer late terminal settlement for Run=%s Turn=%s",
-                        execution_id,
-                        turn_id,
-                    )
-                run_terminal_status = None
-            result = store.record_run_output(
-                execution_id,
-                output_id=output_id,
-                text=result_text,
-                message_id=message_id,
-                provenance={
-                    **output_provenance,
-                    "turn_id": turn_id,
-                    "evidence_kind": evidence_kind,
-                    "settled_by": settled_by,
-                },
-                terminal_status=run_terminal_status,
-                error=str(terminal_error) if terminal_error is not None else None,
+        normalized_execution_ids = list(
+            dict.fromkeys(
+                execution_id
+                for value in execution_ids
+                if (execution_id := str(value or "").strip())
             )
-            settled_any = settled_any or bool(
-                result.get("terminal_transition") or result.get("text_backfilled")
-            )
+        )
+        deferred_run_ids = [
+            execution_id
+            for execution_id in normalized_execution_ids
+            if callable(has_blocker) and has_blocker(execution_id)
+        ]
+        results = store.record_turn_run_outputs(
+            normalized_execution_ids,
+            output_id=output_id,
+            text=result_text,
+            message_id=message_id,
+            provenance={
+                **output_provenance,
+                "turn_id": turn_id,
+                "evidence_kind": evidence_kind,
+                "settled_by": settled_by,
+            },
+            terminal_status=terminal_status,
+            error=str(terminal_error) if terminal_error is not None else None,
+            deferred_run_ids=deferred_run_ids,
+        )
+        settled_any = any(
+            result.get("terminal_transition") or result.get("text_backfilled")
+            for result in results.values()
+        )
         if settled_any:
             self._wake_runtime_work(
                 RuntimeWorkLane.REQUESTS,

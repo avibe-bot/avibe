@@ -1175,6 +1175,37 @@ class ConsolidatedMessageDispatcher:
                 if (run_id := str(value or "").strip())
             )
         )
+        output_id = str(output_semantics.idempotency_key or "").strip()
+        if not output_id and output_semantics.sequence is not None:
+            output_id = f"sequence:{output_semantics.sequence}"
+        if not output_id and terminal_status:
+            output_id = "terminal"
+        if not output_id:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+            output_id = f"content:{digest}"
+        record_turn_outputs = getattr(store, "record_turn_run_outputs", None)
+        if callable(record_turn_outputs):
+            deferred_run_ids = (
+                [
+                    run_id
+                    for run_id in normalized_run_ids
+                    if terminal_status and self._run_has_blocking_activity(run_id)
+                ]
+                if terminal_status
+                else []
+            )
+            record_turn_outputs(
+                normalized_run_ids,
+                output_id=output_id,
+                text=text,
+                message_id=message_id,
+                sequence=output_semantics.sequence,
+                provenance=provenance,
+                terminal_status=terminal_status,
+                error=terminal_error,
+                deferred_run_ids=deferred_run_ids,
+            )
+            return
         get_run = getattr(store, "get_run", None)
         eligible_run_ids = (
             [
@@ -1223,14 +1254,6 @@ class ConsolidatedMessageDispatcher:
                 run_terminal_status = None
             record_output = getattr(store, "record_run_output", None)
             if callable(record_output):
-                output_id = str(output_semantics.idempotency_key or "").strip()
-                if not output_id and output_semantics.sequence is not None:
-                    output_id = f"sequence:{output_semantics.sequence}"
-                if not output_id and run_terminal_status:
-                    output_id = "terminal"
-                if not output_id:
-                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
-                    output_id = f"content:{digest}"
                 record_kwargs = {
                     "output_id": output_id,
                     "text": text,

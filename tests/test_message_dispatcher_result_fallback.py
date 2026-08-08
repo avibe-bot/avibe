@@ -186,6 +186,49 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         store.close.assert_called_once_with()
 
+    def test_terminal_recording_delegates_owner_election_to_the_atomic_store_batch(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController(platform="slack"))
+        store = mock.Mock()
+        store.get_run.side_effect = AssertionError(
+            "the dispatcher must not snapshot participant state outside the batch"
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            idempotency_key="terminal-output",
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-fallback",
+                    "delivered": False,
+                    "fallback_run_id": "run-a",
+                }
+            },
+        )
+
+        dispatcher._record_agent_run_terminal_for_ids(
+            store=store,
+            run_ids=["run-a", "run-b"],
+            text="",
+            message_id=None,
+            terminal_status="failed",
+            terminal_error="stream disconnected",
+            output_semantics=output,
+            provenance=dict(output.metadata),
+        )
+
+        store.record_turn_run_outputs.assert_called_once_with(
+            ["run-a", "run-b"],
+            output_id="terminal-output",
+            text="",
+            message_id=None,
+            sequence=None,
+            provenance=output.metadata,
+            terminal_status="failed",
+            error="stream disconnected",
+            deferred_run_ids=[],
+        )
+        store.get_run.assert_not_called()
+
     async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
         controller = _StubController(platform="slack")
         controller.agent_service = type(

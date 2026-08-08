@@ -4338,6 +4338,7 @@ class SQLiteBackgroundTaskStore:
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
         updated_at: Optional[str] = None,
+        _conn: Any = None,
     ) -> dict[str, Any]:
         """Append one idempotent Run output and optionally settle the Run once."""
 
@@ -4350,7 +4351,8 @@ class SQLiteBackgroundTaskStore:
         text_backfilled = False
         run_payload: Optional[dict[str, Any]] = None
         row_to_publish = None
-        with self.engine.begin() as conn:
+        transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
+        with transaction as conn:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -4539,7 +4541,10 @@ class SQLiteBackgroundTaskStore:
                 run_payload = self._run_from_row(row_to_publish)
             else:
                 run_payload = self._run_from_row(row)
-        _publish_run_rows_updated([row_to_publish])
+        if _conn is not None:
+            _defer_run_rows_updated_from_connection(_conn, [row_to_publish])
+        else:
+            _publish_run_rows_updated([row_to_publish])
         return {
             "recorded": recorded,
             "terminal_transition": terminal_transition,
@@ -4549,6 +4554,122 @@ class SQLiteBackgroundTaskStore:
             "text_backfilled": text_backfilled,
             "run": run_payload,
         }
+
+    def record_turn_run_outputs(
+        self,
+        run_ids: Sequence[str],
+        *,
+        output_id: str,
+        text: str,
+        message_id: str | None = None,
+        sequence: int | None = None,
+        provenance: Optional[dict[str, Any]] = None,
+        terminal_status: Optional[str] = None,
+        error: Optional[str] = None,
+        deferred_run_ids: Sequence[str] = (),
+        updated_at: Optional[str] = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Record one Turn output across all participant Runs atomically.
+
+        The fallback owner is a property of the whole failed Turn, not of any one
+        Run write. Reserve SQLite's writer slot before reading participant state so
+        cancellation cannot land after owner election but before a later participant
+        is written with that owner's id.
+        """
+
+        from core import failure_notices
+
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_run_ids:
+            return {}
+        deferred_ids = {
+            run_id
+            for value in deferred_run_ids
+            if (run_id := str(value or "").strip())
+        }
+        now = updated_at or _utc_now_iso()
+        results: dict[str, dict[str, Any]] = {}
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            terminal_provenance = dict(provenance or {})
+            notification = terminal_provenance.get("turn_failure_notification")
+            current_owner = (
+                str(notification.get("fallback_run_id") or "").strip()
+                if isinstance(notification, dict)
+                else ""
+            )
+            candidate_ids = [*normalized_run_ids]
+            if current_owner and current_owner not in candidate_ids:
+                candidate_ids.append(current_owner)
+            rows: dict[str, Any] = {}
+            for batch in _id_batches(candidate_ids):
+                rows.update(
+                    {
+                        str(row["id"]): row
+                        for row in conn.execute(
+                            select(agent_runs).where(agent_runs.c.id.in_(batch))
+                        ).mappings()
+                    }
+                )
+            runs = {
+                run_id: self._run_from_row(row)
+                for run_id, row in rows.items()
+            }
+            eligible_run_ids = sorted(
+                run_id
+                for run_id in normalized_run_ids
+                if failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
+            )
+            if isinstance(notification, dict) and eligible_run_ids:
+                notification = dict(notification)
+                if not failure_notices.turn_fallback_owner_eligible(
+                    runs.get(current_owner)
+                ):
+                    notification["fallback_run_id"] = eligible_run_ids[0]
+                terminal_provenance["turn_failure_notification"] = notification
+
+            deferred_metadata = {
+                key: value
+                for key in ("turn_id", "turn_failure_notification")
+                if (value := terminal_provenance.get(key)) is not None
+            }
+            for run_id in normalized_run_ids:
+                run = runs.get(run_id)
+                if run is None or normalize_run_status(run.get("status")) == "canceled":
+                    continue
+                run_terminal_status = terminal_status
+                if run_terminal_status and run_id in deferred_ids:
+                    defer_kwargs: dict[str, Any] = {
+                        "terminal_status": run_terminal_status,
+                        "result_text": text,
+                        "updated_at": now,
+                        "_conn": conn,
+                    }
+                    if error is not None:
+                        defer_kwargs["error"] = error
+                    if deferred_metadata:
+                        defer_kwargs["metadata"] = deferred_metadata
+                    self.defer_run_terminal(run_id, **defer_kwargs)
+                    run_terminal_status = None
+                results[run_id] = self.record_run_output(
+                    run_id,
+                    output_id=output_id,
+                    text=text,
+                    message_id=message_id,
+                    sequence=sequence,
+                    provenance=terminal_provenance,
+                    terminal_status=run_terminal_status,
+                    error=error,
+                    updated_at=now,
+                    _conn=conn,
+                )
+        return results
 
     def settle_run_terminal(
         self,
@@ -4695,12 +4816,14 @@ class SQLiteBackgroundTaskStore:
         result_text: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
+        _conn: Any = None,
     ) -> bool:
         """Remember a terminal intent and its evidence while an Activity blocks it."""
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
-        with self.engine.begin() as conn:
+        transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
+        with transaction as conn:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -4756,7 +4879,10 @@ class SQLiteBackgroundTaskStore:
                     select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
                 ).mappings().one()
             )
-        _publish_run_rows_updated([row_to_publish])
+        if _conn is not None:
+            _defer_run_rows_updated_from_connection(_conn, [row_to_publish])
+        else:
+            _publish_run_rows_updated([row_to_publish])
         return True
 
     def settle_deferred_run(
