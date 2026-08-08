@@ -351,6 +351,8 @@ def _flush_sse(data_lines: list[str], event_name: str | None, events: list[dict[
         return False
     data = "\n".join(data_lines)
     data_lines.clear()
+    if event_name in {"", "message"}:
+        event_name = None
     if data == "[DONE]":
         events.append({"kind": "done", "type": event_name, "sequence": len(events)})
         return True
@@ -716,7 +718,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     if (
                         content_index is None
                         or key not in content_parts
-                        or content_part_types.get(key) != "output_text"
+                        or content_part_types.get(key) not in RESPONSES_MESSAGE_PART_TYPES
                         or key in content_parts_closed
                         or key in message_text_done
                         or not isinstance(delta, str)
@@ -784,7 +786,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if done_status is not None and done_status != "completed":
                     return False
                 if item_types.get(item_id) == "message" and any(
-                    part_item_id == item_id and content_part_types.get((part_item_id, part_index)) == "output_text" and (part_item_id, part_index) not in message_text_done
+                    part_item_id == item_id
+                    and content_part_types.get((part_item_id, part_index)) in RESPONSES_MESSAGE_PART_TYPES
+                    and (part_item_id, part_index) not in message_text_done
                     for part_item_id, part_index in content_parts
                 ):
                     return False

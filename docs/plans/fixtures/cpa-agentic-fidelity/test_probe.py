@@ -607,6 +607,17 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "wrong_name")
         self.assertFalse(probe._stream_order_ok("anthropic", events))
 
+    def test_sse_parser_normalizes_default_event_names(self) -> None:
+        payload = '{"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"stop"}]}'
+        for event_name in ("message", ""):
+            events: list[dict[str, object]] = []
+            invalid = [0]
+            probe._flush_sse([payload], event_name, events, invalid)
+            probe._flush_sse(["[DONE]"], event_name, events, invalid)
+            self.assertEqual([event["type"] for event in events], [None, None])
+            self.assertEqual(invalid, [0])
+            self.assertTrue(probe._stream_order_ok("chat", events))
+
     def test_sse_parser_rejects_trailing_event_name_whitespace(self) -> None:
         payload = (
             b'event: message_start \ndata: {"type":"message_start","message":{"type":"message",'
@@ -2091,6 +2102,17 @@ class ProbeParserTests(unittest.TestCase):
         self.assertNotIn("terminal_output_mismatch", turn.parse_errors)
         self.assertEqual(turn.text, "firstsecond")
         self.assertEqual(turn.continuation[0]["content"], [{"type": "output_text", "text": "first"}, {"type": "output_text", "text": "second"}])
+
+    def test_responses_text_content_part_accepts_output_text_deltas(self) -> None:
+        events = _response_message_stream()
+        events[2]["event"]["part"]["type"] = "text"
+        events[5]["event"]["part"]["type"] = "text"
+        events[6]["event"]["item"]["content"][0]["type"] = "text"
+        events[7]["event"]["response"]["output"][0]["content"][0]["type"] = "text"
+        self.assertTrue(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, True))
+        self.assertEqual(turn.text, "answer")
+        self.assertEqual(turn.parse_errors, [])
 
     def test_responses_text_content_part_opening_text_must_be_empty(self) -> None:
         events = [
