@@ -8073,6 +8073,108 @@ def test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks(
     assert stored_parent["callback_run_id"] == existing.id
 
 
+def test_hfr_457_missing_turn_participant_does_not_rollback_valid_runs(
+    tmp_path: Path,
+) -> None:
+    """A stale attribution id is excluded before ownership and settlement."""
+
+    sqlite, requests = _store(tmp_path)
+    run = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-valid-turn-participant",
+            request_type="agent_run",
+            message="valid participant",
+        )
+    )
+    assert requests.claim(run.id) is not None
+    turn_id = "turn-with-stale-participant"
+
+    results = sqlite.record_turn_run_outputs(
+        ["run-missing-turn-participant", run.id],
+        output_id="turn-terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": "run-missing-turn-participant",
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    assert list(results) == [run.id]
+    assert sqlite.get_run(run.id)["status"] == "failed"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["turn_fallback_run_id"] == run.id
+    assert notice["turn_participant_run_ids"] == [run.id]
+
+
+def test_hfr_458_steered_callback_uses_its_shared_turn_output_receipt(
+    tmp_path: Path,
+) -> None:
+    """A callback need not be the primary Run named by its persisted result."""
+
+    from storage import messages_service
+
+    sqlite, requests = _store(tmp_path)
+    _callback_session(sqlite)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-shared-receipt-parent",
+            request_type="agent_run",
+            message="parent",
+            callback_session_id="ses-callback-target",
+        )
+    )
+    callback = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-shared-receipt-callback",
+            request_type="agent_run",
+            message="callback",
+            source_kind="callback",
+            parent_run_id=parent.id,
+            session_id="ses-callback-target",
+        )
+    )
+    for run in (parent, callback):
+        assert requests.claim(run.id) is not None
+    sqlite.update_callback_status(
+        parent.id,
+        status="sent",
+        callback_run_id=callback.id,
+    )
+    turn_id = "turn-steered-callback-receipt"
+    output_id = "steered-terminal-output"
+    sqlite.record_turn_run_outputs(
+        [callback.id],
+        output_id=output_id,
+        text="callback delivered",
+        provenance={"turn_id": turn_id, "run_id": "run-primary-human-turn"},
+        terminal_status="succeeded",
+    )
+    with sqlite.engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-callback-target",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="callback delivered",
+            metadata={
+                "turn_id": turn_id,
+                "run_id": "run-primary-human-turn",
+                "output_id": output_id,
+            },
+        )
+
+    assert sqlite.run_callback_state(parent.id) == "sent"
+
+
 @pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])
 def test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane(
     tmp_path: Path,

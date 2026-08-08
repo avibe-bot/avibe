@@ -4095,6 +4095,24 @@ scenarios:
     # The SQLite writer refuses a new failure callback after late cancellation but
     # still arms an already-durable child as authoritative callback evidence.
     test: tests/test_harness_failure_visibility.py::test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks
+  - id: HFR-457
+    name: stale Turn participant ids cannot roll back valid settlement
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Ownership projection and terminal writes use only Runs loaded under the
+    # settlement writer lock; stale attribution is excluded from durable provenance.
+    test: tests/test_harness_failure_visibility.py::test_hfr_457_missing_turn_participant_does_not_rollback_valid_runs
+  - id: HFR-458
+    name: steered callbacks inherit shared Turn output receipts
+    status: covered
+    kind: delivery
+    layer: contract
+    backend: shared
+    # A callback accepted into an active Turn shares the persisted result through
+    # exact Turn and output provenance even when another Run is the primary owner.
+    test: tests/test_harness_failure_visibility.py::test_hfr_458_steered_callback_uses_its_shared_turn_output_receipt
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

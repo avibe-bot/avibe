@@ -168,6 +168,10 @@ does not claim that an event was detected.
   parent notice created in the same batch.
 - `HFR-456`: late-canceled failed parents reject new callbacks while preserving
   accepted children.
+- `HFR-457`: stale Turn participant ids are excluded before ownership projection
+  and cannot roll back settlement for valid Runs.
+- `HFR-458`: a callback accepted into an active Turn can prove its persisted
+  receipt through the shared Turn output even when another Run owns the Message.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

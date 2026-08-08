@@ -4236,6 +4236,51 @@ class SQLiteBackgroundTaskStore:
         parent = agent_runs.alias("callback_parent")
         child = agent_runs.alias("callback_child")
         callback_session = agent_sessions.alias("callback_session")
+        callback_output = (
+            func.json_each(child.c.result_payload_json, "$.outputs")
+            .table_valued("value")
+            .alias("callback_output")
+        )
+        linked_output_receipt = (
+            select(literal(1))
+            .select_from(callback_output)
+            .where(func.json_valid(child.c.result_payload_json) == 1)
+            .where(
+                cast(func.json_extract(callback_output.c.value, "$.id"), Text)
+                == cast(
+                    func.json_extract(messages.c.metadata_json, "$.output_id"),
+                    Text,
+                )
+            )
+            .where(
+                cast(
+                    func.json_extract(
+                        callback_output.c.value,
+                        "$.provenance.turn_id",
+                    ),
+                    Text,
+                )
+                == cast(
+                    func.json_extract(messages.c.metadata_json, "$.turn_id"),
+                    Text,
+                )
+            )
+            .where(
+                func.coalesce(
+                    cast(
+                        func.json_extract(
+                            callback_output.c.value,
+                            "$.provenance.turn_id",
+                        ),
+                        Text,
+                    ),
+                    "",
+                )
+                != ""
+            )
+            .correlate(child, messages)
+            .exists()
+        )
         persisted_receipt = (
             select(literal(1))
             .select_from(messages)
@@ -4243,8 +4288,14 @@ class SQLiteBackgroundTaskStore:
             .where(messages.c.type == "result")
             .where(func.json_valid(messages.c.metadata_json) == 1)
             .where(
-                cast(func.json_extract(messages.c.metadata_json, "$.run_id"), Text)
-                == child.c.id
+                or_(
+                    cast(
+                        func.json_extract(messages.c.metadata_json, "$.run_id"),
+                        Text,
+                    )
+                    == child.c.id,
+                    linked_output_receipt,
+                )
             )
             .where(
                 func.coalesce(
@@ -4937,6 +4988,9 @@ class SQLiteBackgroundTaskStore:
                         ).mappings()
                     }
                 )
+            loaded_run_ids = [
+                run_id for run_id in normalized_run_ids if run_id in rows
+            ]
             runs = {
                 run_id: self._run_from_row(row)
                 for run_id, row in rows.items()
@@ -4948,7 +5002,7 @@ class SQLiteBackgroundTaskStore:
             # before the remaining candidates use their stable lexical tie-breaker.
             same_batch_notice_owners: set[str] = set()
             eligible_run_ids: list[str] = []
-            for run_id in normalized_run_ids:
+            for run_id in loaded_run_ids:
                 row = rows[run_id]
                 parent_id = (
                     str(row["parent_run_id"] or "").strip()
@@ -4996,7 +5050,7 @@ class SQLiteBackgroundTaskStore:
                 notification.get("failure_id") or ""
             ).strip():
                 terminal_provenance[TURN_PARTICIPANT_RUN_IDS_METADATA_KEY] = list(
-                    normalized_run_ids
+                    loaded_run_ids
                 )
 
             deferred_metadata = {
@@ -5008,7 +5062,7 @@ class SQLiteBackgroundTaskStore:
                 )
                 if (value := terminal_provenance.get(key)) is not None
             }
-            for run_id in normalized_run_ids:
+            for run_id in loaded_run_ids:
                 run = runs.get(run_id)
                 if run is None or normalize_run_status(run.get("status")) == "canceled":
                     continue
