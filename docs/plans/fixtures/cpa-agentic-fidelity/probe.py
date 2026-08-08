@@ -62,6 +62,15 @@ class _DuplicateKeyError(ValueError):
     pass
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in result:
+            raise _DuplicateKeyError(f"duplicate JSON key: {key}")
+        result[key] = item
+    return result
+
+
 @dataclass
 class ToolCall:
     call_id: str
@@ -303,7 +312,7 @@ def _flush_sse(data_lines: list[str], event_name: str | None, events: list[dict[
         return True
 
     try:
-        parsed = json.loads(data, parse_constant=_reject_nonfinite)
+        parsed = json.loads(data, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
     except (json.JSONDecodeError, ValueError):
         invalid[0] += 1
         return False
@@ -342,7 +351,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         message_started = False
         for index, item in enumerate(events):
             if item.get("kind") == "done":
-                continue
+                return False
             event = item.get("event", {})
             event_type = event.get("type")
             if item.get("type") != event_type:
@@ -390,6 +399,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     if protocol == "responses":
         added: set[str] = set()
         closed: set[str] = set()
+        argument_done: set[str] = set()
         item_types: dict[str, str] = {}
         response_started = False
         output_started = False
@@ -423,8 +433,21 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if not response_started:
                     return False
                 item_id = str(event.get("item_id", event.get("output_index", "")))
-                if item_id not in added or item_id in closed or item_types.get(item_id) != "function_call":
+                if item_id not in added or item_id in closed or item_id in argument_done or item_types.get(item_id) != "function_call":
                     return False
+            elif event_type == "response.function_call_arguments.done":
+                if not response_started:
+                    return False
+                item_id = str(event.get("item_id", event.get("output_index", "")))
+                if (
+                    item_id not in added
+                    or item_id in closed
+                    or item_id in argument_done
+                    or item_types.get(item_id) != "function_call"
+                    or not isinstance(event.get("arguments"), str)
+                ):
+                    return False
+                argument_done.add(item_id)
             elif event_type in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
                 if not response_started:
                     return False
@@ -483,8 +506,13 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             delta = choice.get("delta", {})
             if not isinstance(delta, dict):
                 return False
+            tool_calls = delta.get("tool_calls", [])
+            if not isinstance(tool_calls, list):
+                return False
             chunk_last_tool_index = -1
-            for call in delta.get("tool_calls", []) if isinstance(delta, dict) else []:
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    return False
                 tool_index = _stream_index(call.get("index"))
                 if tool_index is None:
                     return False
@@ -512,7 +540,11 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
             status = response.status
             if not stream:
                 try:
-                    document = json.loads(response.read().decode("utf-8"), parse_constant=_reject_nonfinite)
+                    document = json.loads(
+                        response.read().decode("utf-8"),
+                        object_pairs_hook=_reject_duplicate_keys,
+                        parse_constant=_reject_nonfinite,
+                    )
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     return TransportResult(status, None, [], False, 1)
                 return TransportResult(status, document if isinstance(document, dict) else None, [], False, 0)
@@ -586,16 +618,8 @@ def _parse_arguments(value: Any) -> tuple[Any, str | None]:
         return value, None
     if not isinstance(value, str):
         return value, "arguments_not_object_or_json"
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, item in pairs:
-            if key in result:
-                raise _DuplicateKeyError(f"duplicate argument key: {key}")
-            result[key] = item
-        return result
-
     try:
-        parsed = json.loads(value, object_pairs_hook=reject_duplicate_keys, parse_constant=_reject_nonfinite)
+        parsed = json.loads(value, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
     except _DuplicateKeyError:
         return value, "arguments_duplicate_key"
     except (json.JSONDecodeError, ValueError):
@@ -927,6 +951,19 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
             if delta:
                 argument_fragment_items.add(key)
             args_by_item[key] = args_by_item.get(key, "") + delta
+        elif event_type == "response.function_call_arguments.done":
+            key = str(event.get("item_id", event.get("output_index", "")))
+            if output.get(key, {}).get("type") != "function_call":
+                errors.append("stream_delta_item_type_mismatch")
+                continue
+            done_arguments = event.get("arguments")
+            if not isinstance(done_arguments, str):
+                errors.append("stream_arguments_done_invalid")
+                continue
+            reconstructed, reconstructed_error = _parse_arguments(args_by_item.get(key, ""))
+            completed, completed_error = _parse_arguments(done_arguments)
+            if reconstructed_error or completed_error or reconstructed != completed:
+                errors.append("stream_arguments_done_mismatch")
         elif event_type in {"response.output_text.delta", "response.reasoning_summary_text.delta"}:
             key = str(event.get("item_id", event.get("output_index", "")))
             expected_type = "reasoning" if event_type.startswith("response.reasoning") else "message"
@@ -1028,6 +1065,9 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
         calls.append(ToolCall(_required_identifier(raw.get("id"), errors), str(function.get("name", "")), arguments))
     content = message.get("content", "") if isinstance(message, dict) else ""
     reasoning_content = message.get("reasoning_content", "") if isinstance(message, dict) else ""
+    if "reasoning_content" in message and (not isinstance(reasoning_content, str) or not reasoning_content):
+        errors.append("reasoning_content_invalid")
+        reasoning_content = ""
     finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
     continuation = copy.deepcopy(message) if isinstance(message, dict) else {}
     turn = Turn(
@@ -1089,11 +1129,22 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                 assistant_role_seen = True
         if delta.get("content"):
             content.append(str(delta["content"]))
-        if delta.get("reasoning_content"):
-            reasoning.append(str(delta["reasoning_content"]))
+        if "reasoning_content" in delta:
+            reasoning_content = delta["reasoning_content"]
+            if not isinstance(reasoning_content, str) or not reasoning_content:
+                errors.append("reasoning_content_invalid")
+            else:
+                reasoning.append(reasoning_content)
         if choice.get("finish_reason"):
             finish_reason = choice["finish_reason"]
-        for raw in delta.get("tool_calls", []) if isinstance(delta, dict) else []:
+        tool_calls = delta.get("tool_calls", [])
+        if not isinstance(tool_calls, list):
+            errors.append("tool_calls_invalid")
+            continue
+        for raw in tool_calls:
+            if not isinstance(raw, dict):
+                errors.append("tool_call_invalid")
+                continue
             index = _stream_index(raw.get("index"))
             if index is None:
                 errors.append("stream_index_invalid")
@@ -1116,6 +1167,9 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
                 else:
                     call["id"] = raw["id"]
             function = raw.get("function", {})
+            if not isinstance(function, dict):
+                errors.append("tool_function_invalid")
+                continue
             if function.get("name"):
                 call["function"]["name"] += str(function["name"])
             if function.get("arguments"):
