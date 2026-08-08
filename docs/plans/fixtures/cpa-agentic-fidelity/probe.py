@@ -431,6 +431,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or message.get("type") != "message"
                     or message.get("role") != "assistant"
                     or message.get("content") != []
+                    or "stop_reason" not in message
+                    or "stop_sequence" not in message
                     or message.get("stop_reason") is not None
                     or message.get("stop_sequence") is not None
                 ):
@@ -496,6 +498,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         reasoning_text_started: set[str] = set()
         reasoning_text_done: set[tuple[str, int]] = set()
         reasoning_summary_indexes: dict[str, set[int]] = {}
+        reasoning_summary_text: dict[tuple[str, int], str] = {}
         encrypted_reasoning: dict[str, str | None] = {}
         message_text: dict[str, str] = {}
         item_types: dict[str, str] = {}
@@ -556,7 +559,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or response.get("output") != []
                 ):
                     return False
-                if response.get("id") is not None and response.get("id") != response_id:
+                in_progress_id = response.get("id")
+                if response_id is not None:
+                    if not isinstance(in_progress_id, str) or in_progress_id != response_id:
+                        return False
+                elif in_progress_id is not None and in_progress_id != response_id:
                     return False
                 if output_started:
                     return False
@@ -598,6 +605,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 elif item_types[item_id] == "reasoning":
                     opening_summary = raw.get("summary")
                     if opening_summary not in (None, []):
+                        return False
+                    opening_content = raw.get("content")
+                    if opening_content not in (None, []):
                         return False
                     opening_encrypted = raw.get("encrypted_content")
                     if opening_encrypted is not None and not isinstance(opening_encrypted, str):
@@ -707,7 +717,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     message_text[item_id] = message_text.get(item_id, "") + delta
                 else:
                     summary_index = _stream_index(event.get("summary_index"))
-                    if summary_index is None:
+                    delta = event.get("delta")
+                    if summary_index is None or not isinstance(delta, str):
                         return False
                     indexes = reasoning_summary_indexes.setdefault(item_id, set())
                     if summary_index not in indexes and summary_index != len(indexes):
@@ -716,6 +727,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     summary_key = (item_id, summary_index)
                     if summary_key in reasoning_text_done:
                         return False
+                    reasoning_summary_text[summary_key] = reasoning_summary_text.get(summary_key, "") + delta
                     reasoning_text_started.add(item_id)
             elif event_type in {"response.output_text.done", "response.reasoning_summary_text.done"}:
                 if not response_started:
@@ -783,7 +795,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         if not isinstance(part, dict):
                             return False
                         part_type = part.get("type")
-                        if part_type not in RESPONSES_MESSAGE_PART_TYPES or part_type != expected_type:
+                        if not isinstance(part_type, str) or part_type not in RESPONSES_MESSAGE_PART_TYPES or part_type != expected_type:
                             return False
                         text = part.get("text")
                         if not isinstance(text, str):
@@ -802,7 +814,19 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     summary = raw.get("summary", [])
                     if not isinstance(summary, list):
                         return False
-                    if any((item_id, summary_index) not in reasoning_text_done for summary_index in range(len(summary))):
+                    summary_indexes = reasoning_summary_indexes.get(item_id, set())
+                    if set(range(len(summary))) != summary_indexes:
+                        return False
+                    if any((item_id, summary_index) not in reasoning_text_done for summary_index in summary_indexes):
+                        return False
+                    if any(
+                        not isinstance(part, dict)
+                        or not isinstance(part.get("type"), str)
+                        or part.get("type") not in RESPONSES_REASONING_PART_TYPES
+                        or not isinstance(part.get("text"), str)
+                        or part["text"] != reasoning_summary_text.get((item_id, summary_index), "")
+                        for summary_index, part in enumerate(summary)
+                    ):
                         return False
                     done_encrypted = raw.get("encrypted_content")
                     if done_encrypted is not None and not isinstance(done_encrypted, str):
@@ -1286,7 +1310,12 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 envelope = {"type": message.get("type"), "role": message.get("role")}
                 if message.get("content") != []:
                     errors.append("message_start_content_invalid")
-                if message.get("stop_reason") is not None or message.get("stop_sequence") is not None:
+                if (
+                    "stop_reason" not in message
+                    or "stop_sequence" not in message
+                    or message.get("stop_reason") is not None
+                    or message.get("stop_sequence") is not None
+                ):
                     errors.append("message_start_terminal_invalid")
         elif event_type == "message_delta":
             delta = event.get("delta")
@@ -1522,6 +1551,12 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 or response.get("output") != []
             ):
                 errors.append("response_in_progress_snapshot_invalid")
+            snapshot_id = response.get("id") if isinstance(response, dict) else None
+            if response_id is not None:
+                if not isinstance(snapshot_id, str) or snapshot_id != response_id:
+                    errors.append("response_in_progress_id_invalid")
+            elif snapshot_id is not None and snapshot_id != response_id:
+                errors.append("response_in_progress_id_invalid")
         elif event_type == "response.output_item.added":
             streamed_output_seen = True
             raw = copy.deepcopy(event.get("item"))
@@ -1551,7 +1586,10 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 opening_summary = raw.get("summary")
                 if opening_summary not in (None, []):
                     errors.append("stream_reasoning_opening_snapshot_invalid")
-                reasoning_by_item[key] = _reasoning_text(raw.get("summary")) + _reasoning_text(raw.get("content"))
+                opening_content = raw.get("content")
+                if opening_content not in (None, []):
+                    errors.append("stream_reasoning_opening_snapshot_invalid")
+                reasoning_by_item[key] = _reasoning_text(raw.get("summary"))
                 opening_encrypted = raw.get("encrypted_content")
                 if opening_encrypted is not None and not isinstance(opening_encrypted, str):
                     errors.append("encrypted_reasoning_snapshot_invalid")
@@ -1591,8 +1629,24 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     summary = raw.get("summary", [])
                     if not isinstance(summary, list):
                         errors.append("stream_reasoning_summary_invalid")
-                    elif any((key, summary_index) not in reasoning_summary_done for summary_index in range(len(summary))):
-                        errors.append("stream_reasoning_summary_events_missing")
+                    else:
+                        summary_indexes = reasoning_summary_indexes.get(key, set())
+                        if set(range(len(summary))) != summary_indexes:
+                            errors.append("stream_reasoning_summary_snapshot_invalid")
+                            if any(summary_index not in summary_indexes for summary_index in range(len(summary))):
+                                errors.append("stream_reasoning_summary_events_missing")
+                        if any((key, summary_index) not in reasoning_summary_done for summary_index in summary_indexes):
+                            errors.append("stream_reasoning_summary_events_missing")
+                        for summary_index, part in enumerate(summary):
+                            if (
+                                not isinstance(part, dict)
+                                or not isinstance(part.get("type"), str)
+                                or part.get("type") not in RESPONSES_REASONING_PART_TYPES
+                                or not isinstance(part.get("text"), str)
+                            ):
+                                errors.append("stream_reasoning_summary_snapshot_invalid")
+                            elif part["text"] != reasoning_by_summary.get((key, summary_index), ""):
+                                errors.append("stream_reasoning_summary_snapshot_mismatch")
                     done_encrypted = raw.get("encrypted_content")
                     if done_encrypted is not None and not isinstance(done_encrypted, str):
                         errors.append("encrypted_reasoning_snapshot_invalid")

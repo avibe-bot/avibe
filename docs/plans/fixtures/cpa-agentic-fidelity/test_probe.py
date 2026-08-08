@@ -237,6 +237,30 @@ class ProbeParserTests(unittest.TestCase):
         missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0))
         self.assertIn("stream_reasoning_summary_events_missing", missing_turn.parse_errors)
 
+    def test_responses_reasoning_opening_content_must_be_empty(self) -> None:
+        valid = _response_reasoning_stream()
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        for opening_content in ([{"type": "summary_text", "text": "prefilled"}], {"unexpected": True}):
+            invalid = copy.deepcopy(valid)
+            invalid[1]["event"]["item"]["content"] = opening_content
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0))
+            self.assertIn("stream_reasoning_opening_snapshot_invalid", turn.parse_errors)
+
+        empty = copy.deepcopy(valid)
+        empty[1]["event"]["item"]["content"] = []
+        self.assertTrue(probe._stream_order_ok("responses", empty))
+
+    def test_responses_reasoning_summary_snapshots_match_each_delta_index(self) -> None:
+        invalid = _response_multi_summary_stream()
+        invalid[6]["event"]["item"]["summary"] = [
+            {"type": "summary_text", "text": "firsts"},
+            {"type": "summary_text", "text": "econd"},
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0))
+        self.assertIn("stream_reasoning_summary_snapshot_mismatch", turn.parse_errors)
+
     def test_responses_stream_rejects_noncontiguous_reasoning_summary_index(self) -> None:
         events = _response_multi_summary_stream()
         events[4]["event"]["summary_index"] = 2
@@ -1305,6 +1329,34 @@ class ProbeParserTests(unittest.TestCase):
             turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
             self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
 
+    def test_responses_stream_in_progress_snapshot_preserves_response_id(self) -> None:
+        valid = _response_message_stream()
+        valid[0]["event"]["response"]["id"] = "resp_1"
+        valid.insert(
+            1,
+            {
+                "kind": "event",
+                "type": "response.in_progress",
+                "event": {
+                    "type": "response.in_progress",
+                    "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []},
+                },
+            },
+        )
+        valid[-1]["event"]["response"]["id"] = "resp_1"
+        for index, event in enumerate(valid):
+            event["sequence"] = index
+            event["wire_sequence"] = index
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
+        self.assertNotIn("response_in_progress_id_invalid", valid_turn.parse_errors)
+
+        missing = copy.deepcopy(valid)
+        missing[1]["event"]["response"].pop("id")
+        self.assertFalse(probe._stream_order_ok("responses", missing))
+        missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0, False))
+        self.assertIn("response_in_progress_id_invalid", missing_turn.parse_errors)
+
     def test_responses_stream_rejects_invalid_terminal_discriminator(self) -> None:
         events = _response_message_stream()
         events[-1]["event"]["response"]["object"] = "other"
@@ -2010,6 +2062,13 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("terminal_output_mismatch", turn.parse_errors)
 
+    def test_responses_stream_rejects_unhashable_message_part_type(self) -> None:
+        invalid = _response_message_stream()
+        invalid[6]["event"]["item"]["content"][0]["type"] = []
+        self.assertFalse(probe._stream_order_ok("responses", invalid))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+        self.assertIn("message_part_type_invalid", turn.parse_errors)
+
     def test_anthropic_thinking_opening_snapshot_must_be_empty(self) -> None:
         valid = [
             {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
@@ -2067,6 +2126,15 @@ class ProbeParserTests(unittest.TestCase):
         stop_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, premature_stop, False, 0, False))
         self.assertIn("message_start_content_invalid", content_turn.parse_errors)
         self.assertIn("message_start_terminal_invalid", stop_turn.parse_errors)
+
+        for field in ("stop_reason", "stop_sequence"):
+            missing = copy.deepcopy(valid)
+            missing[0]["event"]["message"].pop(field)
+            self.assertFalse(probe._stream_order_ok("anthropic", missing))
+            missing_turn = probe._parse_anthropic_stream(
+                probe.TransportResult(200, None, missing, False, 0, False)
+            )
+            self.assertIn("message_start_terminal_invalid", missing_turn.parse_errors)
 
     def test_non_string_stop_reasons_are_parse_failures(self) -> None:
         anthropic = probe._parse_anthropic_document(
