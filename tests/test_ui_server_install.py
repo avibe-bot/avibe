@@ -6,7 +6,7 @@ import time
 import pytest
 
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
-from vibe import api
+from vibe import api, desktop_backends
 from vibe.ui_server import app
 
 from tests.ui_server_test_helpers import csrf_headers
@@ -268,3 +268,11 @@ def test_install_job_dedupes_running_backend(monkeypatch):
     assert second["job_id"] == first["job_id"]
     assert second["status"] == "running"
     assert calls == ["codex"]
+    private_install_budget = (
+        desktop_backends.DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS
+        + desktop_backends.DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS
+        + desktop_backends.DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS
+        + desktop_backends.DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS
+        + 4.0
+    )
+    assert first["poll_timeout_seconds"] > private_install_budget

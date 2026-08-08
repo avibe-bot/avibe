@@ -49,6 +49,10 @@ from vibe.opencode_config import (
 )
 from vibe.build_identity import get_build_identity
 from vibe.desktop_backends import (
+    DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS,
+    DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS,
+    DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS,
+    DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS,
     DesktopBackendError,
     desktop_backend_toolchain,
     install_desktop_backend,
@@ -5831,6 +5835,14 @@ _AGENT_INSTALL_JOB_LOCK = threading.Lock()
 _AGENT_INSTALL_JOBS: dict[str, dict] = {}
 _AGENT_INSTALL_LATEST_BY_BACKEND: dict[str, str] = {}
 _AGENT_INSTALL_JOB_TTL_SECONDS = 3600.0
+_AGENT_INSTALL_POLL_TIMEOUT_SECONDS = (
+    DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS
+    + DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS
+    + DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS
+    + DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS
+    + 4.0  # Controller refresh acknowledgement.
+    + 30.0  # Filesystem publication, persistence, and polling margin.
+)
 
 
 def _prune_agent_install_jobs(now: float | None = None) -> None:
@@ -5878,6 +5890,7 @@ def start_agent_install_job(name: str) -> dict:
         "message": "Upgrade started",
         "output": "",
         "path": None,
+        "poll_timeout_seconds": _AGENT_INSTALL_POLL_TIMEOUT_SECONDS,
         "started_at": now,
         "finished_at": None,
     }
@@ -6156,7 +6169,10 @@ def install_agent(name: str) -> dict:
                 resolve_from=configured_path,
             )
 
-    if desktop_backend_toolchain() is not None:
+    # A damaged private toolchain must fail closed. Falling through here would
+    # run the legacy global installers and mutate user/system state from a
+    # desktop Runtime that promises app-private backend ownership.
+    if is_desktop_managed_runtime():
         return _run_desktop_backend_install(name, _truncate_output)
 
     command_env: dict[str, str] | None = None

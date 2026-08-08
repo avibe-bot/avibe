@@ -30,6 +30,10 @@ CURRENT_DESCRIPTOR_SCHEMA_VERSION = 1
 MAX_DESCRIPTOR_BYTES = 16 * 1024
 MAX_INSTALL_OUTPUT_CHARS = 8192
 NPM_REGISTRY = "https://registry.npmjs.org/"
+DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS = 30.0
+DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS = 300.0
+DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS = 15.0
+DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -170,7 +174,7 @@ def install_desktop_backend(
     *,
     base_env: Mapping[str, str] | None = None,
     activate: ActivationCallback | None = None,
-    timeout_seconds: float = 300,
+    timeout_seconds: float = DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS,
 ) -> DesktopBackendInstallResult:
     """Install or update one backend and atomically publish its descriptor.
 
@@ -194,7 +198,10 @@ def install_desktop_backend(
 
     backend_root = toolchain.backends_root / backend
     _prepare_backend_root(toolchain.backends_root, backend_root)
-    lock = MigrationFileLock(backend_root / ".install.lock", timeout_seconds=30)
+    lock = MigrationFileLock(
+        backend_root / ".install.lock",
+        timeout_seconds=DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS,
+    )
     try:
         lock.acquire()
     except MigrationLockTimeout as exc:
@@ -277,6 +284,11 @@ def install_desktop_backend(
                 activate(str(published_executable))
         except Exception:
             _restore_descriptor_bytes(descriptor_path, previous_descriptor)
+            # Once staging has been renamed, the outer cleanup can no longer
+            # reach it. Remove the release only after restoring the descriptor;
+            # if restoration itself fails, retaining the files is safer than a
+            # descriptor that points at a deleted executable.
+            _remove_staging_directory(release_root, backend_root)
             raise
 
         return DesktopBackendInstallResult(
@@ -402,7 +414,9 @@ def _run_command(
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         signal_process_tree(process, KILL_SIGNAL, logger, "desktop backend install")
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(
+            timeout=DESKTOP_BACKEND_PROCESS_DRAIN_TIMEOUT_SECONDS,
+        )
         raise DesktopBackendError(
             "Desktop backend install timed out.",
             code="install_timeout",
@@ -501,7 +515,7 @@ def _verify_backend_executable(
             env=dict(env),
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=DESKTOP_BACKEND_PROBE_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DesktopBackendError(

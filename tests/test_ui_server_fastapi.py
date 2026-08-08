@@ -1735,6 +1735,30 @@ def test_changed_agent_backend_runtimes_uses_backend_runtime_projection():
     assert ui_server._changed_agent_backend_runtimes(None, current, {"agents": changed_payload["agents"]}) == []
 
 
+def test_changed_agent_backend_runtimes_keeps_saved_selector_changes_visible(monkeypatch, tmp_path):
+    from config.v2_config import V2Config
+
+    resolved = tmp_path / ".local" / "bin" / "claude"
+    resolved.parent.mkdir(parents=True)
+    resolved.write_text("#!/bin/sh\n", encoding="utf-8")
+    resolved.chmod(0o755)
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr("vibe.cli_paths.resolve_cli_path", lambda _selector: str(resolved))
+
+    payload = _full_config_payload()
+    payload["agents"]["claude"]["cli_path"] = "claude"
+    previous = V2Config.from_payload(payload)
+    changed_payload = json.loads(json.dumps(payload))
+    changed_payload["agents"]["claude"]["cli_path"] = str(resolved)
+    current = V2Config.from_payload(changed_payload)
+
+    assert ui_server._changed_agent_backend_runtimes(
+        previous,
+        current,
+        {"agents": changed_payload["agents"]},
+    ) == ["claude"]
+
+
 def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-902."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

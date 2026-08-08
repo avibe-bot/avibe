@@ -1437,8 +1437,11 @@ def _changed_agent_backend_runtimes(
     from config.v2_compat import to_app_config
     from modules.agents.catalog import AGENT_BACKENDS
 
-    previous_runtime = to_app_config(previous)
-    current_runtime = to_app_config(current)
+    # Historical snapshots must stay pure. Resolving both selectors against
+    # today's filesystem can make a newly saved absolute path compare equal to
+    # the old bare command and suppress the live backend refresh it requires.
+    previous_runtime = to_app_config(previous, resolve_agent_paths=False)
+    current_runtime = to_app_config(current, resolve_agent_paths=False)
     return [
         backend
         for backend in AGENT_BACKENDS

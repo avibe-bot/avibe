@@ -23,9 +23,12 @@ backends are installed only after the user requests one.
    same resolver used by Settings before constructing Claude, Codex, or
    OpenCode runtime configuration. GUI-process `PATH` inheritance is never a
    second source of truth for whether an installed backend can launch.
+   Historical snapshots remain unresolved when deciding whether a saved
+   selector change requires live reconciliation.
 5. Installing a missing backend in a desktop-managed Runtime uses the bundled
    Node.js and npm. It never requires or mutates system Node.js, npm, or global
-   package state.
+   package state. An invalid private toolchain fails closed instead of falling
+   through to a global installer.
 6. Non-desktop installations retain the existing global one-click installer
    behavior.
 
@@ -48,8 +51,8 @@ backends are installed only after the user requests one.
 - Updates use the same staged install and atomic publication path. A running
   backend may continue using its previous release; old releases are not deleted
   during installation.
-- Failed staging directories are removed. Previously published releases and
-  configuration remain unchanged.
+- Failed staging directories and unpublished releases are removed. Previously
+  published releases and configuration remain unchanged.
 
 ## Runtime Bundle Contract
 
@@ -80,6 +83,9 @@ installed SDK contains no bundled Claude executable before packaging.
   adopts it as both the displayed and saved value, so it never offers a second
   Save action for the same activation.
 - Install completion and failure messages use the configured Avibe language.
+- The install-job response publishes a polling budget that exceeds the full
+  bounded lock, npm, verification, process-drain, and reconciliation budget;
+  the Workbench uses that server-owned budget.
 - Backend update checks continue to compare the installed version with the
   package registry version.
 - Desktop application updates replace the signed Runtime bundle but do not

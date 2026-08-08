@@ -182,6 +182,7 @@ def test_descriptor_publication_failure_does_not_activate_config(monkeypatch, tm
         desktop_backends.install_desktop_backend("opencode", base_env=env, activate=activate)
 
     assert state["path"] == "opencode"
+    assert list((Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "opencode" / "releases").iterdir()) == []
 
 
 def test_descriptor_is_published_before_activation_and_restored_on_failure(monkeypatch, tmp_path):
@@ -214,6 +215,7 @@ def test_descriptor_is_published_before_activation_and_restored_on_failure(monke
         desktop_backends.install_desktop_backend("claude", base_env=env, activate=fail_activation)
 
     assert desktop_backends.resolve_published_desktop_backend("claude", env) == str(old_executable)
+    assert [path.name for path in (backend_root / "releases").iterdir()] == ["old"]
 
 
 def test_resolver_rejects_descriptor_traversal_and_non_native_file(tmp_path):

@@ -21,7 +21,7 @@ from config import paths
 from config.v2_settings import ChannelSettings, SettingsStore
 from core.vibe_agents import VibeAgentStore
 from core import chat_discovery
-from vibe import api, backend_model_catalog
+from vibe import api, backend_model_catalog, cli_paths
 from vibe.opencode_config import parse_jsonc_object
 
 
@@ -1352,16 +1352,17 @@ def test_detect_cli_supports_explicit_path(monkeypatch, tmp_path):
 def only_tmp_binaries(monkeypatch, tmp_path):
     """Make CLI discovery hermetic: only executables under ``tmp_path`` count as
     installed, so the runner's real ``/usr/local/bin/{npm,codex}`` (or a dev box's
-    homebrew/nvm binaries) can't leak into detection. ``api._candidate_cli_paths``
+    homebrew/nvm binaries) can't leak into detection. ``cli_paths``
     scans hardcoded common bin dirs (``/usr/local/bin``, ``/opt/homebrew/bin``)
     that these tests cannot otherwise neutralize; without this they pass locally
     but fail on a CI runner that has a real npm installed."""
-    real_is_exec = api._is_executable_file
-    monkeypatch.setattr(
-        api,
-        "_is_executable_file",
-        lambda p: str(p).startswith(str(tmp_path)) and real_is_exec(p),
-    )
+    real_is_exec = cli_paths._is_executable_file
+
+    def is_fixture_executable(path):
+        return str(path).startswith(str(tmp_path)) and real_is_exec(path)
+
+    monkeypatch.setattr(api, "_is_executable_file", is_fixture_executable)
+    monkeypatch.setattr(cli_paths, "_is_executable_file", is_fixture_executable)
 
 
 def test_detect_cli_finds_npm_in_nvm(monkeypatch, tmp_path, only_tmp_binaries):
@@ -1576,6 +1577,7 @@ def test_install_agent_upgrades_exact_configured_external_path(monkeypatch, tmp_
 
 def test_install_agent_uses_private_desktop_installer_when_external_is_missing(monkeypatch, tmp_path):
     installed = tmp_path / "backends" / "codex" / "releases" / "new" / "codex"
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
 
     class Config:
         def __init__(self):
@@ -1635,6 +1637,34 @@ def test_desktop_backend_install_localizes_structured_failure(monkeypatch):
         "message": "无法安装 Claude Code。",
         "output": "npm failed",
     }
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_desktop_runtime_does_not_fall_back_to_global_installer(monkeypatch, backend):
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(language="en"))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _value: None)
+    monkeypatch.setattr(
+        api,
+        "install_desktop_backend",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            api.DesktopBackendError(
+                "private toolchain unavailable",
+                code="desktop_toolchain_unavailable",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("desktop Runtime must not run a global installer"),
+    )
+
+    result = api.install_agent(backend)
+
+    assert result["ok"] is False
+    assert result["code"] == "desktop_toolchain_unavailable"
+    assert result["message"] == "The desktop backend installer is unavailable."
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
