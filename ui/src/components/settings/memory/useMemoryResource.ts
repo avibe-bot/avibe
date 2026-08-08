@@ -31,7 +31,7 @@ export type MemoryResource<T, A extends unknown[] = []> = {
 export type UseMemoryResourceOptions<A extends unknown[]> = {
   /** Must be referentially stable — it is a `reload` dependency. */
   read: (...args: A) => Promise<unknown>;
-  /** Success predicate; defaults to the `status: 'ok'` envelope. Must be stable. */
+  /** Compatibility success predicate; current Memory routes use the default `status: 'ok'` envelope. */
   accept?: (value: unknown) => boolean;
   /** i18n key used when the request itself throws, so there is no closed code. */
   failureMessageKey: string;

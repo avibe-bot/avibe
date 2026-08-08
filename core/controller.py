@@ -1554,6 +1554,55 @@ class Controller:
         )
         return self.memory_runtime.project_for_workdir(workdir)
 
+    async def final_flush_memory_session(
+        self,
+        context: MessageContext,
+        raw_session_id: str,
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> bool:
+        """Best-effort final Memory flush for a trusted IM session lifecycle event.
+
+        The raw anchor must come from ``SessionHandler.get_base_session_id``.  The
+        handler deliberately never constructs a provider session identifier: this
+        controller boundary reuses capture admission and lets Memory derive its
+        current epoch-scoped identity.
+        """
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            return False
+        facts = self._memory_turn_facts(context, session_id=raw_session_id)
+        if not facts.memory_enabled:
+            return False
+        admission = self._memory_admission()
+        try:
+            if not admission.admits(facts):
+                return False
+            principal_id = admission.principal_for(facts)
+            project_id = admission.project_for(facts)
+        except Exception:
+            logger.debug("Memory final flush admission failed", exc_info=True)
+            return False
+        if principal_id is None or project_id is None:
+            return False
+
+        runtime = getattr(self, "memory_runtime", None)
+        final_flush = getattr(runtime, "final_flush", None)
+        if not callable(final_flush):
+            return False
+        try:
+            return bool(
+                await final_flush(
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    raw_session_id=raw_session_id,
+                    deadline_seconds=deadline_seconds,
+                )
+            )
+        except Exception:
+            logger.debug("Memory final flush failed", exc_info=True)
+            return False
+
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.
 

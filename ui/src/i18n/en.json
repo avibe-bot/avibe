@@ -3568,10 +3568,9 @@
       "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
     },
     "tabs": {
-      "status": "Status",
+      "processingRecord": "Processing Record",
       "profile": "Profile",
       "search": "Search",
-      "log": "Log",
       "settings": "Settings"
     },
     "remoteUnavailable": {
@@ -3638,8 +3637,91 @@
         "kind": {
           "delivery_abandoned": "Delivery abandoned",
           "distillation_rejected": "Distillation rejected",
+          "recorder_degraded": "Recorder degraded",
           "result_unknown": "Result unknown"
         }
+      }
+    },
+    "processingRecord": {
+      "title": "Processing Record",
+      "description": "Runtime observations, source freshness, recovery evidence, and bounded processing diagnostics.",
+      "refresh": "Refresh",
+      "runtime": {
+        "title": "Runtime and capabilities",
+        "loading": "Reading runtime health…",
+        "unavailable": "No runtime health snapshot is available.",
+        "version": "Version",
+        "capabilities": "Capabilities",
+        "noCapabilities": "No capabilities were reported.",
+        "disabledFeatures": "Disabled features",
+        "noneDisabled": "No disabled features were reported.",
+        "cascade": "Cascade",
+        "recorder": "Recorder",
+        "noFacts": "No facts were reported."
+      },
+      "source": {
+        "health": "Runtime health"
+      },
+      "sourceState": {
+        "available": "Available",
+        "partial": "Partial",
+        "stale": "Stale",
+        "unknown": "Unknown",
+        "unavailable": "Unavailable"
+      },
+      "sourceReason": "Reason: {{reason}}",
+      "sources": {
+        "title": "Source availability",
+        "description": "Each source is observed independently; one unavailable source does not imply a global runtime state."
+      },
+      "anomalies": {
+        "title": "Anomalies and recovery",
+        "description": "Bounded processing and recovery evidence retained by this installation.",
+        "loading": "Reading anomalies…",
+        "empty": "No retained anomalies.",
+        "loadFailed": "Couldn't load Memory anomalies."
+      },
+      "manualRequiredReadOnly": "Manual review is required. This record is read-only and has no action.",
+      "anomalyState": {
+        "dead": "Dead",
+        "degraded": "Degraded",
+        "manualRequired": "Manual review required",
+        "rejected": "Rejected"
+      },
+      "anomalyOperation": {
+        "add": "Add",
+        "flush": "Flush",
+        "record": "Record"
+      },
+      "field": {
+        "operation": "Operation",
+        "operationId": "Operation ID",
+        "state": "State",
+        "occurredAt": "Occurred at",
+        "errorCode": "Error code",
+        "attempts": "Attempts",
+        "generation": "Generation",
+        "requestId": "Request ID"
+      },
+      "clearRecovery": {
+        "title": "Interrupted Clear requires a decision",
+        "description": "Resume deletion from its journal, or abort and restore the captured snapshot.",
+        "state": {
+          "preparing": "Preparing snapshot",
+          "prepared": "Snapshot prepared",
+          "deleting": "Deleting Memory data",
+          "recoveryNeeded": "Recovery required"
+        },
+        "resume": "Resume Clear",
+        "abort": "Abort and restore",
+        "abortUnavailable": "Abort is unavailable until the initial snapshot is complete.",
+        "resumeSuccess": "Clear resumed and completed.",
+        "abortSuccess": "Clear aborted and the snapshot was restored.",
+        "actionFailed": "Couldn't update Clear recovery.",
+        "loadFailed": "Couldn't load Clear maintenance state."
+      },
+      "timeline": {
+        "title": "Recent processing timeline"
       }
     },
     "profile": {
@@ -3692,6 +3774,8 @@
       "clearAction": "Open Clear all",
       "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
       "sectionPartial": "{{section}} is partially available ({{reason}}).",
+      "sectionStale": "{{section}} is stale ({{reason}}).",
+      "sectionUnknown": "{{section}} availability is unknown ({{reason}}).",
       "section": {
         "everos": "Timeline data",
         "capture": "Capture attribution",
@@ -3780,7 +3864,8 @@
       "apiKeyPlaceholder": "sk-…",
       "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
       "embeddingLocked": "Changing the embedding endpoint or model is disabled while memory data exists. Run Clear all first.",
-      "embeddingStatusPending": "Confirming Memory state… the embedding endpoint unlocks once it's confirmed no data exists.",
+      "embeddingStatusPending": "Reading local maintenance state… the embedding endpoint unlocks once it's confirmed no data exists.",
+      "maintenanceLoadFailed": "Couldn't load local Memory maintenance state.",
       "save": "Save settings",
       "saving": "Saving…",
       "saveFailed": "Couldn't save Memory settings.",

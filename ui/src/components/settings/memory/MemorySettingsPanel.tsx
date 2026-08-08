@@ -12,10 +12,10 @@ import { Switch } from '../../ui/switch';
 import { useApi } from '../../../context/ApiContext';
 import type {
   MemoryEndpointConfig,
+  MemoryMaintenance,
   MemorySettings,
   MemorySettingsPatch,
   MemorySettingsResult,
-  MemoryStatus,
 } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
 import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
@@ -115,20 +115,22 @@ const EndpointFields: React.FC<{
 
 export const MemorySettingsPanel: React.FC<{
   settings: MemorySettings;
-  status: MemoryStatus | null;
+  maintenance: MemoryMaintenance | null;
+  maintenanceError: string | null;
   dependencyReady: boolean;
   onSaved: (next: MemorySettingsOk) => void;
   onReloadSettings: () => void;
-  onReloadStatus: () => void;
+  onReloadMaintenance: () => void;
   onClearAll: () => void;
   clearing: boolean;
 }> = ({
   settings,
-  status,
+  maintenance,
+  maintenanceError,
   dependencyReady,
   onSaved,
   onReloadSettings,
-  onReloadStatus,
+  onReloadMaintenance,
   onClearAll,
   clearing,
 }) => {
@@ -148,20 +150,22 @@ export const MemorySettingsPanel: React.FC<{
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
   }, [settings]);
 
-  // `data_exists` is only known once status resolves. Settings can render first (the two loads run
-  // concurrently), so until status is known we must NOT let the embedding endpoint be edited: a
+  // `data_exists` is only known once the cheap local maintenance read resolves. Settings can render
+  // first, so until maintenance is known we must NOT let the embedding endpoint be edited: a
   // change made in that window would be silently discarded once the lock activates yet still report
-  // success. Fail closed — treat the embedding endpoint as locked while status is unknown, and only
-  // unlock it after a resolved status reports data_exists=false.
-  const statusKnown = status != null;
+  // success. Fail closed until the maintenance fact explicitly reports data_exists=false.
+  const maintenanceKnown = maintenance != null;
   // Data already exists in the local Memory root: changing the embedding endpoint/model would mix
   // vector spaces, so the backend rejects it; lock those fields here too, proactively.
-  const embeddingDataLock = !!status?.data_exists;
-  const embeddingLocked = !statusKnown || embeddingDataLock;
+  const embeddingDataLock = !!maintenance?.data_exists;
+  const embeddingLocked = !maintenanceKnown || embeddingDataLock;
+  const embeddingLockedHint = embeddingDataLock
+    ? t('memory.settings.embeddingLocked')
+    : maintenanceError ?? (!maintenanceKnown ? t('memory.settings.embeddingStatusPending') : undefined);
   const canClearKeys = !enabledDraft;
 
   // If data_exists transitions to true while the user has an unsaved embedding draft
-  // (e.g. they edited it while data_exists was false, then a poll reports data_exists
+  // (e.g. they edited it while data_exists was false, then a refreshed maintenance read reports
   // true), discard that draft back to the persisted settings. Otherwise save() would
   // drop the embedding patch (locked) yet report success — a silent discard.
   useEffect(() => {
@@ -207,12 +211,12 @@ export const MemorySettingsPanel: React.FC<{
         // Reconciliation may roll back endpoint fields. Reload both resources
         // instead of restoring drafts from the stale pre-save snapshot.
         onReloadSettings();
-        onReloadStatus();
+        onReloadMaintenance();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
       onReloadSettings();
-      onReloadStatus();
+      onReloadMaintenance();
     } finally {
       setSaving(false);
     }
@@ -262,15 +266,9 @@ export const MemorySettingsPanel: React.FC<{
         onChange={setEmbeddingDraft}
         disabled={saving}
         locked={embeddingLocked}
-        // Distinguish the two lock reasons: data-exists (permanent until Clear all) vs status not
-        // yet resolved (transient — re-enables once status confirms no data exists).
-        lockedHint={
-          embeddingDataLock
-            ? t('memory.settings.embeddingLocked')
-            : !statusKnown
-              ? t('memory.settings.embeddingStatusPending')
-              : undefined
-        }
+        // Distinguish the two lock reasons: data-exists (permanent until Clear all) vs maintenance
+        // not yet resolved (transient — re-enables once the local fact confirms no data exists).
+        lockedHint={embeddingLockedHint}
         canClearKey={canClearKeys}
       />
 

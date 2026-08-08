@@ -62,11 +62,12 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        status={null}
+        maintenance={null}
+        maintenanceError={null}
         dependencyReady
         onSaved={onSaved}
         onReloadSettings={() => undefined}
-        onReloadStatus={() => undefined}
+        onReloadMaintenance={() => undefined}
         onClearAll={() => undefined}
         clearing={false}
       />,
@@ -83,6 +84,80 @@ describe('MemorySettingsPanel', () => {
       processing: { llm: { base_url: 'https://new.example.test/v1' } },
     }));
     expect(onSaved).toHaveBeenCalledWith(saved);
+  });
+
+  it('locks embedding identity until the separate maintenance fact is known', () => {
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[1] as HTMLInputElement;
+    expect(embeddingBaseUrl.disabled).toBe(true);
+    expect(screen.getByText('memory.settings.embeddingStatusPending')).toBeTruthy();
+  });
+
+  it('keeps the embedding identity locked and reports a maintenance read failure', () => {
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError="maintenance unavailable"
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[1] as HTMLInputElement;
+    expect(embeddingBaseUrl.disabled).toBe(true);
+    expect(screen.getByText('maintenance unavailable')).toBeTruthy();
+  });
+
+  it('unlocks embedding identity only when maintenance reports no data', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      processing: {
+        ...legacySettings.processing,
+        embedding: endpoint('https://new-embedding.example.test/v1'),
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{ status: 'ok', data_exists: false, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[1] as HTMLInputElement;
+    expect(embeddingBaseUrl.disabled).toBe(false);
+    await user.clear(embeddingBaseUrl);
+    await user.type(embeddingBaseUrl, 'https://new-embedding.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      processing: { embedding: { base_url: 'https://new-embedding.example.test/v1' } },
+    }));
   });
 
 });

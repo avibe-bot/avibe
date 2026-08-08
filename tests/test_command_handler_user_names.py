@@ -298,6 +298,60 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
 
+    async def test_new_flushes_before_clear_and_continues_after_failed_flush(self):
+        controller = _StubController({"display_name": "小王"})
+        calls = []
+
+        async def _final_flush(context, raw_session_id, *, deadline_seconds):
+            calls.append(("flush", context, raw_session_id, deadline_seconds))
+            raise RuntimeError("provider unavailable")
+
+        async def _clear_sessions(session_key):
+            calls.append(("clear", session_key))
+            return {}
+
+        controller.final_flush_memory_session = _final_flush
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_new(context)
+
+        self.assertEqual(
+            calls,
+            [
+                ("flush", context, "wechat_wx-chat", 5.0),
+                ("clear", "wechat::wx-chat"),
+            ],
+        )
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+
+    async def test_new_does_not_flush_a_fallback_session_anchor(self):
+        controller = _StubController({"display_name": "Alex"})
+        flush_calls = []
+        clear_base_calls = []
+
+        async def _final_flush(*args, **kwargs):
+            flush_calls.append((args, kwargs))
+
+        def _raise_for_missing_canonical_anchor(_context):
+            raise RuntimeError("session identity unavailable")
+
+        controller.final_flush_memory_session = _final_flush
+        controller.session_handler.get_base_session_id = _raise_for_missing_canonical_anchor
+        controller.sessions = type(
+            "Sessions",
+            (),
+            {"clear_session_base": lambda _self, key, anchor: clear_base_calls.append((key, anchor)) or 1},
+        )()
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", message_id="M1", platform="slack")
+
+        await handler.handle_new(context)
+
+        self.assertEqual(flush_calls, [])
+        self.assertEqual(clear_base_calls, [("slack::C1", "slack_M1")])
+
     async def test_new_command_reports_paused_bound_definitions(self):
         """D2 — `/new` pauses definitions pinned to the session it clears, and says so.
 
@@ -491,6 +545,19 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController({"display_name": "Alex"})
         setattr(controller.config, "platform", "telegram")
         controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        flush_calls = []
+        call_order = []
+
+        async def _final_flush(context, raw_session_id, *, deadline_seconds):
+            call_order.append("flush")
+            flush_calls.append((context, raw_session_id, deadline_seconds))
+
+        controller.final_flush_memory_session = _final_flush
+        controller.session_handler = type(
+            "SessionHandler",
+            (),
+            {"get_base_session_id": staticmethod(lambda _context: "telegram_-100123_1")},
+        )()
         handler = CommandHandlers(controller)
         controller.im_client.started_topic_context = MessageContext(
             user_id="42",
@@ -498,6 +565,13 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             thread_id="99",
             platform="telegram",
         )
+        original_start = controller.im_client.start_new_topic_session
+
+        async def _start_new_topic(context):
+            call_order.append("topic")
+            return await original_start(context)
+
+        controller.im_client.start_new_topic_session = _start_new_topic
         context = MessageContext(
             user_id="42",
             channel_id="-100123",
@@ -513,6 +587,8 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("-100123", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
         self.assertEqual(controller.im_client.sent_contexts[0].thread_id, "99")
+        self.assertEqual(flush_calls, [(context, "telegram_-100123_1", 5.0)])
+        self.assertEqual(call_order, ["flush", "topic"])
 
     async def test_slack_dm_start_skips_channel_info_lookup(self):
         controller = _StubController({"display_name": "Alex"})

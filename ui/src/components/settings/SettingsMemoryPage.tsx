@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowUpRight, Brain, Loader2, RotateCw, ShieldAlert } from 'lucide-react';
@@ -8,47 +8,43 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { SegmentedRadio } from '../ui/segmented';
 import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
-import { MemoryLogPanel, MemoryRecorderFaultBanner } from './memory/MemoryLogPanel';
+import { MemoryLogPanel } from './memory/MemoryLogPanel';
 import { MemorySearchPanel } from './memory/MemorySearchPanel';
 import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
 import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
 import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
 import type {
-  MemoryFailureLogEntry,
   MemoryFailureLogResult,
+  MemoryLogSections,
+  MemoryMaintenanceResult,
   MemorySettingsResult,
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
-type MemoryTab = 'status' | 'profile' | 'search' | 'log' | 'settings';
+type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
-type MemoryFailureLogOk = Extract<MemoryFailureLogResult, { items: MemoryFailureLogEntry[] }>;
-
-const POLL_MS = 4000;
-
-const DEFAULT_FAILURE_RETENTION_DAYS = 90;
-
-// The failure log is the one Memory route that answers success untagged.
-const hasFailureItems = (value: unknown): boolean =>
-  Array.isArray((value as { items?: unknown } | null | undefined)?.items);
+type MemoryFailureLogOk = Extract<MemoryFailureLogResult, { status: 'ok' }>;
+type MemoryMaintenanceOk = Extract<MemoryMaintenanceResult, { status: 'ok' }>;
 
 export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
 
-  const [tab, setTab] = useState<MemoryTab>('status');
+  const [tab, setTab] = useState<MemoryTab>('processingRecord');
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [logGeneration, setLogGeneration] = useState(0);
+  const [logRefreshToken, setLogRefreshToken] = useState(0);
+  const [logSections, setLogSections] = useState<MemoryLogSections | null>(null);
+  const [recoveryAction, setRecoveryAction] = useState<'resume' | 'abort' | null>(null);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
@@ -60,22 +56,30 @@ export const SettingsMemoryPage: React.FC = () => {
   });
   const failuresRead = useMemoryResource<MemoryFailureLogOk>({
     read: api.getMemoryFailures,
-    accept: hasFailureItems,
-    failureMessageKey: 'memory.status.failureLog.loadFailed',
+    failureMessageKey: 'memory.processingRecord.anomalies.loadFailed',
+  });
+  const maintenanceRead = useMemoryResource<MemoryMaintenanceOk>({
+    read: api.getMemoryMaintenance,
+    failureMessageKey: 'memory.settings.maintenanceLoadFailed',
   });
 
   const { reload: loadSettings, setData: setSettings } = settingsRead;
-  const { reload: loadStatus, reloadIfIdle: pollStatus } = statusRead;
-  const { reload: loadFailures, reloadIfIdle: pollFailures } = failuresRead;
+  const { reload: loadStatus } = statusRead;
+  const { reload: loadFailures } = failuresRead;
+  const { reload: loadMaintenance } = maintenanceRead;
   const settings = settingsRead.data;
   const status = statusRead.data;
+  const loadProcessingRecord = useCallback(async () => {
+    await loadStatus();
+    await loadFailures();
+  }, [loadFailures, loadStatus]);
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
-  const remoteUnavailable = settingsRead.forbidden || statusRead.forbidden || failuresRead.forbidden;
+  const remoteUnavailable =
+    settingsRead.forbidden || statusRead.forbidden || failuresRead.forbidden || maintenanceRead.forbidden;
 
-  // Dependency readiness comes from the authoritative Dependencies source (plan §5), NOT the
-  // memory status: after a failed enable the backend rolls the setting back to disabled and a
-  // disabled status omits the runtime error, so status alone would falsely read "ready".
+  // Dependency readiness comes from the authoritative Dependencies source. Processing Record
+  // health is observational and never doubles as installation or enablement state.
   const loadDependency = useCallback(async () => {
     try {
       const res = await api.listDependencies();
@@ -97,46 +101,65 @@ export const SettingsMemoryPage: React.FC = () => {
 
   useEffect(() => {
     void loadSettings();
-    void loadStatus();
-    void loadFailures();
+    void loadProcessingRecord();
+    void loadMaintenance();
     void loadDependency();
-  }, [loadSettings, loadStatus, loadFailures, loadDependency]);
-
-  // Poll status while the page is open so queue/state transitions (starting → ready, clearing →
-  // enabled, etc.) show up without a manual refresh. Settings/profile/search stay explicit-refresh.
-  const remoteUnavailableRef = useRef(remoteUnavailable);
-  remoteUnavailableRef.current = remoteUnavailable;
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      if (remoteUnavailableRef.current) return;
-      // Poll, but never stack probes: a status read can outlive the tick when the sidecar is
-      // slow (its provider health check has its own timeout), and one extra read every 4s
-      // would pile up on the controller and SQLite for as long as the sidecar stays quiet.
-      void pollStatus();
-      void pollFailures();
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [pollStatus, pollFailures]);
+  }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
     setClearing(true);
     // Clear can delete provider payloads before a failed receipt or a lost
     // response, so purge cached payloads for every confirmed attempt.
     setLogGeneration((generation) => generation + 1);
+    setLogSections(null);
     try {
       const res = await api.clearMemory();
       if (res.status === 'completed') {
         showToast(t('memory.clear.cleared'), 'success');
         setClearOpen(false);
-        void loadStatus();
+        void loadProcessingRecord();
+        void loadMaintenance();
         void loadSettings();
       } else {
-        showToast(memoryErrorMessage(t, res.error), 'error');
+        void loadProcessingRecord();
+        void loadMaintenance();
+        showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
       }
     } catch {
+      void loadProcessingRecord();
+      void loadMaintenance();
       showToast(t('memory.clear.failed'), 'error');
     } finally {
       setClearing(false);
+    }
+  };
+
+  const refreshProcessingRecord = () => {
+    void loadProcessingRecord();
+    void loadMaintenance();
+    setLogRefreshToken((token) => token + 1);
+  };
+
+  const runClearRecovery = async (action: 'resume' | 'abort', operationId: string) => {
+    setRecoveryAction(action);
+    try {
+      const res = action === 'resume'
+        ? await api.resumeMemoryClear(operationId)
+        : await api.abortMemoryClear(operationId);
+      if (res.status === 'completed' || res.status === 'aborted') {
+        showToast(t(`memory.processingRecord.clearRecovery.${action}Success`), 'success');
+        setLogGeneration((generation) => generation + 1);
+        setLogSections(null);
+        void loadProcessingRecord();
+        void loadMaintenance();
+        void loadSettings();
+      } else {
+        showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
+      }
+    } catch {
+      showToast(t('memory.processingRecord.clearRecovery.actionFailed'), 'error');
+    } finally {
+      setRecoveryAction(null);
     }
   };
 
@@ -146,8 +169,7 @@ export const SettingsMemoryPage: React.FC = () => {
       const res = await api.restartMemoryRuntime();
       if (res.ok) {
         showToast(t('memory.status.engineRestartCompleted'), 'success');
-        void loadStatus();
-        void loadFailures();
+        void loadProcessingRecord();
       } else {
         showToast(memoryErrorMessage(t, res.error), 'error');
       }
@@ -160,34 +182,32 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const tabs = useMemo(
     () => [
-      { id: 'status' as const, label: t('memory.tabs.status') },
+      { id: 'processingRecord' as const, label: t('memory.tabs.processingRecord') },
       { id: 'profile' as const, label: t('memory.tabs.profile') },
       { id: 'search' as const, label: t('memory.tabs.search') },
-      { id: 'log' as const, label: t('memory.tabs.log') },
       { id: 'settings' as const, label: t('memory.tabs.settings') },
     ],
     [t],
   );
 
-  const setupStage = memorySetupStage(runtimeInstalled, settings?.enabled ?? null);
-  const runtimeRecoveryAvailable = memoryRuntimeRecoveryAvailable(runtimeInstalled, settings !== null);
-
   const settingsPanel = settings ? (
     <MemorySettingsPanel
       settings={settings}
-      status={status}
+      maintenance={maintenanceRead.data}
+      maintenanceError={maintenanceRead.error}
       dependencyReady={dependencyReady}
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
-        void loadStatus();
+        void loadProcessingRecord();
+        void loadMaintenance();
         void loadDependency();
       }}
       onReloadSettings={() => {
         void loadSettings();
       }}
-      onReloadStatus={() => {
-        void loadStatus();
+      onReloadMaintenance={() => {
+        void loadMaintenance();
         void loadDependency();
       }}
       onClearAll={() => setClearOpen(true)}
@@ -201,11 +221,6 @@ export const SettingsMemoryPage: React.FC = () => {
       title={t('memory.title')}
       subtitle={t('memory.subtitle')}
     >
-      {!remoteUnavailable &&
-        settings?.enabled === false &&
-        status?.recorder?.reason === 'call_log_corrupt' ? (
-        <MemoryRecorderFaultBanner status={status} onClearAll={() => setClearOpen(true)} />
-      ) : null}
       {!remoteUnavailable && settings?.enabled === true ? (
         <div className="flex justify-end">
           <Button
@@ -225,25 +240,8 @@ export const SettingsMemoryPage: React.FC = () => {
           <span className="text-[14px] font-semibold text-foreground">{t('memory.remoteUnavailable.title')}</span>
           <span className="max-w-md text-[12.5px] text-muted">{t('memory.remoteUnavailable.description')}</span>
         </div>
-      ) : setupStage === 'runtime-required' ? (
-        <>
-          <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
-            <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-              <Brain className="size-4 text-violet" />
-              {t('memory.setup.runtimeRequired')}
-            </div>
-            <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
-            <Button asChild variant="secondary" size="sm">
-              <Link to="/admin/settings/dependencies">
-                {t('memory.settings.goToDependencies')}
-                <ArrowUpRight className="size-3.5" />
-              </Link>
-            </Button>
-          </div>
-          {runtimeRecoveryAvailable ? settingsPanel : null}
-        </>
-      ) : setupStage === 'loading' ? (
-        settingsRead.error && !settings ? (
+      ) : !settings ? (
+        settingsRead.error ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {settingsRead.error}
           </div>
@@ -253,44 +251,62 @@ export const SettingsMemoryPage: React.FC = () => {
             {t('memory.settings.loading')}
           </div>
         )
-      ) : setupStage === 'setup' && settings ? (
-        settingsPanel
       ) : (
         <>
+          {runtimeInstalled === false ? (
+            <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
+              <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+                <Brain className="size-4 text-violet" />
+                {t('memory.setup.runtimeRequired')}
+              </div>
+              <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
+              <Button asChild variant="secondary" size="sm">
+                <Link to="/admin/settings/dependencies">
+                  {t('memory.settings.goToDependencies')}
+                  <ArrowUpRight className="size-3.5" />
+                </Link>
+              </Button>
+            </div>
+          ) : null}
           <div data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1">
             <div className="min-w-max">
               <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
             </div>
           </div>
 
-          {tab === 'status' && (
-            <MemoryStatusPanel
-              status={status}
-              failures={failuresRead.data?.items ?? []}
-              failureRetentionDays={failuresRead.data?.retention_days ?? DEFAULT_FAILURE_RETENTION_DAYS}
-              failuresError={failuresRead.error}
-              loading={!statusRead.loaded}
-              error={statusRead.error}
-              onRefresh={() => {
-                void loadStatus();
-                void loadFailures();
-              }}
-              onOpenSettings={() => setTab('settings')}
-            />
-          )}
+          {tab === 'processingRecord' ? (
+            <div className="flex flex-col gap-6">
+              <MemoryStatusPanel
+                status={status}
+                failures={failuresRead.data?.items ?? []}
+                recovery={failuresRead.data?.recovery ?? maintenanceRead.data?.clear_recovery ?? null}
+                logSections={logSections}
+                statusLoading={!statusRead.loaded || statusRead.loading}
+                failuresLoading={!failuresRead.loaded || failuresRead.loading}
+                statusError={statusRead.error}
+                failuresError={failuresRead.error}
+                refreshPending={statusRead.loading || failuresRead.loading}
+                recoveryAction={recoveryAction}
+                onRefresh={refreshProcessingRecord}
+                onResumeClear={(operationId) => void runClearRecovery('resume', operationId)}
+                onAbortClear={(operationId) => void runClearRecovery('abort', operationId)}
+              />
+              <section className="flex flex-col gap-2" aria-labelledby="memory-timeline-title">
+                <h3 id="memory-timeline-title" className="text-[13px] font-semibold text-foreground">
+                  {t('memory.processingRecord.timeline.title')}
+                </h3>
+                <MemoryLogPanel
+                  key={logGeneration}
+                  refreshToken={logRefreshToken}
+                  onSectionsChange={setLogSections}
+                />
+              </section>
+            </div>
+          ) : null}
 
           {tab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
 
           {tab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
-
-          {tab === 'log' && settings ? (
-            <MemoryLogPanel
-              key={logGeneration}
-              enabled={settings.enabled}
-              status={status}
-              onClearAll={() => setClearOpen(true)}
-            />
-          ) : null}
 
           {tab === 'settings' &&
             (!settingsRead.loaded && !settings ? (

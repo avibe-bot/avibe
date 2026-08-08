@@ -16,14 +16,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 from config import paths
+from core.memory.attachments import (
+    AttachmentPinError,
+    AttachmentPinStore,
+    PinnedBundle,
+    encode_pinned_bundle,
+)
 from core.memory.artifact import PROVIDER_ROOT_CONTROL_FILES
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
-from core.memory.presentation import memory_status_buckets
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryMeta,
     MemoryStore,
-    QueueStats,
     is_principal_id,
     is_project_id,
 )
@@ -34,8 +38,6 @@ from core.memory.types import (
     CaptureReceipt,
     CaptureRequest,
     CaptureSkipped,
-    ClearCompleted,
-    ClearReceipt,
     MemoryErrorCode,
     MemoryFailureLogEntry,
     MemoryItem,
@@ -44,9 +46,10 @@ from core.memory.types import (
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     MemoryResult,
-    MemoryStatus,
     OperationFailed,
-    encode_capture_attachments,
+    RecallItems,
+    RecallPolicy,
+    RecallResult,
     is_memory_error_code,
 )
 from core.memory.worker import MemoryWorker, ProcessingEvent
@@ -98,6 +101,7 @@ class MemoryModule:
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
         clear_provider_data: Callable[[], Awaitable[None] | None] | None = None,
+        maintenance_open: Callable[[], bool] | None = None,
         provider_root_format: str = SLICE1_PROVIDER_ROOT_FORMAT,
         artifact_fingerprint: str = SLICE1_ARTIFACT_FINGERPRINT,
         compatible_provider_root_formats: Iterable[str] = (),
@@ -105,6 +109,8 @@ class MemoryModule:
         clear_cleanup_timeout_seconds: float = CLEAR_CLEANUP_TIMEOUT_SECONDS,
         processing_event: ProcessingEvent | None = None,
         worker: MemoryWorker | None = None,
+        attachment_store: AttachmentPinStore | None = None,
+        effective_home: Path | None = None,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -112,9 +118,13 @@ class MemoryModule:
         self._runtime_error_source = runtime_error
         self._starting_source = starting
         self._disk_free_bytes = disk_free_bytes or self._default_free_disk_bytes
-        self._provider_root = provider_root or (paths.get_vibe_remote_dir() / "memory" / "everos-root")
+        self._effective_home = (
+            paths.get_vibe_remote_dir()
+            if effective_home is None
+            else effective_home
+        )
+        self._provider_root = provider_root or (self._effective_home / "memory" / "everos-root")
         self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
-        self._effective_home = paths.get_vibe_remote_dir()
         self._provider_root_format = _root_metadata_value(
             provider_root_format,
             fallback=SLICE1_PROVIDER_ROOT_FORMAT,
@@ -134,15 +144,20 @@ class MemoryModule:
             }
         )
         self._clear_provider_data = clear_provider_data
+        self._maintenance_open = maintenance_open or (lambda: False)
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
         self._clear_active = False
+        self._attachment_store = attachment_store or AttachmentPinStore(
+            effective_home=self._effective_home
+        )
         self._worker = worker or MemoryWorker(
             store=store,
             provider=provider,
             enabled=self._is_enabled,
             processing_event=processing_event,
+            attachment_store=self._attachment_store,
         )
 
     def _replace_provider(self, provider: MemoryProviderPort) -> None:
@@ -154,7 +169,7 @@ class MemoryModule:
         """
 
         self._provider = provider
-        self._worker._provider = provider
+        self._worker.replace_provider(provider)
 
     def _set_runtime_artifact_metadata(
         self,
@@ -224,24 +239,49 @@ class MemoryModule:
 
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
-        if self._clear_active:
+        if self._clear_active or self._is_maintenance_open():
             return CaptureSkipped(reason="memory_clear_failed")
-        if not isinstance(request, CaptureRequest):
-            return await self._skipped_with_missed("memory_invalid_input")
 
-        normalized_text = self._normalize_text(request.text)
-        validation_error = self._capture_validation_error(request, normalized_text)
-        if validation_error is not None:
-            return await self._skipped_with_missed(validation_error)
+        async with self._root_lifecycle_lock():
+            if not self._is_enabled():
+                return CaptureSkipped(reason="memory_disabled")
+            if self._clear_active or self._is_maintenance_open():
+                return CaptureSkipped(reason="memory_clear_failed")
+            if not isinstance(request, CaptureRequest):
+                return await self._skipped_with_missed("memory_invalid_input")
 
+            normalized_text = self._normalize_text(request.text)
+            validation_error = self._capture_validation_error(request, normalized_text)
+            if validation_error is not None:
+                return await self._skipped_with_missed(validation_error)
+
+            try:
+                disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
+            except Exception:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            if disk_free < MIN_FREE_DISK_BYTES:
+                return await self._skipped_with_missed("memory_low_disk_space")
+            return await self._capture_under_root(request, normalized_text)
+
+    async def _capture_under_root(
+        self,
+        request: CaptureRequest,
+        normalized_text: str,
+    ) -> CaptureReceipt:
+        """Pin and enqueue one validated capture under the provider-root fence."""
+
+        pinned_bundle: PinnedBundle | None = None
         try:
-            disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
-        except Exception:
-            return await self._skipped_with_missed("memory_low_disk_space")
-        if disk_free < MIN_FREE_DISK_BYTES:
-            return await self._skipped_with_missed("memory_low_disk_space")
-
-        try:
+            if request.attachments:
+                pinned_bundle = await self._thread_call(
+                    self._attachment_store.pin,
+                    request.attachments,
+                )
+            attachment_payload = (
+                encode_pinned_bundle(pinned_bundle)
+                if pinned_bundle is not None
+                else None
+            )
             result = await self._store_call(
                 self._store.enqueue_request,
                 source_message_id=request.source_message_id,
@@ -250,18 +290,38 @@ class MemoryModule:
                 project_ref=request.project_id,
                 provenance=request.provenance,
                 payload_text=normalized_text,
-                payload_attachments=encode_capture_attachments(request.attachments),
+                payload_attachments=attachment_payload,
+                attachment_bundle_id=(
+                    pinned_bundle.bundle_id if pinned_bundle is not None else None
+                ),
+                attachment_bundle_relative_path=(
+                    pinned_bundle.relative_path if pinned_bundle is not None else None
+                ),
+                attachment_file_count=(
+                    len(pinned_bundle.attachments) if pinned_bundle is not None else 0
+                ),
+                attachment_total_bytes=(
+                    pinned_bundle.total_bytes if pinned_bundle is not None else 0
+                ),
                 occurred_at_ms=request.occurred_at_ms,
                 max_provider_timestamp_ms=MAX_PROVIDER_TIMESTAMP_MS,
                 nonterminal_limit=MAX_NONTERMINAL_QUEUE_ROWS,
             )
+        except AttachmentPinError as error:
+            return await self._capture_pin_failure(error.error)
         except UnicodeError:
+            if pinned_bundle is not None:
+                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
             return await self._skipped_with_missed("memory_invalid_input")
         except Exception:
+            if pinned_bundle is not None:
+                await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
             return OperationFailed(error="memory_store_unavailable")
 
         if result.outcome == "accepted":
             return CaptureAccepted()
+        if pinned_bundle is not None:
+            await self._release_unadmitted_bundle(pinned_bundle.bundle_id)
         if result.outcome == "duplicate":
             return CaptureDuplicate()
         if result.outcome == "queue_full":
@@ -269,6 +329,24 @@ class MemoryModule:
         if result.outcome == "timestamp_invalid":
             return CaptureSkipped(reason="memory_invalid_input")
         return CaptureSkipped(reason="memory_clear_failed")
+
+    async def _capture_pin_failure(self, error: MemoryErrorCode) -> CaptureReceipt:
+        if error == "memory_store_unavailable":
+            return OperationFailed(error=error)
+        if error in {
+            "memory_invalid_input",
+            "memory_input_too_large",
+            "memory_low_disk_space",
+        }:
+            return await self._skipped_with_missed(error)
+        return OperationFailed(error="memory_store_unavailable")
+
+    async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
+        try:
+            await self._thread_call(self._attachment_store.release, bundle_id)
+        except Exception:
+            # It has no DB reference and boot reconciliation removes the orphan.
+            return
 
     async def search(
         self,
@@ -278,10 +356,37 @@ class MemoryModule:
         project_id: str,
         limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> MemoryResult:
-        """Return a bounded provider search result or one closed error category."""
+        """Compatibility wrapper for the default one-run hybrid recall policy."""
+
+        try:
+            policy = RecallPolicy(mode="hybrid", max_results=limit)
+        except ValueError:
+            return OperationFailed(error="memory_invalid_input")
+        result = await self.recall(
+            query,
+            policy=policy,
+            principal_id=principal_id,
+            project_id=project_id,
+        )
+        if isinstance(result, RecallItems):
+            return MemoryItems(items=result.items, warnings=result.warnings)
+        return result
+
+    async def recall(
+        self,
+        query: str,
+        *,
+        policy: RecallPolicy,
+        principal_id: str,
+        project_id: str,
+        current_session_id: str | None = None,
+    ) -> RecallResult:
+        """Execute one capability-gated recall decision and at most one search."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
+        if not isinstance(policy, RecallPolicy):
+            return OperationFailed(error="memory_invalid_input")
         normalized_query = self._normalize_text(query)
         query_bytes = _utf8_bytes(normalized_query)
         if query_bytes is None or not normalized_query.strip():
@@ -290,15 +395,10 @@ class MemoryModule:
             return OperationFailed(error="memory_access_denied")
         if not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_SEARCH_LIMIT:
-            return OperationFailed(error="memory_invalid_input")
         if len(query_bytes) > MAX_QUERY_BYTES:
             return OperationFailed(error="memory_input_too_large")
 
-        recovery = await self._recover_interrupted_clear()
-        if recovery is not None:
-            return recovery
-        if self._clear_active:
+        if self._clear_active or self._is_maintenance_open():
             return OperationFailed(error="memory_clear_failed")
 
         async with self._lifecycle_lock:
@@ -310,10 +410,68 @@ class MemoryModule:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
+            session_ref = None
+            if policy.include_current_session:
+                if not isinstance(current_session_id, str) or not current_session_id.strip():
+                    return OperationFailed(error="memory_invalid_input")
+                try:
+                    session_ref = await self._store_call(
+                        self._store.provider_session_ref,
+                        principal_id=principal_id,
+                        project_ref=project_id,
+                        session_id=current_session_id.strip(),
+                    )
+                except ValueError:
+                    return OperationFailed(error="memory_access_denied")
+                except Exception:
+                    return OperationFailed(error="memory_store_unavailable")
+
+            requested_mode = policy.mode
+            if requested_mode == "agentic":
+                # EverOS 1.2.3 has no public model-call/token budget contract.
+                # A local timeout alone cannot make this policy enforceable.
+                if not bool(getattr(self._provider, "agentic_budget_enforced", False)):
+                    return OperationFailed(error="memory_capability_unavailable")
+                effective_mode: Literal["keyword", "vector", "hybrid", "agentic"] = "agentic"
+            elif requested_mode == "keyword":
+                effective_mode = "keyword"
+            else:
+                try:
+                    health = await asyncio.wait_for(
+                        self._provider.health_snapshot(),
+                        timeout=PROVIDER_READ_TIMEOUT_SECONDS,
+                    )
+                    embed_available = health.capabilities.get("embed") is True
+                except Exception:
+                    embed_available = False
+                if requested_mode == "auto":
+                    effective_mode = "hybrid" if embed_available else "keyword"
+                elif not embed_available:
+                    return OperationFailed(error="memory_capability_unavailable")
+                else:
+                    effective_mode = requested_mode
             result = await self._provider_read(
-                lambda: self._provider.search(principal_id, project_id, normalized_query, limit)
+                lambda: self._provider.search(
+                    principal_id,
+                    project_id,
+                    normalized_query,
+                    policy.max_results,
+                    method=effective_mode,
+                    include_profile=policy.include_profile,
+                    session_ref=session_ref,
+                )
             )
-        return result if isinstance(result, OperationFailed) else self._bounded_items(result, limit=limit)
+        if isinstance(result, OperationFailed):
+            return result
+        bounded = self._bounded_items(result, limit=policy.max_results)
+        if isinstance(bounded, OperationFailed):
+            return bounded
+        return RecallItems(
+            items=bounded.items,
+            requested_mode=requested_mode,
+            effective_mode=effective_mode,
+            current_session_overlay=session_ref is not None,
+        )
 
     async def profile(self, *, principal_id: str, project_id: str) -> MemoryResult:
         """Return a bounded provider profile result or one closed error category."""
@@ -324,10 +482,7 @@ class MemoryModule:
             return OperationFailed(error="memory_access_denied")
         if not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
-        recovery = await self._recover_interrupted_clear()
-        if recovery is not None:
-            return recovery
-        if self._clear_active:
+        if self._clear_active or self._is_maintenance_open():
             return OperationFailed(error="memory_clear_failed")
 
         async with self._lifecycle_lock:
@@ -345,151 +500,10 @@ class MemoryModule:
             limit=MAX_PROVIDER_RESULT_ITEMS,
         )
 
-    async def status(self) -> MemoryStatus:
-        """Return status using the frozen precedence order."""
-
-        if not self._clear_active:
-            await self._recover_interrupted_clear()
-        try:
-            meta = await self._store_call(self._store.get_meta)
-            stats = await self._store_call(self._store.queue_stats)
-            manual_required = await self._store_call(self._store.has_manual_required_fence)
-        except Exception:
-            return MemoryStatus(state="error", error="memory_store_unavailable")
-
-        if self._clear_active or (meta is not None and meta.clear_in_progress):
-            return await self._status("clearing", meta=meta, stats=stats)
-        if not self._is_enabled():
-            return await self._status("disabled", meta=meta, stats=stats)
-        # Compute the active persisted error once. A newer terminal flush
-        # observation supersedes delivery-era errors from older builds, while a
-        # later add failure (meta.updated_at > last_flush_at) remains current.
-        historical = meta.last_error if meta is not None else None
-        flush_supersedes_error = bool(
-            meta is not None
-            and stats.last_flush_at is not None
-            and meta.last_error_at is not None
-            and stats.last_flush_at >= meta.last_error_at
-            and (
-                historical in {"memory_sidecar_unavailable", "memory_provider_timeout"}
-                or (
-                    historical == "memory_processing_failed"
-                    and meta.processing_fault_since is None
-                )
-            )
-        )
-        active_error = (
-            None
-            if historical == "memory_low_disk_space" or flush_supersedes_error
-            else historical
-        )
-        if flush_supersedes_error and historical is not None and meta is not None:
-            try:
-                await self._store_call(
-                    self._store.clear_superseded_error,
-                    expected_error=historical,
-                    expected_error_at=meta.last_error_at,
-                )
-            except Exception:
-                pass
-        runtime_error = self._runtime_error()
-        if runtime_error is not None:
-            return await self._status("error", meta=meta, stats=stats, error=runtime_error)
-        if self._is_starting():
-            return await self._status("starting", meta=meta, stats=stats)
-        if not await self._provider_healthy():
-            # An active provider outage is the cause; do not echo a stale persisted
-            # last_error (e.g. a resolved memory_low_disk_space) that would misreport
-            # the current condition (active outages outrank stale errors).
-            return await self._status(
-                "down",
-                meta=meta,
-                stats=stats,
-                error=active_error or "memory_sidecar_unavailable",
-            )
-        if not await self._has_minimum_free_disk():
-            return await self._status(
-                "degraded",
-                meta=meta,
-                stats=stats,
-                error="memory_low_disk_space",
-            )
-        if manual_required:
-            return await self._status(
-                "degraded",
-                meta=meta,
-                stats=stats,
-                error="memory_processing_failed",
-            )
-        if active_error is not None:
-            return await self._status("degraded", meta=meta, stats=stats, error=active_error)
-        if stats.pending or stats.processing or stats.awaiting_receipt:
-            return await self._status("syncing", meta=meta, stats=stats, error=None)
-        return await self._status("ready", meta=meta, stats=stats, error=None)
-
     async def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
         """Return bounded, sanitized terminal failure history."""
 
         return await self._store_call(self._store.failure_log, limit=limit)
-
-    async def clear(self) -> ClearReceipt:
-        """Run one idempotent, bounded clear lifecycle operation."""
-
-        async with self._lifecycle_lock:
-            async with self._root_lifecycle_lock():
-                self._clear_active = True
-                try:
-                    started = await self._store_call(self._store.begin_clear)
-                    if not await self._worker.pause_and_wait(
-                        timeout_seconds=self._clear_drain_timeout_seconds
-                    ):
-                        raise _ClearStepFailure("worker drain did not stop in time")
-                    await self._clear_provider_data_or_fail(started)
-                    completed = await self._store_call(self._store.finish_clear)
-                except Exception:
-                    await self._record_clear_failure()
-                    return OperationFailed(error="memory_clear_failed")
-                finally:
-                    self._clear_active = False
-
-                self._worker.resume_claims()
-                return ClearCompleted(epoch=completed.epoch if completed is not None else started.epoch)
-
-    async def _recover_interrupted_clear(self) -> OperationFailed | None:
-        """Retry a durable clear marker on every eligible lifecycle check."""
-
-        if self._clear_active:
-            return None
-        async with self._lifecycle_lock:
-            return await self._recover_interrupted_clear_locked()
-
-    async def _recover_interrupted_clear_locked(self) -> OperationFailed | None:
-        """Recover a durable Clear while ``_lifecycle_lock`` is already held."""
-
-        async with self._root_lifecycle_lock():
-            if self._clear_active:
-                return None
-            try:
-                meta = await self._store_call(self._store.get_meta)
-            except Exception:
-                return OperationFailed(error="memory_clear_failed")
-            if meta is None or not meta.clear_in_progress:
-                self._worker.resume_claims()
-                return None
-
-            try:
-                if not await self._worker.pause_and_wait(
-                    timeout_seconds=self._clear_drain_timeout_seconds
-                ):
-                    raise _ClearStepFailure("worker drain did not stop in time")
-                await self._clear_provider_data_or_fail(meta)
-                await self._store_call(self._store.finish_clear)
-            except Exception:
-                await self._record_clear_failure()
-                return OperationFailed(error="memory_clear_failed")
-
-            self._worker.resume_claims()
-            return None
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:
@@ -570,8 +584,11 @@ class MemoryModule:
             or any(not self._valid_capture_attachment(item) for item in request.attachments)
         ):
             return "memory_invalid_input"
-        encoded_attachments = encode_capture_attachments(request.attachments)
-        attachment_bytes = _utf8_bytes(encoded_attachments) if encoded_attachments is not None else b""
+        attachment_metadata = "\0".join(
+            f"{item.kind}\0{item.name}\0{item.ext}"
+            for item in request.attachments
+        )
+        attachment_bytes = _utf8_bytes(attachment_metadata)
         if attachment_bytes is None:
             return "memory_invalid_input"
         if len(attachment_bytes) > MAX_CAPTURE_ATTACHMENT_METADATA_BYTES:
@@ -597,51 +614,6 @@ class MemoryModule:
             return False
         return _utf8_bytes("\0".join((value.name, value.uri, value.ext))) is not None
 
-    async def _status(
-        self,
-        state: Literal[
-            "disabled",
-            "starting",
-            "ready",
-            "syncing",
-            "degraded",
-            "down",
-            "clearing",
-            "error",
-        ],
-        *,
-        meta: MemoryMeta | None,
-        stats: QueueStats,
-        error: MemoryErrorCode | None = None,
-    ) -> MemoryStatus:
-        counters = {
-            "pending": stats.pending,
-            "processing": stats.processing,
-            "awaiting_receipt": stats.awaiting_receipt,
-            "succeeded": stats.succeeded,
-            "receipt_unknown": stats.receipt_unknown,
-            "distill_failed": stats.distill_failed,
-            "dead": stats.dead,
-            "missed": meta.missed_count if meta is not None else 0,
-        }
-        return MemoryStatus(
-            state=state,
-            **counters,
-            buckets=memory_status_buckets(counters),
-            queue_plaintext_bytes=stats.queue_plaintext_bytes,
-            provider_disk_bytes=await asyncio.to_thread(self._provider_disk_bytes),
-            last_success_at=meta.last_success_at if meta is not None else None,
-            last_flush_observation=stats.last_flush_observation,
-            last_flush_status=stats.last_flush_status,
-            last_flush_error_code=stats.last_flush_error_code,
-            last_flush_request_id=stats.last_flush_request_id,
-            last_flush_at=stats.last_flush_at,
-            processing_fault_kind=meta.processing_fault_kind if meta is not None else None,
-            processing_fault_since=meta.processing_fault_since if meta is not None else None,
-            processing_alert_active=meta.processing_alert_active if meta is not None else False,
-            error=error,
-        )
-
     def _is_enabled(self) -> bool:
         try:
             value = self._enabled_source() if callable(self._enabled_source) else self._enabled_source
@@ -663,11 +635,11 @@ class MemoryModule:
             return False
         return bool(value)
 
-    async def _provider_healthy(self) -> bool:
+    def _is_maintenance_open(self) -> bool:
         try:
-            return bool(await asyncio.wait_for(self._provider.health(), timeout=PROVIDER_READ_TIMEOUT_SECONDS))
+            return bool(self._maintenance_open())
         except Exception:
-            return False
+            return True
 
     async def _has_minimum_free_disk(self) -> bool:
         try:
@@ -877,7 +849,26 @@ class MemoryModule:
             return
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.to_thread(method, *args, **kwargs)
+        return await self._thread_call(method, *args, **kwargs)
+
+    @staticmethod
+    async def _thread_call(method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """Settle durable thread work before propagating caller cancellation."""
+
+        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        if cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise cancellation
+        return task.result()
 
     def _default_free_disk_bytes(self) -> int:
         return int(shutil.disk_usage(self._store.path.parent).free)

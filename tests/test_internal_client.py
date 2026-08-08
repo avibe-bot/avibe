@@ -337,7 +337,18 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
     assert captured == [
         ("/internal/memory/status", None),
         ("/internal/memory/profile", None),
-        ("/internal/memory/search", {"query": "find this", "limit": 4}),
+        (
+            "/internal/memory/search",
+            {
+                "query": "find this",
+                "policy": {
+                    "mode": "hybrid",
+                    "max_results": 4,
+                    "include_profile": True,
+                    "include_current_session": False,
+                },
+            },
+        ),
     ]
 
 

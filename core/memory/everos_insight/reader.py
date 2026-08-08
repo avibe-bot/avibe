@@ -533,8 +533,19 @@ class MemoryInsightReader:
         try:
             with _read_only(self._paths.capture_db_path) as conn:
                 conn.execute(
-                    "SELECT session_id, principal_id, project_ref, provider_timestamp_ms, "
-                    "add_request_id, flush_request_id FROM memory_capture_queue LIMIT 1"
+                    """
+                    SELECT queue.session_id, queue.provider_session_ref, queue.epoch,
+                           queue.generation, queue.principal_id, queue.project_ref,
+                           queue.provider_timestamp_ms, queue.add_request_id,
+                           settlement.request_id
+                    FROM memory_capture_queue AS queue
+                    LEFT JOIN memory_flush_settlements AS settlement
+                      ON settlement.provider_session_ref = queue.provider_session_ref
+                     AND settlement.epoch = queue.epoch
+                     AND settlement.generation = queue.generation
+                     AND settlement.operation_kind = 'flush'
+                    LIMIT 1
+                    """
                 ).fetchone()
             return {"status": "available"}
         except _Unavailable as unavailable:
@@ -674,15 +685,17 @@ class MemoryInsightReader:
                     """,
                 ]
                 if capture_available:
-                    capture_links = " UNION ".join(
-                        f"""
-                        SELECT page.memcell_id, owned_queue.{request_column} AS request_id
+                    ctes.append(
+                        """
+                        capture_candidates AS MATERIALIZED (
+                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                               owned_queue.add_request_id AS request_id
                         FROM page
                         JOIN capture.memory_capture_queue AS owned_queue
                           ON owned_queue.principal_id = page.owner_id
                          AND owned_queue.project_ref = page.project_id
-                        WHERE typeof(owned_queue.{request_column}) = 'text'
-                          AND owned_queue.{request_column} != ''
+                        WHERE typeof(owned_queue.add_request_id) = 'text'
+                          AND owned_queue.add_request_id != ''
                           AND EXISTS (
                               SELECT 1 FROM json_each(page.message_ids_json) AS message_id
                               WHERE message_id.type = 'text'
@@ -690,20 +703,60 @@ class MemoryInsightReader:
                                     'm_' || owned_queue.session_id || '_'
                                     || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
                           )
-                          AND NOT EXISTS (
+
+                        UNION
+
+                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                               owned_settlement.request_id AS request_id
+                        FROM page
+                        JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = page.owner_id
+                         AND owned_queue.project_ref = page.project_id
+                        JOIN capture.memory_flush_settlements AS owned_settlement
+                          ON owned_settlement.provider_session_ref =
+                                owned_queue.provider_session_ref
+                         AND owned_settlement.epoch = owned_queue.epoch
+                         AND owned_settlement.generation = owned_queue.generation
+                         AND owned_settlement.operation_kind = 'flush'
+                        WHERE typeof(owned_settlement.request_id) = 'text'
+                          AND owned_settlement.request_id != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text'
+                                AND message_id.value =
+                                    'm_' || owned_queue.session_id || '_'
+                                    || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                        ),
+                        capture_links AS MATERIALIZED (
+                        SELECT candidate.memcell_id, candidate.request_id
+                        FROM capture_candidates AS candidate
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                              WHERE (
-                                  any_queue.add_request_id = owned_queue.{request_column}
-                                  OR any_queue.flush_request_id = owned_queue.{request_column}
-                              ) AND (
-                                  any_queue.principal_id IS NOT page.owner_id
-                                  OR any_queue.project_ref IS NOT page.project_id
+                              WHERE any_queue.add_request_id = candidate.request_id
+                                AND (
+                                  any_queue.principal_id IS NOT candidate.owner_id
+                                  OR any_queue.project_ref IS NOT candidate.project_id
                               )
                           )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM capture.memory_flush_settlements AS any_settlement
+                              JOIN capture.memory_capture_queue AS any_queue
+                                ON any_queue.provider_session_ref =
+                                      any_settlement.provider_session_ref
+                               AND any_queue.epoch = any_settlement.epoch
+                               AND any_queue.generation = any_settlement.generation
+                              WHERE any_settlement.operation_kind = 'flush'
+                                AND any_settlement.request_id = candidate.request_id
+                                AND (
+                                    any_queue.principal_id IS NOT candidate.owner_id
+                                    OR any_queue.project_ref IS NOT candidate.project_id
+                                )
+                          )
+                        )
                         """
-                        for request_column in ("add_request_id", "flush_request_id")
                     )
-                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
                     call_branches.append(
                         """
                         SELECT capture_links.memcell_id, pc.id AS call_id
@@ -830,30 +883,68 @@ class MemoryInsightReader:
                     """,
                 ]
                 if capture_available:
-                    capture_links = " UNION ".join(
-                        f"""
-                        SELECT owned_queue.{column} AS request_id
+                    ctes.append(
+                        """
+                        capture_candidates AS MATERIALIZED (
+                        SELECT owned_queue.add_request_id AS request_id
                         FROM page JOIN capture.memory_capture_queue AS owned_queue
                           ON owned_queue.principal_id = :owner_id
                          AND owned_queue.project_ref = :project_id
-                        WHERE typeof(owned_queue.{column}) = 'text' AND owned_queue.{column} != ''
+                        WHERE typeof(owned_queue.add_request_id) = 'text'
+                          AND owned_queue.add_request_id != ''
                           AND EXISTS (
                               SELECT 1 FROM json_each(page.message_ids_json) AS message_id
                               WHERE message_id.type = 'text' AND message_id.value =
                                   'm_' || owned_queue.session_id || '_'
                                   || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
                           )
-                          AND NOT EXISTS (
+
+                        UNION
+
+                        SELECT owned_settlement.request_id AS request_id
+                        FROM page JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = :owner_id
+                         AND owned_queue.project_ref = :project_id
+                        JOIN capture.memory_flush_settlements AS owned_settlement
+                          ON owned_settlement.provider_session_ref =
+                                owned_queue.provider_session_ref
+                         AND owned_settlement.epoch = owned_queue.epoch
+                         AND owned_settlement.generation = owned_queue.generation
+                         AND owned_settlement.operation_kind = 'flush'
+                        WHERE typeof(owned_settlement.request_id) = 'text'
+                          AND owned_settlement.request_id != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text' AND message_id.value =
+                                  'm_' || owned_queue.session_id || '_'
+                                  || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                        ),
+                        capture_links AS MATERIALIZED (
+                        SELECT candidate.request_id
+                        FROM capture_candidates AS candidate
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                              WHERE (any_queue.add_request_id = owned_queue.{column}
-                                     OR any_queue.flush_request_id = owned_queue.{column})
+                              WHERE any_queue.add_request_id = candidate.request_id
                                 AND (any_queue.principal_id IS NOT :owner_id
                                      OR any_queue.project_ref IS NOT :project_id)
                           )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM capture.memory_flush_settlements AS any_settlement
+                              JOIN capture.memory_capture_queue AS any_queue
+                                ON any_queue.provider_session_ref =
+                                      any_settlement.provider_session_ref
+                               AND any_queue.epoch = any_settlement.epoch
+                               AND any_queue.generation = any_settlement.generation
+                              WHERE any_settlement.operation_kind = 'flush'
+                                AND any_settlement.request_id = candidate.request_id
+                                AND (any_queue.principal_id IS NOT :owner_id
+                                     OR any_queue.project_ref IS NOT :project_id)
+                          )
+                        )
                         """
-                        for column in ("add_request_id", "flush_request_id")
                     )
-                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
                     branches.append(
                         """
                         SELECT pc.id AS call_id FROM capture_links
@@ -1023,7 +1114,7 @@ class MemoryInsightReader:
                 rows = list(conn.execute(
                     """
                     SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
-                           state, occurred_at_ms, add_request_id, flush_request_id
+                           state, occurred_at_ms, add_request_id
                     FROM memory_capture_queue
                     WHERE principal_id = :owner_id AND project_ref = :project_id
                       AND EXISTS (

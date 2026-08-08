@@ -32,7 +32,14 @@ from core.memory.artifact import (
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
 )
-from core.memory.everos import FakeMemoryProvider
+from core.memory.clear_journal import MemoryClearJournal
+from core.memory.attachments import AttachmentPinStore, attachment_pin_root
+from core.memory.everos import (
+    EverOSPort,
+    FakeMemoryProvider,
+    ProviderCapture,
+    ProviderHealthSnapshot,
+)
 import core.memory.process as memory_process
 import core.memory.runtime as memory_runtime
 from core.memory.process import (
@@ -50,14 +57,19 @@ from core.memory.process import (
     _snapshot_owned_processes,
 )
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
+from core.memory.sidecar import _request_rejection
 from core.memory.everos_insight.recorder import initialize_call_log
 from core.memory.store import MemoryStore
 from core.memory.types import (
+    CaptureAccepted,
     MemoryItem,
     MemoryItems,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     OperationFailed,
+    CaptureAttachment,
+    CaptureRequest,
+    ProviderSessionRef,
 )
 from config.v2_config import (
     AgentsConfig,
@@ -149,7 +161,20 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     runtime = create_memory_runtime(MemoryConfig(enabled=True))
 
     assert runtime.available is False
-    assert asyncio.run(runtime.status_payload())["error"] == "memory_store_unavailable"
+    assert asyncio.run(runtime.status_payload()) == {
+        "status": "ok",
+        "source": {
+            "status": "unavailable",
+            "observed_at": None,
+            "reason": "memory_sidecar_unavailable",
+        },
+        "health": None,
+    }
+    assert asyncio.run(runtime.maintenance_payload()) == {
+        "status": "ok",
+        "data_exists": True,
+        "clear_recovery": None,
+    }
 
 
 def test_memory_runtime_reopens_the_store_after_initialization_failure(
@@ -1241,15 +1266,184 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert environment["EVEROS_MULTIMODAL__BASE_URL"] == environment["EVEROS_LLM__BASE_URL"]
     assert environment["EVEROS_MULTIMODAL__MODEL"] == environment["EVEROS_LLM__MODEL"]
     assert environment["EVEROS_MULTIMODAL__API_KEY"] == "llm-secret"
-    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(tmp_path / "attachments" / "avibe")
+    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
+        attachment_pin_root(tmp_path)
+    )
     assert environment["EVEROS_EMBEDDING__API_KEY"] == "embedding-secret"
     assert "HTTP_PROXY" not in environment
     assert "SSL_CERT_FILE" not in environment
     assert "llm-secret" not in generated
     assert "embedding-secret" not in generated
     assert "rerank" in generated
-    assert str(tmp_path / "attachments" / "avibe") in generated
+    assert str(attachment_pin_root(tmp_path)) in generated
     assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
+
+
+def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "avibe-home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    source_root = home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "diagram.png"
+    source.write_bytes(b"pinned image")
+    source.chmod(0o600)
+    pin_store = AttachmentPinStore(
+        root=attachment_pin_root(home),
+        source_root=source_root,
+    )
+    bundle = pin_store.pin(
+        (
+            CaptureAttachment(
+                kind="image",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="png",
+            ),
+        )
+    )
+    pinned = pin_store.provider_attachments(bundle)
+
+    process = EverOSProcess(sys.executable, effective_home=home, settings=_settings())
+    environment = process._child_environment()
+    allowed_root = Path(environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
+    assert allowed_root == attachment_pin_root(home)
+
+    request: dict[str, object] = {}
+
+    async def capture_request(
+        method: str,
+        route: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, bytes]:
+        request.update(method=method, route=route, payload=payload)
+        return 200, b'{"data":{"status":"accumulated"}}'
+
+    provider = EverOSPort(home / "memory" / ".rt" / "everos.sock")
+    monkeypatch.setattr(provider, "_sidecar_write", capture_request)
+    session_ref = ProviderSessionRef(
+        principal_id="u-11111111111111111111111111111111",
+        epoch=1,
+        project_ref=PROJECT,
+        session_id=f"src--{'1' * 64}--e1",
+    )
+    asyncio.run(
+        provider.add(
+            ProviderCapture(
+                session_ref=session_ref,
+                text="remember this diagram",
+                provider_timestamp_ms=1_725_000_001_234,
+                attachments=pinned,
+            )
+        )
+    )
+
+    body = json.dumps(request["payload"]).encode()
+    assert request["method"] == "POST"
+    assert request["route"] == "/api/v2/memory/add"
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/add",
+            body,
+            attachments_root=allowed_root,
+        )
+        is None
+    )
+
+    outside = home / "outside.png"
+    outside.write_bytes(b"outside")
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    content = messages[0]["content"]
+    assert isinstance(content, list)
+    content[-1]["uri"] = outside.as_uri()
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/add",
+            json.dumps(payload).encode(),
+            attachments_root=allowed_root,
+        )
+        == "add"
+    )
+
+
+def test_runtime_effective_home_owns_the_attachment_pipeline(
+    monkeypatch, tmp_path: Path
+) -> None:
+    global_home = tmp_path / "global-home"
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("AVIBE_HOME", str(runtime_home))
+    store = MemoryStore()
+    monkeypatch.setenv("AVIBE_HOME", str(global_home))
+    source_root = runtime_home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "notes.txt"
+    source.write_bytes(b"runtime-owned attachment")
+    source.chmod(0o600)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=runtime_home,
+    )
+    expected_pin_root = attachment_pin_root(runtime_home)
+    assert runtime.module._effective_home == runtime_home
+    assert runtime.module._attachment_store._effective_home == runtime_home
+    assert runtime.module._attachment_store._root == expected_pin_root
+    assert runtime.module._attachment_store._source_root == source_root
+    assert runtime._snapshot_manager is not None
+    assert runtime._snapshot_manager.effective_home == runtime_home
+    assert any(
+        surface.path == "memory/attachments"
+        for surface in runtime._snapshot_manager.surfaces
+    )
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=runtime_home,
+        settings=_settings(),
+    )
+    assert process._child_environment()["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
+        expected_pin_root
+    )
+
+    async def run() -> object:
+        try:
+            return await runtime.module.capture(
+                CaptureRequest(
+                    source_message_id="source-1",
+                    session_id="session-1",
+                    principal_id="u-11111111111111111111111111111111",
+                    project_id=PROJECT,
+                    provenance="user_input",
+                    text="remember the notes",
+                    occurred_at_ms=1_725_000_001_234,
+                    attachments=(
+                        CaptureAttachment(
+                            kind="doc",
+                            name=source.name,
+                            uri=source.as_uri(),
+                            ext="txt",
+                        ),
+                    ),
+                )
+            )
+        finally:
+            await runtime.close()
+
+    assert isinstance(asyncio.run(run()), CaptureAccepted)
+    pinned_files = tuple((expected_pin_root / "bundles").glob("*/*"))
+    assert len(pinned_files) == 1
+    assert pinned_files[0].read_bytes() == b"runtime-owned attachment"
+    assert not attachment_pin_root(global_home).exists()
 
 
 def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
@@ -1662,7 +1856,7 @@ def test_explicit_sidecar_retry_keeps_crash_budget_until_observed_health(monkeyp
     assert process.consecutive_failures == 5
 
 
-def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Path) -> None:
     started: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -1675,6 +1869,13 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
+    journal = MemoryClearJournal(tmp_path)
+    journal.start(
+        operation_id="interrupted-clear",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(),
@@ -1682,16 +1883,15 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
         effective_home=tmp_path,
     )
 
-    async def interrupted_clear() -> OperationFailed:
-        return OperationFailed(error="memory_clear_failed")
-
-    monkeypatch.setattr(runtime.module, "_recover_interrupted_clear_locked", interrupted_clear)
-
     async def run() -> None:
         assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
 
     asyncio.run(run())
     assert started == []
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.operation_id == "interrupted-clear"
+    assert recovery.state == "recovery_needed"
 
 
 def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
@@ -2425,7 +2625,7 @@ def test_legacy_disabled_diagnostics_still_records_provider_calls(
     asyncio.run(run())
 
 
-def test_recorder_corruption_stays_degraded_until_clear(
+def test_status_reuses_each_direct_everos_recorder_observation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2446,30 +2646,43 @@ def test_recorder_corruption_stays_degraded_until_clear(
         assert (await runtime.reconcile(config))["ok"] is True
         calls = 0
 
-        async def recorder_health() -> dict[str, str | None]:
+        async def health_snapshot() -> ProviderHealthSnapshot:
             nonlocal calls
             calls += 1
-            return (
-                {"state": "degraded", "reason": "call_log_corrupt"}
-                if calls == 1
-                else {"state": "active", "reason": None}
+            return ProviderHealthSnapshot(
+                status="ok",
+                version="1.2.3",
+                capabilities={
+                    "llm": True,
+                    "embed": True,
+                    "rerank": True,
+                    "multimodal_llm": True,
+                    "parser": True,
+                },
+                disabled_features=(),
+                cascade=None,
+                recorder=(
+                    {"state": "degraded", "reason": "call_log_corrupt"}
+                    if calls == 1
+                    else {"state": "active", "reason": None}
+                ),
             )
 
-        async def ready_status():
-            return memory_runtime.MemoryStatus(state="ready")
-
-        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
-        monkeypatch.setattr(runtime.module, "status", ready_status)
+        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
 
         first = await runtime.status_payload()
+        anomalies = await runtime.failure_log_payload()
         second = await runtime.status_payload()
 
-        assert first["recorder"] == {
+        assert first["health"]["recorder"] == {
             "state": "degraded",
             "reason": "call_log_corrupt",
         }
-        assert second["recorder"] == first["recorder"]
-        assert calls == 1
+        assert anomalies["items"][0]["kind"] == "recorder_degraded"
+        assert anomalies["items"][0]["operation"] == "record"
+        assert anomalies["items"][0]["error_code"] == "memory_processing_failed"
+        assert second["health"]["recorder"] == {"state": "active", "reason": None}
+        assert calls == 2
         await runtime._stop_sidecar_for_clear()
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
         await runtime.close()
@@ -2477,7 +2690,7 @@ def test_recorder_corruption_stays_degraded_until_clear(
     asyncio.run(run())
 
 
-def test_live_sidecar_with_unexpectedly_disabled_recorder_reports_writer_failure(
+def test_status_preserves_everos_disabled_recorder_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2497,17 +2710,28 @@ def test_live_sidecar_with_unexpectedly_disabled_recorder_reports_writer_failure
         )
         assert (await runtime.reconcile(config))["ok"] is True
 
-        async def recorder_health() -> dict[str, str | None]:
-            return {"state": "disabled", "reason": None}
+        snapshot = ProviderHealthSnapshot(
+            status="ok",
+            version="1.2.3",
+            capabilities={
+                "llm": True,
+                "embed": True,
+                "rerank": True,
+                "multimodal_llm": True,
+                "parser": True,
+            },
+            disabled_features=(),
+            cascade=None,
+            recorder={"state": "disabled", "reason": None},
+        )
 
-        async def ready_status() -> memory_runtime.MemoryStatus:
-            return memory_runtime.MemoryStatus(state="ready")
+        async def health_snapshot() -> ProviderHealthSnapshot:
+            return snapshot
 
-        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
-        monkeypatch.setattr(runtime.module, "status", ready_status)
-        assert (await runtime.status_payload())["recorder"] == {
-            "state": "degraded",
-            "reason": "writer_failures",
+        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+        assert (await runtime.status_payload())["health"]["recorder"] == {
+            "state": "disabled",
+            "reason": None,
         }
         await runtime.close()
 
@@ -2649,10 +2873,8 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
                 break
             await asyncio.sleep(0)
         payload = await runtime.status_payload()
-        assert payload["recorder"] == {
-            "state": "degraded",
-            "reason": "call_log_corrupt",
-        }
+        assert payload["health"] is None
+        assert payload["source"]["reason"] == "memory_disabled"
         await asyncio.wait_for(asyncio.shield(task), timeout=1)
         assert maintenance_calls == 1
         assert runtime._call_log_retention_task is None
@@ -2697,7 +2919,7 @@ def test_runtime_close_waits_for_active_call_log_maintenance(
     asyncio.run(run())
 
 
-def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
+def test_clear_quiesce_does_not_delete_call_log_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2713,7 +2935,7 @@ def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
         runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
         await runtime._stop_sidecar_for_clear()
 
-        assert not db_path.exists()
+        assert db_path.exists()
         assert unexpected.read_text(encoding="utf-8") == "keep"
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
         await runtime.close()
@@ -2876,7 +3098,7 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     assert "profile_warning" not in payload
 
 
-def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
+def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2888,7 +3110,8 @@ def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
     async def run() -> None:
-        assert (await runtime.status_payload())["data_exists"] is False
+        assert (await runtime.maintenance_payload())["data_exists"] is False
+        assert "data_exists" not in await runtime.status_payload()
         await runtime.close()
 
     asyncio.run(run())
@@ -3221,7 +3444,7 @@ def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
+def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3236,6 +3459,7 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     )
     old = FakeEverOSProcess()
     runtime._process = old
+    old_provider = runtime._provider
     store = runtime._store
     assert store is not None
     worker = runtime.module._worker
@@ -3276,24 +3500,22 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     async def run() -> None:
         runtime._worker_task = asyncio.create_task(worker.drain_once())
         assert await asyncio.to_thread(entered.wait, 1.0)
-        restarting = asyncio.create_task(runtime.restart())
-        await asyncio.sleep(0.05)
-        assert restarting.done() is False
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
         assert old.stops == 0
+        assert runtime._process is old
+        assert runtime._provider is old_provider
         assert factory.created == []
+        assert worker._claims_paused is False
 
         release.set()
-        assert await restarting == {"ok": True, "state": "ready"}
-        assert old.stops == 1
-        assert len(factory.created) == 1
-        assert worker._boot_id != old_lease
+        assert await runtime._worker_task == 0
+        assert old.stops == 0
+        assert factory.created == []
+        assert worker._boot_id == old_lease
         assert store.list_queue_rows()[0].state == "processing"
-
-        # The first tick under the replacement lease must fence old claimed
-        # work before claims can resume.
-        worker.pause_claims()
-        assert await worker.drain_once() == 0
-        assert store.list_queue_rows()[0].state == "manual_required"
         await runtime.close()
 
     asyncio.run(run())
@@ -3529,7 +3751,6 @@ def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
 
 
 def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     marked_factory = FakeEverOSProcessFactory()
@@ -3551,13 +3772,12 @@ def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery
         effective_home=tmp_path / "recovery",
     )
 
-    async def failed_recovery() -> OperationFailed:
-        return OperationFailed(error="memory_clear_failed")
-
-    monkeypatch.setattr(
-        recovering.module,
-        "_recover_interrupted_clear_locked",
-        failed_recovery,
+    meta = recovering._store.ensure_meta()
+    recovering._clear_journal.start(
+        operation_id="restart-recovery",
+        operator_ref="user:owner",
+        pre_epoch=meta.epoch,
+        target_epoch=meta.epoch + 1,
     )
 
     async def run() -> None:
@@ -3683,13 +3903,13 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
         if lifecycle == "clear":
-            async def blocked_clear():
+            async def blocked_prepare(_operation):
                 entered.set()
                 await release.wait()
-                return OperationFailed(error="memory_clear_failed")
+                raise RuntimeError("injected clear pause")
 
-            monkeypatch.setattr(runtime.module, "clear", blocked_clear)
-            operation = asyncio.create_task(runtime.clear())
+            monkeypatch.setattr(runtime, "_prepare_clear", blocked_prepare)
+            operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
         elif lifecycle == "reconcile":
             async def blocked_reconcile(*_args, **_kwargs):
                 entered.set()
@@ -3734,7 +3954,7 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         ready_task = runtime._ready_activation_task
         if ready_task is not None:
             await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
-        assert activations == ([] if lifecycle == "artifact" else [None])
+        assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
         await runtime.close()
 
     asyncio.run(run())

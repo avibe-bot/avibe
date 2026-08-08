@@ -1,7 +1,6 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  AlertTriangle,
   ArrowLeft,
   ChevronDown,
   ChevronRight,
@@ -11,7 +10,6 @@ import {
   FileWarning,
   Loader2,
   RefreshCw,
-  Trash2,
 } from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
@@ -23,9 +21,9 @@ import type {
   MemoryLogEntry,
   MemoryLogListResult,
   MemoryLogSections,
+  MemoryLogSourceStatus,
   MemoryLogStep,
   MemoryProviderCall,
-  MemoryStatus,
 } from '../../../context/ApiContext';
 import {
   MEMORY_LOG_ENTRY_LIMIT,
@@ -104,17 +102,23 @@ const MemoryLogScope: React.FC<Pick<MemoryLogEntry, 'project_id' | 'principal_id
 const SectionNotices: React.FC<{ sections: MemoryLogSections }> = ({ sections }) => {
   const { t } = useTranslation();
   const notices = Object.entries(sections).filter(([, value]) => value.status !== 'available');
+  const messageKey = (status: MemoryLogSourceStatus['status']): string => {
+    if (status === 'partial') return 'memory.log.sectionPartial';
+    if (status === 'stale') return 'memory.log.sectionStale';
+    if (status === 'unknown') return 'memory.log.sectionUnknown';
+    return 'memory.log.sectionUnavailable';
+  };
   if (notices.length === 0) return null;
   return (
     <div className="flex flex-col gap-1.5" role="status">
       {notices.map(([name, value]) => (
         <span
           key={name}
-          className={value.status === 'partial'
+          className={value.status !== 'unavailable'
             ? 'rounded-md border border-gold/30 bg-gold/[0.06] px-3 py-2 text-[11.5px] text-muted'
             : 'rounded-md border border-destructive/30 bg-destructive/[0.06] px-3 py-2 text-[11.5px] text-muted'}
         >
-          {t(value.status === 'partial' ? 'memory.log.sectionPartial' : 'memory.log.sectionUnavailable', {
+          {t(messageKey(value.status), {
             section: t(`memory.log.section.${name}`),
             reason: memoryLogEnumLabel(t, 'reason', value.reason ?? value.status),
           })}
@@ -393,36 +397,10 @@ const MemoryLogDetail: React.FC<{
   );
 };
 
-export const MemoryRecorderFaultBanner: React.FC<{
-  status: MemoryStatus | null;
-  onClearAll: () => void;
-}> = ({ status, onClearAll }) => {
-  const { t } = useTranslation();
-  const recorderFault = status?.recorder?.state === 'degraded';
-  const corrupt = recorderFault && status?.recorder?.reason === 'call_log_corrupt';
-  if (!recorderFault) return null;
-
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[12px]">
-      <span className="flex min-w-0 items-center gap-2 text-foreground">
-        <AlertTriangle className="size-4 shrink-0 text-gold" />
-        {corrupt ? t('memory.log.recorderCorrupt') : t('memory.log.recorderDegraded')}
-      </span>
-      {corrupt ? (
-        <Button variant="destructive" size="xs" onClick={onClearAll}>
-          <Trash2 />
-          {t('memory.log.clearAction')}
-        </Button>
-      ) : null}
-    </div>
-  );
-};
-
 export const MemoryLogPanel: React.FC<{
-  enabled: boolean;
-  status: MemoryStatus | null;
-  onClearAll: () => void;
-}> = ({ enabled, status, onClearAll }) => {
+  refreshToken?: number;
+  onSectionsChange?: (sections: MemoryLogSections | null) => void;
+}> = ({ refreshToken = 0, onSectionsChange }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [listState, dispatchListPage] = useReducer(reduceMemoryLogPage, INITIAL_MEMORY_LOG_LIST_STATE);
@@ -435,51 +413,42 @@ export const MemoryLogPanel: React.FC<{
   }, [api]);
   const listRead = useMemoryResource<MemoryLogPage, [string | null]>({
     read: readList,
-    enabled,
     failureMessageKey: 'memory.log.loadFailed',
     clearErrorOnReload: true,
   });
   const readDetail = useCallback((memcellId: string) => api.getMemoryLogEntry(memcellId), [api]);
   const detailRead = useMemoryResource<MemoryLogDetailOk, [string]>({
     read: readDetail,
-    enabled,
     failureMessageKey: 'memory.log.detailFailed',
     clearErrorOnReload: true,
     resetDataOnError: true,
   });
 
   const { data: listPage, reload: reloadList } = listRead;
+  const { reload: reloadDetail } = detailRead;
   useEffect(() => {
-    if (!enabled) return;
     void reloadList(null);
-  }, [enabled, reloadList]);
+  }, [refreshToken, reloadList]);
+  useEffect(() => {
+    if (selected) void reloadDetail(selected);
+  }, [refreshToken, reloadDetail, selected]);
   useEffect(() => {
     if (!listPage) return;
     // The resource hook has already rejected superseded responses. Mirror only
     // that accepted page into the cursor accumulator used by the list view.
     dispatchListPage(listPage);
   }, [listPage]);
-
-  if (!enabled) {
-    return (
-      <div className="rounded-md border border-dashed border-border bg-surface p-8 text-center text-sm text-muted">
-        {t('memory.log.disabledHint')}
-      </div>
-    );
-  }
+  useEffect(() => {
+    onSectionsChange?.(sections);
+  }, [onSectionsChange, sections]);
 
   const openDetail = (memcellId: string) => {
     setSelected(memcellId);
-    void detailRead.reload(memcellId);
   };
   const selectedDetail = detailRead.data?.entry.memcell_id === selected ? detailRead.data : null;
 
   return (
     <div className="flex flex-col gap-3">
-      <MemoryRecorderFaultBanner
-        status={status}
-        onClearAll={onClearAll}
-      />
       {selected ? (
         detailRead.loading && !selectedDetail ? (
           <div className="flex items-center gap-2 px-1 py-5 text-sm text-muted">

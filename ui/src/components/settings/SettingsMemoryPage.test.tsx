@@ -9,12 +9,15 @@ import { SettingsMemoryPage } from './SettingsMemoryPage';
 import type { MemoryStatus } from '../../context/ApiContext';
 
 const api = vi.hoisted(() => ({
+  abortMemoryClear: vi.fn(),
   clearMemory: vi.fn(),
   getMemoryFailures: vi.fn(),
+  getMemoryMaintenance: vi.fn(),
   getMemorySettings: vi.fn(),
   getMemoryStatus: vi.fn(),
   listDependencies: vi.fn(),
   restartMemoryRuntime: vi.fn(),
+  resumeMemoryClear: vi.fn(),
 }));
 const logMounts = vi.hoisted(() => ({ count: 0 }));
 const showToast = vi.hoisted(() => vi.fn());
@@ -44,21 +47,23 @@ vi.mock('../ui/confirm-dialog', () => ({
     open ? <button type="button" onClick={() => void onConfirm()}>confirm-clear</button> : null,
 }));
 
-vi.mock('./memory/MemoryLogPanel', async (loadOriginal) => {
-  const original = await loadOriginal<typeof import('./memory/MemoryLogPanel')>();
+vi.mock('./memory/MemoryLogPanel', async () => {
   const React = await import('react');
   return {
-    ...original,
-    MemoryLogPanel: ({ onClearAll }: { onClearAll: () => void }) => {
+    MemoryLogPanel: ({ refreshToken = 0 }: { refreshToken?: number }) => {
       const [mount] = React.useState(() => ++logMounts.count);
-      return <button type="button" onClick={onClearAll}>open-clear-{mount}</button>;
+      return <div data-testid="processing-log">processing-log-{mount}-refresh-{refreshToken}</div>;
     },
   };
 });
 
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
-vi.mock('./memory/MemorySettingsPanel', () => ({ MemorySettingsPanel: () => null }));
+vi.mock('./memory/MemorySettingsPanel', () => ({
+  MemorySettingsPanel: ({ onClearAll }: { onClearAll: () => void }) => (
+    <button type="button" onClick={onClearAll}>open-clear</button>
+  ),
+}));
 
 const endpoint = {
   base_url: 'https://provider.example.test/v1',
@@ -67,32 +72,24 @@ const endpoint = {
   has_api_key: false,
 };
 
-const readyStatus = (processingFaultKind: MemoryStatus['processing_fault_kind'] = null): MemoryStatus => ({
+const readyStatus = (): MemoryStatus => ({
   status: 'ok',
-  state: 'ready',
-  buckets: { syncing: 0, succeeded: 0, unknown: 0, failed: 0, dead: 0, missed: 0 },
-  pending: 0,
-  processing: 0,
-  awaiting_receipt: 0,
-  succeeded: 0,
-  receipt_unknown: 0,
-  distill_failed: 0,
-  dead: 0,
-  missed: 0,
-  queue_plaintext_bytes: 0,
-  provider_disk_bytes: 0,
-  last_success_at: null,
-  last_flush_observation: null,
-  last_flush_status: null,
-  last_flush_error_code: null,
-  last_flush_request_id: null,
-  last_flush_at: null,
-  processing_fault_kind: processingFaultKind,
-  processing_fault_since: processingFaultKind ? '2026-08-04T00:00:00Z' : null,
-  processing_alert_active: processingFaultKind !== null,
-  error: null,
-  data_exists: false,
+  source: { status: 'available', observed_at: '2026-08-08T12:00:00Z', reason: null },
+  health: {
+    status: 'ok',
+    version: '1.2.3',
+    capabilities: {},
+    disabled_features: [],
+    cascade: {},
+    recorder: {},
+  },
 });
+
+const renderPage = () => render(
+  <MemoryRouter>
+    <SettingsMemoryPage />
+  </MemoryRouter>,
+);
 
 beforeEach(() => {
   logMounts.count = 0;
@@ -101,149 +98,203 @@ beforeEach(() => {
     enabled: true,
     processing: { llm: endpoint, embedding: endpoint },
   });
-  api.getMemoryStatus.mockResolvedValue({ status: 'failed', error: 'memory_status_failed' });
-  api.getMemoryFailures.mockResolvedValue({ items: [], retention_days: 90 });
+  api.getMemoryStatus.mockResolvedValue(readyStatus());
+  api.getMemoryFailures.mockResolvedValue({ status: 'ok', items: [], recovery: null });
+  api.getMemoryMaintenance.mockResolvedValue({ status: 'ok', data_exists: false, clear_recovery: null });
   api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
   api.restartMemoryRuntime.mockResolvedValue({ ok: true, state: 'ready' });
+  api.clearMemory.mockResolvedValue({ status: 'completed', operation_id: 'clear-ok', epoch: 1 });
+  api.resumeMemoryClear.mockResolvedValue({ status: 'completed', operation_id: 'clear-42' });
+  api.abortMemoryClear.mockResolvedValue({ status: 'aborted', operation_id: 'clear-42' });
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
-describe('SettingsMemoryPage Clear handling', () => {
-  const openAndConfirmClear = async () => {
-    const user = userEvent.setup();
+describe('SettingsMemoryPage Processing Record', () => {
+  it('observes provider health before loading recorder anomalies', async () => {
+    let resolveStatus: ((status: MemoryStatus) => void) | undefined;
+    api.getMemoryStatus.mockReturnValue(
+      new Promise<MemoryStatus>((resolve) => {
+        resolveStatus = resolve;
+      }),
+    );
 
-    render(<SettingsMemoryPage />);
-    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.log' }));
-    await user.click(await screen.findByRole('button', { name: 'open-clear-1' }));
-    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
-  };
+    renderPage();
 
-  it('purges mounted log payload state when Clear reports partial failure', async () => {
-    api.clearMemory.mockResolvedValue({ status: 'failed', error: 'memory_clear_failed' });
+    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(1));
+    expect(api.getMemoryFailures).not.toHaveBeenCalled();
 
-    await openAndConfirmClear();
-
-    await waitFor(() => expect(api.clearMemory).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole('button', { name: 'open-clear-2' })).toBeTruthy();
-    expect(showToast).toHaveBeenCalledWith('errors.memory_clear_failed', 'error');
+    resolveStatus?.(readyStatus());
+    await waitFor(() => expect(api.getMemoryFailures).toHaveBeenCalledTimes(1));
   });
 
-  it('purges mounted log payload state when the Clear receipt is lost', async () => {
-    api.clearMemory.mockRejectedValue(new Error('connection closed'));
+  it('merges status and log into one tab and performs no interval polling', async () => {
+    const setInterval = vi.spyOn(window, 'setInterval');
+    renderPage();
 
-    await openAndConfirmClear();
+    expect(await screen.findByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
+    expect(await screen.findByTestId('processing-log')).toBeTruthy();
+    expect(screen.queryByRole('radio', { name: 'memory.tabs.status' })).toBeNull();
+    expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
+    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(1));
+    expect(api.getMemoryFailures).toHaveBeenCalledTimes(1);
+    expect(api.getMemoryMaintenance).toHaveBeenCalledTimes(1);
+    expect(setInterval.mock.calls.some(([, delay]) => delay === 4000)).toBe(false);
+  });
 
-    await waitFor(() => expect(api.clearMemory).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole('button', { name: 'open-clear-2' })).toBeTruthy();
-    expect(showToast).toHaveBeenCalledWith('memory.clear.failed', 'error');
+  it('refreshes health, anomalies, maintenance, and the timeline independently', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const refresh = await screen.findByRole('button', { name: 'memory.processingRecord.refresh' });
+    await waitFor(() => expect((refresh as HTMLButtonElement).disabled).toBe(false));
+
+    await user.click(refresh);
+
+    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(2));
+    expect(api.getMemoryFailures).toHaveBeenCalledTimes(2);
+    expect(api.getMemoryMaintenance).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('processing-log').textContent).toContain('refresh-1');
+  });
+
+  it('keeps retained Processing Record evidence available while Memory is disabled', async () => {
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: false,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    renderPage();
+
+    expect(await screen.findByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
+    expect(await screen.findByTestId('processing-log')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'memory.status.restartEngine' })).toBeNull();
+  });
+
+  it('keeps manual_required evidence read-only', async () => {
+    api.getMemoryFailures.mockResolvedValue({
+      status: 'ok',
+      recovery: null,
+      items: [{
+        kind: 'attachment_release',
+        state: 'manual_required',
+        operation: 'flush',
+        occurred_at: '2026-08-08T12:01:00Z',
+        error_code: 'attachment_release_unknown',
+        attempts: 3,
+        generation: 2,
+        request_id: 'request-2',
+      }],
+    });
+    renderPage();
+
+    expect(await screen.findByText('memory.processingRecord.manualRequiredReadOnly')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' })).toBeNull();
+  });
+
+  it('keeps clear recovery available from maintenance when the anomaly source fails', async () => {
+    api.getMemoryFailures.mockResolvedValue({ status: 'failed', error: 'memory_store_unavailable' });
+    api.getMemoryMaintenance.mockResolvedValue({
+      status: 'ok',
+      data_exists: true,
+      clear_recovery: {
+        operation_id: 'clear-maintenance',
+        state: 'recovery_required',
+        can_abort: true,
+      },
+    });
+    renderPage();
+
+    expect(await screen.findByText('clear-maintenance')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' })).toBeTruthy();
+    expect(screen.getByText('errors.memory_store_unavailable')).toBeTruthy();
+  });
+
+  it.each([
+    ['resume', 'resumeMemoryClear', 'completed'],
+    ['abort', 'abortMemoryClear', 'aborted'],
+  ] as const)('runs the clear recovery %s command with its operation ID', async (action, method) => {
+    api.getMemoryFailures.mockResolvedValue({
+      status: 'ok',
+      items: [],
+      recovery: {
+        operation_id: 'clear-42',
+        state: 'recovery_required',
+        can_abort: true,
+      },
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', {
+      name: `memory.processingRecord.clearRecovery.${action}`,
+    }));
+
+    await waitFor(() => expect(api[method]).toHaveBeenCalledWith('clear-42'));
+    expect(showToast).toHaveBeenCalledWith(
+      `memory.processingRecord.clearRecovery.${action}Success`,
+      'success',
+    );
+  });
+
+  it('refreshes and exposes recovery immediately after a failed clear', async () => {
+    api.clearMemory.mockResolvedValue({
+      status: 'failed',
+      error: 'memory_clear_failed',
+      recovery: {
+        operation_id: 'clear-interrupted',
+        state: 'recovery_needed',
+        can_abort: false,
+      },
+    });
+    api.getMemoryFailures
+      .mockResolvedValueOnce({ status: 'ok', items: [], recovery: null })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        items: [],
+        recovery: {
+          operation_id: 'clear-interrupted',
+          state: 'recovery_needed',
+          can_abort: false,
+        },
+      });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(await screen.findByRole('button', { name: 'open-clear' }));
+    await user.click(await screen.findByRole('button', { name: 'confirm-clear' }));
+
+    await waitFor(() => expect(api.getMemoryFailures).toHaveBeenCalledTimes(2));
+    expect(api.getMemoryMaintenance).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }));
+    expect(await screen.findByText('clear-interrupted')).toBeTruthy();
   });
 });
 
 describe('SettingsMemoryPage restart action', () => {
-  it('stays available when status cannot be loaded', async () => {
-    render(<SettingsMemoryPage />);
+  it('stays available when runtime health cannot be loaded', async () => {
+    api.getMemoryStatus.mockResolvedValue({ status: 'failed', error: 'memory_status_failed' });
+    renderPage();
 
     expect(await screen.findByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
   });
 
   it('is disabled and shows progress while the request is pending', async () => {
     let finishRestart: ((value: { ok: true; state: string }) => void) | undefined;
-    api.restartMemoryRuntime.mockReturnValue(
-      new Promise((resolve) => {
-        finishRestart = resolve;
-      }),
-    );
+    api.restartMemoryRuntime.mockReturnValue(new Promise((resolve) => { finishRestart = resolve; }));
     const user = userEvent.setup();
-
-    render(<SettingsMemoryPage />);
+    renderPage();
     const action = await screen.findByRole('button', { name: 'memory.status.restartEngine' });
-    await user.click(action);
 
+    await user.click(action);
     expect((action as HTMLButtonElement).disabled).toBe(true);
     expect(action.querySelector('.animate-spin')).toBeTruthy();
 
     finishRestart?.({ ok: true, state: 'ready' });
     await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false));
-  });
-
-  it('renders exactly one restart action for an engine fault', async () => {
-    api.getMemoryStatus.mockResolvedValue(readyStatus('engine'));
-
-    render(<SettingsMemoryPage />);
-
-    expect(await screen.findByText('memory.status.fault.engine')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'memory.status.restartEngine' })).toHaveLength(1);
-  });
-});
-
-describe('SettingsMemoryPage disabled recorder health', () => {
-  beforeEach(() => {
-    api.getMemorySettings.mockResolvedValue({
-      status: 'ok',
-      enabled: false,
-      processing: { llm: endpoint, embedding: endpoint },
-    });
-  });
-
-  it('surfaces a retained call-log corruption with the Clear recovery action', async () => {
-    api.getMemoryStatus.mockResolvedValue({
-      status: 'ok',
-      state: 'disabled',
-      recorder: { state: 'degraded', reason: 'call_log_corrupt' },
-    });
-    const user = userEvent.setup();
-
-    render(<SettingsMemoryPage />);
-    await user.click(await screen.findByRole('button', { name: 'memory.log.clearAction' }));
-
-    expect(screen.getByRole('button', { name: 'confirm-clear' })).toBeTruthy();
-    expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
-  });
-
-  it('does not offer a restart that the disabled runtime must reject', async () => {
-    api.getMemoryStatus.mockResolvedValue({
-      status: 'ok',
-      state: 'disabled',
-      recorder: { state: 'degraded', reason: 'writer_failures' },
-    });
-
-    render(<SettingsMemoryPage />);
-
-    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText('memory.log.recorderDegraded')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
-    expect(api.restartMemoryRuntime).not.toHaveBeenCalled();
-    expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
-  });
-
-  it('does not offer recorder recovery when enabled Memory is missing its runtime', async () => {
-    api.getMemorySettings.mockResolvedValue({
-      status: 'ok',
-      enabled: true,
-      processing: { llm: endpoint, embedding: endpoint },
-    });
-    api.getMemoryStatus.mockResolvedValue({
-      status: 'ok',
-      state: 'error',
-      recorder: { state: 'degraded', reason: 'writer_failures' },
-    });
-    api.listDependencies.mockResolvedValue({
-      ok: true,
-      deps: [{ id: 'memory-runtime', installed: false, status: 'missing' }],
-    });
-
-    render(
-      <MemoryRouter>
-        <SettingsMemoryPage />
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText('memory.setup.runtimeRequired')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
   });
 });

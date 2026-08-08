@@ -52,6 +52,9 @@ class _Runtime:
 
     def __init__(self, module) -> None:
         self.module = module
+        self.final_flush_calls: list[dict[str, object]] = []
+        self.final_flush_result = True
+        self.final_flush_error: Exception | None = None
 
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
@@ -60,6 +63,12 @@ class _Runtime:
     def project_for_workdir(self, workdir: str) -> str:
         assert workdir == "/tmp/project"
         return PROJECT
+
+    async def final_flush(self, **kwargs) -> bool:
+        self.final_flush_calls.append(kwargs)
+        if self.final_flush_error is not None:
+            raise self.final_flush_error
+        return self.final_flush_result
 
 
 class _CaptureModule:
@@ -197,6 +206,43 @@ def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None
     assert request.provenance == "user_input"
     assert request.text == "/memory status"
     assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
+
+
+def test_final_flush_memory_session_reuses_capture_scope_and_raw_anchor() -> None:
+    controller = _controller()
+
+    result = asyncio.run(controller.final_flush_memory_session(_context("telegram"), "telegram_dm-1"))
+
+    assert result is True
+    assert controller.memory_runtime.final_flush_calls == [
+        {
+            "principal_id": "u-" + ("1" * 32),
+            "project_id": PROJECT,
+            "raw_session_id": "telegram_dm-1",
+            "deadline_seconds": 5.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("enabled,admitted", [(False, True), (True, False)])
+def test_final_flush_memory_session_fails_closed_without_admitted_scope(enabled: bool, admitted: bool) -> None:
+    controller = _controller(user=SimpleNamespace(enabled=admitted, is_admin=False))
+    controller.config.memory.enabled = enabled
+
+    result = asyncio.run(controller.final_flush_memory_session(_context("slack"), "slack_dm-1"))
+
+    assert result is False
+    assert controller.memory_runtime.final_flush_calls == []
+
+
+def test_final_flush_memory_session_swallows_runtime_failure() -> None:
+    controller = _controller()
+    controller.memory_runtime.final_flush_error = RuntimeError("provider unavailable")
+
+    result = asyncio.run(controller.final_flush_memory_session(_context("wechat"), "wechat_dm-1"))
+
+    assert result is False
+    assert len(controller.memory_runtime.final_flush_calls) == 1
 
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:

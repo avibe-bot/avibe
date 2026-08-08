@@ -30,4 +30,11 @@ class FlushUnknown:
     reason: Literal["timeout", "transport"]
 
 
-FlushResult: TypeAlias = FlushSucceeded | FlushRejected | FlushUnknown
+@dataclass(frozen=True)
+class FlushRetryable:
+    """A failure proven to occur before provider submission."""
+
+    error_code: Literal["memory_sidecar_unavailable"] = "memory_sidecar_unavailable"
+
+
+FlushResult: TypeAlias = FlushSucceeded | FlushRejected | FlushUnknown | FlushRetryable

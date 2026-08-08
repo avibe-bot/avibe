@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from config import paths as config_paths
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.everos_insight import reader as reader_module
+from core.memory.store import MemoryStore
+from core.memory.types import ProviderSessionRef
 
 
 ALICE = "u-" + "a" * 32
@@ -83,38 +86,8 @@ def insight_paths(tmp_path: Path) -> MemoryInsightPaths:
             """
         )
 
-    capture_db = tmp_path / "capture.db"
-    with _connect(capture_db) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE memory_capture_queue (
-                source_message_digest TEXT PRIMARY KEY,
-                epoch INTEGER NOT NULL,
-                session_id TEXT NOT NULL,
-                principal_id TEXT NOT NULL,
-                project_ref TEXT NOT NULL,
-                provenance TEXT NOT NULL,
-                payload_text TEXT,
-                payload_attachments TEXT,
-                occurred_at_ms INTEGER NOT NULL,
-                provider_timestamp_ms INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                attempts INTEGER NOT NULL,
-                next_retry_at TEXT,
-                lease_owner TEXT,
-                lease_at TEXT,
-                last_error TEXT,
-                add_request_id TEXT,
-                flush_observation TEXT,
-                flush_status TEXT,
-                flush_error_code TEXT,
-                flush_request_id TEXT,
-                flush_observed_at TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT
-            );
-            """
-        )
+    capture_db = config_paths.get_state_dir() / "memory-insight" / "capture.db"
+    MemoryStore(capture_db)
 
     call_db = tmp_path / "call-log.db"
     with _connect(call_db) as conn:
@@ -203,29 +176,96 @@ def _insert_queue(
     timestamp_ms: int,
     project: str = PROJECT,
     add_request_id: str | None = None,
-    flush_request_id: str | None = None,
+    flush_settlement_request_id: str | None = None,
+    generation: int = 1,
 ) -> None:
+    provider_session_ref = ProviderSessionRef(
+        principal_id=owner,
+        epoch=1,
+        project_ref=project,
+        session_id=f"provider-{session}",
+    ).serialize()
     with sqlite3.connect(paths.capture_db_path) as conn:
         conn.execute(
             """
             INSERT INTO memory_capture_queue (
-                source_message_digest, epoch, session_id, principal_id,
-                project_ref, provenance, occurred_at_ms, provider_timestamp_ms,
-                state, attempts, add_request_id, flush_request_id, created_at,
-                completed_at
-            ) VALUES (?, 1, ?, ?, ?, 'user_input', ?, ?, 'delivered', 1, ?, ?, ?, ?)
+                source_message_digest, epoch, session_id, provider_session_ref,
+                generation, principal_id, project_ref, provenance, occurred_at_ms,
+                provider_timestamp_ms, state, attempts, add_request_id, add_status,
+                created_at, completed_at
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, 'user_input', ?, ?, 'delivered', 1,
+                      ?, 'accumulated', ?, ?)
             """,
             (
                 digest,
                 session,
+                provider_session_ref,
+                generation,
                 owner,
                 project,
                 timestamp_ms,
                 timestamp_ms,
                 add_request_id,
-                flush_request_id,
                 "2026-08-04T00:00:00Z",
                 "2026-08-04T00:00:01Z",
+            ),
+        )
+        if flush_settlement_request_id is not None:
+            conn.execute(
+                """
+                INSERT INTO memory_flush_settlements (
+                    provider_session_ref, epoch, generation, operation_kind,
+                    operation_token, observation, request_id,
+                    confirmed_watermark_ms, observed_at, error_code
+                ) VALUES (?, 1, ?, 'flush', ?, 'settled', ?, ?, ?, NULL)
+                """,
+                (
+                    provider_session_ref,
+                    generation,
+                    f"flush:{digest}",
+                    flush_settlement_request_id,
+                    timestamp_ms,
+                    "2026-08-04T00:00:02Z",
+                ),
+            )
+
+
+def _insert_settlement(
+    paths: MemoryInsightPaths,
+    owner: str,
+    *,
+    session: str,
+    request_id: str,
+    token: str,
+    project: str = PROJECT,
+    generation: int = 1,
+    operation_kind: str = "flush",
+    settlement_epoch: int = 1,
+    provider_session: str | None = None,
+) -> None:
+    provider_session_ref = ProviderSessionRef(
+        principal_id=owner,
+        epoch=1,
+        project_ref=project,
+        session_id=f"provider-{provider_session or session}",
+    ).serialize()
+    with sqlite3.connect(paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO memory_flush_settlements (
+                provider_session_ref, epoch, generation, operation_kind,
+                operation_token, observation, request_id,
+                confirmed_watermark_ms, observed_at, error_code
+            ) VALUES (?, ?, ?, ?, ?, 'settled', ?, 0, ?, NULL)
+            """,
+            (
+                provider_session_ref,
+                settlement_epoch,
+                generation,
+                operation_kind,
+                token,
+                request_id,
+                "2026-08-04T00:00:02Z",
             ),
         )
 
@@ -552,14 +592,15 @@ def test_list_page_bounds_history_before_python_projection(
     assert "SCAN pc" not in query_plan
 
 
-def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
-    message_id = "m_session-a_5000_000"
+def test_exact_add_and_flush_attribution_fails_closed_on_request_id_collisions(
+    insight_paths: MemoryInsightPaths,
+) -> None:
     _insert_memcell(
         insight_paths,
         "mc_capture",
         ALICE,
         timestamp_ms=5_100,
-        message_ids=[message_id],
+        message_ids=["m_session-a_5000_000", "m_session-c_5002_000"],
     )
     _insert_queue(
         insight_paths,
@@ -568,7 +609,54 @@ def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsi
         session="session-a",
         timestamp_ms=5_000,
         add_request_id="request-good",
-        flush_request_id="flush-mixed",
+        flush_settlement_request_id="flush-good",
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-mixed",
+        token="flush:alice:mixed",
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-wrong-generation",
+        token="flush:alice:wrong-generation",
+        generation=2,
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-wrong-epoch",
+        token="flush:alice:wrong-epoch",
+        settlement_epoch=2,
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-wrong-provider-session",
+        token="flush:alice:wrong-provider-session",
+        provider_session="session-other",
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="settlement-add-kind",
+        token="add:alice",
+        operation_kind="add",
+    )
+    _insert_queue(
+        insight_paths,
+        "alice-cross-kind",
+        ALICE,
+        session="session-c",
+        timestamp_ms=5_002,
+        add_request_id="add-mixed",
     )
     _insert_queue(
         insight_paths,
@@ -576,19 +664,58 @@ def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsi
         BOB,
         session="session-b",
         timestamp_ms=5_001,
-        flush_request_id="flush-mixed",
+        flush_settlement_request_id="flush-mixed",
+    )
+    _insert_queue(
+        insight_paths,
+        "bob-cross-kind",
+        BOB,
+        session="session-d",
+        timestamp_ms=5_003,
+        flush_settlement_request_id="add-mixed",
     )
     _insert_call(insight_paths, "good", request_id="request-good", stage="boundary")
+    _insert_call(insight_paths, "flush-good", request_id="flush-good", stage="boundary")
     _insert_call(insight_paths, "mixed", request_id="flush-mixed", stage="boundary")
+    _insert_call(insight_paths, "add-mixed", request_id="add-mixed", stage="boundary")
+    _insert_call(
+        insight_paths,
+        "wrong-generation",
+        request_id="flush-wrong-generation",
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "wrong-operation-kind",
+        request_id="settlement-add-kind",
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "wrong-epoch",
+        request_id="flush-wrong-epoch",
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "wrong-provider-session",
+        request_id="flush-wrong-provider-session",
+        stage="boundary",
+    )
     _insert_call(insight_paths, "unlinked", request_id="request-other", stage="boundary")
 
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_capture")
-    assert [call["id"] for call in detail["calls"]] == ["good"]
+    assert {call["id"] for call in detail["calls"]} == {"good", "flush-good"}
     assert detail["capture"]["status"] == "available"
     listed = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
-    assert listed["entries"][0]["authorized_call_count"] == 1
+    assert listed["entries"][0]["authorized_call_count"] == 2
     encoded = json.dumps(detail)
     assert "flush-mixed" not in encoded
+    assert "add-mixed" not in encoded
+    assert "flush-wrong-generation" not in encoded
+    assert "flush-wrong-epoch" not in encoded
+    assert "flush-wrong-provider-session" not in encoded
+    assert "settlement-add-kind" not in encoded
     assert "request-other" not in encoded
 
 

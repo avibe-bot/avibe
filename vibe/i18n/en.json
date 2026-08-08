@@ -642,8 +642,41 @@
   "memory": {
     "cli": {
       "error": "Memory {operation} failed: {code}",
-      "status": "Memory status: {state}",
-      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "status": "Memory source: {state}",
+      "provider": "EverOS {version}: {state}",
+      "sourceReason": "Source reason: {reason}",
+      "sourceState": {
+        "available": "available",
+        "stale": "stale",
+        "unavailable": "unavailable",
+        "unknown": "unknown"
+      },
+      "providerState": {
+        "ok": "healthy",
+        "unknown": "unknown"
+      },
+      "unknownVersion": "unknown version",
+      "reason": {
+        "memoryDisabled": "Memory is disabled",
+        "invalidInput": "invalid Memory input",
+        "accessDenied": "Memory access denied",
+        "inputTooLarge": "Memory input is too large",
+        "queueFull": "Memory queue is full",
+        "lowDiskSpace": "low disk space",
+        "storeUnavailable": "Memory store unavailable",
+        "runtimeMissing": "Memory runtime missing",
+        "runtimeUnsupported": "Memory runtime unsupported",
+        "runtimeInstallFailed": "Memory runtime installation failed",
+        "reconcileFailed": "Memory reconciliation failed",
+        "restartFailed": "Memory restart failed",
+        "sidecarUnavailable": "Memory sidecar unavailable",
+        "providerTimeout": "Memory provider timed out",
+        "providerResponseInvalid": "invalid Memory provider response",
+        "capabilityUnavailable": "Memory capability unavailable",
+        "processingFailed": "Memory processing failed",
+        "clearFailed": "Memory clear failed",
+        "unknown": "unknown reason"
+      },
       "fault": {
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."

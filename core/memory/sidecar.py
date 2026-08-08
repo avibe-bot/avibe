@@ -26,6 +26,7 @@ _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
 _PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
 _PROJECT_PATTERN = re.compile(r"p-[0-9a-f]{32}\Z")
+_SESSION_PATTERN = re.compile(r"src--[0-9a-f]{64}--e(?:0|[1-9][0-9]*)\Z")
 logger = logging.getLogger(__name__)
 
 
@@ -221,7 +222,7 @@ def _validate_add(
     if not _exact_keys(payload, {"session_id", "app_id", "project_id", "messages"}) or not _valid_scope(payload):
         return "add"
     messages = payload.get("messages")
-    if not isinstance(payload.get("session_id"), str) or not isinstance(messages, list) or len(messages) != 1:
+    if not _valid_session(payload.get("session_id")) or not isinstance(messages, list) or len(messages) != 1:
         return "add"
     message = messages[0]
     if not isinstance(message, dict) or set(message) != {"sender_id", "role", "timestamp", "content"}:
@@ -290,38 +291,56 @@ def _valid_workbench_attachment(item: dict[str, Any], attachments_root: Path | N
 def _validate_flush(payload: dict[str, Any]) -> str | None:
     if not _exact_keys(payload, {"session_id", "app_id", "project_id"}) or not _valid_scope(payload):
         return "flush"
-    return None if isinstance(payload.get("session_id"), str) else "flush"
+    return None if _valid_session(payload.get("session_id")) else "flush"
 
 
 def _validate_search(payload: dict[str, Any]) -> str | None:
-    keys = {"user_id", "app_id", "project_id", "query", "method", "top_k", "include_profile", "enable_llm_rerank"}
-    if not _exact_keys(payload, keys) or not _valid_scope(payload):
+    required = {
+        "user_id",
+        "app_id",
+        "project_id",
+        "query",
+        "method",
+        "top_k",
+        "include_profile",
+        "enable_llm_rerank",
+    }
+    if frozenset(payload) not in {frozenset(required), frozenset((*required, "filters"))}:
+        return "search"
+    if not _valid_scope(payload):
         return "search"
     if (
         not _valid_principal(payload.get("user_id"))
         or not isinstance(payload.get("query"), str)
-        or payload.get("method") != "hybrid"
+        or payload.get("method") not in {"keyword", "vector", "hybrid"}
         or not isinstance(payload.get("top_k"), int)
         or isinstance(payload.get("top_k"), bool)
         or not 1 <= payload["top_k"] <= 20
-        or payload.get("include_profile") is not True
+        or type(payload.get("include_profile")) is not bool
         or payload.get("enable_llm_rerank") is not False
+    ):
+        return "search"
+    filters = payload.get("filters")
+    if filters is not None and (
+        not isinstance(filters, dict)
+        or set(filters) != {"session_id"}
+        or not _valid_session(filters.get("session_id"))
     ):
         return "search"
     return None
 
 
 def _validate_get(payload: dict[str, Any]) -> str | None:
-    keys = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size", "sort_by", "sort_order"}
-    if not _exact_keys(payload, keys) or not _valid_scope(payload):
+    keys = {"user_id", "app_id", "project_id", "memory_type", "page", "page_size"}
+    if not _exact_keys(payload, keys):
         return "get"
     if (
         not _valid_principal(payload.get("user_id"))
-        or payload.get("memory_type") not in {"profile", "episode"}
+        or payload.get("app_id") != _APP_ID
+        or payload.get("project_id") != "default"
+        or payload.get("memory_type") != "profile"
         or payload.get("page") != 1
-        or payload.get("page_size") != 20
-        or payload.get("sort_by") != "timestamp"
-        or payload.get("sort_order") != "desc"
+        or payload.get("page_size") != 1
     ):
         return "get"
     return None
@@ -329,6 +348,14 @@ def _validate_get(payload: dict[str, Any]) -> str | None:
 
 def _valid_principal(value: object) -> bool:
     return isinstance(value, str) and _PRINCIPAL_PATTERN.fullmatch(value) is not None
+
+
+def _valid_session(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8")) <= 128
+        and _SESSION_PATTERN.fullmatch(value) is not None
+    )
 
 
 def _processing_healthy_from_child_environment() -> bool:

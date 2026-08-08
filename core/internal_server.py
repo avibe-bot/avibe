@@ -1025,6 +1025,20 @@ def create_app(
             logger.warning("internal memory failure log failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
+    @app.get("/internal/memory/maintenance")
+    async def _memory_maintenance() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.maintenance_payload()
+        except Exception:
+            logger.warning("internal memory maintenance read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
         try:
@@ -1166,15 +1180,26 @@ def create_app(
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"query", "limit"}
+            or set(payload) != {"query", "policy"}
             or not isinstance(payload.get("query"), str)
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        limit = payload.get("limit")
-        if not isinstance(limit, int) or isinstance(limit, bool):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+        from core.memory.types import RecallPolicy
+
         try:
-            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
+            policy = RecallPolicy.from_payload(payload.get("policy"))
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
+        try:
+            return await runtime.search_payload(
+                payload["query"],
+                policy,
+                principal_id,
+                project_id,
+                current_session_id=current_session_id,
+            )
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
@@ -1234,7 +1259,8 @@ def create_app(
 
     @app.post("/internal/memory/clear")
     async def _memory_clear(request: Request) -> Any:
-        if _verified_memory_ui_user_key(request) is None:
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
@@ -1243,7 +1269,9 @@ def create_app(
         if payload != {"confirm": True}:
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         try:
-            return await runtime.clear()
+            return await runtime.clear(
+                operator_ref=runtime.principal_for_user_key(user_key)
+            )
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
@@ -1252,6 +1280,41 @@ def create_app(
         except Exception:
             logger.warning("internal memory clear failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
+    async def _memory_clear_recovery(request: Request, *, abort: bool) -> Any:
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"operation_id"}
+            or not isinstance(payload.get("operation_id"), str)
+            or not 1 <= len(payload["operation_id"]) <= 128
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            operator_ref = runtime.principal_for_user_key(user_key)
+            operation = runtime.abort_clear if abort else runtime.resume_clear
+            return await operation(payload["operation_id"], operator_ref=operator_ref)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        except MemoryStoreUnavailableError:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        except Exception:
+            logger.warning("internal memory clear recovery failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
+    @app.post("/internal/memory/clear/resume")
+    async def _memory_clear_resume(request: Request) -> Any:
+        return await _memory_clear_recovery(request, abort=False)
+
+    @app.post("/internal/memory/clear/abort")
+    async def _memory_clear_abort(request: Request) -> Any:
+        return await _memory_clear_recovery(request, abort=True)
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:

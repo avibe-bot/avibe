@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 import psutil
 
 from config import paths
+from core.memory.attachments import attachment_pin_root
 from core.memory.everos import EverOSPort
 from core.memory.types import MemoryErrorCode
 
@@ -86,6 +87,7 @@ class EverOSProcess:
         self._python = Path(python)
         self._effective_home = Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
         self._memory_dir = self._effective_home / "memory"
+        self._attachments_root = attachment_pin_root(self._effective_home)
         self._provider_root = Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
@@ -551,7 +553,6 @@ class EverOSProcess:
 
     def _write_generated_config(self) -> None:
         generated = self._memory_dir / "generated"
-        attachments_root = self._effective_home / "attachments" / "avibe"
         timezone_name = self._timezone_for_root()
         timezone = _toml_string(timezone_name)
         everos_contents = "\n".join(
@@ -568,7 +569,7 @@ class EverOSProcess:
                 'base_url = ""',
                 "",
                 "[multimodal]",
-                f"file_uri_allow_dirs = [{_toml_string(str(attachments_root))}]",
+                f"file_uri_allow_dirs = [{_toml_string(str(self._attachments_root))}]",
                 "",
             )
         )
@@ -609,7 +610,7 @@ class EverOSProcess:
             "XDG_DATA_HOME": str(child_home / ".local" / "share"),
             "XDG_STATE_HOME": str(child_home / ".local" / "state"),
             "EVEROS_ROOT": str(self._provider_root),
-            "AVIBE_MEMORY_ATTACHMENTS_ROOT": str(self._effective_home / "attachments" / "avibe"),
+            "AVIBE_MEMORY_ATTACHMENTS_ROOT": str(self._attachments_root),
             "EVEROS_LLM__BASE_URL": str(settings.llm_base_url),
             "EVEROS_LLM__MODEL": str(settings.llm_model),
             "EVEROS_LLM__API_KEY": str(settings.llm_api_key),

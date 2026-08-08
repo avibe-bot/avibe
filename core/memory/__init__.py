@@ -8,8 +8,6 @@ from core.memory.types import (
     CaptureReceipt,
     CaptureRequest,
     CaptureSkipped,
-    ClearCompleted,
-    ClearReceipt,
     MemoryErrorCode,
     MemoryItem,
     MemoryItems,
@@ -18,9 +16,12 @@ from core.memory.types import (
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     MemoryResult,
-    MemoryStatus,
     OperationFailed,
     ProviderSessionRef,
+    RecallItems,
+    RecallMode,
+    RecallPolicy,
+    RecallResult,
 )
 
 __all__ = [
@@ -30,8 +31,6 @@ __all__ = [
     "CaptureReceipt",
     "CaptureRequest",
     "CaptureSkipped",
-    "ClearCompleted",
-    "ClearReceipt",
     "MemoryErrorCode",
     "MemoryItem",
     "MemoryItems",
@@ -41,7 +40,10 @@ __all__ = [
     "MemoryProfileExplicitInfo",
     "MemoryProfileTrait",
     "MemoryResult",
-    "MemoryStatus",
     "OperationFailed",
     "ProviderSessionRef",
+    "RecallItems",
+    "RecallMode",
+    "RecallPolicy",
+    "RecallResult",
 ]
