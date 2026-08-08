@@ -1625,6 +1625,66 @@ class ProbeParserTests(unittest.TestCase):
         projection = probe._validate_first(turn, ("lookup_weather",), stream=False)
         self.assertFalse(projection["checks"]["reasoning_not_visible"])
 
+    def test_partial_reasoning_excerpts_must_not_be_visible(self) -> None:
+        first = probe._parse_anthropic_document(
+            {
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "internal chain of thought",
+                        "signature": "PRIVATE_SIGNATURE_PAYLOAD",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup_weather",
+                        "input": {"city": "Shanghai"},
+                    },
+                    {"type": "text", "text": "INTERNAL   CHAIN"},
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+        first_projection = probe._validate_first(first, ("lookup_weather",), stream=False)
+        self.assertFalse(first_projection["checks"]["reasoning_not_visible"])
+
+        second = probe._parse_anthropic_document(
+            {
+                "content": [{"type": "text", "text": "private_signa"}],
+                "stop_reason": "end_turn",
+            }
+        )
+        second_projection = probe._validate_second(
+            second,
+            (),
+            stream=False,
+            prior_reasoning_parts=first.reasoning_parts,
+        )
+        self.assertFalse(second_projection["checks"]["reasoning_not_visible"])
+
+    def test_short_common_reasoning_overlap_is_not_treated_as_leakage(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Need weather data for Shanghai before calling the requested tool",
+                        "signature": "sig",
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup_weather",
+                        "input": {"city": "Shanghai"},
+                    },
+                    {"type": "text", "text": "Shanghai"},
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+        projection = probe._validate_first(turn, ("lookup_weather",), stream=False)
+        self.assertTrue(projection["checks"]["reasoning_not_visible"])
+
     def test_opaque_reasoning_payloads_must_not_be_visible(self) -> None:
         signature = probe._parse_anthropic_document(
             {

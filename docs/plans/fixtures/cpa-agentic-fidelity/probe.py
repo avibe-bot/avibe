@@ -77,6 +77,8 @@ RESPONSES_REASONING_PART_TYPES = {"reasoning_text", "summary_text", "text"}
 CHAT_STREAM_EVENT_TYPES = {None, "chat.completion.chunk", "error"}
 ANTHROPIC_CONTENT_BLOCK_TYPES = {"redacted_thinking", "text", "thinking", "tool_use"}
 MAX_503_RETRIES = 3
+PROTECTED_REASONING_MIN_EXCERPT = 12
+PROTECTED_REASONING_MAX_EXCERPT = 32
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -245,6 +247,28 @@ def _tool_output_pair_present(text: str, call: ToolCall) -> bool:
 
 def _token_present(text: str, token: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", text) is not None
+
+
+def _protected_reasoning_visible(text: str, protected_parts: list[str]) -> bool:
+    visible = " ".join(text.casefold().split())
+    for part in protected_parts:
+        protected = " ".join(part.casefold().split())
+        if not protected:
+            continue
+        excerpt_length = min(
+            PROTECTED_REASONING_MAX_EXCERPT,
+            max(PROTECTED_REASONING_MIN_EXCERPT, (len(protected) + 1) // 2),
+        )
+        if len(protected) <= excerpt_length:
+            if protected in visible:
+                return True
+            continue
+        if any(
+            protected[start : start + excerpt_length] in visible
+            for start in range(len(protected) - excerpt_length + 1)
+        ):
+            return True
+    return False
 
 
 def _anthropic_payload(*, model: str, stream: bool, parallel: bool, followup: Turn | None = None) -> dict[str, Any]:
@@ -2244,7 +2268,7 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
         "no_premature_tool_outputs": not _tool_output_tuples(turn.text)
         and not any(_token_present(turn.text, marker) for marker in TOOL_OUTPUTS.values()),
         "reasoning_present": turn.reasoning_present,
-        "reasoning_not_visible": not any(part in turn.text for part in turn.reasoning_parts if part),
+        "reasoning_not_visible": not _protected_reasoning_visible(turn.text, turn.reasoning_parts),
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
         "stream_order": (not stream) or turn.stream_order_ok,
         "stream_deadline": (not stream) or not turn.deadline_expired,
@@ -2273,10 +2297,9 @@ def _validate_second(
         "stop_reason": isinstance(turn.stop_reason, str) and turn.stop_reason in STOP_REASONS[turn.protocol]["final"],
         "no_followup_tool_calls": not turn.tool_calls,
         "reasoning_present": turn.reasoning_present,
-        "reasoning_not_visible": not any(
-            part in turn.text
-            for part in [*(prior_reasoning_parts or []), *turn.reasoning_parts]
-            if part
+        "reasoning_not_visible": not _protected_reasoning_visible(
+            turn.text,
+            [*(prior_reasoning_parts or []), *turn.reasoning_parts],
         ),
         "system_marker": _token_present(turn.text, SYSTEM_MARKER),
         "system_scope": _token_present(turn.text, SYSTEM_SCOPE_OK) and not _token_present(turn.text, USER_SCOPE_LEAK),
