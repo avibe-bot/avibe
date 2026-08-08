@@ -3264,7 +3264,7 @@ def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
+def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3279,6 +3279,7 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     )
     old = FakeEverOSProcess()
     runtime._process = old
+    old_provider = runtime._provider
     store = runtime._store
     assert store is not None
     worker = runtime.module._worker
@@ -3319,24 +3320,22 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     async def run() -> None:
         runtime._worker_task = asyncio.create_task(worker.drain_once())
         assert await asyncio.to_thread(entered.wait, 1.0)
-        restarting = asyncio.create_task(runtime.restart())
-        await asyncio.sleep(0.05)
-        assert restarting.done() is False
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
         assert old.stops == 0
+        assert runtime._process is old
+        assert runtime._provider is old_provider
         assert factory.created == []
+        assert worker._claims_paused is False
 
         release.set()
-        assert await restarting == {"ok": True, "state": "ready"}
-        assert old.stops == 1
-        assert len(factory.created) == 1
-        assert worker._boot_id != old_lease
+        assert await runtime._worker_task == 0
+        assert old.stops == 0
+        assert factory.created == []
+        assert worker._boot_id == old_lease
         assert store.list_queue_rows()[0].state == "processing"
-
-        # The first tick under the replacement lease must fence old claimed
-        # work before claims can resume.
-        worker.pause_claims()
-        assert await worker.drain_once() == 0
-        assert store.list_queue_rows()[0].state == "manual_required"
         await runtime.close()
 
     asyncio.run(run())

@@ -603,6 +603,144 @@ def test_cancelled_flush_waiting_for_write_slot_remains_retryable(tmp_path: Path
     asyncio.run(run())
 
 
+def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        first_add_entered = asyncio.Event()
+        release_first_add = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                if capture.text == "payload-first-add":
+                    first_add_entered.set()
+                    await release_first_add.wait()
+                return AddAck(f"add-{len(self.captures)}", "accumulated")
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            max_concurrent_writes=1,
+        )
+        _enqueue(store, "first-add", session="first-add")
+        _enqueue(store, "waiting-add", session="waiting-add")
+        claimed = {
+            row.payload_text: row
+            for row in (
+                store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z"),
+                store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z"),
+            )
+            if row is not None
+        }
+
+        first_call = asyncio.create_task(
+            coordinator.deliver(claimed["payload-first-add"], lease_owner="worker")
+        )
+        await asyncio.wait_for(first_add_entered.wait(), timeout=1)
+        waiting_call = asyncio.create_task(
+            coordinator.deliver(claimed["payload-waiting-add"], lease_owner="worker")
+        )
+
+        async def wait_for_queued_slot() -> None:
+            while not getattr(coordinator._write_slots, "_waiters", None):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_queued_slot(), timeout=1)
+        waiting_call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting_call
+
+        waiting_row = next(
+            row for row in store.list_queue_rows() if row.payload_text == "payload-waiting-add"
+        )
+        assert waiting_row.state == "pending"
+        assert waiting_row.attempts == 0
+        assert [capture.text for capture in provider.captures] == ["payload-first-add"]
+
+        release_first_add.set()
+        assert await asyncio.wait_for(first_call, timeout=1)
+        recovery = store.recover_after_boot(
+            lease_owner="next-boot",
+            clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert recovery.reclaimed == 0
+        retry = store.claim_due(
+            lease_owner="next-boot",
+            now="2026-01-01T00:00:01.000Z",
+        )
+        assert retry is not None and retry.payload_text == "payload-waiting-add"
+
+        assert await coordinator.deliver(retry, lease_owner="next-boot")
+        assert [capture.text for capture in provider.captures] == [
+            "payload-first-add",
+            "payload-waiting-add",
+        ]
+
+    asyncio.run(run())
+
+
+def test_cancelled_add_waiting_for_session_lock_returns_exact_claim(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        first_add_entered = asyncio.Event()
+        release_first_add = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                if capture.text == "payload-first-locked":
+                    first_add_entered.set()
+                    await release_first_add.wait()
+                return AddAck(f"add-{len(self.captures)}", "accumulated")
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        _enqueue(store, "first-locked", session="same-session")
+        _enqueue(store, "waiting-locked", session="same-session")
+        claimed = {
+            row.payload_text: row
+            for row in (
+                store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z"),
+                store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z"),
+            )
+            if row is not None
+        }
+
+        first_call = asyncio.create_task(
+            coordinator.deliver(claimed["payload-first-locked"], lease_owner="worker")
+        )
+        await asyncio.wait_for(first_add_entered.wait(), timeout=1)
+        waiting_call = asyncio.create_task(
+            coordinator.deliver(claimed["payload-waiting-locked"], lease_owner="worker")
+        )
+        await asyncio.sleep(0)
+        assert waiting_call.done() is False
+
+        waiting_call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting_call
+
+        waiting_row = next(
+            row
+            for row in store.list_queue_rows()
+            if row.payload_text == "payload-waiting-locked"
+        )
+        assert waiting_row.state == "pending"
+        assert waiting_row.attempts == 0
+        assert [capture.text for capture in provider.captures] == ["payload-first-locked"]
+
+        release_first_add.set()
+        assert await asyncio.wait_for(first_call, timeout=1)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_error"),
     [

@@ -317,6 +317,14 @@ def test_store_settles_one_fenced_generation_not_individual_queue_rows(tmp_path:
             conn.execute(
                 "UPDATE memory_flush_settlements SET observation = 'rejected'"
             )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute("DELETE FROM memory_flush_settlements")
+
+    clearing = store.begin_clear()
+    assert clearing.clear_in_progress is True
+    assert store.finish_clear().clear_in_progress is False
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_flush_settlements").fetchone()[0] == 0
 
 
 def test_store_records_rejected_and_unknown_as_generation_settlements(tmp_path: Path) -> None:
@@ -675,7 +683,19 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
 
 def test_clear_reset_replays_at_the_exact_target_epoch(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "queued")
+    session_ref = _deliver(store, "queued")
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=session_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert store.mark_flush_submission_started(lease, now="2026-01-01T00:00:02.500Z")
+    assert store.settle_flush(
+        lease,
+        FlushSucceeded(request_id="flush-before-clear", status="extracted"),
+        now="2026-01-01T00:00:03.000Z",
+    ).settled
     pre_epoch = store.ensure_meta().epoch
 
     first = store.reset_for_clear(target_epoch=pre_epoch + 1)
@@ -684,6 +704,8 @@ def test_clear_reset_replays_at_the_exact_target_epoch(tmp_path: Path) -> None:
     assert first.epoch == pre_epoch + 1
     assert replay.epoch == first.epoch
     assert store.list_queue_rows() == ()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_flush_settlements").fetchone()[0] == 0
     with pytest.raises(ValueError):
         store.reset_for_clear(target_epoch=pre_epoch + 3)
 
@@ -712,23 +734,45 @@ def test_provenance_survives_payload_tombstoning(tmp_path: Path, provenance: str
     assert tombstone.provenance == provenance
 
 
-def test_terminal_tombstones_compact_by_retention(tmp_path: Path) -> None:
+def test_terminal_tombstones_compact_after_90_days_but_retain_settlement_evidence(
+    tmp_path: Path,
+) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "terminal")
-    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(row, Delivered(), lease_owner="boot", now=_dt("2026-01-01T00:00:01.000Z")).settled
+    session_ref = _deliver(store, "terminal")
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=session_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert store.mark_flush_submission_started(lease, now="2026-01-01T00:00:02.500Z")
+    assert store.settle_flush(
+        lease,
+        FlushSucceeded(request_id="flush-terminal", status="extracted"),
+        now="2026-01-01T00:00:03.000Z",
+    ).settled
 
-    reference = datetime(2026, 7, 1, tzinfo=UTC)
-    old = reference - TERMINAL_TOMBSTONE_RETENTION - timedelta(seconds=1)
-    with sqlite3.connect(store.path) as conn:
-        conn.execute(
-            "UPDATE memory_capture_queue SET completed_at = ? WHERE source_message_digest = 'terminal'",
-            (old.isoformat().replace("+00:00", "Z"),),
-        )
+    reference = (
+        datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC)
+        + TERMINAL_TOMBSTONE_RETENTION
+        + timedelta(seconds=1)
+    )
 
     assert store.compact_terminal_tombstones(now=reference) == 1
     assert _row_for_source(store, "terminal") is None
+    with sqlite3.connect(store.path) as conn:
+        settlement = conn.execute(
+            """
+            SELECT operation_kind, observation, request_id, observed_at
+            FROM memory_flush_settlements
+            """
+        ).fetchone()
+    assert settlement == (
+        "flush",
+        "settled",
+        "flush-terminal",
+        "2026-01-01T00:00:03.000Z",
+    )
 
 
 def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

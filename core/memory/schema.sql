@@ -158,3 +158,13 @@ BEFORE UPDATE ON memory_flush_settlements
 BEGIN
     SELECT RAISE(ABORT, 'memory flush settlements are immutable');
 END;
+
+CREATE TRIGGER IF NOT EXISTS trg_memory_flush_settlements_no_delete
+BEFORE DELETE ON memory_flush_settlements
+WHEN COALESCE(
+    (SELECT clear_in_progress FROM memory_meta WHERE singleton = 1),
+    0
+) != 1
+BEGIN
+    SELECT RAISE(ABORT, 'memory flush settlements are immutable');
+END;

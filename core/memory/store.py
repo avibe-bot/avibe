@@ -673,6 +673,31 @@ class MemoryStore:
             )
             return updated.rowcount == 1
 
+    def return_unsubmitted_claim(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+    ) -> bool:
+        """Return an exact add claim that never crossed the provider boundary."""
+
+        with self._transaction() as conn:
+            updated = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET state = 'pending', lease_owner = NULL, lease_at = NULL
+                WHERE source_message_digest = ? AND epoch = ?
+                  AND state = 'processing' AND lease_owner = ? AND lease_token = ?
+                """,
+                (
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                    row.lease_token,
+                ),
+            )
+            return updated.rowcount == 1
+
     def settle(
         self,
         row: QueueRow,
@@ -2167,6 +2192,14 @@ class MemoryStore:
             ):
                 raise ValueError("Memory clear target epoch does not match current state")
             now = utc_now_iso()
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET clear_in_progress = 1, updated_at = ?
+                WHERE singleton = 1
+                """,
+                (now,),
+            )
             conn.execute("DELETE FROM memory_capture_queue")
             conn.execute("DELETE FROM memory_flush_settlements")
             conn.execute("DELETE FROM memory_session_flush_state")
@@ -2532,10 +2565,6 @@ class MemoryStore:
                 """,
                 (overflow,),
             ).rowcount
-        conn.execute(
-            "DELETE FROM memory_flush_settlements WHERE observed_at < ?",
-            (cutoff,),
-        )
         return int(removed)
 
 

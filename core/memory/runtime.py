@@ -1470,8 +1470,12 @@ class MemoryRuntime:
             old_process = self._process
             try:
                 # The grace budget applies only to the current drain tick. A
-                # timeout still proceeds to exact cancellation settlement.
-                await worker.pause_and_wait(timeout_seconds=5.0)
+                # timeout leaves the current process/provider ownership intact.
+                if not await worker.pause_and_wait(timeout_seconds=5.0):
+                    if old_process is not None and old_process.running:
+                        worker.resume_claims()
+                        self._ensure_worker()
+                    return {"ok": False, "error": "memory_restart_failed"}
                 await self._stop_worker()
             except Exception:
                 if old_process is not None and old_process.running:

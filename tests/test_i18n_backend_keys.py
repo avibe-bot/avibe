@@ -35,6 +35,11 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
 )
+from vibe.cli import (
+    _MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
+    _MEMORY_CLI_REASON_I18N_KEYS,
+    _MEMORY_CLI_SOURCE_STATE_I18N_KEYS,
+)
 from vibe.i18n import get_supported_languages, t
 
 I18N_DIR = Path(__file__).resolve().parents[1] / "vibe" / "i18n"
@@ -67,6 +72,27 @@ def test_no_backend_translation_is_blank() -> None:
     for lang in ("en", "zh"):
         blank = [key for key, value in _bundle(lang).items() if not str(value).strip()]
         assert blank == [], f"{lang} has blank translations: {blank}"
+
+
+@pytest.mark.parametrize(
+    "key",
+    sorted(
+        {
+            *_MEMORY_CLI_SOURCE_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_REASON_I18N_KEYS.values(),
+            "memory.cli.sourceState.unknown",
+            "memory.cli.providerState.unknown",
+            "memory.cli.reason.unknown",
+            "memory.cli.unknownVersion",
+        }
+    ),
+)
+def test_every_memory_cli_status_label_resolves(key: str) -> None:
+    for lang in get_supported_languages():
+        resolved = t(key, lang)
+        assert resolved != key, f"{key} is not translated in {lang}"
+        assert resolved.strip()
 
 
 @pytest.mark.parametrize(

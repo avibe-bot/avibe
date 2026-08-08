@@ -53,6 +53,11 @@ ProcessingEvent = Callable[
 ]
 
 
+class _AddSubmissionGuard:
+    def __init__(self) -> None:
+        self.started = False
+
+
 class SessionFlushCoordinator:
     """Own the exact session fence from add admission through flush settlement."""
 
@@ -141,21 +146,34 @@ class SessionFlushCoordinator:
         """Deliver one claimed add under the exact canonical session lock."""
 
         key = row.provider_session_ref.serialize()
-        async with self._session_lock(key):
-            if await self._store_call(
-                self._store.return_claim_if_fenced,
-                row,
-                lease_owner=lease_owner,
-            ):
-                return False
-            if self._paused or not self._enabled():
-                await self._settle_failure(
+        submission = _AddSubmissionGuard()
+        try:
+            async with self._session_lock(key):
+                if await self._store_call(
+                    self._store.return_claim_if_fenced,
                     row,
                     lease_owner=lease_owner,
-                    outcome=SystemOutage(error="memory_disabled"),
+                ):
+                    return False
+                if self._paused or not self._enabled():
+                    await self._settle_failure(
+                        row,
+                        lease_owner=lease_owner,
+                        outcome=SystemOutage(error="memory_disabled"),
+                    )
+                    return False
+                return await self._deliver_locked(
+                    row,
+                    lease_owner=lease_owner,
+                    submission=submission,
                 )
-                return False
-            return await self._deliver_locked(row, lease_owner=lease_owner)
+        except asyncio.CancelledError:
+            await self._return_cancelled_unsubmitted(
+                row,
+                lease_owner=lease_owner,
+                submission=submission,
+            )
+            raise
 
     async def run_due(self, *, max_sessions: int = 8) -> int:
         """Schedule due sessions without waiting for long-running provider flushes."""
@@ -292,10 +310,20 @@ class SessionFlushCoordinator:
                 )
                 if row is None:
                     break
-                delivered = await self._deliver_locked(
-                    row,
-                    lease_owner=lease.fence_token,
-                )
+                submission = _AddSubmissionGuard()
+                try:
+                    delivered = await self._deliver_locked(
+                        row,
+                        lease_owner=lease.fence_token,
+                        submission=submission,
+                    )
+                except asyncio.CancelledError:
+                    await self._return_cancelled_unsubmitted(
+                        row,
+                        lease_owner=lease.fence_token,
+                        submission=submission,
+                    )
+                    raise
                 state = await self._store_call(
                     self._store.get_session_flush_state,
                     provider_session_ref,
@@ -380,7 +408,13 @@ class SessionFlushCoordinator:
             ):
                 await self._open_processing_fault()
 
-    async def _deliver_locked(self, row: QueueRow, *, lease_owner: str) -> bool:
+    async def _deliver_locked(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        submission: _AddSubmissionGuard,
+    ) -> bool:
         if row.payload_text is None:
             await self._settle_failure(
                 row,
@@ -429,6 +463,7 @@ class SessionFlushCoordinator:
         )
         try:
             async with self._write_slots:
+                submission.started = True
                 ack = await asyncio.wait_for(
                     self._provider.add(capture),
                     timeout=self._add_timeout_seconds,
@@ -495,6 +530,21 @@ class SessionFlushCoordinator:
         if settled.settled:
             await self._close_processing_fault()
         return settled.settled
+
+    async def _return_cancelled_unsubmitted(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        submission: _AddSubmissionGuard,
+    ) -> None:
+        if submission.started:
+            return
+        await self._store_call(
+            self._store.return_unsubmitted_claim,
+            row,
+            lease_owner=lease_owner,
+        )
 
     async def _settle_failure(
         self,

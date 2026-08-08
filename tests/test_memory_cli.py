@@ -112,10 +112,39 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
 
     assert cli.cmd_memory(args) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "记忆来源：stale",
-        "EverOS 1.2.3：ok",
-        "来源原因：memory_sidecar_unavailable",
+        "记忆来源：数据已过期",
+        "EverOS 1.2.3：正常",
+        "来源原因：记忆 sidecar 不可用",
     ]
+
+
+def test_memory_cli_human_status_uses_localized_fallbacks_for_unknown_tokens(
+    monkeypatch,
+    capsys,
+) -> None:
+    args = cli.build_parser().parse_args(["memory", "status"])
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: "zh")
+    monkeypatch.setattr(
+        internal_client,
+        "memory_status_sync",
+        lambda **_kwargs: {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "source": {"status": "future_state", "reason": "future_reason"},
+                "health": {"status": "future_health"},
+            },
+        },
+    )
+
+    assert cli.cmd_memory(args) == 0
+    output = capsys.readouterr().out.splitlines()
+    assert output == [
+        "记忆来源：未知",
+        "EverOS 未知版本：未知",
+        "来源原因：未知原因",
+    ]
+    assert "future_" not in "\n".join(output)
 
 
 def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypatch, capsys) -> None:

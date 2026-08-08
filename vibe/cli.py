@@ -351,6 +351,47 @@ def _memory_cli_language() -> str:
         return "en"
 
 
+_MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
+    "available": "memory.cli.sourceState.available",
+    "stale": "memory.cli.sourceState.stale",
+    "unavailable": "memory.cli.sourceState.unavailable",
+}
+_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
+    "ok": "memory.cli.providerState.ok",
+}
+_MEMORY_CLI_REASON_I18N_KEYS = {
+    "memory_disabled": "memory.cli.reason.memoryDisabled",
+    "memory_invalid_input": "memory.cli.reason.invalidInput",
+    "memory_access_denied": "memory.cli.reason.accessDenied",
+    "memory_input_too_large": "memory.cli.reason.inputTooLarge",
+    "memory_queue_full": "memory.cli.reason.queueFull",
+    "memory_low_disk_space": "memory.cli.reason.lowDiskSpace",
+    "memory_store_unavailable": "memory.cli.reason.storeUnavailable",
+    "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
+    "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
+    "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
+    "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
+    "memory_restart_failed": "memory.cli.reason.restartFailed",
+    "memory_sidecar_unavailable": "memory.cli.reason.sidecarUnavailable",
+    "memory_provider_timeout": "memory.cli.reason.providerTimeout",
+    "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
+    "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
+    "memory_processing_failed": "memory.cli.reason.processingFailed",
+    "memory_clear_failed": "memory.cli.reason.clearFailed",
+}
+
+
+def _memory_cli_label(
+    value: object,
+    *,
+    keys: dict[str, str],
+    fallback_key: str,
+    language: str,
+) -> str:
+    token = value.strip() if isinstance(value, str) else ""
+    return i18n_t(keys.get(token, fallback_key), language)
+
+
 def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
     payload = {
         "schema_version": 1,
@@ -389,28 +430,50 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
     if operation == "status":
         source = result.get("source")
         source_state = source.get("status") if isinstance(source, dict) else None
+        source_state_label = _memory_cli_label(
+            source_state if source_state is not None else "unavailable",
+            keys=_MEMORY_CLI_SOURCE_STATE_I18N_KEYS,
+            fallback_key="memory.cli.sourceState.unknown",
+            language=language,
+        )
         print(
             i18n_t(
                 "memory.cli.status",
                 language,
-                state=source_state if isinstance(source_state, str) else "unavailable",
+                state=source_state_label,
             )
         )
         health = result.get("health")
         if isinstance(health, dict):
             version = health.get("version")
             provider_state = health.get("status")
+            provider_state_label = _memory_cli_label(
+                provider_state,
+                keys=_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
+                fallback_key="memory.cli.providerState.unknown",
+                language=language,
+            )
             print(
                 i18n_t(
                     "memory.cli.provider",
                     language,
-                    version=version if isinstance(version, str) else "unknown",
-                    state=provider_state if isinstance(provider_state, str) else "unknown",
+                    version=(
+                        version
+                        if isinstance(version, str) and version
+                        else i18n_t("memory.cli.unknownVersion", language)
+                    ),
+                    state=provider_state_label,
                 )
             )
         reason = source.get("reason") if isinstance(source, dict) else None
         if isinstance(reason, str) and reason:
-            print(i18n_t("memory.cli.sourceReason", language, reason=reason))
+            reason_label = _memory_cli_label(
+                reason,
+                keys=_MEMORY_CLI_REASON_I18N_KEYS,
+                fallback_key="memory.cli.reason.unknown",
+                language=language,
+            )
+            print(i18n_t("memory.cli.sourceReason", language, reason=reason_label))
         return
 
     items = result.get("items")
