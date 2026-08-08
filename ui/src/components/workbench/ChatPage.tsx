@@ -777,6 +777,14 @@ export const ChatPage: React.FC = () => {
         if (incoming.length === 0) return;
         const existing = messagesRef.current;
         const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
+        const preservesVisibleAnchor = [...provisionPlacementRef.current.byMessageId.values()].some(
+          (candidates) => candidates.some(
+            (candidate) => candidate.id !== request.id &&
+              candidate.status === 'pending' &&
+              !hiddenVaultRequestIdsRef.current.has(candidate.id),
+          ),
+        );
+        if (disjoint && preservesVisibleAnchor) return;
         // An around-fetch can land wholly outside the retained live tail. Do
         // not union those ranges: the missing rows would be rendered as if
         // they were adjacent. Replace the tail with a historical window,
@@ -1089,6 +1097,9 @@ export const ChatPage: React.FC = () => {
       setMessages(tailMessages);
       setOlderCursor(res.next_before_id ?? null);
       setHistoricalWindow(false);
+      // A deliberate return to the live tail is the retry boundary for requests
+      // deferred while another disjoint anchor window was visible.
+      vaultAnchorFetchesRef.current.clear();
       deepLinkWindowHandledRef.current = false;
       // Returning to the live tail from a historical window: activity ingestion was
       // suppressed while scrolled away, so resync groups from storage — a turn that
