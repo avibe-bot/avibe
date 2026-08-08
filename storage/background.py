@@ -5323,6 +5323,11 @@ class SQLiteBackgroundTaskStore:
         participant_rows_to_publish: list[dict[str, Any]] = []
         transitioned = False
         with self.engine.begin() as conn:
+            # Deferred Runs from one Turn can be released by independent Activity
+            # completions. Own SQLite's writer slot before reading either the Run
+            # or its current fallback owner so election, settlement, and sibling
+            # propagation observe one serialized snapshot.
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()

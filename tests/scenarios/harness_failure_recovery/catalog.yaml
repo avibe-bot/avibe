@@ -4113,6 +4113,15 @@ scenarios:
     # A callback accepted into an active Turn shares the persisted result through
     # exact Turn and output provenance even when another Run is the primary owner.
     test: tests/test_harness_failure_visibility.py::test_hfr_458_steered_callback_uses_its_shared_turn_output_receipt
+  - id: HFR-459
+    name: deferred Turn owner election is writer-serialized
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    # Activity completions reserve SQLite's writer slot before reading deferred
+    # participants or their owner, so one Turn cannot elect competing fallbacks.
+    test: tests/test_harness_failure_visibility.py::test_hfr_459_deferred_owner_election_reserves_writer_before_reads
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

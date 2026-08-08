@@ -305,10 +305,10 @@ def test_a_cancel_landing_under_record_run_output_is_not_overwritten(
     assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
 
 
-def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
+def test_a_cancel_landing_before_deferred_owner_reservation_is_not_overwritten(
     tmp_path: Path,
 ) -> None:
-    """An Activity's deferred failure remains subordinate to a concurrent Stop."""
+    """A Stop that wins the writer reservation remains authoritative."""
 
     sqlite, requests = _store(tmp_path)
     request = requests.enqueue_agent_run(
@@ -324,14 +324,14 @@ def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
         result_text="backend failed",
     )
 
-    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="BEGIN IMMEDIATE")
     event.listen(sqlite.engine, "before_cursor_execute", listener)
     try:
         transitioned = sqlite.settle_deferred_run(request.id)
     finally:
         event.remove(sqlite.engine, "before_cursor_execute", listener)
 
-    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    assert fired, "the cancel never won the writer reservation"
     saved = sqlite.get_run(request.id)
     assert transitioned is True
     assert saved["status"] == "canceled"
@@ -541,6 +541,60 @@ def test_all_deferred_turn_runs_elect_and_propagate_the_first_stable_owner(
     assert sqlite.settle_deferred_run(runs[2].id)
     second_notice = sqlite.owed_failure_notice(runs[2].id)
     assert second_notice["turn_fallback_run_id"] == runs[1].id
+
+
+def test_hfr_459_deferred_owner_election_reserves_writer_before_reads(
+    tmp_path: Path,
+) -> None:
+    """Independent Activity releases serialize before choosing a Turn owner."""
+
+    sqlite, requests = _store(tmp_path)
+    definitions = ["watch-deferred-lock-a", "watch-deferred-lock-b"]
+    for definition_id in definitions:
+        _task(sqlite, definition_id)
+    runs = [requests.enqueue_task_run(definition_id) for definition_id in definitions]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    turn_id = "turn-deferred-owner-lock"
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[run.id for run in runs],
+    )
+
+    statements: list[str] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().upper())
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    try:
+        assert sqlite.settle_deferred_run(runs[0].id)
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+
+    lock_index = statements.index("BEGIN IMMEDIATE")
+    first_run_read = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("SELECT") and "FROM AGENT_RUNS" in statement
+    )
+    assert lock_index < first_run_read
+    first_notice = sqlite.owed_failure_notice(runs[0].id)
+    assert first_notice["turn_fallback_run_id"] == runs[0].id
+    assert sqlite.settle_deferred_run(runs[1].id)
+    second_notice = sqlite.owed_failure_notice(runs[1].id)
+    assert second_notice["turn_fallback_run_id"] == runs[0].id
 
 
 def test_hfr_447_fallback_owner_requires_writable_notice_metadata(

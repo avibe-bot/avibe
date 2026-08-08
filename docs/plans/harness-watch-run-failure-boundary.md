@@ -172,6 +172,8 @@ does not claim that an event was detected.
   and cannot roll back settlement for valid Runs.
 - `HFR-458`: a callback accepted into an active Turn can prove its persisted
   receipt through the shared Turn output even when another Run owns the Message.
+- `HFR-459`: independent Activity completions reserve the SQLite writer before
+  reading deferred participants and electing their shared Turn fallback owner.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,
