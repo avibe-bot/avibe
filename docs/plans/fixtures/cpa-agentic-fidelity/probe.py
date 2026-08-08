@@ -222,7 +222,7 @@ def _tool_output(call: ToolCall) -> str:
 
 
 _TOOL_OUTPUT_TUPLE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=(WEATHER_OK|TIME_OK|TOOL_OUTPUT_MISSING)(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_])tool=([^;\s]+);call_id=([^;\s]+);marker=([A-Za-z0-9_]+)(?![A-Za-z0-9_])"
 )
 
 
