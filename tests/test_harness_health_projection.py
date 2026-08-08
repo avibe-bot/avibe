@@ -373,3 +373,61 @@ def test_once_watch_retry_exit_is_a_terminal_waiter_failure(tmp_path, monkeypatc
     assert projected["lifecycle_state"] == "finished"
     assert projected["health"] == "failing"
     assert projected["consecutive_failures"] == 1
+
+
+def test_forever_watch_retry_health_requires_an_enabled_definition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The same retry code becomes failing when the Watch retires."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    watch_store = ManagedWatchStore()
+    watch = watch_store.add_watch(
+        name="bounded retries",
+        session_key="slack::channel::C123",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=60,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    assert watch_store.mark_cycle_start(watch.id)
+    assert watch_store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="retry later",
+        disable=False,
+    )
+
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        retrying = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+    assert retrying is not None
+    assert retrying["enabled"] is True
+    assert retrying["health"] == "healthy"
+
+    assert watch_store.mark_cycle_start(watch.id)
+    assert watch_store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="retry budget exhausted",
+        disable=True,
+    )
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        retired = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+    assert retired is not None
+    assert retired["enabled"] is False
+    assert retired["lifecycle_state"] == "finished"
+    assert retired["health"] == "failing"

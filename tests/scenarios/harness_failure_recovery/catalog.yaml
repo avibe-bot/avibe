@@ -3888,7 +3888,8 @@ scenarios:
     backend: shared
     # A zero-exit waiter remains healthy even when the Agent Run created from its
     # event fails. The downstream verdict is exposed as processing_health; retry
-    # codes are healthy only while a forever waiter can actually retry.
+    # codes are healthy only while an enabled forever waiter can actually retry;
+    # terminal outcomes stay failing even when their code appears in the retry set.
     test: tests/test_harness_health_projection.py::test_watch_health_separates_waiter_from_event_processing
   - id: HFR-437
     name: one visible Turn failure suppresses every linked Run fallback
@@ -3898,6 +3899,8 @@ scenarios:
     backend: shared
     # The backend failure notification is the Turn's primary user-visible error.
     # All Runs accepted by that Turn retain failed audit state without repeating it.
+    # Local persistence under suppress_delivery is not an acknowledgement, so the
+    # durable fallback remains eligible to reach a user-visible target.
     test: tests/test_harness_failure_visibility.py::test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices
   - id: HFR-438
     name: one linked Run reports a missing Turn failure notification

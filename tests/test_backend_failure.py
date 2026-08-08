@@ -121,6 +121,51 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_suppressed_harness_notification_does_not_ack_local_message_id(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform = "slack"
+        request.context.platform_specific.update(
+            {
+                "task_execution_id": "run-background-1",
+                "task_trigger_kind": "watch",
+                "suppress_delivery": True,
+            }
+        )
+        emissions = []
+
+        async def emit(_context, message_type, _text, **kwargs):
+            emissions.append((message_type, kwargs))
+            if message_type == "notify":
+                return "suppressed:run-background-1"
+            return None
+
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(
+                maybe_emit_auth_recovery_message=AsyncMock(return_value=False)
+            ),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "stream disconnected",
+            request=request,
+        )
+
+        terminal_output = emissions[1][1]["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": None,
+                "delivered": False,
+            },
+        )
+
     async def test_auth_recovery_owns_the_only_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(

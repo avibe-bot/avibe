@@ -365,6 +365,7 @@ async def emit_backend_failure(
             live_delivery is not None
             and live_delivery.delivered_id is None
             and delivered_id is not None
+            and not bool((context.platform_specific or {}).get("suppress_delivery"))
         ):
             live_delivery.delivered_id = str(delivered_id)
             live_delivery.send_returned = True

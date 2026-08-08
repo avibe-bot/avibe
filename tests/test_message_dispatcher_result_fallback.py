@@ -9,6 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.delivery_evidence import DeliveryEvidence
 from core.message_output import (
     MessageOutput,
     contained_teardown_output_for,
@@ -945,14 +946,21 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             user_id="U1", channel_id="C1", platform="slack",
             platform_specific={"suppress_delivery": True},
         )
+        evidence = DeliveryEvidence()
         with mock.patch(
             "core.message_dispatcher.persist_agent_message",
             return_value={"id": "msg-background"},
         ) as persist:
-            message_id = await dispatcher.emit_agent_message(context, "result", "private output")
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private output",
+                delivery=evidence,
+            )
         persist.assert_called_once()
         self.assertEqual(message_id, "msg-background")
         self.assertEqual(controller.im_client.sent_messages, [])
+        self.assertIsNone(evidence.ack_evidence)
 
     async def test_suppressed_result_records_folded_footer(self):
         """A suppressed Web result keeps structured UI metrics while its run

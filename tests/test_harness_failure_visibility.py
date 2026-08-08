@@ -2039,6 +2039,52 @@ def test_the_duplicate_short_circuit_reports_its_receipt(tmp_path: Path) -> None
     assert evidence.ack_evidence == ACK_EVIDENCE_RECEIPT
 
 
+def test_suppressed_duplicate_short_circuit_is_local_history_not_a_receipt() -> None:
+    """A background Session's persisted row proves no outward delivery."""
+
+    from unittest.mock import patch
+
+    import core.message_dispatcher as dispatcher_module
+    from core.delivery_evidence import DeliveryEvidence
+    from core.message_output import MessageOutput
+    from modules.im import MessageContext
+
+    from tests.test_message_dispatcher_scheduled import _StubController
+
+    controller = _StubController()
+    dispatcher = dispatcher_module.ConsolidatedMessageDispatcher(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={
+            "task_trigger_kind": "scheduled",
+            "task_execution_id": "run-background",
+            "suppress_delivery": True,
+        },
+    )
+    evidence = DeliveryEvidence()
+
+    with patch.object(dispatcher_module, "agent_message_exists", return_value=True):
+        returned = asyncio.run(
+            dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "your background task failed",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    idempotency_key="backend-failure:failure:run-background",
+                ),
+                delivery=evidence,
+            )
+        )
+
+    assert returned and "backend-failure:failure:run-background" in returned
+    assert controller.im_client.sent == []
+    assert evidence.ack_evidence is None
+
+
 def test_the_duplicate_short_circuit_receipt_acks_a_workbench_rung() -> None:
     """HFR-075 — the dedup receipt has to satisfy the STRICTEST ack source there is.
 

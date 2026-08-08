@@ -36,6 +36,10 @@ owed failure notice is a fallback only:
 4. if an owned Activity delays Run settlement, the Turn notification evidence
    is committed with the deferred terminal intent and survives until settlement.
 
+Persistence caused only by `suppress_delivery` is local history, not delivery
+evidence. It leaves the Turn notification unacknowledged so the durable fallback
+can route the failure to a user-visible target.
+
 The Turn id is the failure identity. Definition ids remain provenance and do
 not create additional user-visible failures.
 
@@ -63,8 +67,9 @@ does not claim that an event was detected.
 
 - `HFR-436`: Watch health remains healthy after a successful waiter while its
   event processing health becomes failing. Retry exit codes are healthy only
-  for `forever` Watches that can actually retry, and an unreadable processing
-  verdict remains visible as `unknown`.
+  while a `forever` Watch remains enabled and can actually retry; the same retry
+  outcome remains failing when a lifetime, binding, or operator stop makes it
+  terminal. An unreadable processing verdict remains visible as `unknown`.
 - `HFR-437`: one acknowledged Turn failure suppresses every linked Run notice.
 - `HFR-438`: a missing Turn notification produces exactly one fallback across
   all linked Runs. Canceled Runs are excluded from ownership, and Runs accepted

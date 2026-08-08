@@ -153,7 +153,7 @@ def _run_is_cancelled(run: Any) -> bool:
     if not isinstance(run, dict):
         return False
     status = str(run.get("status") or "").strip().lower()
-    return bool(run.get("cancel_requested")) or status in {"canceled", "cancelled"}
+    return status in {"canceled", "cancelled"}
 
 
 async def _stream_chunk(
@@ -2143,6 +2143,9 @@ class ConsolidatedMessageDispatcher:
         target_context = self._get_target_context(context)
         output_metadata = output_semantics.provenance(context) if output is not None else None
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
+        suppresses_outward_delivery = bool(
+            (context.platform_specific or {}).get("suppress_delivery")
+        )
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -2188,7 +2191,7 @@ class ConsolidatedMessageDispatcher:
             # re-send, report nothing, and then either walk on to another delivery
             # rung (a duplicate by another route) or exhaust its backoff and
             # dead-letter a notice the user already has.
-            if delivery is not None:
+            if delivery is not None and not suppresses_outward_delivery:
                 delivery.send_returned = True
                 delivery.delivered_id = native_output_id
                 delivery.persisted_row = {
@@ -2276,7 +2279,7 @@ class ConsolidatedMessageDispatcher:
         # and the persisted row is the inbox/transcript source of truth.
         persists_without_delivery = target_context.platform == "avibe"
 
-        if (context.platform_specific or {}).get("suppress_delivery"):
+        if suppresses_outward_delivery:
             try:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
