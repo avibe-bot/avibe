@@ -2076,7 +2076,7 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "thought"}}},
             {"kind": "event", "sequence": 3, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
             {"kind": "event", "sequence": 4, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
-            {"kind": "event", "sequence": 5, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}},
+            {"kind": "event", "sequence": 5, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
             {"kind": "event", "sequence": 6, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
         invalid = copy.deepcopy(valid)
@@ -2109,7 +2109,7 @@ class ProbeParserTests(unittest.TestCase):
                 "kind": "event",
                 "sequence": 1,
                 "type": "message_delta",
-                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}},
             },
             {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
@@ -2378,6 +2378,106 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", events))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
         self.assertIn("stream_text_snapshot_mismatch", turn.parse_errors)
+
+    def test_anthropic_stream_requires_compatible_stop_sequence(self) -> None:
+        valid = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": "message_start",
+                "event": {
+                    "type": "message_start",
+                    "message": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                    },
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": "message_delta",
+                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}},
+            },
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        malformed = copy.deepcopy(valid)
+        malformed[1]["event"]["delta"]["stop_sequence"] = []
+        self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        self.assertFalse(probe._stream_order_ok("anthropic", malformed))
+        turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, malformed, False, 0, False))
+        self.assertIn("message_delta_stop_sequence_invalid", turn.parse_errors)
+
+    def test_chat_stream_completion_id_must_remain_stable(self) -> None:
+        events = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": None,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}],
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": None,
+                "event": {
+                    "id": "chatcmpl_1",
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                },
+            },
+            {"kind": "done", "sequence": 2, "type": None},
+        ]
+        self.assertTrue(probe._stream_order_ok("chat", events))
+        mismatched = copy.deepcopy(events)
+        mismatched[1]["event"]["id"] = "chatcmpl_2"
+        self.assertFalse(probe._stream_order_ok("chat", mismatched))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, mismatched, True, 0, False))
+        self.assertIn("stream_completion_id_changed", turn.parse_errors)
+
+    def test_first_turn_rejects_user_scope_leakage(self) -> None:
+        turn = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": probe.USER_SCOPE_LEAK}],
+                "stop_reason": "tool_use",
+            }
+        )
+        checks = probe._validate_first(turn, (), stream=False)
+        self.assertFalse(checks["checks"]["user_scope"])
+
+    def test_second_turn_rejects_prior_turn_reasoning_leakage(self) -> None:
+        first = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "PRIVATE_THOUGHT", "signature": "sig"}],
+                "stop_reason": "tool_use",
+            }
+        )
+        second = probe._parse_anthropic_document(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "answer PRIVATE_THOUGHT"}],
+                "stop_reason": "end_turn",
+            }
+        )
+        checks = probe._validate_second(
+            second,
+            (),
+            stream=False,
+            prior_reasoning_parts=first.reasoning_parts,
+        )
+        self.assertFalse(checks["checks"]["reasoning_not_visible"])
 
 
 if __name__ == "__main__":

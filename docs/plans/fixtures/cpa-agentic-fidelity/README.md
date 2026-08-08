@@ -62,7 +62,7 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun (r31) exercised all eight cases after the current-head
+latest gate-complete rerun (r32) exercised all eight cases after the current-head
 parser fixes: all eight completed both turns with HTTP 200 and no fallback was
 used. Messages-to-Responses single failed both parse gates with thinking present;
 its final system marker, system scope, tool outputs, and exact tuple failed. The
@@ -74,8 +74,8 @@ failed both parse gates and its final exact tuple failed; the parallel failed bo
 parse gates and its first stream-order gate, with its final exact tuple failing.
 Chat-to-Messages single passed both parse gates but had reasoning absent; its final
 system marker, system scope, and exact tuple failed while tool outputs passed. The
-parallel case had reasoning absent, failed both parse gates, and failed final
-system marker, system scope, and exact tuple.
+parallel case had reasoning absent, failed both parse gates, and failed its exact
+tuple while the final system marker and scope passed.
 
 ## S4 matrix mapping
 
@@ -90,7 +90,7 @@ success claim.
 | Multi-turn loop | `_run_case` observed `first_turn.tool_calls` plus `_validate_second`: `no_followup_tool_calls`, `tool_outputs`, and `_tool_output_tuples` exact complete call-ID/result tuple set |
 | Streaming text | `_request` strict UTF-8/JSON and `text/event-stream` checks with one-space SSE field handling, `_parse_anthropic_stream`/`_parse_responses_stream` delta, done-event, item, and terminal snapshot comparison, `RESPONSES_MESSAGE_PART_TYPES` plus content-part-to-item snapshot correlation, per-item `stream_text_snapshot_mismatch`, `_parse_chat_stream` `CHAT_STREAM_EVENT_TYPES`/`chat.completion.chunk` and typed content checks, assistant-role preservation, `_stream_order_ok`, and `stream_complete` |
 | Streaming tool fragments | `_parse_anthropic_stream`, `_parse_responses_stream`, `_parse_chat_stream`, and `_stream_order_ok` opening/terminal envelopes, explicit `stream_failure_event`, `ANTHROPIC_STREAM_EVENT_TYPES`/`RESPONSES_STREAM_EVENT_TYPES`/`CHAT_STREAM_EVENT_TYPES` and supported content-block/output-item discriminators, monotonic wire sequence, contiguous block/item/content-part indexes, content-part and block/delta/done snapshot compatibility, item/choice/output-index/ID continuity, `summary_index` continuity, typed `stream_name_invalid`/`stream_arguments_invalid` fragments and done events, duplicate terminal usage rejection, and monotonic lifecycle checks |
-| System prompt | `_system_prompt`, `_token_present`, and `_validate_second`: exact-token `system_marker` and `system_scope` |
+| System prompt | `_system_prompt`, `_token_present`, `_validate_first`: negative `user_scope`, and `_validate_second`: exact-token `system_marker` and `system_scope` |
 | Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, `_parse_anthropic_document` payload/signature validation, `_parse_anthropic_stream` empty `thinking`/`signature` opening snapshots plus typed deltas, `_parse_responses_document` `RESPONSES_REASONING_PART_TYPES`/encrypted reasoning type validation, `_parse_responses_stream` reasoning text and encrypted snapshot comparison, `_reasoning_item_has_signal`, `_chat_reasoning_usage_present` terminal integer-token gate, and `_validate_first`/`_validate_second`: `reasoning_present` plus `reasoning_not_visible` |
 | Context length/truncation | `probe.CONTEXT_LENGTH_NOT_VERIFIED` residual; no low-cost context-limit run was included in M0 |
 

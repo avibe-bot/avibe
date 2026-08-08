@@ -484,7 +484,18 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             elif event_type == "message_delta":
                 if not message_started or open_blocks or message_delta_seen:
                     return False
-                if not isinstance(event.get("delta"), dict):
+                delta = event.get("delta")
+                if not isinstance(delta, dict):
+                    return False
+                stop_reason = delta.get("stop_reason")
+                stop_sequence = delta.get("stop_sequence")
+                if (
+                    not isinstance(stop_reason, str)
+                    or "stop_sequence" not in delta
+                    or (stop_sequence is not None and not isinstance(stop_sequence, str))
+                    or (stop_reason == "stop_sequence" and not stop_sequence)
+                    or (stop_reason != "stop_sequence" and stop_sequence is not None)
+                ):
                     return False
                 message_delta_seen = True
         return message_started and message_stop is not None and message_stop == len(events) - 1
@@ -910,6 +921,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     done_seen = False
     usage_seen = False
     seen_tool_indexes: set[int] = set()
+    completion_id: str | None = None
     for index, item in enumerate(events):
         if item.get("kind") == "done":
             if index != len(events) - 1:
@@ -926,6 +938,14 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         choices = event.get("choices", [])
         usage = event.get("usage")
         if event.get("object") != "chat.completion.chunk":
+            return False
+        event_id = event.get("id")
+        if not isinstance(event_id, str) or not event_id:
+            if completion_id is not None:
+                return False
+        elif completion_id is None:
+            completion_id = event_id
+        elif event_id != completion_id:
             return False
         if event_type is not None and not isinstance(event_type, str):
             return False
@@ -1216,6 +1236,7 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
 def _parse_anthropic_stream(result: TransportResult) -> Turn:
     blocks: dict[int, dict[str, Any]] = {}
     stop_reason: str | None = None
+    stop_sequence: str | None = None
     errors: list[str] = []
     text_delta_count = 0
     envelope: dict[str, Any] = {}
@@ -1322,7 +1343,19 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
             if not isinstance(delta, dict):
                 errors.append("message_delta_invalid")
             else:
-                stop_reason = delta.get("stop_reason")
+                candidate_reason = delta.get("stop_reason")
+                candidate_sequence = delta.get("stop_sequence")
+                if (
+                    not isinstance(candidate_reason, str)
+                    or "stop_sequence" not in delta
+                    or (candidate_sequence is not None and not isinstance(candidate_sequence, str))
+                    or (candidate_reason == "stop_sequence" and not candidate_sequence)
+                    or (candidate_reason != "stop_sequence" and candidate_sequence is not None)
+                ):
+                    errors.append("message_delta_stop_sequence_invalid")
+                else:
+                    stop_reason = candidate_reason
+                    stop_sequence = candidate_sequence
     content: list[dict[str, Any]] = []
     for index in sorted(blocks):
         block = blocks[index]
@@ -1332,7 +1365,13 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
             if error:
                 errors.append(error)
         content.append(block)
-    document = {"type": envelope.get("type"), "role": envelope.get("role"), "content": content, "stop_reason": stop_reason}
+    document = {
+        "type": envelope.get("type"),
+        "role": envelope.get("role"),
+        "content": content,
+        "stop_reason": stop_reason,
+        "stop_sequence": stop_sequence,
+    }
     turn = _parse_anthropic_document(
         document,
         event_count=len(result.events),
@@ -1982,6 +2021,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     argument_fragment_indexes: set[int] = set()
     tool_type_seen: set[int] = set()
     assistant_role_seen = False
+    completion_id: str | None = None
     for item in result.events:
         if item.get("kind") == "done":
             done_type = item.get("type")
@@ -2002,6 +2042,14 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if event.get("object") != "chat.completion.chunk":
             errors.append("stream_object_invalid")
             continue
+        event_id = event.get("id")
+        if not isinstance(event_id, str) or not event_id:
+            if completion_id is not None:
+                errors.append("stream_completion_id_invalid")
+        elif completion_id is None:
+            completion_id = event_id
+        elif event_id != completion_id:
+            errors.append("stream_completion_id_changed")
         if "error" in event:
             errors.append("stream_failure_event")
             continue
@@ -2150,6 +2198,7 @@ def _validate_first(turn: Turn, expected_tools: tuple[str, ...], *, stream: bool
         "tool_names": sorted(names) == sorted(expected_tools),
         "tool_ids_unique": bool(ids) and len(ids) == len(set(ids)) and all(ids),
         "tool_arguments": args_ok,
+        "user_scope": not _token_present(turn.text, USER_SCOPE_LEAK),
         "reasoning_present": turn.reasoning_present,
         "reasoning_not_visible": not any(part in turn.text for part in turn.reasoning_parts if part),
         "stream_complete": (not stream) or (turn.event_count > 0 and turn.terminal),
@@ -2166,6 +2215,7 @@ def _validate_second(
     *,
     stream: bool,
     expected_calls: list[ToolCall] | None = None,
+    prior_reasoning_parts: list[str] | None = None,
 ) -> dict[str, Any]:
     required_markers = [SYSTEM_MARKER, *(TOOL_OUTPUTS[name] for name in expected_tools)]
     call_output_pairs = (
@@ -2179,7 +2229,11 @@ def _validate_second(
         "stop_reason": isinstance(turn.stop_reason, str) and turn.stop_reason in STOP_REASONS[turn.protocol]["final"],
         "no_followup_tool_calls": not turn.tool_calls,
         "reasoning_present": turn.reasoning_present,
-        "reasoning_not_visible": not any(part in turn.text for part in turn.reasoning_parts if part),
+        "reasoning_not_visible": not any(
+            part in turn.text
+            for part in [*(prior_reasoning_parts or []), *turn.reasoning_parts]
+            if part
+        ),
         "system_marker": _token_present(turn.text, SYSTEM_MARKER),
         "system_scope": _token_present(turn.text, SYSTEM_SCOPE_OK) and not _token_present(turn.text, USER_SCOPE_LEAK),
         "tool_outputs": all(_token_present(turn.text, marker) for marker in required_markers[1:]),
@@ -2260,7 +2314,13 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
                 "checks": first["checks"],
             }
         second_turn = _parse_turn(spec.client_protocol, second_result, stream=spec.stream)
-        second = _validate_second(second_turn, spec.expected_tools, stream=spec.stream, expected_calls=first_turn.tool_calls)
+        second = _validate_second(
+            second_turn,
+            spec.expected_tools,
+            stream=spec.stream,
+            expected_calls=first_turn.tool_calls,
+            prior_reasoning_parts=first_turn.reasoning_parts,
+        )
         second["checks"]["http_success"] = 200 <= second_result.status < 300
         second["status"] = second_result.status
     checks = dict(first["checks"])
