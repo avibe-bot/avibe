@@ -881,7 +881,7 @@ class FakeMemoryProvider:
         if self.ingest_failures:
             raise self.ingest_failures.popleft()
         self.captures.append(capture)
-        return AddAck(request_id=None, status="accumulated")
+        return AddAck(request_id=f"fake-add-{len(self.captures)}", status="accumulated")
 
     async def flush(self, session_ref: str, project_id: str) -> FlushResult:
         self.flushes.append(session_ref)

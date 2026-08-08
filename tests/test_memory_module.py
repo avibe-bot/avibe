@@ -747,6 +747,47 @@ async def test_malformed_add_ack_becomes_manual_required_without_replay(
     assert (await module.status()).error == "memory_processing_failed"
 
 
+@pytest.mark.parametrize("request_id", [None, "", "x" * 129])
+async def test_add_ack_without_bounded_receipt_is_manual_required_without_replay(
+    tmp_path: Path,
+    request_id: str | None,
+) -> None:
+    class MissingReceiptProvider(FakeMemoryProvider):
+        async def add(self, capture):
+            self.captures.append(capture)
+            return AddAck(request_id=request_id, status="accumulated")
+
+    provider = MissingReceiptProvider()
+    module, store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request()) == CaptureAccepted()
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert row.state == "manual_required"
+    assert row.payload_text == "remember this"
+    if request_id is None or len(request_id.encode("utf-8")) <= 128:
+        assert row.add_request_id == request_id
+    else:
+        assert row.add_request_id == request_id[:128]
+    assert store.has_manual_required_fence() is True
+
+
+async def test_adapter_classified_timeout_is_manual_required_without_replay(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    provider.ingest_failures.append(MemoryProviderFailure("memory_provider_timeout"))
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert row.state == "manual_required"
+    assert row.attempts == 0
+    assert row.payload_text == "remember this"
+    assert len(provider.captures) == 0
+    assert store.has_manual_required_fence() is True
+
+
 async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_path: Path) -> None:
     provider = FakeMemoryProvider(
         search_items=(MemoryItem(kind="fact", text="bounded fact", date="2026-01-01"),),
@@ -940,14 +981,16 @@ async def test_status_precedence(tmp_path: Path) -> None:
     assert (await clearing.status()).state == "clearing"
 
 
-async def test_latest_flush_success_closes_stale_timeout_but_keeps_dead_history(tmp_path: Path) -> None:
+async def test_latest_flush_success_closes_stale_delivery_failure_but_keeps_dead_history(
+    tmp_path: Path,
+) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="failed", text="failed delivery")) == CaptureAccepted()
     provider.ingest_failures.extend(
         [
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_processing_failed"),
+            MemoryProviderFailure("memory_processing_failed"),
+            MemoryProviderFailure("memory_processing_failed"),
         ]
     )
     current = datetime(2026, 1, 1, tzinfo=UTC)
@@ -1033,7 +1076,7 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request(source="failed")) == CaptureAccepted()
     provider.ingest_failures.extend(
-        [MemoryProviderFailure("memory_provider_timeout")] * 3
+        [MemoryProviderFailure("memory_processing_failed")] * 3
     )
     current = datetime.now(UTC).replace(microsecond=0)
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
@@ -1054,7 +1097,7 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     ).settled
     delivered_status = await module.status()
     assert delivered_status.state == "degraded"
-    assert delivered_status.error == "memory_provider_timeout"
+    assert delivered_status.error == "memory_processing_failed"
 
     assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
     assert store.record_flush_verdict(
@@ -1074,9 +1117,9 @@ async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> 
     assert await module.capture(_request(source="failed", session="private-session", text="private text")) == CaptureAccepted()
     provider.ingest_failures.extend(
         [
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
+            MemoryProviderFailure("memory_processing_failed"),
+            MemoryProviderFailure("memory_processing_failed"),
+            MemoryProviderFailure("memory_processing_failed"),
         ]
     )
     current = datetime.now(UTC).replace(microsecond=0)
@@ -1099,7 +1142,7 @@ async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> 
         MemoryFailureLogEntry(
             kind="delivery_abandoned",
             occurred_at=expected_at,
-            error_code="memory_provider_timeout",
+            error_code="memory_processing_failed",
             request_id=None,
             attempts=3,
         ),

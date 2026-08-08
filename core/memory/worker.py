@@ -261,9 +261,13 @@ class MemoryWorker:
             )
             return False
         except MemoryProviderFailure as failure:
+            error = _provider_error_code(failure, "memory_processing_failed")
+            if error == "memory_provider_timeout":
+                await self._manual_required(row, error)
+                return False
             await self._ambiguous_failure_is_system_outage(
                 row,
-                _provider_error_code(failure, "memory_processing_failed"),
+                error,
                 retryable=failure.retryable,
             )
             return False
@@ -271,7 +275,11 @@ class MemoryWorker:
             await self._ambiguous_failure_is_system_outage(row, "memory_processing_failed")
             return False
 
-        if not isinstance(ack, AddAck) or ack.status not in {"accumulated", "extracted"}:
+        if (
+            not isinstance(ack, AddAck)
+            or ack.status not in {"accumulated", "extracted"}
+            or not _valid_add_receipt_id(ack.request_id)
+        ):
             await self._manual_required(
                 row,
                 "memory_provider_response_invalid",
@@ -506,6 +514,10 @@ def _opens_breaker(result: FlushResult) -> bool:
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return error.error if is_memory_error_code(error.error) else fallback
+
+
+def _valid_add_receipt_id(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= 128
 
 
 def _positive_timeout(value: float) -> float:
