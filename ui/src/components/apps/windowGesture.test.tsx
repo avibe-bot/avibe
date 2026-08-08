@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { WindowBodyGestureShield, shouldShieldWindowBody } from './windowGesture';
+import { WindowBodyGestureShield } from './WindowBodyGestureShield';
+import { shouldShieldWindowBody } from './windowGesture';
 
 describe('shouldShieldWindowBody (§7.1i arm/disarm predicate)', () => {
   it('shields only a visible window while a gesture is active', () => {

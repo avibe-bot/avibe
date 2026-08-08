@@ -12,13 +12,16 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { useToast } from '@/context/ToastContext';
+import { initialSeedState, savedMenuKey, seedStep } from '../asyncLifetime';
 import { modelsApi } from '../modelsApi';
 import { backendVisual } from '../vendorMeta';
 import type { AgentMenu, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
 import { AddCustomModelDialog } from './AddCustomModelDialog';
-import { buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
+import { eligibleSources as filterEligible } from '../eligibility';
+import { buildMenuGroups, type MenuModelRow } from './identifiers';
 import { SupplyDots } from './supplyBits';
+import { useAnnounceEnrollment } from './enrollment';
 
 type EditTarget = { sourceId: string; modelId: string; displayName: string | null } | null;
 
@@ -71,7 +74,8 @@ export const OpenCodeMenuDrawer: React.FC<{
   agent: AgentSupply;
   sources: Source[];
   onClose: () => void;
-  onSaved: () => void;
+  /** Hands the page the Agent row this write echoed — see `agentsWithEcho`. */
+  onSaved: (echoed: AgentSupply) => void;
   /** Re-fetch sources after a custom model is added/edited. */
   onRefresh: () => void;
 }> = ({ open, agent, sources, onClose, onSaved, onRefresh }) => {
@@ -83,11 +87,10 @@ export const OpenCodeMenuDrawer: React.FC<{
   // identifiers byte-match the backend's opencode_model_id — never hand-mirrored.
   const standardVendors = React.useMemo(() => new Set(agent.standard_vendors ?? []), [agent.standard_vendors]);
 
-  // Only OpenCode-eligible sources materialize as providers (isSourceEligible):
-  // API-key sources only — subscriptions (native_cli AND hub-held experimental)
-  // are excluded, matching the backend predicate, so we never offer a row the
-  // live `set_opencode_menu` would reject.
-  const eligibleSources = React.useMemo(() => sources.filter((s) => isSourceEligible(s, 'opencode')), [sources]);
+  // Only sources the SERVER says may serve OpenCode materialize as providers —
+  // `agent.sources.eligibility`, not a UI-side predicate — so we never offer a
+  // row the live `set_opencode_menu` would reject.
+  const eligibleSources = React.useMemo(() => filterEligible(sources, agent), [sources, agent]);
   const groups = React.useMemo(() => buildMenuGroups(eligibleSources, standardVendors), [eligibleSources, standardVendors]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
   // Identifiers a source currently supplies. Persisted `checked` is self-healed
@@ -95,6 +98,9 @@ export const OpenCodeMenuDrawer: React.FC<{
   // force-deleted source) is dropped rather than shown as an invisible checked
   // row or sent to putMenu (which the server rejects as mapping_target_unavailable).
   const availableIds = React.useMemo(() => new Set(allRows.map((r) => r.identifier)), [allRows]);
+  // Ticking a model may also enroll its supplier into OpenCode's source order
+  // (api.md → "Mapping and menu enrollment"). Read off the echo at commit.
+  const announceEnrollment = useAnnounceEnrollment('opencode', sources);
 
   const [view, setView] = React.useState<'featured' | 'full'>(agent.menu?.view ?? 'featured');
   const [checked, setChecked] = React.useState<Set<string>>(() => new Set(agent.menu?.checked ?? []));
@@ -103,8 +109,17 @@ export const OpenCodeMenuDrawer: React.FC<{
   const [customOpen, setCustomOpen] = React.useState(false);
   const [editTarget, setEditTarget] = React.useState<EditTarget>(null);
 
+  // Seed from the stored menu; `seedStep` owns *when*, so a save that lands after
+  // this drawer was closed and reopened re-seats it instead of being written back
+  // over (asyncLifetime.ts). A refresh that changed nothing stays inert, which is
+  // what keeps an edit in flight safe.
+  const seed = React.useRef(initialSeedState);
+  const authoritative = savedMenuKey(agent.menu);
   React.useEffect(() => {
     if (!open) return;
+    const step = seedStep(seed.current, authoritative);
+    seed.current = step.state;
+    if (!step.reseed) return;
     const v = agent.menu?.view ?? 'featured';
     const raw = agent.menu?.checked ?? [];
     // Self-heal the DISPLAY: drop checked ids whose supplier no longer exists
@@ -116,7 +131,7 @@ export const OpenCodeMenuDrawer: React.FC<{
     setChecked(new Set(healed));
     initialRef.current = { view: v, checked: [...raw] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, authoritative]);
 
   const featuredCount = allRows.filter((r) => checked.has(r.identifier)).length;
   const fullCount = allRows.length;
@@ -142,8 +157,9 @@ export const OpenCodeMenuDrawer: React.FC<{
       // `checked` is already self-healed at open and only grows via toggles/adds
       // of available (or just-added) identifiers, so send it as-is — filtering
       // here would strip a just-added custom model before onRefresh lands.
-      await modelsApi.putMenu({ view, checked: [...checked] });
-      onSaved();
+      const echoed = await modelsApi.putMenu({ view, checked: [...checked] });
+      announceEnrollment(agent, echoed);
+      onSaved(echoed);
       onClose();
     } catch {
       showToast(t('settings.models.menus.saveFailed') as string, 'error');
@@ -255,6 +271,7 @@ export const OpenCodeMenuDrawer: React.FC<{
         open={customOpen}
         sources={eligibleSources}
         standardVendors={standardVendors}
+        showOpenCodeIdentifier
         edit={editTarget}
         onClose={() => setCustomOpen(false)}
         onSaved={(identifier) => {

@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 import threading
 from asyncio.subprocess import Process
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 
@@ -46,6 +46,7 @@ OPENCODE_LOG_TAIL_BYTES = 2_000_000
 MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
+_DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 
 
 def _percent_encode_path(path: str) -> str:
@@ -57,6 +58,29 @@ def _percent_encode_path(path: str) -> str:
     misinterpreted by the receiving end.
     """
     return _url_quote(path, safe="/")
+
+
+def native_part_id_for_attempt(attempt_id: str) -> str:
+    """Map one durable attempt into OpenCode's part namespace."""
+
+    value = str(attempt_id or "").strip()
+    match = _DURABLE_ATTEMPT_ID_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("OpenCode prompt attempt identity is not canonical")
+    return f"prt_{match.group(1)}"
+
+
+class OpenCodePromptRejectedError(RuntimeError):
+    """Definitive HTTP rejection from OpenCode's async prompt endpoint."""
+
+    def __init__(self, status: int, response_text: str) -> None:
+        self.status = status
+        self.response_text = response_text
+        super().__init__(f"Failed to start async prompt: {status} {response_text}")
+
+    @property
+    def is_permanent_input_rejection(self) -> bool:
+        return self.status == 400
 
 
 class OpenCodeServerManager:
@@ -105,6 +129,51 @@ class OpenCodeServerManager:
         self._model_hub_overlay_hash: Optional[str] = None
         self._model_hub_overlay_content: Optional[str] = None
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
+        self._runtime_activation_retire: Callable[[bool], bool] | None = None
+        self._runtime_generation_token: tuple[int, float | None] | None = None
+
+    def set_runtime_activation_retire(
+        self,
+        callback: Callable[[bool], bool],
+    ) -> None:
+        self._runtime_activation_retire = callback
+
+    @staticmethod
+    def _runtime_token_from_pid_info(
+        info: Optional[Dict[str, Any]],
+    ) -> tuple[int, float | None] | None:
+        if not isinstance(info, dict):
+            return None
+        pid = info.get("pid")
+        if not isinstance(pid, int):
+            return None
+        started_at = info.get("started_at")
+        return (
+            pid,
+            float(started_at) if isinstance(started_at, (int, float)) else None,
+        )
+
+    def _retire_runtime_generation_for_replacement(self) -> None:
+        retire_activation = self._runtime_activation_retire
+        if callable(retire_activation) and not retire_activation(True):
+            raise RuntimeError(
+                "OpenCode runtime replacement could not retire its activation generation"
+            )
+        self._runtime_generation_token = None
+
+    def _observe_runtime_generation(
+        self,
+        info: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if info is None:
+            info = self._read_pid_file()
+        token = self._runtime_token_from_pid_info(info)
+        if token is None:
+            return
+        previous = self._runtime_generation_token
+        if previous is not None and previous != token:
+            self._retire_runtime_generation_for_replacement()
+        self._runtime_generation_token = token
 
     def _caller_context_path(self) -> str:
         return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
@@ -239,7 +308,13 @@ class OpenCodeServerManager:
                 return
             await self._close_http_session_locked()
 
-    async def _restart_for_auth_refresh_locked(self) -> None:
+    async def _restart_for_auth_refresh_locked(self, *, force: bool = False) -> None:
+        retire_activation = self._runtime_activation_retire
+        if callable(retire_activation) and not retire_activation(force):
+            self._auth_refresh_pending = True
+            raise RuntimeError(
+                "OpenCode runtime restart is blocked by a newly admitted owner"
+            )
         await self._close_http_session_locked()
 
         cleanup_port = self._auth_refresh_pending_port or self.port
@@ -275,6 +350,7 @@ class OpenCodeServerManager:
         self._process = None
         self._process_loop = None
         self._base_url = None
+        self._runtime_generation_token = None
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port = None
         self._apply_pending_runtime_config_locked()
@@ -293,7 +369,7 @@ class OpenCodeServerManager:
                     len(self._active_run_sessions),
                 )
                 return
-            await self._restart_for_auth_refresh_locked()
+            await self._restart_for_auth_refresh_locked(force=force)
 
     async def refresh_global_config(self) -> bool:
         """Ask a live OpenCode server to reload global opencode.json config.
@@ -1108,6 +1184,8 @@ class OpenCodeServerManager:
 
         cmd = self._get_pid_command(pid)
         if self._pid_exists(pid):
+            if self._runtime_activation_retire is not None:
+                self._retire_runtime_generation_for_replacement()
             if cmd and self._is_opencode_serve_cmd(cmd, self.port):
                 await self._terminate_pid(pid, reason="orphaned and unhealthy")
             elif cmd is None and self._pid_owns_listening_port(pid, self.port):
@@ -1176,6 +1254,7 @@ class OpenCodeServerManager:
                     self._apply_resource_governance(pid)
 
                 self._base_url = f"http://{self.host}:{self.port}"
+                self._observe_runtime_generation(self._read_pid_file())
                 return self.base_url
 
             if not self._is_port_available():
@@ -1189,6 +1268,8 @@ class OpenCodeServerManager:
                     "Stop the process using this port or set OPENCODE_PORT to a free port."
                 )
 
+            if self._runtime_generation_token is not None:
+                self._retire_runtime_generation_for_replacement()
             await self._start_server()
             self._caller_context_plugin_refresh_pending = False
             return self.base_url
@@ -1297,6 +1378,7 @@ class OpenCodeServerManager:
         while time.monotonic() - start_time < SERVER_START_TIMEOUT:
             if await self._is_healthy():
                 self._base_url = f"http://{self.host}:{self.port}"
+                self._observe_runtime_generation(self._read_pid_file())
                 logger.info(f"OpenCode server started at {self._base_url}")
                 return
             await asyncio.sleep(0.5)
@@ -1409,7 +1491,7 @@ class OpenCodeServerManager:
                     len(self._active_run_sessions),
                 )
                 return
-            await self._restart_for_auth_refresh_locked()
+            await self._restart_for_auth_refresh_locked(force=force)
 
     @classmethod
     def stop_instance_sync(cls) -> None:
@@ -1497,6 +1579,7 @@ class OpenCodeServerManager:
         session_id: str,
         directory: str,
         text: str,
+        attempt_id: Optional[str] = None,
         agent: Optional[str] = None,
         model: Optional[Dict[str, str]] = None,
         reasoning_effort: Optional[str] = None,
@@ -1509,8 +1592,11 @@ class OpenCodeServerManager:
         async with self._request_scope():
             session = await self._get_http_session()
 
+            text_part: Dict[str, Any] = {"type": "text", "text": text}
+            if attempt_id:
+                text_part["id"] = native_part_id_for_attempt(attempt_id)
             body: Dict[str, Any] = {
-                "parts": [{"type": "text", "text": text}],
+                "parts": [text_part],
             }
             if agent:
                 body["agent"] = agent
@@ -1532,7 +1618,7 @@ class OpenCodeServerManager:
                 # OpenCode returns 204 when accepted.
                 if resp.status not in (200, 204):
                     error_text = await resp.text()
-                    raise RuntimeError(f"Failed to start async prompt: {resp.status} {error_text}")
+                    raise OpenCodePromptRejectedError(resp.status, error_text)
             self._last_prompt_started_at[session_id] = started_at
 
     async def list_messages(self, session_id: str, directory: str) -> List[Dict[str, Any]]:
@@ -1546,6 +1632,26 @@ class OpenCodeServerManager:
                     error_text = await resp.text()
                     raise RuntimeError(f"Failed to list messages: {resp.status} {error_text}")
                 return await resp.json()
+
+    async def get_session_status(
+        self,
+        session_id: str,
+        directory: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the installed OpenCode runtime status for one native session."""
+
+        async with self._request_scope():
+            session = await self._get_http_session()
+            async with session.get(
+                f"{self.base_url}/session/status",
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(f"Failed to get session status: {resp.status} {error_text}")
+                statuses = await resp.json()
+                status = statuses.get(session_id) if isinstance(statuses, dict) else None
+                return status if isinstance(status, dict) else None
 
     async def get_message(self, session_id: str, message_id: str, directory: str) -> Dict[str, Any]:
         async with self._request_scope():

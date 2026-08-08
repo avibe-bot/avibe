@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { ArrowRight, KeyRound, LockKeyhole, PenTool, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -16,6 +17,45 @@ function requestType(request: VaultRequest): RequestType {
   return t === 'sign' || t === 'provision' ? t : 'access';
 }
 
+type OpenProvisionDialog = (request: VaultRequest) => void;
+
+const VaultProvisionDialogContext = createContext<OpenProvisionDialog | null>(null);
+
+export const VaultProvisionDialogProvider: React.FC<{
+  requests: VaultRequest[];
+  onResolved: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}> = ({ requests, onResolved, disabled = false, children }) => {
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+  const openProvisionDialog = useCallback((request: VaultRequest) => {
+    setActiveRequestId(request.id);
+  }, []);
+  const activeRequest = useMemo(
+    () => requests.find((request) => request.id === activeRequestId && requestType(request) === 'provision'),
+    [activeRequestId, requests],
+  );
+
+  return (
+    <VaultProvisionDialogContext.Provider value={disabled ? null : openProvisionDialog}>
+      {children}
+      {activeRequest ? (
+        <VaultSecretDialog
+          open={!disabled}
+          onOpenChange={(open) => {
+            if (!open) setActiveRequestId(null);
+          }}
+          request={activeRequest}
+          onCreated={() => {
+            setActiveRequestId(null);
+            onResolved();
+          }}
+        />
+      ) : null}
+    </VaultProvisionDialogContext.Provider>
+  );
+};
+
 /**
  * One pending vault request rendered as an inline chat card (design: Form A). Provision opens
  * the shared {@link VaultSecretDialog}; access / sign open the shared {@link VaultApprovalDialog}
@@ -25,6 +65,8 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const type = useMemo(() => requestType(request), [request]);
+  const openProvisionDialog = useContext(VaultProvisionDialogContext);
+  const externallyOwnedProvision = type === 'provision' && openProvisionDialog !== null;
   const card = (request.card ?? {}) as {
     kind?: string;
     protection?: string;
@@ -70,13 +112,20 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
             ) : null}
           </div>
         </div>
-        <Button size="sm" className="shrink-0" onClick={() => setOpen(true)}>
+        <Button
+          size="sm"
+          className="shrink-0"
+          onClick={() => {
+            if (externallyOwnedProvision) openProvisionDialog(request);
+            else setOpen(true);
+          }}
+        >
           {meta.action}
           <ArrowRight className="size-3.5" />
         </Button>
       </div>
 
-      {type === 'provision' ? (
+      {type === 'provision' && !externallyOwnedProvision ? (
         <VaultSecretDialog
           open={open}
           onOpenChange={setOpen}
@@ -86,7 +135,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
             onResolved();
           }}
         />
-      ) : (
+      ) : type !== 'provision' ? (
         <VaultApprovalDialog
           request={open ? request : null}
           onResolved={() => {
@@ -95,7 +144,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           }}
           onClose={() => setOpen(false)}
         />
-      )}
+      ) : null}
     </>
   );
 };

@@ -37,11 +37,15 @@ MANAGED_ENV_VALUES = {
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
 }
 
+# Passed through the SDK as a process-local ``--settings`` override. Keeping it
+# out of ``MANAGED_ENV_VALUES`` ensures Avibe never persists this policy into
+# the user's Claude Code settings.
+CLAUDE_MEMORY_DISABLED_SETTINGS = '{"autoMemoryEnabled":false}'
+
 # Keys we recognise inside ``~/.claude/settings.json``'s ``env`` block.
-# ``ANTHROPIC_API_KEY`` is the SDK's documented variable; relay setups
-# (e.g. Cloudflare-fronted gateways like ai-relay) prefer
-# ``ANTHROPIC_AUTH_TOKEN``. We surface both so a hand-edited config
-# doesn't silently invalidate the Settings UI.
+# Claude Code assigns header semantics from the selected variable, independently
+# from ``ANTHROPIC_BASE_URL``. Avibe preserves that native distinction instead
+# of inferring a credential type from the endpoint hostname.
 RELEVANT_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -292,11 +296,13 @@ def apply_claude_auth(
 ) -> Dict[str, Any]:
     """Persist Claude auth into ``settings.json``.
 
-    ``api_key`` mode writes ``env.ANTHROPIC_API_KEY`` and removes
-    ``ANTHROPIC_AUTH_TOKEN`` so header semantics cannot conflict. ``oauth``
-    mode removes all Anthropic credential/base-url overrides from the env
-    block and leaves Claude's OAuth credentials untouched. Both modes upsert
-    Avibe's non-secret Claude Code env defaults.
+    In ``api_key`` mode the caller selects exactly one native Claude Code
+    credential variable: ``ANTHROPIC_API_KEY`` or ``ANTHROPIC_AUTH_TOKEN``.
+    Claude Code owns the resulting request headers; ``ANTHROPIC_BASE_URL``
+    does not affect which variable Avibe persists.
+    ``oauth`` mode removes all Anthropic credential/base-url overrides from the
+    env block and leaves Claude's OAuth credentials untouched. Both modes
+    upsert Avibe's non-secret Claude Code env defaults.
     """
     if auth_mode not in {"oauth", "api_key"}:
         raise ValueError(f"Unsupported claude auth_mode: {auth_mode!r}")
@@ -410,29 +416,32 @@ def read_claude_auth_state(home: Path | None = None) -> Dict[str, Any]:
             if "ANTHROPIC_API_KEY" in env_block
             else ("ANTHROPIC_AUTH_TOKEN" if "ANTHROPIC_AUTH_TOKEN" in env_block else None)
         ),
+        "credential_type": (
+            "api_key"
+            if "ANTHROPIC_API_KEY" in env_block
+            else ("auth_token" if "ANTHROPIC_AUTH_TOKEN" in env_block else None)
+        ),
         "settings_env_base_url": settings_base,
     }
 
 
-def read_claude_api_key_from_settings(home: Path | None = None) -> Optional[str]:
-    """Return ``settings.json``'s ``ANTHROPIC_API_KEY`` if it has one.
+def read_claude_credential_from_settings(
+    home: Path | None = None,
+) -> tuple[str | None, str | None]:
+    """Return Claude Code's selected credential type and value.
 
-    Used as a fallback when the UI sends a base-URL-only update: V2Config
-    may be stale (older installs lacked ``api_key``), but the CLI still
-    picks up whatever is in ``settings.json``. Prefer that over silently
-    blanking the live key.
-
-    Restricted to ``ANTHROPIC_API_KEY`` on purpose. ``ANTHROPIC_AUTH_TOKEN``
-    is the bearer-token relay variant — Claude Code applies it from
-    ``settings.json`` directly, and our ``api_key`` field always injects
-    ``ANTHROPIC_API_KEY`` at launch (see ``session_handler``). Pulling an
-    auth-token value into V2Config.api_key would silently switch the
-    header semantics on the next save and break bearer-token gateways.
-    Bearer-token users should rely on the existing settings.json path or
-    re-enter their key into the form.
+    The credential variable is authoritative. Base URL-only edits must preserve
+    it exactly, because Claude Code treats ``ANTHROPIC_API_KEY`` and
+    ``ANTHROPIC_AUTH_TOKEN`` as distinct inputs.
     """
     env_block = read_claude_settings_env(home)
-    return env_block.get("ANTHROPIC_API_KEY")
+    api_key = env_block.get("ANTHROPIC_API_KEY")
+    if api_key:
+        return "api_key", api_key
+    auth_token = env_block.get("ANTHROPIC_AUTH_TOKEN")
+    if auth_token:
+        return "auth_token", auth_token
+    return None, None
 
 
 def build_claude_subprocess_env(
@@ -454,7 +463,7 @@ def build_claude_subprocess_env(
     OAuth in Settings but their shell exports ``ANTHROPIC_API_KEY``, the
     Claude CLI silently keeps API-key auth and never reaches
     Claude Code's OAuth credential store. Stripping both ``ANTHROPIC_API_KEY``
-    and ``ANTHROPIC_AUTH_TOKEN`` (header-semantics switch) in OAuth mode
+    and ``ANTHROPIC_AUTH_TOKEN`` (both native credential inputs) in OAuth mode
     makes the Settings toggle authoritative.
 
     ``force_oauth=True`` is the escape hatch for callers that ARE the

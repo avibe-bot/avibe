@@ -84,7 +84,7 @@ Avibe 当前有两套命令面：
 
 #### Slack
 
-- 目前原生 Slack slash command 只公开了 `/start` 和 `/stop`。
+- 在 Slack App 中声明后，原生 Slack slash command 会公开 `/start` 和 `/stop`。
 - 其它命令通常以“普通消息 + bot 定向”的方式触发，例如：
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -505,6 +505,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
+| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或提交需要记住的长期内容（用户明确要求，或 Agent 从对话与本机工作中主动提炼） |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
@@ -700,13 +701,19 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
+# Agent 任务，以及失败后升级给 Agent 的命令任务
 vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <argv>...) --on-failure agent [options]
+
+# 纯命令任务：不涉及 Agent，因此也不接受 session 目标
+vibe task add (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <argv>...) [options]
 ```
 
 重要参数：
 
 - `--name`
 - `--session-id`
+- `--send-now`
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
@@ -716,7 +723,20 @@ vibe task add (--session-id <session_id> | --create-session | --create-session-p
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--on-failure {none,agent}`
+- `--timeout <秒>`
+- `--cwd <目录>`
 - `--timezone`
+
+命令任务（`--shell` 或写在 `--` 之后的 argv）执行时不会触发任何 Agent turn，
+除非设置了 `--on-failure agent`，否则不接受 session、scope 或 agent 相关参数。
+`--timeout` 限制每次命令执行的时长（默认 21600 秒，`0` 表示不限制）。
+`--cwd` 指定命令的执行目录；当 `--on-failure agent` 绑定到已存在的 Session 时，
+它只作用于命令，升级 Session 保留自己的工作目录；配合 `--create-session` /
+`--create-session-per-run` 时，它同时决定新建 Session 的目录。不传该参数时，
+绑定了 Session 的命令会跟随那个 Session 的目录（触发时实时读取），其他命令则记录
+你执行 `vibe task add` 时所在的目录。完整规则见 `docs/CLI.md`。
 
 ### `vibe task update`
 
@@ -739,7 +759,15 @@ vibe task update <task_id> [options]
 - `--at`
 - `--message`
 - `--message-file`
+- `--shell`
+- `--timeout <秒>`
+- `--cwd <目录>`
 - `--timezone`
+
+在 message 形态与 command 形态之间切换，或修改 `--on-failure`，都会被
+`task_mode_immutable` 拒绝——请删除任务后重新创建。`--cwd` 可以修改命令任务的执行
+目录，而不影响它升级时使用的 Session；对 message 任务，在目标 Session 已存在时
+仍然会被拒绝。
 
 ### `vibe task list`
 
@@ -749,6 +777,8 @@ vibe task list [--include-finished] [--page N] [--limit N]
 
 默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
 继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
+list 和 show 会返回与 Workbench 相同的 lifecycle 投影。watch 还包含三态的
+`process_alive`；兼容字段 `state` / `last_status` 不定义 lifecycle。
 
 ### `vibe task show`
 
@@ -845,6 +875,13 @@ no-delivery session，更适合 sub-agent 调用。
 Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `session_id` 的
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
+
+和现有 `--session-id` 一起使用时，`--send-now` 会先持久化 Agent Run，
+然后复用 Workbench 的 Session 级打断并发送操作：通过共享 Stop 路径停止活动
+Turn，再把现有 FIFO 队头作为新 Turn 发送。它不提供同 Turn steering，也不重排
+队列；如果打断被拒绝，Run 会继续保持排队。命令响应包含
+`delivery_intent`，Controller 消费请求后，`vibe runs show <run-id>` 会显示持久化的
+`metadata.delivery_outcome`。
 
 `--fork-session <session_id>` 会基于源 Session 的 native backend 上下文创建一个新的
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。

@@ -4,9 +4,11 @@ import { useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { AlertCircle, Loader2, Search } from 'lucide-react';
 
+import { appTabHref, tabModifierLabel, type LaunchModifiers } from '../../../apps/appLaunch';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
+import { Switch } from '../../ui/switch';
 import { AppSearchResultSection } from './AppSearchResults';
 import { SearchResultGroup } from './SearchResultGroup';
 import { useAppSearchResults, useOpenSearchApp } from './useAppSearch';
@@ -39,7 +41,11 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
-  const { results, loading, error } = useMessageSearch(query);
+  // Opt-in only, and reset on every open (see onOpenAutoFocus) — the palette
+  // already resets the query there, and a sticky archived filter would quietly
+  // change what ⌘K returns by default.
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const { results, loading, error } = useMessageSearch(query, { includeArchived });
   const { results: appResults, loading: appsLoading } = useAppSearchResults(query, open);
   const openSearchApp = useOpenSearchApp();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -65,14 +71,26 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   // A changed result set falls back to its first row without a state-sync
   // effect. Arrow navigation only stores an explicit key while it stays valid.
   const selectedTarget = flatTargets.find((target) => target.key === selectedKey) ?? flatTargets[0];
+  // Whether the highlighted row actually HAS a browser-tab surface: the ⌘↵ hint below
+  // must not promise a tab for a message hit, nor for a window-only app such as the
+  // Library, where `openSearchApp` falls back to a workbench window (§7.1m).
+  const selectedTabHref =
+    selectedTarget?.kind === 'app'
+      ? appTabHref({
+          appId: selectedTarget.result.appId,
+          sessionId: selectedTarget.result.kind === 'showpage' ? selectedTarget.result.sessionId : null,
+        })
+      : null;
 
   const handleSelect = (sessionId: string, messageId: string) => {
     navigate(`/chat/${encodeURIComponent(sessionId)}?msg=${encodeURIComponent(messageId)}`);
     onClose();
   };
 
-  const handleAppSelect = (result: (typeof appResults)[number]) => {
-    openSearchApp(result);
+  // `launch` carries the activating event's modifiers, so ⌘/Ctrl+click AND
+  // ⌘/Ctrl+Enter open the app in a browser tab (§7.1m).
+  const handleAppSelect = (result: (typeof appResults)[number], launch?: LaunchModifiers) => {
+    openSearchApp(result, launch);
     onClose();
   };
 
@@ -103,7 +121,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
       // row activates instead of the (possibly different) arrow-selected one.
       if (document.activeElement !== inputRef.current) return;
       e.preventDefault();
-      if (selectedTarget?.kind === 'app') handleAppSelect(selectedTarget.result);
+      if (selectedTarget?.kind === 'app') handleAppSelect(selectedTarget.result, e);
       else if (selectedTarget) handleSelect(selectedTarget.sessionId, selectedTarget.messageId);
     }
   };
@@ -136,6 +154,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             e.preventDefault();
             setQuery('');
             setSelectedKey(null);
+            setIncludeArchived(false);
             inputRef.current?.focus();
           }}
           aria-describedby={undefined}
@@ -213,7 +232,27 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
           <div className="flex shrink-0 items-center gap-4 border-t border-border bg-foreground/[0.02] px-4 py-[11px]">
             <FooterHint keyLabel="↑↓" label={t('workbench.search.kbdNavigate')} />
             <FooterHint keyLabel="↵" label={t('workbench.search.kbdOpen')} />
+            {/* Only while an app WITH a tab surface is highlighted: ⌘↵ opens it as a
+                browser tab (§7.1m), which a message hit has no equivalent of — so the
+                hint appears with the target it applies to instead of always sitting in
+                the footer. */}
+            {selectedTabHref && (
+              <FooterHint
+                keyLabel={`${tabModifierLabel()}↵`}
+                label={t('workbench.search.kbdNewTab')}
+              />
+            )}
             <FooterHint keyLabel={t('workbench.search.kbdEsc')} label={t('workbench.search.kbdClose')} />
+            {/* Archived opt-in — off on every open; archived hits open read-only. */}
+            <label className="flex items-center gap-1.5 text-[11px] text-muted">
+              <Switch
+                checked={includeArchived}
+                onCheckedChange={setIncludeArchived}
+                label={t('workbench.search.includeArchived')}
+                size="sm"
+              />
+              {t('workbench.search.includeArchived')}
+            </label>
             <span className="flex-1" />
             <span className="truncate text-[11px] text-muted">{t('workbench.search.footerNote')}</span>
           </div>

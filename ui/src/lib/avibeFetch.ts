@@ -8,17 +8,32 @@
 //  - refresh-ahead: re-mint at ~half the remaining lifetime, and on focus/online,
 //    so the token is always warm when the user acts (never a mint on the hot path)
 //  - single-flight: concurrent callers share one /api/cloud/token request
-//  - 401 safety net: re-mint once + retry (rare; covers revoke / clock skew)
-//  - fallback: throws CloudUnavailableError when no token can be obtained (local
-//    access / not paired / not signed in) so callers use the local relay instead
+//  - 401 safety net: re-mint once + retry (rare; covers revoke / clock skew);
+//    refresh failure is final because the request body was already submitted
+//  - fallback: before any cloud request, throws CloudUnavailableError when no
+//    token can be obtained so callers may use the local relay instead
 import { apiFetch } from './apiFetch';
 
 export type CloudToken = { token: string; baseUrl: string; expiresAt: number };
 
+export type AvibeFetchAttemptEvent =
+  | { phase: 'started'; attempt: number }
+  | { phase: 'response'; attempt: number; status: number; elapsedMs: number };
+
+export type AvibeFetchRequestInit = RequestInit & {
+  onAttempt?: (event: AvibeFetchAttemptEvent) => void;
+};
+
 export class CloudUnavailableError extends Error {
-  constructor(message = 'cloud_unavailable') {
+  readonly uploadStarted: boolean;
+
+  constructor(
+    message = 'cloud_unavailable',
+    options: { uploadStarted?: boolean } = {},
+  ) {
     super(message);
     this.name = 'CloudUnavailableError';
+    this.uploadStarted = options.uploadStarted ?? false;
   }
 }
 
@@ -27,6 +42,9 @@ export class CloudUnavailableError extends Error {
 const EXPIRY_SKEW_MS = 30_000;
 // Floor for the background refresh delay so a near-expired token doesn't busy-loop.
 const MIN_REFRESH_DELAY_MS = 30_000;
+// Token minting is a local control-plane request. Bound the shared request
+// independently so one hung prewarm cannot poison every later caller.
+export const CLOUD_TOKEN_MINT_TIMEOUT_MS = 4_000;
 
 let current: CloudToken | null = null;
 let inflight: Promise<CloudToken | null> | null = null;
@@ -65,8 +83,20 @@ const bindActivityListeners = (): void => {
 const mint = (): Promise<CloudToken | null> => {
   if (inflight) return inflight;
   inflight = (async () => {
+    const controller = new AbortController();
+    const timeoutError = new DOMException('cloud token mint timed out', 'TimeoutError');
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = globalThis.setTimeout(() => {
+        controller.abort(timeoutError);
+        reject(timeoutError);
+      }, CLOUD_TOKEN_MINT_TIMEOUT_MS);
+    });
     try {
-      const res = await apiFetch('/api/cloud/token');
+      const res = await Promise.race([
+        apiFetch('/api/cloud/token', { signal: controller.signal }),
+        deadline,
+      ]);
       if (!res.ok) {
         current = null;
         return null;
@@ -88,6 +118,7 @@ const mint = (): Promise<CloudToken | null> => {
       bindActivityListeners();
       return current;
     } finally {
+      if (timeout != null) globalThis.clearTimeout(timeout);
       inflight = null;
     }
   })();
@@ -97,6 +128,29 @@ const mint = (): Promise<CloudToken | null> => {
 const ensureToken = (): Promise<CloudToken | null> =>
   isFresh(current) ? Promise.resolve(current) : mint();
 
+const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException('request aborted', 'AbortError'));
+  }
+  return new Promise<Value>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason ?? new DOMException('request aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
+
 // Prewarm at app load (fire-and-forget): get a token before the first real use
 // so recording never waits on a mint.
 export const primeCloudToken = (): void => {
@@ -105,23 +159,62 @@ export const primeCloudToken = (): void => {
 
 // Fetch a path on the avibe.bot cloud surface with the short-lived user token.
 // Throws CloudUnavailableError when no token can be obtained; on a 401 it
-// re-mints once and retries.
-export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
-  let token = await ensureToken();
+// re-mints once and retries without making post-upload fallback look safe.
+export const avibeFetch = async (
+  path: string,
+  init: AvibeFetchRequestInit = {},
+): Promise<Response> => {
+  const { onAttempt, ...requestInit } = init;
+  let token: CloudToken | null;
+  try {
+    token = await waitForSignal(
+      ensureToken(),
+      requestInit.signal ?? undefined,
+    );
+  } catch (error) {
+    if (requestInit.signal?.aborted) throw requestInit.signal.reason ?? error;
+    throw new CloudUnavailableError();
+  }
   if (!token) throw new CloudUnavailableError();
 
-  const send = (active: CloudToken): Promise<Response> => {
-    const headers = new Headers(init.headers ?? {});
+  const notifyAttempt = (event: AvibeFetchAttemptEvent): void => {
+    try {
+      onAttempt?.(event);
+    } catch {
+      // Request instrumentation cannot change the cloud request behavior.
+    }
+  };
+  const send = async (active: CloudToken, attempt: number): Promise<Response> => {
+    const headers = new Headers(requestInit.headers ?? {});
     headers.set('Authorization', `Bearer ${active.token}`);
-    return fetch(`${active.baseUrl}${path}`, { ...init, headers });
+    notifyAttempt({ phase: 'started', attempt });
+    const startedAt = Date.now();
+    const response = await fetch(
+      `${active.baseUrl}${path}`,
+      { ...requestInit, headers },
+    );
+    notifyAttempt({
+      phase: 'response',
+      attempt,
+      status: response.status,
+      elapsedMs: Date.now() - startedAt,
+    });
+    return response;
   };
 
-  const res = await send(token);
+  const res = await send(token, 1);
   if (res.status !== 401) return res;
 
   // Token rejected (revoked / clock skew / server restart) — re-mint once.
   current = null;
-  token = await mint();
-  if (!token) throw new CloudUnavailableError();
-  return send(token);
+  try {
+    token = await waitForSignal(mint(), requestInit.signal ?? undefined);
+  } catch (error) {
+    if (requestInit.signal?.aborted) throw requestInit.signal.reason ?? error;
+    throw new CloudUnavailableError('cloud_refresh_unavailable', { uploadStarted: true });
+  }
+  if (!token) {
+    throw new CloudUnavailableError('cloud_refresh_unavailable', { uploadStarted: true });
+  }
+  return send(token, 2);
 };

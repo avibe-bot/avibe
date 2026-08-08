@@ -2,8 +2,32 @@ import asyncio
 import logging
 import os
 import signal
+from types import SimpleNamespace
 
 from modules.agents import claude_process_reaper
+
+
+def test_claude_process_state_helpers_report_signal_and_stderr_tail():
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-signal.SIGABRT)),
+        _vibe_stderr_lines=["first", "", "fatal Claude error"],
+    )
+
+    assert claude_process_reaper.get_claude_client_returncode(client) == -6
+    assert claude_process_reaper.claude_process_exit_reason(-6) == "SIGABRT (signal 6)"
+    assert claude_process_reaper.claude_process_exit_reason_i18n(-6) == (
+        "error.claudeProcessSignal",
+        {"signal": "SIGABRT", "number": 6},
+    )
+    assert claude_process_reaper.get_claude_client_stderr_tail(client) == "first\nfatal Claude error"
+
+
+def test_claude_process_state_helpers_ignore_running_process():
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+    )
+
+    assert claude_process_reaper.get_claude_client_returncode(client) is None
 
 
 def test_find_claude_resume_processes_matches_exact_resume_id(monkeypatch):
@@ -142,6 +166,119 @@ def test_reap_duplicate_claude_resume_processes_reaps_scoped_orphan_without_keep
     assert reaped == 1
     assert (100, signal.SIGTERM) in signals
     assert all(pid != 300 for pid, _ in signals)
+
+
+def test_reap_duplicate_claude_resume_processes_spares_owned_replacement(monkeypatch):
+    """A live client resuming the same native id must survive keep_pid=None.
+
+    Regression for the idle-eviction race: force cleanup passes keep_pid=None,
+    so without exclude_pids the reaper kills the healthy replacement client
+    (and its helpers) that took over the session during the slow disconnect.
+    """
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            f"400 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "401 400 node helper.js",
+        ]
+    )
+    signals = []
+    alive = {100, 400, 401}
+
+    def fake_kill(pid, sig):
+        if sig == 0:
+            if pid not in alive:
+                raise ProcessLookupError
+            return
+        signals.append((pid, sig))
+        alive.discard(pid)
+
+    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper.os, "kill", fake_kill)
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_duplicate_claude_resume_processes(
+            "sess-1",
+            keep_pid=None,
+            exclude_pids={400},
+            logger=logging.getLogger("test.claude_reaper"),
+        )
+    )
+
+    assert reaped == 1
+    assert (100, signal.SIGTERM) in signals
+    assert all(pid not in (400, 401) for pid, _ in signals)
+
+
+def test_reap_duplicate_claude_resume_processes_skips_when_all_matches_owned(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"400 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = []
+    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_duplicate_claude_resume_processes(
+            "sess-1",
+            keep_pid=None,
+            exclude_pids={400},
+            logger=logging.getLogger("test.claude_reaper"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_duplicate_claude_resume_processes_counts_owned_matches_in_the_guard(monkeypatch):
+    """A departed keep_pid must not hide an orphan behind an owned replacement.
+
+    Receiver-side cleanup keeps a non-null keep_pid, but that process can be
+    gone from the table by the time the scan runs. With an owned replacement
+    and an orphan both resuming the session, filtering the replacement out
+    before the duplicate guard leaves one scoped match and spares the orphan.
+    """
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            f"400 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = []
+    alive = {100, 400}
+
+    def fake_kill(pid, sig):
+        if sig == 0:
+            if pid not in alive:
+                raise ProcessLookupError
+            return
+        signals.append((pid, sig))
+        alive.discard(pid)
+
+    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper.os, "kill", fake_kill)
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_duplicate_claude_resume_processes(
+            "sess-1",
+            keep_pid=999,
+            exclude_pids={400},
+            logger=logging.getLogger("test.claude_reaper"),
+        )
+    )
+
+    assert reaped == 1
+    assert (100, signal.SIGTERM) in signals
+    assert all(pid != 400 for pid, _ in signals)
 
 
 def test_reap_duplicate_claude_resume_processes_ignores_unrelated_unique_match(monkeypatch):

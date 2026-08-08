@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
+import { isStandaloneAppTab } from '../apps/appLaunch';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
+import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
@@ -15,8 +17,9 @@ import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
-import { WindowManagerProvider } from '../context/WindowManagerContext';
-import { DockProvider } from '../context/DockContext';
+import { WindowManagerProvider } from '../context/WindowManagerProvider';
+import { DockProvider } from '../context/DockProvider';
+import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
 import { WindowLayer } from './apps/WindowLayer';
 import { MobileDockDrawer } from './apps/MobileDockDrawer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
@@ -26,6 +29,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { isAdvancedSettingsPath, isMemorySettingsPath } from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -219,6 +223,7 @@ export const AppShell: React.FC = () => {
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
+  const [memoryNavVisible, setMemoryNavVisible] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
@@ -227,6 +232,13 @@ export const AppShell: React.FC = () => {
   // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
   // sheet it closes on any route change — tapping a tile navigates + dismisses.
   const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
+  // Whether this DOCUMENT was opened as a single-app tab (⌘/Ctrl-click on an app icon,
+  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
+  // navigating deeper inside the tab can't suddenly restore the workbench window layout
+  // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  const [standaloneAppTab] = useState(() =>
+    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+  );
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -239,6 +251,17 @@ export const AppShell: React.FC = () => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
+  }, [api]);
+
+  useEffect(() => {
+    const refreshMemoryNav = () => {
+      void api.getMemorySettings()
+        .then((memory) => setMemoryNavVisible(memoryNavShouldBeVisible(memory)))
+        .catch(() => setMemoryNavVisible(false));
+    };
+    refreshMemoryNav();
+    window.addEventListener('avibe:memory-settings-changed', refreshMemoryNav);
+    return () => window.removeEventListener('avibe:memory-settings-changed', refreshMemoryNav);
   }, [api]);
 
   // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
@@ -317,18 +340,17 @@ export const AppShell: React.FC = () => {
       icon: Bot,
       match: (p) => p.startsWith('/admin/settings/backends'),
     },
+    ...(memoryNavVisible
+      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain, match: isMemorySettingsPath }]
+      : []),
     {
-      // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
-      // backends moved out to their own sidebar destinations above, so exclude
-      // their routes from the active match.
+      // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
+      // backends, models, and Memory have their own sidebar destinations, so
+      // exclude those routes from the active match.
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
 
@@ -347,11 +369,7 @@ export const AppShell: React.FC = () => {
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
   // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
@@ -400,8 +418,9 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
-    <WindowManagerProvider>
+    <WindowManagerProvider standalone={standaloneAppTab}>
     <DockProvider>
+    <ShowPageDragProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
@@ -632,6 +651,7 @@ export const AppShell: React.FC = () => {
           the sidebar launcher. */}
       <WindowLayer />
     </div>
+    </ShowPageDragProvider>
     </DockProvider>
     </WindowManagerProvider>
   );

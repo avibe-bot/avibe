@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -7,9 +8,11 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from core.runtime_activation import RuntimeActivationRegistry
 
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
 
@@ -138,6 +141,9 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 CodexAgent = _MODULE.CodexAgent
+CodexConnectionProbeRuntimeMismatchError = (
+    _MODULE.CodexConnectionProbeRuntimeMismatchError
+)
 CodexResumeUnavailableError = _MODULE.CodexResumeUnavailableError
 
 for name, module in _saved_modules.items():
@@ -261,7 +267,336 @@ class CodexAgentNotificationRoutingTests(unittest.TestCase):
         self.assertIsNone(resolved)
 
 
+class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
+    def _agent(self, cwd: str, transport):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {cwd: transport}
+        agent._transport_last_activity = {}
+        agent._connection_probes = {}
+        agent._connection_probe_turns = {}
+        agent._connection_probe_cwds = {}
+        agent.can_reuse_direct_connection_probe = Mock(
+            return_value=getattr(transport, "runtime_fingerprint", "direct") == "direct"
+        )
+        agent._get_or_create_transport = AsyncMock(return_value=transport)
+        return agent
+
+    def test_live_probe_requires_a_cached_direct_transport_and_existing_cwd(self):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {}
+        with tempfile.TemporaryDirectory() as cwd:
+            self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct = SimpleNamespace(runtime_fingerprint="direct")
+            agent._transports[cwd] = direct
+            self.assertTrue(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct.runtime_fingerprint = "hub:openai/gpt-5.4-mini"
+            self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+            direct.runtime_fingerprint = "direct"
+        self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
+
+    async def test_reuses_existing_transport_with_isolated_ephemeral_thread(self):
+        requests = []
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await agent._on_notification(
+                    "item/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turnId": "turn-probe",
+                        "item": {"type": "agentMessage", "text": "hello"},
+                    },
+                )
+                await agent._on_notification(
+                    "turn/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        transport = _Transport()
+        agent = self._agent(cwd, transport)
+        diagnostics = []
+
+        async def acquire_transport(_cwd, *, allow_runtime_replacement):
+            self.assertEqual(agent._connection_probe_cwds, {})
+            self.assertFalse(allow_runtime_replacement)
+            return transport
+
+        agent._get_or_create_transport = AsyncMock(side_effect=acquire_transport)
+
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            result = await agent.probe_connection(
+                cwd,
+                model="gpt-5.4-mini",
+                on_diagnostic=diagnostics.append,
+            )
+
+        self.assertEqual(result, "hello")
+        agent._get_or_create_transport.assert_awaited_once_with(
+            cwd,
+            allow_runtime_replacement=False,
+        )
+        self.assertEqual(requests[0][0], "thread/start")
+        self.assertEqual(
+            requests[0][1],
+            {
+                "cwd": str(Path(runtime_dir.name) / "codex-connection-probe"),
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "ephemeral": True,
+                "developerInstructions": (
+                    "This is a connection probe. Do not use tools. "
+                    "Reply with a short greeting."
+                ),
+            },
+        )
+        self.assertEqual(
+            requests[1],
+            (
+                "turn/start",
+                {
+                    "threadId": "thread-probe",
+                    "input": [{"type": "text", "text": "Hi"}],
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": {
+                        "type": "readOnly",
+                        "networkAccess": False,
+                    },
+                    "effort": "low",
+                    "model": "gpt-5.4-mini",
+                },
+            ),
+        )
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+        self.assertEqual(agent._connection_probe_cwds, {})
+        self.assertEqual(diagnostics, [])
+
+    async def test_transport_exit_settles_probe_without_outer_timeout(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, _params):
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                return None
+
+        agent = self._agent(cwd, _Transport())
+
+        with (
+            patch.object(
+                _MODULE.paths,
+                "get_runtime_dir",
+                return_value=Path(runtime_dir.name),
+            ),
+            self.assertRaisesRegex(
+                ConnectionError,
+                "app-server exited during the connection probe",
+            ),
+        ):
+            await agent.probe_connection(cwd)
+
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_cancellation_interrupts_started_probe_and_clears_ownership(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+        turn_started = asyncio.Event()
+        requests = []
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, params):
+                requests.append((method, params))
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                if method == "turn/start":
+                    turn_started.set()
+                    return {"turn": {"id": "turn-probe"}}
+                if method == "turn/interrupt":
+                    return {}
+                raise AssertionError(method)
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        agent = self._agent(cwd, _Transport())
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            task = asyncio.create_task(agent.probe_connection(cwd))
+            await turn_started.wait()
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertIn(
+            (
+                "turn/interrupt",
+                {"threadId": "thread-probe", "turnId": "turn-probe"},
+            ),
+            requests,
+        )
+        self.assertEqual(agent._connection_probes, {})
+        self.assertEqual(agent._connection_probe_turns, {})
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_retriable_errors_are_preserved_as_diagnostics(self):
+        cwd = "/tmp/user-project"
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+        diagnostics = []
+
+        class _Transport:
+            is_initialized = True
+
+            async def send_request(inner_self, method, _params):
+                if method == "thread/start":
+                    return {"thread": {"id": "thread-probe"}}
+                await agent._on_notification(
+                    "error",
+                    {
+                        "threadId": "thread-probe",
+                        "turnId": "turn-probe",
+                        "willRetry": True,
+                        "error": {"message": "401 Unauthorized"},
+                    },
+                )
+                await agent._on_notification(
+                    "turn/completed",
+                    {
+                        "threadId": "thread-probe",
+                        "turn": {"id": "turn-probe", "status": "completed"},
+                    },
+                )
+                return {"turn": {"id": "turn-probe"}}
+
+            async def wait_closed(inner_self):
+                await asyncio.Event().wait()
+
+        agent = self._agent(cwd, _Transport())
+        with patch.object(
+            _MODULE.paths,
+            "get_runtime_dir",
+            return_value=Path(runtime_dir.name),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "returned no response"):
+                await agent.probe_connection(
+                    cwd,
+                    on_diagnostic=diagnostics.append,
+                )
+
+        self.assertEqual(diagnostics, ["401 Unauthorized"])
+
+    async def test_rejects_initialized_model_hub_transport(self):
+        cwd = "/tmp/user-project"
+        transport = SimpleNamespace(
+            is_initialized=True,
+            runtime_fingerprint="hub:openai/gpt-5.4-mini",
+        )
+        agent = self._agent(cwd, transport)
+
+        with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+            await agent.probe_connection(cwd)
+
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_runtime_fingerprint_race_does_not_replace_model_hub_transport(self):
+        cwd = "/tmp/user-project"
+        transport = SimpleNamespace(is_initialized=True, runtime_fingerprint="direct")
+        agent = self._agent(cwd, transport)
+        agent._get_or_create_transport = AsyncMock(
+            side_effect=CodexConnectionProbeRuntimeMismatchError("runtime changed")
+        )
+
+        with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+            await agent.probe_connection(cwd)
+
+        agent._get_or_create_transport.assert_awaited_once_with(
+            cwd,
+            allow_runtime_replacement=False,
+        )
+        self.assertEqual(agent._connection_probe_cwds, {})
+
+    async def test_unregistered_probe_runtime_preserves_live_activation(self):
+        cwd = "/tmp/user-project"
+        activation = RuntimeActivationRegistry()
+        live_identity = activation.attach("codex", cwd)
+        retire_scope = Mock()
+        transport = SimpleNamespace(stop=AsyncMock())
+        agent = object.__new__(CodexAgent)
+        agent._registered_runtime = False
+        agent._transports = {cwd: transport}
+        agent._transport_last_activity = {cwd: 1.0}
+        agent._transport_locks = {cwd: asyncio.Lock()}
+        agent._transport_cwd_inodes = {cwd: 1}
+        agent._session_last_activity = {}
+        agent._session_locks = {}
+        agent._session_mgr = SimpleNamespace(all_base_sessions=lambda: [])
+        agent._turn_registry = SimpleNamespace()
+        agent.sessions = SimpleNamespace()
+        agent.controller = SimpleNamespace(
+            runtime_activation=activation,
+            model_hub_runtime=SimpleNamespace(retire_process_scope=retire_scope),
+        )
+
+        self.assertIsNone(agent._attach_transport_activation(cwd, transport))
+        await agent.shutdown_runtime()
+
+        transport.stop.assert_awaited_once_with()
+        self.assertIs(activation.current("codex", cwd), live_identity)
+        retire_scope.assert_not_called()
+
+
 class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        ownership = SimpleNamespace(
+            disposition="reclaimable",
+            blocks_reclamation=False,
+        )
+        patcher = patch.object(
+            CodexAgent,
+            "_runtime_ownership_snapshot_for_cwd",
+            new=lambda _agent, _cwd: ownership,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_handle_stop_does_not_hide_turn_before_interrupt_succeeds(self):
         agent = object.__new__(CodexAgent)
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
@@ -313,6 +648,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_auth_state_stops_transports_and_invalidates_threads(self):
         agent = object.__new__(CodexAgent)
         stop_calls = []
+        retire_scope = Mock()
 
         async def stop_a():
             stop_calls.append("a")
@@ -337,7 +673,10 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             release_calls.append((backend, set(base_session_ids)))
 
         agent.controller = SimpleNamespace(
-            session_turns=SimpleNamespace(release_for_backend_refresh=release_for_backend_refresh)
+            session_turns=SimpleNamespace(release_for_backend_refresh=release_for_backend_refresh),
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            ),
         )
 
         await agent.refresh_auth_state()
@@ -347,15 +686,51 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transports, {})
         self.assertEqual(invalidated, ["session-1", "session-2"])
         self.assertEqual(cleared_sessions, ["session-1", "session-2"])
+        self.assertEqual(
+            retire_scope.call_args_list,
+            [
+                call("codex", "/tmp/a"),
+                call("codex", "/tmp/b"),
+            ],
+        )
+
+    async def test_refresh_auth_state_retires_generation_before_transport_stop(self):
+        agent = object.__new__(CodexAgent)
+        activation = RuntimeActivationRegistry()
+        transport = SimpleNamespace()
+        agent._transports = {"/tmp/work": transport}
+        agent._transport_last_activity = {"/tmp/work": 1.0}
+        agent._session_last_activity = {}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        agent._transport_cwd_inodes = {"/tmp/work": 1}
+        agent._session_mgr = SimpleNamespace(all_base_sessions=lambda: [])
+        agent._turn_registry = SimpleNamespace()
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        identity = agent._attach_transport_activation("/tmp/work", transport)
+        late_commit = Mock(return_value="started")
+
+        async def stop_transport():
+            result = activation.commit_if_current(identity, late_commit)
+            self.assertFalse(result.admitted)
+
+        transport.stop = stop_transport
+
+        await agent.refresh_auth_state()
+
+        late_commit.assert_not_called()
+        self.assertNotIn("/tmp/work", agent._transports)
+        self.assertIsNone(activation.current("codex", "/tmp/work"))
 
     async def test_prepare_resume_binding_restarts_unshared_transport(self):
         agent = object.__new__(CodexAgent)
         stop_calls = []
+        retire_scope = Mock()
 
         async def stop_transport():
             stop_calls.append("stop")
 
-        agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
+        transport = SimpleNamespace(stop=stop_transport)
+        agent._transports = {"/tmp/work": transport}
         agent._transport_last_activity = {"/tmp/work": 1.0}
         invalidated = []
         cleared_sessions = []
@@ -364,6 +739,11 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
         )
         agent._turn_registry = SimpleNamespace(clear_session=lambda base_session_id: cleared_sessions.append(base_session_id))
+        agent.controller = SimpleNamespace(
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            )
+        )
 
         await agent.prepare_resume_binding(
             base_session_id="session-1",
@@ -376,6 +756,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transport_last_activity, {})
         self.assertEqual(invalidated, ["session-1"])
         self.assertEqual(cleared_sessions, ["session-1"])
+        retire_scope.assert_called_once_with("codex", "/tmp/work")
 
     async def test_prepare_resume_binding_skips_shared_transport(self):
         agent = object.__new__(CodexAgent)
@@ -403,16 +784,144 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalidated, [])
         self.assertEqual(cleared_sessions, [])
 
+    async def test_prepare_resume_binding_retains_generation_when_stop_fails(self):
+        agent = object.__new__(CodexAgent)
+        activation = RuntimeActivationRegistry()
+        transport = SimpleNamespace()
+        agent._transports = {"/tmp/work": transport}
+        agent._transport_last_activity = {"/tmp/work": 1.0}
+        agent._transport_cwd_inodes = {"/tmp/work": 1}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        invalidated = []
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
+            invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
+        )
+        agent._turn_registry = SimpleNamespace(clear_session=Mock())
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        identity = agent._attach_transport_activation("/tmp/work", transport)
+        late_commit = Mock(return_value="started")
+
+        async def stop_transport():
+            self.assertFalse(
+                activation.commit_if_current(identity, late_commit).admitted
+            )
+            raise RuntimeError("stop failed")
+
+        transport.stop = stop_transport
+
+        await agent.prepare_resume_binding(
+            base_session_id="session-1",
+            session_key="scope-1",
+            working_path="/tmp/work",
+        )
+
+        late_commit.assert_not_called()
+        self.assertIs(agent._transports["/tmp/work"], transport)
+        self.assertEqual(invalidated, [])
+        self.assertIs(activation.current("codex", "/tmp/work"), identity)
+        self.assertTrue(activation.commit_if_current(identity, late_commit).admitted)
+        late_commit.assert_called_once_with()
+
+    async def test_shutdown_runtime_retires_generation_before_transport_stop(self):
+        agent = object.__new__(CodexAgent)
+        activation = RuntimeActivationRegistry()
+        transport = SimpleNamespace()
+        agent._transports = {"/tmp/work": transport}
+        agent._transport_last_activity = {"/tmp/work": 1.0}
+        agent._session_last_activity = {}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        agent._transport_cwd_inodes = {"/tmp/work": 1}
+        agent._session_locks = {}
+        agent._session_mgr = SimpleNamespace(all_base_sessions=lambda: [])
+        agent._turn_registry = SimpleNamespace()
+        agent.sessions = SimpleNamespace()
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        identity = agent._attach_transport_activation("/tmp/work", transport)
+        late_commit = Mock(return_value="started")
+
+        async def stop_transport():
+            self.assertFalse(
+                activation.commit_if_current(identity, late_commit).admitted
+            )
+
+        transport.stop = stop_transport
+
+        await agent.shutdown_runtime()
+
+        late_commit.assert_not_called()
+        self.assertNotIn("/tmp/work", agent._transports)
+        self.assertIsNone(activation.current("codex", "/tmp/work"))
+
+    def test_request_activation_resolves_one_live_session_key_transport(self):
+        agent = object.__new__(CodexAgent)
+        activation = RuntimeActivationRegistry()
+        live = SimpleNamespace()
+        agent._transports = {"/tmp/live": live}
+        agent._session_mgr = SimpleNamespace(
+            get_sessions_by_session_key=lambda session_key: ["base-dead", "base-live"],
+            get_cwd=lambda base_session_id: {
+                "base-dead": "/tmp/dead",
+                "base-live": "/tmp/live",
+            }[base_session_id],
+        )
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        identity = agent._attach_transport_activation("/tmp/live", live)
+
+        resolved = agent.runtime_activation_identity_for_request(
+            SimpleNamespace(working_path=None, metadata={}, session_key="route:base")
+        )
+
+        self.assertEqual(resolved, identity)
+
+    def test_request_activation_fails_closed_for_multiple_live_session_key_transports(self):
+        agent = object.__new__(CodexAgent)
+        activation = RuntimeActivationRegistry()
+        first = SimpleNamespace()
+        second = SimpleNamespace()
+        agent._transports = {"/tmp/a": first, "/tmp/b": second}
+        agent._session_mgr = SimpleNamespace(
+            get_sessions_by_session_key=lambda session_key: ["base-a", "base-b"],
+            get_cwd=lambda base_session_id: {
+                "base-a": "/tmp/a",
+                "base-b": "/tmp/b",
+            }[base_session_id],
+        )
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        agent._attach_transport_activation("/tmp/a", first)
+        agent._attach_transport_activation("/tmp/b", second)
+
+        with self.assertRaisesRegex(ValueError, "multiple live Codex runtime"):
+            agent.runtime_activation_identity_for_request(
+                SimpleNamespace(working_path=None, metadata={}, session_key="route:base")
+            )
+
+    def test_request_activation_returns_none_when_session_key_has_no_live_transport(self):
+        agent = object.__new__(CodexAgent)
+        agent._transports = {}
+        agent._session_mgr = SimpleNamespace(
+            get_sessions_by_session_key=lambda session_key: ["base-dead"],
+            get_cwd=lambda base_session_id: "/tmp/dead",
+        )
+
+        resolved = agent.runtime_activation_identity_for_request(
+            SimpleNamespace(working_path=None, metadata={}, session_key="route:base")
+        )
+
+        self.assertIsNone(resolved)
+
     async def test_evict_idle_transports_stops_idle_codex_runtime(self):
         agent = object.__new__(CodexAgent)
         stop_calls = []
         invalidated_sessions = []
         cleared_turns = []
+        retire_scope = Mock()
 
         async def stop_transport():
             stop_calls.append("stop")
 
-        agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
+        transport = SimpleNamespace(stop=stop_transport)
+        agent._transports = {"/tmp/work": transport}
         agent._transport_last_activity = {"/tmp/work": 0.0}
         agent._transport_locks = {"/tmp/work": asyncio.Lock()}
         agent._session_mgr = SimpleNamespace(
@@ -425,6 +934,14 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        activation = RuntimeActivationRegistry()
+        agent.controller = SimpleNamespace(
+            runtime_activation=activation,
+            model_hub_runtime=SimpleNamespace(
+                retire_process_scope=retire_scope,
+            )
+        )
+        identity = agent._attach_transport_activation("/tmp/work", transport)
 
         with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
             evicted = await agent.evict_idle_transports(600)
@@ -436,7 +953,13 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions.clear_agent_session_mapping.assert_not_called()
         self.assertEqual(agent._transports, {})
         self.assertIn("/tmp/work", agent._transport_locks)
+        self.assertIsNone(activation.current("codex", "/tmp/work"))
+        self.assertEqual(
+            activation.current("codex", "/tmp/work", include_retired=True),
+            identity,
+        )
         self.assertEqual(agent._transport_last_activity, {})
+        retire_scope.assert_called_once_with("codex", "/tmp/work")
 
     async def test_evict_idle_transports_keeps_active_codex_runtime(self):
         agent = object.__new__(CodexAgent)
@@ -493,7 +1016,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/work", agent._transports)
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
-    async def test_evict_idle_transports_preserves_state_when_stop_fails(self):
+    async def test_evict_idle_transports_retains_generation_when_stop_fails(self):
         agent = object.__new__(CodexAgent)
         invalidated_sessions = []
         cleared_turns = []
@@ -577,6 +1100,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
         agent._transport_last_activity = {"/tmp/work": last_activity}
+        agent._session_last_activity = {"session-1": last_activity}
         agent._transport_locks = {"/tmp/work": asyncio.Lock()}
         invalidated = []
         cleared_turns = []
@@ -585,12 +1109,18 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
         )
         request = SimpleNamespace(context="ctx-1", base_session_id="session-1")
+        active_turns = {"session-1": active_turn}
+
+        def clear_session(base_session_id):
+            cleared_turns.append(base_session_id)
+            active_turns[base_session_id] = None
+
         agent._turn_registry = SimpleNamespace(
-            get_active_turn=lambda base_session_id: active_turn,
+            get_active_turn=lambda base_session_id: active_turns.get(base_session_id),
             has_pending_turn_start=lambda base_session_id: False,
             get_request_for_turn=lambda turn_id: request if turn_id == active_turn else None,
             get_latest_request=lambda base_session_id: request,
-            clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
+            clear_session=clear_session,
         )
         release_calls = []
         agent._event_handler = SimpleNamespace(
@@ -602,12 +1132,14 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
         return agent, stop_calls, invalidated, cleared_turns
 
-    async def test_evict_idle_transports_force_evicts_stuck_active_transport(self):
+    async def test_hfr_144_stuck_active_settles_only_exact_codex_owner(self):
+        """HFR-144: the exact owner settles through the terminal chokepoint."""
         # active turn that has been idle WAY past the stuck-active cap
         # (max(600*3, 1800) = 1800s) must be force-evicted — the leak fix.
         agent, stop_calls, invalidated, cleared_turns = self._make_evict_agent(
             active_turn="turn-1", last_activity=0.0
         )
+        agent.handle_message = AsyncMock()
 
         with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
             evicted = await agent.evict_idle_transports(600)
@@ -623,6 +1155,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent.controller.emit_agent_message.assert_awaited_once_with(
             "ctx-1", "result", "", is_error=True, level="silent", output=ANY
         )
+        agent.handle_message.assert_not_awaited()
         self.assertEqual(agent._event_handler.release_calls, [])
 
     async def test_evict_idle_transports_force_evict_release_falls_back_to_latest_request(self):
@@ -690,28 +1223,37 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/work", agent._transports)
         self.assertEqual(cleared_turns, [])
 
-    async def test_evict_idle_transports_force_evict_skips_when_activity_refreshed(self):
-        # Race: pass 1 sees a stuck-active candidate (idle past the 1800s cap),
-        # but a fresh notification updates last_activity before the locked
-        # recheck. The recheck recomputes idle from current state and bails.
+    async def test_hfr_143_observable_session_progress_wins_locked_recheck(self):
+        """HFR-143: attributable progress keeps a productive turn alive."""
         agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
             active_turn="turn-1", last_activity=0.0
         )
         lock = asyncio.Lock()
         await lock.acquire()
         agent._transport_locks = {"/tmp/work": lock}
+        request = SimpleNamespace(
+            base_session_id="session-1",
+            working_path="/tmp/work",
+        )
+        agent._find_request_for_notification = Mock(return_value=request)
+        agent._event_handler.handle_notification = AsyncMock()
 
         with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
             eviction_task = asyncio.create_task(agent.evict_idle_transports(600))
             await asyncio.sleep(0)
-            # fresh activity: idle recomputed as 2000-1900=100s, well under cap
-            agent._transport_last_activity["/tmp/work"] = 1900.0
+            # Fresh progress belongs to this exact Session, not merely its cwd.
+            with patch.object(_MODULE.time, "monotonic", return_value=1900.0):
+                await agent._on_notification(
+                    "item/agentMessage/delta",
+                    {"threadId": "thread-1", "turnId": "turn-1"},
+                )
             lock.release()
             evicted = await eviction_task
 
         self.assertEqual(evicted, 0)
         self.assertEqual(stop_calls, [])
         self.assertIn("/tmp/work", agent._transports)
+        agent.controller.emit_agent_message.assert_not_awaited()
 
     async def test_evict_idle_transports_reclassifies_when_turn_clears_between_passes(self):
         # Race: pass 1 sees a stuck-active candidate, but the turn completes
@@ -755,6 +1297,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         lock = asyncio.Lock()
         agent._transports = {"/tmp/work": transport}
         agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._session_last_activity = {"session-1": 0.0}
         agent._transport_locks = {"/tmp/work": lock}
         agent._session_mgr = SimpleNamespace(
             sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
@@ -767,6 +1310,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        agent._settle_stuck_active_request = AsyncMock()
 
         with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
             evicted = await agent.evict_idle_transports(600)
@@ -775,7 +1319,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(agent._transports["/tmp/work"], transport)
         self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
         self.assertEqual(invalidated, [])
-        self.assertEqual(cleared_turns, [])
+        self.assertEqual(cleared_turns, ["session-1"])
 
     async def test_get_or_create_transport_fast_path_waits_for_transport_lock(self):
         agent = object.__new__(CodexAgent)
@@ -1036,8 +1580,15 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_drop_transport_after_failure_keeps_other_sessions_when_transport_was_replaced(self):
         agent = object.__new__(CodexAgent)
         request = SimpleNamespace(base_session_id="session-1")
-        old_transport = SimpleNamespace(stop=AsyncMock())
+        activation = RuntimeActivationRegistry()
+        old_identity = activation.attach("codex", "/tmp/work")
+        old_transport = SimpleNamespace(
+            stop=AsyncMock(),
+            _vibe_runtime_activation_identity=old_identity,
+        )
+        fresh_identity = activation.attach("codex", "/tmp/work")
         fresh_transport = SimpleNamespace()
+        fresh_transport._vibe_runtime_activation_identity = fresh_identity
         invalidated = []
         cleared = []
         agent._transports = {"/tmp/work": fresh_transport}
@@ -1050,6 +1601,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent._turn_registry = SimpleNamespace(
             clear_session=Mock(side_effect=lambda base_session_id: cleared.append(base_session_id))
         )
+        agent.controller = SimpleNamespace(runtime_activation=activation)
 
         await agent._drop_transport_after_failure("/tmp/work", old_transport, request)
 
@@ -1058,6 +1610,36 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transport_last_activity, {"/tmp/work": 1.0})
         self.assertEqual(invalidated, ["session-1"])
         self.assertEqual(cleared, ["session-1"])
+        self.assertEqual(activation.current("codex", "/tmp/work"), fresh_identity)
+
+    async def test_drop_transport_after_failure_retires_current_generation_before_stop(self):
+        agent = object.__new__(CodexAgent)
+        request = SimpleNamespace(base_session_id="session-1")
+        activation = RuntimeActivationRegistry()
+        observed_current = []
+        transport = SimpleNamespace()
+
+        async def stop_transport():
+            observed_current.append(activation.is_current(identity))
+
+        transport.stop = stop_transport
+        agent._transports = {"/tmp/work": transport}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        agent._transport_last_activity = {"/tmp/work": 1.0}
+        agent._transport_cwd_inodes = {"/tmp/work": 1}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=Mock(return_value=["session-1"]),
+            invalidate_thread=Mock(),
+        )
+        agent._turn_registry = SimpleNamespace(clear_session=Mock())
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        identity = agent._attach_transport_activation("/tmp/work", transport)
+
+        await agent._drop_transport_after_failure("/tmp/work", transport, request)
+
+        self.assertEqual(observed_current, [False])
+        self.assertNotIn("/tmp/work", agent._transports)
+        self.assertIsNone(activation.current("codex", "/tmp/work"))
 
     async def test_start_or_resume_thread_reraises_recoverable_transport_error(self):
         agent = object.__new__(CodexAgent)
@@ -1397,10 +1979,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Current session id: `sesk8m4q2p7x`", developer_instructions)
         self.assertNotIn("Channel-level session key:", developer_instructions)
 
-    async def test_resume_thread_does_not_force_model_provider_when_thread_matches_config(self):
+    async def test_resume_thread_rebinds_managed_provider_when_thread_id_matches_config(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=True))
-        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.codex_config = SimpleNamespace(
+            default_model=None,
+            auth_mode="api_key",
+            base_url="https://relay.example/v1",
+        )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent.sessions = SimpleNamespace(
             get_agent_session_id=Mock(return_value="thread-existing"),
@@ -1439,7 +2025,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.send_request.await_args_list[1].args[0], "thread/read")
         method, params = transport.send_request.await_args_list[2].args
         self.assertEqual(method, "thread/resume")
-        self.assertNotIn("modelProvider", params)
+        self.assertEqual(params["modelProvider"], "openai-managed")
 
     async def test_resume_thread_overrides_stale_session_model_provider(self):
         agent = object.__new__(CodexAgent)
@@ -2542,6 +3128,34 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("If you generate an image with Codex", params["developerInstructions"])
         self.assertNotIn("## Quick-reply buttons", params["developerInstructions"])
 
+    def test_thread_developer_instructions_follow_live_memory_enabled_state(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(
+                platform="avibe",
+                reply_enhancements=True,
+                memory=SimpleNamespace(enabled=False),
+            )
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={"agent_session_id": "sesk8m4q2p7x", "memory_cli_admitted": True},
+                user_id="U1",
+                channel_id="C1",
+            ),
+            subagent_name=None,
+        )
+
+        disabled_instructions = agent._build_thread_developer_instructions(request)
+        agent.controller.config.memory.enabled = True
+        enabled_instructions = agent._build_thread_developer_instructions(request)
+
+        self.assertNotIn("## Personal Memory", disabled_instructions)
+        self.assertIn("## Personal Memory", enabled_instructions)
+        self.assertIn('vibe memory search "<query>" --json', enabled_instructions)
+
     def test_build_input_does_not_add_codex_generated_image_prompt_to_each_turn(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(reply_enhancements=True))
@@ -2764,6 +3378,12 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
 
     async def test_start_turn_uses_sandbox_policy_object(self):
+        from core.native_dispatch_phase import (
+            DISPATCH_PHASE_PREWRITE,
+            backend_dispatch_attempted,
+            set_dispatch_phase,
+        )
+
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(get_codex_overrides=Mock(return_value=(None, None, None)))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -2781,8 +3401,15 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             subagent_name=None,
             subagent_model=None,
             subagent_reasoning_effort=None,
+            context=SimpleNamespace(platform_specific={}),
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"turn": {"id": "turn-1"}}))
+        set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
+
+        async def _send_at_native_boundary(*_args, **_kwargs):
+            self.assertIs(backend_dispatch_attempted(request.context), True)
+            return {"turn": {"id": "turn-1"}}
+
+        transport = SimpleNamespace(send_request=AsyncMock(side_effect=_send_at_native_boundary))
 
         thread_id = await agent._start_turn(transport, request, "thread-1")
 
@@ -2797,7 +3424,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 "sandboxPolicy": {"type": "dangerFullAccess"},
             },
         )
-        agent.controller.get_codex_overrides.assert_not_called()
+        agent.controller.get_codex_overrides.assert_called_once_with(request.context)
 
     async def test_start_turn_writes_current_caller_env_script_for_reused_threads(self):
         agent = object.__new__(CodexAgent)
@@ -3049,6 +3676,9 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
             transport = Transport(binary="codex", cwd="/tmp/work")
             await transport.start()
             await transport.stop()
+            initialize_request = json.loads(writes[0])
+            self.assertEqual(initialize_request["method"], "initialize")
+            self.assertEqual(initialize_request["params"]["clientInfo"]["name"], "avibe")
             transport = Transport(
                 binary="codex",
                 cwd="/tmp/work",
@@ -3060,13 +3690,21 @@ class CodexTransportCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             created_cmds,
             [
-                ["codex", "--dangerously-bypass-approvals-and-sandbox", "app-server"],
+                [
+                    "codex",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "app-server",
+                    "-c",
+                    "features.memories=false",
+                ],
                 [
                     "codex",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "app-server",
                     "-c",
                     'model_provider="avibe_model_hub"',
+                    "-c",
+                    "features.memories=false",
                 ],
             ],
         )
@@ -3087,14 +3725,16 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
         agent.controller = SimpleNamespace()
+        agent._runtime_ownership_snapshot_for_cwd = Mock(
+            return_value=SimpleNamespace(blocks_transport_replacement=False)
+        )
         return agent
 
-    async def test_server_request_refreshes_transport_activity(self):
-        # An auto-approved server request must refresh the bound cwd's activity
-        # so the stuck-active idle backstop doesn't force-evict a live turn that
-        # recently asked for approval.
+    async def test_hfr_142_server_request_does_not_refresh_progress_activity(self):
+        """HFR-142: protocol approval frames are not real Session progress."""
         agent = self._agent()
         agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._session_last_activity = {}
 
         with patch.object(_MODULE.time, "monotonic", return_value=1234.0):
             result = await agent._on_server_request(
@@ -3105,11 +3745,29 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, {"approved": True})
-        self.assertEqual(agent._transport_last_activity["/tmp/work"], 1234.0)
+        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
+        self.assertEqual(agent._session_last_activity, {})
 
-    async def test_get_or_create_transport_binds_cwd_into_server_request_cb(self):
-        # The server-request callback registered on the transport must carry the
-        # cwd, so invoking it (as the transport would) refreshes that cwd.
+    def test_turn_start_refreshes_the_cwd_transport_clock(self):
+        agent = self._agent()
+        agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._session_last_activity = {"session-1": 0.0}
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            base_session_id="session-1",
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1234.0):
+            agent.record_runtime_turn_start(
+                runtime_key="session:/tmp/work",
+                request=request,
+            )
+
+        self.assertEqual(agent._transport_last_activity, {"/tmp/work": 1234.0})
+        self.assertEqual(agent._session_last_activity, {"session-1": 1234.0})
+
+    async def test_hfr_142_server_request_callback_does_not_create_progress(self):
+        """HFR-142: the cwd-bound callback preserves the prior progress clock."""
         import tempfile
 
         agent = self._agent()
@@ -3126,11 +3784,12 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
                 await agent._get_or_create_transport(cwd)
 
             self.assertIn("cb", captured)
+            before = agent._transport_last_activity[cwd]
             with patch.object(_MODULE.time, "monotonic", return_value=999.0):
                 result = await captured["cb"](1, "item/fileChange/requestApproval", {"itemId": "x"})
 
             self.assertEqual(result, {"approved": True})
-            self.assertEqual(agent._transport_last_activity[cwd], 999.0)
+            self.assertEqual(agent._transport_last_activity[cwd], before)
 
     async def test_get_or_create_transport_moves_app_server_into_agent_cgroup(self):
         import tempfile
@@ -3189,6 +3848,73 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             # The new spawn re-records the CURRENT inode.
             self.assertEqual(agent._transport_cwd_inodes[cwd], os.stat(cwd).st_ino)
 
+    async def test_stale_cwd_preserves_transport_with_durable_native_owner(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            stale = SimpleNamespace(is_initialized=True, stop=AsyncMock())
+            agent._transports[cwd] = stale
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino + 1
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(blocks_transport_replacement=True)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                await agent._get_or_create_transport(cwd)
+
+            stale.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], stale)
+
+    async def test_runtime_change_preserves_transport_with_pid_run_owner(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            existing = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = existing
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(blocks_transport_replacement=True)
+            )
+            launch = SimpleNamespace(fingerprint="hub:replacement")
+
+            with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                await agent._get_or_create_transport(cwd, launch)
+
+            existing.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], existing)
+
+    async def test_stale_transport_stop_failure_retains_exact_generation(self):
+        import tempfile
+
+        agent = self._agent()
+        activation = RuntimeActivationRegistry()
+        agent.controller.runtime_activation = activation
+        with tempfile.TemporaryDirectory() as cwd:
+            observed_current = []
+            stale = SimpleNamespace(is_initialized=True)
+            agent._transports[cwd] = stale
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino + 1
+            identity = agent._attach_transport_activation(cwd, stale)
+
+            async def stop_stale():
+                observed_current.append(activation.is_current(identity))
+                raise RuntimeError("stop failed")
+
+            stale.stop = stop_stale
+
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                await agent._get_or_create_transport(cwd)
+
+            self.assertEqual(observed_current, [False])
+            self.assertIs(agent._transports[cwd], stale)
+            self.assertIs(activation.current("codex", cwd), identity)
+
     async def test_cached_transport_reused_while_cwd_unchanged(self):
         import tempfile
 
@@ -3204,6 +3930,28 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result, cached)
             cached.stop.assert_not_awaited()
             ctor.assert_not_called()
+
+    async def test_probe_validation_does_not_replace_incompatible_runtime(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            cached = SimpleNamespace(
+                is_initialized=True,
+                runtime_fingerprint="hub:openai/gpt-5.4-mini",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = cached
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+
+            with self.assertRaises(CodexConnectionProbeRuntimeMismatchError):
+                await agent._get_or_create_transport(
+                    cwd,
+                    allow_runtime_replacement=False,
+                )
+
+            cached.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], cached)
 
     async def test_untracked_legacy_entry_reuses_without_inode(self):
         import tempfile

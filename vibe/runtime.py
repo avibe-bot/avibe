@@ -859,12 +859,45 @@ def _spawn_runtime_log_sinks(stdout_path: Path, stderr_path: Path) -> tuple[subp
     return stdout_sink, stderr_sink
 
 
-def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: dict[str, str] | None = None):
+def _spawn_stdin(
+    process: subprocess.Popen,
+    *,
+    memory_ui_secret: str | None,
+) -> None:
+    if memory_ui_secret is None or process.stdin is None:
+        return
+    process.stdin.write(f"{memory_ui_secret}\n".encode("utf-8"))
+    process.stdin.close()
+
+
+def _memory_ui_child_env(
+    env: dict[str, str] | None,
+    *,
+    memory_ui_secret: str | None,
+) -> dict[str, str] | None:
+    if memory_ui_secret is None:
+        return env
+    from core.memory.ui_access import MEMORY_UI_SECRET_STDIN_ENV
+
+    child_env = dict(os.environ if env is None else env)
+    child_env[MEMORY_UI_SECRET_STDIN_ENV] = "1"
+    return child_env
+
+
+def spawn_background(
+    args,
+    pid_path,
+    stdout_name: str,
+    stderr_name: str,
+    env: dict[str, str] | None = None,
+    *,
+    memory_ui_secret: str | None = None,
+):
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = open(os.devnull, "rb")
+    stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
@@ -873,11 +906,13 @@ def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: di
             stderr=stderr_sink.stdin,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=env,
+            env=_memory_ui_child_env(env, memory_ui_secret=memory_ui_secret),
             **isolated_subprocess_kwargs(),
         )
+        _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     finally:
-        stdin.close()
+        if stdin is not subprocess.PIPE:
+            stdin.close()
         stdout_sink.stdin.close()
         stderr_sink.stdin.close()
     pid_path.write_text(str(process.pid), encoding="utf-8")
@@ -889,12 +924,14 @@ def spawn_service_background_process(
     stdout_name: str,
     stderr_name: str,
     env: dict[str, str] | None = None,
+    *,
+    memory_ui_secret: str | None = None,
 ) -> subprocess.Popen:
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = open(os.devnull, "rb")
+    stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
@@ -903,11 +940,13 @@ def spawn_service_background_process(
             stderr=stderr_sink.stdin,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=env,
+            env=_memory_ui_child_env(env, memory_ui_secret=memory_ui_secret),
             **isolated_subprocess_kwargs(),
         )
+        _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     finally:
-        stdin.close()
+        if stdin is not subprocess.PIPE:
+            stdin.close()
         stdout_sink.stdin.close()
         stderr_sink.stdin.close()
     return process
@@ -1154,6 +1193,15 @@ def render_status(*, detect_extra_processes: bool = True):
     restart_status = read_json(get_restart_status_path())
     if restart_status:
         status["restart"] = restart_status
+    internal_server_status = read_json(paths.get_internal_server_status_path())
+    if internal_server_status:
+        # The internal server cannot outlive its service: it runs on that
+        # process's loop and owns a socket that dies with it. A SIGKILL leaves
+        # no shutdown path to correct the file, so a live "ready" without a
+        # service owner is stale by definition rather than something to report.
+        if not running and str(internal_server_status.get("state") or "") not in {"stopped", "error"}:
+            internal_server_status = {**internal_server_status, "state": "stopped", "stale": True}
+        status["internal_server"] = internal_server_status
     try:
         if owner_pid:
             from core.show_git import show_git_checkpointing_active
@@ -1452,9 +1500,12 @@ def start_service(
     *,
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
+    memory_ui_secret: str | None = None,
 ):
     from storage.migrations import guard_source_checkout_default_state_bootstrap
+    from core.memory.ui_access import process_ui_read_secret
 
+    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
     with _SERVICE_LOCK:
         pid_path = paths.get_runtime_pid_path()
@@ -1514,6 +1565,11 @@ def start_service(
         scope_prefix = maybe_systemd_scope_prefix()
         if scope_prefix:
             logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
+        spawn_kwargs = (
+            {"memory_ui_secret": memory_ui_secret}
+            if memory_ui_secret is not None
+            else {}
+        )
         process = spawn_service_background_process(
             [*scope_prefix, sys.executable, str(main_path)],
             "service_stdout.log",
@@ -1523,6 +1579,7 @@ def start_service(
                 "VIBE_DISABLE_STDOUT_LOGGING": "1",
                 SHUTDOWN_INTENT_ENV: "1",
             },
+            **spawn_kwargs,
         )
         pid = process.pid
         _SERVICE_START_PROCESSES[pid] = process
@@ -1745,10 +1802,18 @@ def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) 
     return setup_host
 
 
-def start_ui(host, port, *, wait_for_ready: bool = True):
+def start_ui(
+    host,
+    port,
+    *,
+    wait_for_ready: bool = True,
+    memory_ui_secret: str | None = None,
+):
+    from core.memory.ui_access import process_ui_read_secret
     from vibe.desktop_runtime import normalize_desktop_port
 
     port = normalize_desktop_port(port)
+    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     pid_path = paths.get_runtime_ui_pid_path()
     if pid_path.exists():
         try:
@@ -1773,11 +1838,17 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
         pid_path.unlink(missing_ok=True)
 
     command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
+    spawn_kwargs = (
+        {"memory_ui_secret": memory_ui_secret}
+        if memory_ui_secret is not None
+        else {}
+    )
     pid = spawn_background(
         [sys.executable, "-c", command],
         pid_path,
         "ui_stdout.log",
         "ui_stderr.log",
+        **spawn_kwargs,
     )
     if wait_for_ready and not wait_for_ui_server(host, port):
         logger.warning(

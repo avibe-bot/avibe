@@ -18,6 +18,7 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
+from .message_facts import is_ordinary_discord_text
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -157,13 +158,14 @@ class DiscordBot(BaseIMClient):
         if guild_id and not self._is_allowed_guild(guild_id):
             return None
 
-        is_dm = interaction.guild is None or isinstance(interaction.channel, discord.DMChannel)
+        is_dm = isinstance(interaction.channel, discord.DMChannel)
         return MessageContext(
             user_id=str(interaction.user.id),
             channel_id=channel_id,
+            platform="discord",
             thread_id=thread_id,
             message_id=str(interaction.message.id) if interaction.message else None,
-            platform_specific={"interaction": interaction, "is_dm": is_dm},
+            platform_specific={"platform": "discord", "interaction": interaction, "is_dm": is_dm},
         )
 
     async def _dispatch_callback_query(self, context: MessageContext, data: str) -> None:
@@ -1021,7 +1023,7 @@ class DiscordBot(BaseIMClient):
             return
 
         # Determine if this is a DM
-        is_dm = isinstance(channel, discord.DMChannel) or message.guild is None
+        is_dm = isinstance(channel, discord.DMChannel)
         referenced_anchor_base = None if is_dm else self._get_reply_anchor_base(channel_id, self._get_reference_message_id(message))
 
         auth_result = self.check_authorization(
@@ -1070,10 +1072,12 @@ class DiscordBot(BaseIMClient):
             command_context = MessageContext(
                 user_id=str(message.author.id),
                 channel_id=channel_id,
+                platform="discord",
                 thread_id=thread_id,
                 message_id=str(message.id),
-                platform_specific={"message": message, "is_dm": is_dm},
+                platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                 files=files,
+                is_ordinary_text=is_ordinary_discord_text(message, files),
             )
             if await self.dispatch_text_command(command_context, content, allow_plain_bind=allow_plain_bind):
                 return
@@ -1083,10 +1087,12 @@ class DiscordBot(BaseIMClient):
                 context = MessageContext(
                     user_id=str(message.author.id),
                     channel_id=channel_id,
+                    platform="discord",
                     thread_id=thread_id,
                     message_id=str(message.id),
-                    platform_specific={"message": message, "is_dm": is_dm},
+                    platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                     files=files,
+                    is_ordinary_text=is_ordinary_discord_text(message, files),
                 )
                 await self.on_message_callback(context, "")
             return
@@ -1094,10 +1100,12 @@ class DiscordBot(BaseIMClient):
         context = MessageContext(
             user_id=str(message.author.id),
             channel_id=channel_id,
+            platform="discord",
             thread_id=thread_id,
             message_id=str(message.id),
-            platform_specific={"message": message, "is_dm": is_dm},
+            platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
             files=files,
+            is_ordinary_text=is_ordinary_discord_text(message, files),
         )
 
         if self.on_message_callback:
@@ -1307,11 +1315,11 @@ class DiscordBot(BaseIMClient):
                 await save_interaction.response.defer()
                 if hasattr(self, "_on_settings_update"):
                     await self._on_settings_update(
-                        str(save_interaction.user.id),
-                        show_types,
-                        channel_id or str(save_interaction.channel_id or ""),
-                        require_mention,
-                        language,
+                        user_id=str(save_interaction.user.id),
+                        show_message_types=show_types,
+                        channel_id=channel_id or str(save_interaction.channel_id or ""),
+                        require_mention=require_mention,
+                        language=language,
                         notify_user=True,
                         is_dm=save_interaction.guild is None,
                     )
@@ -2035,18 +2043,18 @@ class DiscordBot(BaseIMClient):
 
                     if hasattr(self.outer, "_on_routing_update"):
                         await self.outer._on_routing_update(
-                            str(interaction.user.id),
-                            channel_id,
-                            self.selected_backend,
-                            _normalize(self.oc_agent),
-                            _normalize(self.oc_model),
-                            _normalize(self.oc_reasoning),
-                            _normalize(self.claude_agent),
-                            _normalize(self.claude_model),
-                            _normalize(self.claude_reasoning),
-                            _normalize(self.codex_agent),
-                            _normalize(self.codex_model),
-                            _normalize(self.codex_reasoning),
+                            user_id=str(interaction.user.id),
+                            channel_id=channel_id,
+                            backend=self.selected_backend,
+                            opencode_agent=_normalize(self.oc_agent),
+                            opencode_model=_normalize(self.oc_model),
+                            opencode_reasoning_effort=_normalize(self.oc_reasoning),
+                            claude_agent=_normalize(self.claude_agent),
+                            claude_model=_normalize(self.claude_model),
+                            claude_reasoning_effort=_normalize(self.claude_reasoning),
+                            codex_agent=_normalize(self.codex_agent),
+                            codex_model=_normalize(self.codex_model),
+                            codex_reasoning_effort=_normalize(self.codex_reasoning),
                             notify_user=True,
                             is_dm=interaction.guild is None,
                         )

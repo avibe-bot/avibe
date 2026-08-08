@@ -63,6 +63,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         ("agent", "models"),
         ("runs", "list"),
         ("session", "list"),
+        ("session", "queue", "list"),
         ("vault", "list"),
         ("vault", "find"),
         ("vault", "tags"),
@@ -111,6 +112,30 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
         checked_commands += 1
 
     assert checked_commands >= 20
+
+
+def test_injected_session_queue_commands_name_real_subcommands() -> None:
+    context = MessageContext(
+        user_id="user",
+        channel_id="channel",
+        platform="avibe",
+        platform_specific={"agent_session_id": "ses-test"},
+    )
+    prompt = build_system_prompt_injection(context=context)
+
+    for command, expected_path in (
+        (
+            "vibe session queue list <session-id>",
+            ("session", "queue", "list"),
+        ),
+        (
+            "vibe session queue remove <session-id> <message-id>",
+            ("session", "queue", "remove"),
+        ),
+    ):
+        assert f"`{command}`" in prompt
+        _, path = _prompt_command_parser(command)
+        assert path == expected_path
 
 
 def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> None:

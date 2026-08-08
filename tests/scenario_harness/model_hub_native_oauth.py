@@ -24,12 +24,16 @@ class MemoryStore:
             }
         )
         self.config.subscription_hub_experimental = experimental
+        self.requested_models = {"claude": "claude-opus-4-6"}
 
     def load(self) -> ModelHubConfig:
         return self.config
 
     def save(self, config: ModelHubConfig) -> None:
         self.config = config
+
+    def requested_model(self, backend: str) -> str:
+        return self.requested_models.get(backend, "")
 
 
 class FakeAgentAuthService:
@@ -41,9 +45,18 @@ class FakeAgentAuthService:
         self.flows: dict[str, SimpleNamespace] = {}
         self.submissions: list[tuple[str, str]] = []
         self.cancelled: list[str] = []
+        self.start_calls: list[tuple[str, bool]] = []
 
-    async def start_web_setup(self, backend: str, *, force_reset: bool = True):
-        assert force_reset is False
+    async def start_web_setup(
+        self,
+        backend: str,
+        *,
+        force_reset: bool = True,
+        on_irreversible_start=None,
+    ):
+        if force_reset and on_irreversible_start is not None:
+            on_irreversible_start()
+        self.start_calls.append((backend, force_reset))
         flow_id = f"web_{uuid.uuid4().hex[:8]}"
         flow = SimpleNamespace(
             flow_id=flow_id,
@@ -123,6 +136,7 @@ class NativeOAuthScenarioHarness:
             oauth_flows=OAuthFlowRegistry(state_dir / "oauth_flows.json"),
             revocations=CredentialRevocationJournal(state_dir / "revocations.json"),
             now=lambda: datetime(2026, 7, 25, 0, 0, tzinfo=timezone.utc),
+            requested_model_override=self.store.requested_model,
         )
 
 

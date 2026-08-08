@@ -1,0 +1,674 @@
+version: 1
+capability:
+  id: harness_command_task
+  name: Scheduled command tasks and their failure visibility
+  canonical_tests:
+    - tests/test_harness_failure_visibility.py
+    - tests/test_scheduled_command_task_integration.py
+    - tests/test_scheduled_tasks.py
+    - tests/test_command_runner.py
+    - tests/test_cli_task_command.py
+  shared_harness: []
+status_legend:
+  covered: deterministic scenario or contract coverage exists
+  manual: validated in the local Incus black-box environment
+  planned: scenario id reserved, coverage not written yet
+scenarios:
+  - id: SCT-001
+    name: a failed command fire produces exactly one command-aware failure notice
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_failed_command_fire_delivers_exactly_one_command_aware_notice
+  - id: SCT-002
+    name: a successful command fire notifies nowhere
+    status: covered
+    kind: success
+    layer: scenario
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_successful_command_fire_notifies_nowhere
+  - id: SCT-003
+    name: an escalated command failure produces one Agent turn and zero notices
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_failed_on_failure_agent_command_fire_queues_exactly_one_escalation
+    # The drain half of the same scenario -- a failed run carrying the escalation
+    # marker is never delivered a notice:
+    # tests/test_harness_failure_visibility.py::test_an_escalated_command_failure_is_never_delivered_a_notice
+  - id: SCT-004
+    name: a reclaim committed mid-command refuses the stamp and escalates nowhere
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_reclaim_during_the_command_refuses_the_stamp_and_escalates_nowhere
+  - id: SCT-005
+    name: session teardown hands a killed escalation's failure back to the notice ladder
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_archiving_the_session_gives_a_killed_escalation_its_notice_back
+    # The other teardown path -- ``/new`` hard-deleting an empty Session, which
+    # orphans the escalation instead of cancelling it:
+    # tests/test_scheduled_tasks.py::test_hard_deleting_the_session_gives_a_killed_escalation_its_notice_back
+  - id: SCT-006
+    name: a timed-out command reports the output it produced before it hung
+    status: covered
+    kind: timeout
+    layer: unit
+    backend: shared
+    test: tests/test_command_runner.py::test_timeout_keeps_the_output_the_capped_readers_already_retained
+  - id: SCT-007
+    name: escalation guidance can be reworded without recreating the task
+    status: covered
+    kind: config
+    layer: contract
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_rewords_escalation_guidance_on_an_agent_command_task
+  - id: SCT-008
+    name: a command with no stored cwd runs in the workdir of the Session it is bound to
+    status: covered
+    kind: config
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_escalating_command_runs_in_its_bound_sessions_workdir
+  - id: SCT-009
+    name: an escalation killed mid-turn by teardown still hands back its failure notice
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_archiving_the_session_gives_an_already_running_escalation_its_notice_back
+  - id: SCT-010
+    name: deleting a Session leaves no claimable escalation bound to it
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_hard_deleting_the_session_also_cancels_the_runs_bound_to_it
+  - id: SCT-011
+    name: a command task is findable by the command it runs
+    status: covered
+    kind: config
+    layer: unit
+    backend: shared
+    test: tests/test_harness_definition_lifecycle.py::test_searching_tasks_looks_at_what_a_command_task_actually_runs
+  - id: SCT-012
+    name: a long command fire never holds its conversation's turn lock
+    status: covered
+    kind: concurrency
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_running_command_fire_does_not_hold_its_conversations_turn_lock
+  - id: SCT-013
+    name: cancelling a running command run actually stops the process
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_canceling_a_running_command_run_actually_stops_the_command
+  - id: SCT-014
+    name: an escalation turn is not a health verdict on the command that queued it
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_harness_definition_lifecycle.py::test_an_escalation_turn_is_not_a_verdict_on_the_command_that_queued_it
+  - id: SCT-015
+    name: a capped output stream retains the tail, where the cause usually is
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_command_runner.py::test_output_cap_keeps_the_tail_where_the_cause_usually_is
+  - id: SCT-016
+    name: an argv command renders with its word boundaries intact in the UI
+    status: covered
+    kind: config
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/harnessLifecycle.test.ts::taskCommandPreview quotes argv the way the shell would read it back
+  - id: SCT-017
+    name: a fire that produced no exit code clears the one the last fire left
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_command_task_integration.py::test_a_fire_with_no_exit_code_clears_the_one_the_last_fire_left
+  - id: SCT-018
+    name: the task pane states the timeout in force even when the row stores none
+    status: covered
+    kind: config
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task states the timeout that actually applies when the row stores none
+  - id: SCT-019
+    name: a notice and a run detail name the command the run actually executed
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_notice_names_the_command_the_run_actually_executed
+    # The write side (a real fire stamps the snapshot onto its run row) and the
+    # Workbench read side:
+    # tests/test_scheduled_command_task_integration.py::test_cli_created_command_task_records_a_nonzero_exit
+    # ui/src/components/workbench/HarnessPage.test.tsx::RunDetail command run
+  - id: SCT-020
+    name: cancelling a run whose task was removed still stops the command
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_canceling_a_run_whose_task_was_removed_still_stops_the_command
+  - id: SCT-021
+    name: an interrupted command fire clears the exit code the last fire left
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_interrupted_command_fire_clears_the_previous_exit_code
+  - id: SCT-022
+    name: generated command failure text follows the configured language
+    status: covered
+    kind: config
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_command_failure_text_is_written_in_the_configured_language
+  - id: SCT-023
+    name: a restart after a crash reaps the command worker the dead service left running
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_crashed_service_reaps_the_command_worker_it_left_running
+  - id: SCT-024
+    name: a scheduler timeout is told apart from a command that exited 124 on its own
+    status: covered
+    kind: timeout
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_command_task_timeout_fails_the_run_with_the_timeout_exit_code
+    # Same scenario, read side: the recorded flag outranks the bare exit code both
+    # ways, and a sub-second limit is stated as the user wrote it rather than
+    # rounded to "0 second(s)":
+    # tests/test_harness_definition_lifecycle.py::test_lifecycle_detail_names_how_a_finished_row_ended
+  - id: SCT-025
+    name: a worker's machine-readable error line reaches the user as a sentence
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_command_whose_executable_is_missing_reads_as_a_sentence
+  - id: SCT-026
+    name: a cancel during the command refuses the escalation and settles cancelled
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_cancel_during_the_command_refuses_the_escalation_and_settles_canceled
+  - id: SCT-027
+    name: a teardown between the stamp and the settle cancels the fire itself
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_teardown_between_the_stamp_and_the_settle_cancels_the_fire_itself
+    # The negative half of SCT-026: archiving the session cancels EVERY non-terminal
+    # run of it, the parent fire included, so the settle sees a cancelled fire that
+    # owes no notice. That is why the settle needs no second check on the escalation
+    # run it just enqueued.
+  - id: SCT-028
+    name: the run snapshot names the command the fire actually claimed, not an older copy
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_the_run_snapshot_names_the_command_the_fire_actually_ran
+  - id: SCT-029
+    name: a command worker that survives the reap is kept for the next start to retry
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_worker_that_survives_the_reap_is_kept_for_the_next_start
+    # Both halves in one test: the run stays ``running`` while a live worker is still
+    # named, because ``list_running_command_workers`` reads only those rows -- and it
+    # stops being held open once ``_MAX_COMMAND_WORKER_REAP_ATTEMPTS`` is spent, so a
+    # process that genuinely never exits cannot pin a run ``running`` for the life of
+    # the install.
+  - id: SCT-030
+    name: an Agent renamed while the command ran still receives the escalation
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_agent_renamed_during_the_command_still_gets_the_escalation
+    # The negative half -- an Agent that was REMOVED rather than renamed keeps the
+    # definition's own spelling, because inventing an identity would bind the report to
+    # a different Agent than the definition asks for:
+    # tests/test_scheduled_tasks.py::test_an_archived_agent_keeps_the_escalations_own_spelling
+  - id: SCT-031
+    name: a liveness probe that cannot read the process keeps the worker's identity
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_probe_that_cannot_read_the_process_keeps_its_identity
+    # The primitive underneath, which is where the two answers are actually told
+    # apart -- an empty pid is "gone", an unreadable one is "unknown":
+    # tests/test_process_isolation.py::test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read
+  - id: SCT-032
+    name: a restart reaps the process group a dead command supervisor left behind
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_restart_reaps_the_group_a_dead_supervisor_left_behind
+    # Real group, real leader exit: the supervisor leads ``pgid == pid`` and that group
+    # outlives it on POSIX, so a free pid is not a reaped tree. The shared primitive
+    # that owns the walk, and its refusal to signal a group it cannot vouch for:
+    # tests/test_process_isolation.py::test_reaping_an_orphan_follows_the_group_its_leader_left_behind
+    # tests/test_process_isolation.py::test_reaping_an_orphan_keeps_a_group_it_cannot_identify
+  - id: SCT-033
+    name: a stop that lands after the stamp retracts the escalation it authorised
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_stop_that_lands_after_the_stamp_retracts_the_escalation
+    # SCT-026 one lane later: there the cancel is visible when the guarded stamp commits
+    # and the escalation rolls back with it; here the flag lands after that transaction
+    # returned, so the durable turn has to be withdrawn by whoever settles the fire
+    # ``canceled``. Neither report is owed -- a stopped fire owes no notice (SCT-027).
+  - id: SCT-034
+    name: claiming the escalation of a stopped fire is refused at the door
+    status: covered
+    kind: teardown
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_claiming_the_escalation_of_a_stopped_fire_is_refused_at_the_door
+    # The half SCT-033's retraction cannot reach. Retraction takes back a QUEUED row;
+    # once the dispatch loop has claimed the escalation, ``cancel_run`` writes a flag the
+    # turn lane does not watch, so the stopped job would launch an Agent anyway. The
+    # claim asks the parent fire itself, inside the transaction that would start the
+    # work, which is what makes the ordering between the two lanes irrelevant.
+  - id: SCT-035
+    name: an unexpected error after the spawn still reaps the command
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_command_runner.py::test_an_unexpected_error_after_the_spawn_still_reaps_the_command
+    # Cancellation (SCT-014) and timeout (SCT-006) were the only exits that reaped the
+    # tree. Anything else -- an OSError draining a capped pipe, one reader dying while
+    # its twin still reads -- escaped with the supervisor alive, and the caller clears
+    # ``command_worker`` in its own ``finally`` the moment the runner raises, so the
+    # orphan was left with nothing on disk naming it.
+  - id: SCT-036
+    name: an enumeration that fails leaves the worker records it could not read
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_an_enumeration_that_fails_leaves_the_records_it_could_not_read
+    # SCT-031 one layer up: there the unreadable thing is a process, here it is the whole
+    # list. A failed ``list_running_command_workers`` used to answer with an empty skip
+    # set, which licensed the very next line to settle EVERY running command fire and
+    # unname every live worker on the host at once. The settle pass now reads the record
+    # off the row it is about to settle instead of trusting a set handed to it, and the
+    # negative half of the same test keeps a fire with no record settling normally.
+  - id: SCT-037
+    name: a command whose worker cannot be recorded is never started
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_command_whose_worker_cannot_be_recorded_is_never_started
+    # The record's birth, which every other guard in this family presupposes. If the
+    # stamp does not land the fire runs unnamed, and the handshake is the one moment
+    # refusing is nearly free: the supervisor is still blocked on its spec, so nothing
+    # the user asked for has started. The negative half is the same judgement inverted --
+    # an identity that could not be CAPTURED does not refuse, because the usual cause is
+    # a supervisor that already exited and an uncapturable identity cannot be made
+    # trustworthy by persisting it.
+  - id: SCT-038
+    name: a refused terminal stamp reports itself in the user's language
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    test: tests/test_i18n_backend_keys.py::test_the_command_fires_refusal_sentences_resolve_in_every_language
+    # The refusal sentence is copy THIS MODULE composes, and it lands in the run
+    # ledger's ``error`` -- the column the Harness detail pane, ``vibe runs show`` and
+    # the failure notice render verbatim, and the one the settlement reasons already
+    # fill through ``vibe/i18n``. What stays untranslated there is quoted text nobody
+    # here wrote (``str(exc)``, a worker's own stderr), so the line is between our copy
+    # and quoted material, not one convention per channel.
+  - id: SCT-039
+    name: a supervisor failure records no command exit code
+    status: covered
+    kind: observability
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_supervisor_failure_records_no_command_exit_code
+    # SCT-025 decoded the worker's error LINE and left its exit STATUS misattributed.
+    # ``main()`` returns 1 for both of the supervisor's own failures, so a spawn it could
+    # not perform was published as the command's exit code -- in the notice, the
+    # escalation prompt, ``last_exit_code`` and the run row -- for a command that never
+    # started. The negative half is the discriminator's proof: a command that ran and
+    # exited 3 still reports 3, or the fix would blind every failing cron job.
+  - id: SCT-040
+    name: a definition does not fire while its own worker may be alive
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_definition_does_not_fire_while_its_own_worker_may_be_alive
+    # Single flight per definition was stated (``_execution_lock_key`` keys a fire on its
+    # own task id) and enforced only in memory, so it lapsed across exactly the restart
+    # that leaves a supervisor running: the record is RETAINED because the tree could not
+    # be shown dead, and the next cron tick then started a second copy over the same
+    # dataset. The fire now consults the durable record by identity, for its own
+    # definition only, and defers on "present" and on "unknown" alike. It looks and never
+    # signals -- reaping to make room would destroy the work it was scheduled to protect
+    # -- and proof of death both releases the schedule and retires the record, so a dead
+    # worker cannot hold its own definition shut until the next restart.
+  - id: SCT-041
+    name: a failed retention write keeps the stored worker record
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_failed_retention_write_keeps_the_stored_worker_record
+    # The last write in the path SCT-036 built, breaking SCT-036's own invariant: a
+    # locked database while re-stamping the attempt count answered "did not retain", and
+    # the caller's next line clears the record. A store hiccup, which says nothing about
+    # the process, thereby did the one thing the path exists to prevent. The stored record
+    # survives a failed write untouched, so "kept" is the honest answer, and the attempt
+    # cap is charged only for attempts actually made. The test fails the re-stamp alone,
+    # leaving the clear working, or a kept record could not be told from an undeletable one.
+  - id: SCT-042
+    name: both run stores name the definition a command worker belongs to
+    status: covered
+    kind: crash_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_both_run_stores_name_the_definition_a_command_worker_belongs_to
+    # SCT-040's guard filters recorded workers by definition, so the attribution IS the
+    # contract. The file backend omitted it -- SQLite's column was renamed
+    # ``definition_id`` while the file payload still spells the association ``task_id``
+    # -- and a missing field does not read as "no worker": it reads as "no worker for
+    # every definition at once", so single flight silently stopped holding on that
+    # backend while looking healthy on the other. Normalized at the store boundary and
+    # asserted on both backends in one test, because a reader cannot tell which one it
+    # was handed.
+  - id: SCT-043
+    name: the task pane claims no Agent routing a pure command task does not have
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task drops the Agent routing a pure command task deliberately has none of
+    # Three label helpers resolve a stored null to a CONCRETE answer -- "Inherits default
+    # agent", "Reuse the same session", "Default · session location" -- which is true of a
+    # message task, whose null Agent really is the inherited one. A command created with
+    # the CLI's default ``--on-failure none`` is bound to nothing, so the same rendering
+    # described routing it deliberately has none of, one field above an "On failure:
+    # Notice only (no Agent)" that says the opposite. Gated on the BINDINGS, not on the
+    # kind: an escalation turn is routed by exactly these fields, and a command created
+    # from IM delivers its failure notice to a real conversation.
+  - id: SCT-044
+    name: a recovered fire is settled once its worker is finally shown gone
+    status: covered
+    kind: crash_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_recovered_fire_is_settled_when_its_worker_is_finally_shown_gone
+    # SCT-040 let a proven death release the definition immediately instead of waiting for
+    # a restart, and left the interrupted run behind: no other pass comes back for it.
+    # ``recover_processing`` runs once at startup and steps over any row still naming a
+    # worker -- this row's whole reason for surviving -- and the stale-run sweep only
+    # classifies orphans of ``run_type == "agent_run"``. The run therefore read
+    # ``running`` until the next restart for a command that was over, the definition
+    # looked healthy, and the user was never told the fire had been cut off. Settled as
+    # ``restarted``, the same cause the startup pass writes, so one interruption is not
+    # told two ways depending on which pass proved the death.
+  - id: SCT-045
+    name: a teardown that cannot drain still kills the command
+    status: covered
+    kind: crash_recovery
+    layer: unit
+    backend: shared
+    test: tests/test_command_runner.py::test_a_teardown_that_cannot_drain_still_kills_the_command
+    # SCT-035 made every unexpected way out of the runner reap the tree, through a
+    # catch-all clause -- which cancellation and timeout never reach, because they are
+    # handled by their own ``except`` clauses beside it. Their teardown drains the pipes,
+    # a drain can fail (``OSError`` on a pipe, a loop already closing), and an exception
+    # raised inside an ``except`` clause is not caught by its sibling: the frame left with
+    # the supervisor alive while the scheduled-task caller cleared the worker record in
+    # its own ``finally``, on the documented assumption the runner had reaped it. The tree
+    # now dies through a synchronous group kill -- nothing left to interrupt, in the very
+    # frames a cancellation reached -- and neither handler lets that failure replace the
+    # outcome it owes: a re-raised cancellation, or a 124 result.
+  - id: SCT-046
+    name: a recovered fire is settled on the file store too
+    status: covered
+    kind: crash_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_recovered_fire_is_settled_on_the_file_store_too
+    # SCT-044 settles through the guarded per-run writer, which only SQLite has. On the
+    # legacy file store that check answered "unsupported" and the settle returned having
+    # done nothing but clear the worker record: the definition was released, the next fire
+    # ran, and the interrupted run's file sat in ``processing`` reading ``running`` until
+    # some later restart -- the leak SCT-044 removed, still open one backend over. The
+    # store now owns the difference (``settle_recovered_run``), so the caller has one path
+    # instead of a supported-store branch that silently does nothing.
+  - id: SCT-047
+    name: a per-run command records the directory it was described in
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_add_per_run_command_records_the_directory_it_was_described_in
+    # ``--create-session-per-run`` stores no ``cwd`` on purpose: that Session is created at
+    # escalation and its workdir resolved then. A command cannot wait for it -- it fires on
+    # the next tick out of the definition's ``cwd`` -- so the documented
+    # ``--shell './scripts/sync.sh'`` ran from ``~/.avibe``, where the script does not
+    # exist and a relative write lands in persisted state. The invocation directory is
+    # recorded for the command's half only: ``session_workdir`` stays unset, or a
+    # scope-bound definition would stop following its Scope's workdir.
+  - id: SCT-048
+    name: a command with nothing to inherit runs where Agent work runs
+    status: covered
+    kind: routing
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_command_with_nothing_to_inherit_runs_where_agent_work_runs
+    # The runtime half of SCT-047, for the definitions its creation-time fix cannot reach:
+    # one created before it, or written straight through the API. Those still arrive with
+    # no ``cwd`` and no readable Session, and the product state directory is the worst
+    # possible place to run a user's command. ``runtime.default_cwd`` is where this
+    # install's Agent turns already run, so it is both a real directory and the answer the
+    # escalation Session would get; it is validated rather than trusted, so an unset or
+    # deleted setting falls through to the old fallback instead of failing the fire.
+  - id: SCT-049
+    name: both run stores settle a fire with the command it ran
+    status: covered
+    kind: crash_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_both_run_stores_settle_a_fire_with_the_command_it_ran
+    # SCT-028's re-stamp is read off the TERMINAL row -- by the failure notice, the
+    # escalation prompt and the Workbench run detail -- and the file backend composed that
+    # row from the ``TaskExecutionRequest`` the caller still held, the enqueue-time copy.
+    # So the last write of the fire overwrote the only one that knew what ran. SQLite
+    # updates the row the metadata already lives on, which is why the gap was invisible
+    # from there; the recovery writer already composed from the file, so the same backend's
+    # two terminal writers disagreed about what a settled row remembers.
+  - id: SCT-050
+    name: an escalating command task can name the directory its command runs in
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_add_escalating_command_task_accepts_an_explicit_cwd
+    # SCT-008 made a bound definition supply the directory ``--cwd`` was refused, which
+    # stopped commands landing in ``~/.avibe`` without giving the user a way to say where
+    # they run. The refusal is a SESSION rule -- an existing Session owns its workdir --
+    # and a command task binds to one only so ``--on-failure agent`` has somewhere to
+    # escalate, so the rule was answering a question nobody asked it. Softened for
+    # commands only: the flag becomes the definition's ``cwd``, ``session_workdir`` stays
+    # unset so the Session still owns its own, and a message task is refused exactly as
+    # before. Omitting it keeps SCT-008 intact, which matters because the inherited
+    # directory is read live -- ``vibe session update --cwd`` on an unrelated conversation
+    # silently relocates every unpinned command, and nothing errors, because every
+    # fallback in the chain is ``isdir``-validated. The runtime half -- that a stored
+    # ``cwd`` actually beats the live Session read at fire time, or accepting the flag
+    # means nothing -- is
+    # tests/test_scheduled_tasks.py::test_a_stored_cwd_beats_the_bound_sessions_workdir.
+  - id: SCT-051
+    name: an unrelated edit does not un-pin a command task's working directory
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit
+    # A bound definition resolves its Session question to ``None`` on every edit, and the
+    # update path persists that with ``update_cwd=True``. Harmless while no command task
+    # could store a ``cwd``; the moment SCT-050 let one, ``vibe task update --name`` erased
+    # it and the next fire went back to following the escalation Session. Only the explicit
+    # flag replaces a stored directory.
+  - id: SCT-052
+    name: the task pane presents the escalation lane as the job it only runs instead of
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task states the failure policy before the routing it governs, not after it
+    # SCT-043 settled WHETHER to show Agent/Session/mode/delivery/message on a command
+    # task -- gated on the bindings, because an escalation turn is routed by exactly those
+    # fields. It did not settle what they mean once shown. Five fields describing a path
+    # that runs on no healthy day rendered at the same weight as the command and the
+    # schedule, with the ``On failure`` that qualifies them BELOW all five, so the pane
+    # read top-down as a daily Opus turn -- the cost an agent-free task is chosen to
+    # avoid. The qualifier moves above the block, the block gets a name, and the message
+    # is called a triage prompt rather than sharing a label with a message task's payload.
+    # The working directory is shown for the first time on this pane in the same pass: it
+    # was unanswerable from the UI even once SCT-050 could store one.
+  - id: SCT-053
+    name: a command task's directory and its Session's survive a policy change separately
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session
+    # Retargeting at ``--create-session``/``--create-session-per-run`` without naming a
+    # directory carries forward the stored one, reading it off ``task.cwd``. That is the
+    # right source while ``cwd`` has one meaning -- for a message task it IS the Session's
+    # directory -- and the wrong one the moment SCT-050 let the two differ: the command's
+    # directory was promoted into the new Session's placement, so an escalation Session
+    # stopped inheriting from its Scope with nothing in the edit saying so. The Session
+    # half now comes from ``metadata["session_workdir"]``, which a bound definition never
+    # had and a per-run definition leaves unset on purpose (SCT-047). The command half
+    # comes from its own stored value, which also stops a policy change from re-stamping
+    # the directory the UPDATE happened to run from -- SCT-051's rule in the lane the
+    # explicit flag does not cover.
+  - id: SCT-054
+    name: nothing is called an escalation on a command task that escalates to no one
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task calls nothing an escalation on a command task that escalates to no one
+    # SCT-052's heading was keyed on the KIND, which is the same mistake SCT-043 rejected
+    # one level down: a command task with ``--on-failure none`` delivered to a real
+    # conversation keeps the routing fields legitimately, and heading them "On failure ->
+    # escalation" made the pane say "Notice only (no Agent)" and "escalation" about one
+    # task, one field apart. Keyed on ``on_failure`` instead -- the same value the field
+    # above it prints -- so the two cannot contradict each other.
+  - id: SCT-055
+    name: the pane does not name a Session the command cannot inherit a directory from
+    status: covered
+    kind: observability
+    layer: unit
+    backend: shared
+    test: ui/src/components/workbench/HarnessPage.test.tsx::TaskDetail command task does not name a session the command cannot inherit a directory from
+    # "Session working directory" named an OUTCOME the pane cannot verify.
+    # ``_bound_session_workdir`` answers ``None`` for a deleted row, a NULL workdir or a
+    # failed read, and every fallback is ``isdir``-validated besides, so the command lands
+    # on the runtime default while the pane points at a Session -- next to the "Session
+    # deleted" the Session field prints two rows up, in the case the UI can already see.
+    # The field names the CHAIN the fire walks instead, and drops the Session term where
+    # the binding is visibly gone or absent. The chain does not stop at
+    # ``runtime.default_cwd`` either: it is unset on a fresh install and revalidated on
+    # every fire, and ``_execute_command_task`` then falls through to the Avibe state
+    # directory -- so "Runtime default" alone named a specific config key the run may
+    # never reach, which is the same overclaim one link further down. Both strings name
+    # the terminal fallback, asserted on the copy in ``en`` and ``zh`` because that is
+    # where the claim lives.
+  - id: SCT-056
+    name: a replacement reusable Session is reserved where the Session belongs, not where the command runs
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_reserves_a_replacement_session_without_the_commands_directory
+    # SCT-053 split the two halves of ``cwd`` on the read side, then handed the reservation
+    # ``cwd`` -- the variable ``_command_definition_spawn_cwd`` had just overwritten with
+    # the COMMAND's answer. So ``--create-session`` on a command task pinned to a build
+    # directory reserved its replacement escalation Session in that build directory instead
+    # of letting it inherit from its Scope: the defect SCT-053 closed, reintroduced one
+    # line later and through the same field. The reservation reads the Session half it was
+    # always meant to. The add path carried the identical line and is fixed with it.
+  - id: SCT-057
+    name: repointing a reserved command task's directory does not replace the Session it escalates to
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_repoints_a_reserved_command_task_without_replacing_its_session
+    # ``_reject_inert_create_once_cwd_update`` refuses ``--cwd`` once a reusable Session
+    # exists, and for a message task that is right -- the Session owns its workdir and the
+    # flag would change nothing. It runs before the command-aware resolution, so it reached
+    # a command task first and left ``--create-session`` as the only way to move a nightly
+    # build: discarding an escalation Session that had nothing to do with the request.
+    # Softened exactly as SCT-050 softened the ``existing`` refusal, and for the same
+    # reason. The same branch stops an unrelated edit on a reserved definition from
+    # falling through and stamping the command's directory into
+    # ``metadata["session_workdir"]`` -- SCT-053's rule in the lane SCT-051 does not cover.
+  - id: SCT-058
+    name: an edit that asks nothing about directories places no Session
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplaced
+    # SCT-053 fixed the retarget; this is the same conflation in the lane where the edit
+    # asks nothing at all. With no ``--cwd`` and no creation flag the update carries the
+    # stored directory forward from ``task.cwd`` -- the COMMAND's half -- and then writes
+    # it as the Session's, so ``vibe task update --name`` pinned every future per-run
+    # Session to the directory ``task add`` was typed in and undid SCT-047's deliberate
+    # blank. A ``create_once`` definition that had not reserved yet reserved there for the
+    # same reason. Each half now carries forward from where that half is stored, which is
+    # the rule SCT-053, SCT-056 and SCT-057 each enforce in one other lane.
+  - id: SCT-059
+    name: a policy change does not pull a command back to its Session's directory
+    status: covered
+    kind: routing
+    layer: unit
+    backend: shared
+    test: tests/test_cli_task_command.py::test_task_update_retarget_does_not_pull_the_command_back_to_its_sessions_directory
+    # The mirror image of SCT-053, and the last lane where one half was read as the other.
+    # ``--cwd`` on a bound escalating command moves the command to B and leaves its
+    # Session on A -- that separation is what SCT-050 exists for. A later
+    # ``--create-session*`` carries A forward as the SESSION's answer, correctly, and
+    # ``_command_definition_spawn_cwd`` read it before the stored command half, so the
+    # command was pulled back to A with nothing in the edit asking. The two are equal
+    # wherever ``--cwd`` set both and differ exactly where the user separated them, so
+    # the stored command half now outranks the Session's: SCT-051's rule -- only the
+    # explicit flag replaces a stored directory -- in the retarget lane.

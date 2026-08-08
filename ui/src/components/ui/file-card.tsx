@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/apiFetch';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
-import { useFileViewer } from '@/components/ui/file-viewer';
+import { useFileViewer } from '@/components/ui/file-viewer-context';
 import { previewRenderKind, formatBytes } from '@/lib/filePreview';
 import { cn } from '@/lib/utils';
 

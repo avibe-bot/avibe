@@ -7,6 +7,7 @@ import type { WorkbenchProject } from '../../context/ApiContext';
 import { DirectoryBrowser } from '../ui/directory-browser';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface NewProjectDialogProps {
   onClose: () => void;
@@ -50,8 +51,8 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
         display_name: displayName.trim() || undefined,
       });
       onCreated(project);
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err) {
+      setError(errorMessage(err) ?? String(err));
       setSubmitting(false);
     }
   };

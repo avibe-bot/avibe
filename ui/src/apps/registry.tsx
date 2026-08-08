@@ -1,8 +1,8 @@
 import { Suspense, lazy } from 'react';
 import { CodeXml, Eye, Folder, LayoutGrid, MonitorPlay, SquareTerminal } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
 import type { LucideIcon } from 'lucide-react';
 
+import { AppBodyLoading } from './AppBodyLoading';
 import { sessionChatPath, showPagePrivatePath } from './showPageAvatar';
 
 // The catalogue of windowed apps. The WindowManager + Dock are headless of any
@@ -45,11 +45,6 @@ export interface AppDefinition {
   chatHref?: (params?: Record<string, unknown>) => string | undefined;
 }
 
-const Loading: React.FC = () => {
-  const { t } = useTranslation();
-  return <div className="grid h-full w-full place-items-center bg-surface text-[12px] text-muted">{t('common.loading')}</div>;
-};
-
 const FilesBody = lazy(() =>
   import('../components/workbench/AppsFileBrowserPage').then((m) => ({ default: m.AppsFileBrowserPage })),
 );
@@ -73,7 +68,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     accent: '--cyan',
     defaultSize: { width: 920, height: 600 },
     Component: ({ windowId }) => (
-      <Suspense fallback={<Loading />}>
+      <Suspense fallback={<AppBodyLoading />}>
         <FilesBody windowed windowId={windowId} />
       </Suspense>
     ),
@@ -86,7 +81,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     defaultSize: { width: 820, height: 540 },
     lockTheme: 'dark',
     Component: ({ windowId, params }) => (
-      <Suspense fallback={<Loading />}>
+      <Suspense fallback={<AppBodyLoading />}>
         {/* Each windowed terminal takes a bounded, reused session slot internally so
             it gets its own backend session without leaking ids (see AppsTerminalPage).
             windowId + params thread through so the tab layout persists across reloads. */}
@@ -102,7 +97,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     defaultSize: { width: 1000, height: 640 },
     lockTheme: 'dark',
     Component: ({ windowId, params }) => (
-      <Suspense fallback={<Loading />}>
+      <Suspense fallback={<AppBodyLoading />}>
         <EditorBody windowId={windowId} params={params} />
       </Suspense>
     ),
@@ -118,7 +113,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     accent: '--gold',
     defaultSize: { width: 900, height: 640 },
     Component: ({ windowId, params }) => (
-      <Suspense fallback={<Loading />}>
+      <Suspense fallback={<AppBodyLoading />}>
         <PreviewBody windowId={windowId} params={params} />
       </Suspense>
     ),
@@ -134,7 +129,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     accent: '--mint',
     defaultSize: { width: 1040, height: 720 },
     Component: ({ windowId, params }) => (
-      <Suspense fallback={<Loading />}>
+      <Suspense fallback={<AppBodyLoading />}>
         <ShowPageBody windowId={windowId} params={params} />
       </Suspense>
     ),
@@ -159,7 +154,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     accent: '--gold',
     defaultSize: { width: 940, height: 640 },
     Component: ({ windowId, params }) => (
-      <Suspense fallback={<Loading />}>
+      <Suspense fallback={<AppBodyLoading />}>
         <LibraryBody windowId={windowId} params={params} />
       </Suspense>
     ),

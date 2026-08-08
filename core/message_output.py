@@ -10,7 +10,36 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
-from core.run_settlement import SETTLED_BY_STOPPED
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_STOPPED
+
+# Every trigger kind whose dispatch created an ``agent_runs`` row. Scheduled
+# tasks, watches, webhooks, hooks and recovered Activities are all Harness runs
+# and must reach the same result recorders as a direct ``vibe agent run``.
+# Gating those recorders on ``agent_run`` alone is why every ``scheduled`` /
+# ``watch`` row carries an empty ``result_text``.
+HARNESS_TRIGGER_KINDS: frozenset[str] = frozenset(
+    {"agent_run", "scheduled", "watch", "webhook", "hook", "activity_recovery"}
+)
+
+# The subset whose ``task_execution_id`` *is* the run id. ``activity_recovery``
+# is deliberately excluded: it builds its context with a synthetic
+# ``activity:<backend>:<id>`` execution id, and its real run ids travel on the
+# Activity completion output instead. Reading its ``task_execution_id`` as a run
+# id addresses a write to a row that cannot exist.
+HARNESS_RUN_ID_TRIGGER_KINDS: frozenset[str] = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
+
+# ``platform_specific`` key carrying the Harness prompt that should be echoed into
+# the turn's IM conversation. The turn pipeline stages it; ``AgentService`` emits it
+# once the runtime turn gate is acquired, so a turn queued behind another turn cannot
+# announce its prompt while that other turn is still working.
+HARNESS_PROMPT_ECHO_SPEC_KEY = "harness_prompt_echo_text"
+
+# The echo is awaited WITH the runtime turn gate held, so a slow or unreachable IM
+# API would delay the Harness turn itself plus every turn queued on that gate — an
+# adapter's own budget is far longer than a turn start should ever wait (Telegram
+# allows 60s per request). Bounded like the status-bubble post that follows it
+# (``MessageDispatcher.begin_status_bubble``); the echo is optional, the turn is not.
+HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -21,10 +50,14 @@ class MessageOutput:
     completes_run: bool | None = None
     detached: bool = False
     idempotency_key: str | None = None
+    native_message_id_aliases: tuple[str, ...] = ()
     activity_id: str | None = None
+    activity_ids: tuple[str, ...] = ()
+    activity_batch_id: str | None = None
     causation_id: str | None = None
     sequence: int | None = None
     run_id: str | None = None
+    run_ids: tuple[str, ...] = ()
     requires_delivery_for_run_settlement: bool = False
     settled_by: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -40,13 +73,16 @@ class MessageOutput:
         trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
         inferred_run_id = (
             str(spec.get("task_execution_id") or "").strip()
-            if trigger_kind == "agent_run"
+            if trigger_kind in HARNESS_RUN_ID_TRIGGER_KINDS
             else ""
         )
         values: dict[str, Any] = {
             "turn_id": str(spec.get("turn_token") or "").strip() or None,
             "activity_id": self.activity_id,
+            "activity_ids": list(self.activity_ids) or None,
+            "activity_batch_id": self.activity_batch_id,
             "run_id": self.run_id or inferred_run_id or None,
+            "run_ids": list(self.run_ids) or None,
             "causation_id": self.causation_id,
             "sequence": self.sequence,
             "output_id": self.idempotency_key,
@@ -68,10 +104,14 @@ class MessageOutput:
         ).strip()
         if not backend and isinstance(target, dict):
             backend = str(target.get("agent_backend") or "").strip()
-        activity_lineage = f"activity:{self.activity_id}" if self.activity_id else ""
+        activity_lineage = (
+            f"activity-batch:{self.activity_batch_id}"
+            if self.activity_batch_id
+            else (f"activity:{self.activity_id}" if self.activity_id else "")
+        )
         lineage = str(
-            self.run_id
-            or activity_lineage
+            activity_lineage
+            or self.run_id
             or spec.get("task_execution_id")
             or spec.get("agent_session_id")
             or spec.get("agent_runtime_turn_key")
@@ -136,4 +176,44 @@ def stop_output_for(request: Any) -> MessageOutput:
         completes_turn=True,
         completes_run=False,
         settled_by=SETTLED_BY_STOPPED,
+    )
+
+
+def contained_teardown_output_for(request: Any) -> MessageOutput:
+    """A service-initiated backend teardown's terminal result: infrastructure, not fault.
+
+    The service killed this backend runtime itself -- idle eviction, duplicate reap,
+    a rolling ``agents.*`` reconciliation. #1202 taught the Claude paths to recognize
+    that signal and stop reporting it as a user-visible backend error or a Model Hub
+    source-health failure. It did not change what the emit that follows still says:
+    an ordinary ``result`` whose only lifecycle authority is the terminal-turn
+    default, so the dispatcher terminalized an ``agent_runs`` row from an empty body
+    and the durable Turn read ``failed`` -- indistinguishable from a backend that
+    actually broke, while the bubble said nothing at all.
+
+    Same shape as ``stop_output_for``, different reason. ``completes_run=False``
+    keeps the empty body out of ``_record_agent_run_terminal_result``, and
+    ``settled_by`` routes the release through the settlement lane instead, where
+    ``SETTLEMENT_TERMINAL_STATUS`` already maps ``backend_refresh`` to ``failed``
+    with ``interrupt_reason=backend_refresh``. That preserves invariant 2 of
+    ``docs/plans/harness-run-reliability.md`` -- an infrastructure interruption is
+    ``failed`` with a STRUCTURED cause, never silently swallowed -- while making the
+    cause distinguishable from a backend that actually broke.
+
+    ``backend_refresh`` rather than ``interrupted`` because it already names this
+    exact boundary: a live Agent runtime retired inside an otherwise healthy
+    service. The same name also drives the TURN-level surfaces through
+    ``NON_COMPLETING_TURN_SETTLEMENTS``, which record it as ``canceled`` -- the word
+    ``release_for_backend_refresh`` already uses when it retires a live Turn
+    directly, so one teardown reads the same however it reached the row.
+
+    Nothing here is Claude-specific. Any backend whose cleanup can classify its own
+    teardown gets the same semantics by emitting through this factory.
+    """
+
+    return replace(
+        terminal_output_for(request),
+        completes_turn=True,
+        completes_run=False,
+        settled_by=SETTLED_BY_BACKEND_REFRESH,
     )

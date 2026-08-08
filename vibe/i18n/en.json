@@ -12,7 +12,25 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
+      "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
+      "idConflict": "This Show event ID is already bound to different event contents."
+    }
+  },
   "harness": {
+    "agentInitiatedContinuation": "Agent-initiated continuation",
+    "promptEcho": {
+      "scheduled": "⏰ Scheduled task",
+      "watch": "👀 Watch",
+      "webhook": "🔗 Webhook",
+      "hook": "🪝 Hook",
+      "agentRun": "🤖 Agent run",
+      "generic": "⚙️ Background task",
+      "named": "{label} · {name}",
+      "truncated": "… (truncated)"
+    },
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
       "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",
@@ -24,6 +42,26 @@
         "unsupportedVersion": "The watch worker specification version is unsupported.",
         "invalidCommand": "The watch worker command is invalid."
       }
+    },
+    "command": {
+      "workdirMissing": "Working directory does not exist: {cwd}",
+      "supervisorExitedDuringStartup": "Command supervisor exited during startup.",
+      "workerNotRecorded": "The command was not started because its worker could not be recorded.",
+      "supervisorFailed": "Command supervisor failed: {detail}",
+      "unknownSupervisorFailure": "Unknown supervisor failure.",
+      "protocolErrors": {
+        "specTooLarge": "The command specification is too large.",
+        "invalidEncoding": "The command specification is not valid UTF-8.",
+        "invalidJson": "The command specification is not valid JSON.",
+        "unsupportedVersion": "The command specification version is unsupported.",
+        "invalidCommand": "The command is invalid."
+      },
+      "timedOut": "Command timed out after {seconds} second(s).",
+      "exited": "Command exited with status {code}.",
+      "exitedWithDetail": "Command exited with status {code}: {detail}"
+    },
+    "task": {
+      "resultNotRecorded": "The result of this run could not be recorded: the task was reclaimed, repointed or removed while it was running, so its stored state is unchanged."
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",
@@ -37,9 +75,77 @@
         "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
         "refusedConcurrentTurn": "[Avibe Harness] This run was skipped because another turn was already in flight for the same session. A session runs one turn at a time; trigger it again once the current turn finishes.",
         "backendRefresh": "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed while the run was in flight, usually right after an Agent setting was saved. Nothing is wrong with the run itself — trigger it again.",
+        "restarted": "[Avibe Harness] This run was interrupted because the service shut down while it was in flight. The interrupted attempt was recorded and will not be replayed after restart. Trigger it again if the work still needs doing.",
+        "interrupted": "[Avibe Harness] This run was interrupted while it was in flight. The interrupted attempt was recorded and was not requeued. Trigger it again if the work still needs doing.",
         "orphaned": "[Avibe Harness] This run was left marked as running with nothing executing it, most likely because the service restarted while it was in flight. Any output it had already sent is still kept on the run. Run it again if the work still needs doing.",
         "transportUnavailable": "[Avibe Harness] This run stayed queued because its chat platform never reconnected, so it was never delivered. Check the platform connection in Settings, then trigger it again.",
         "queueHoldExpired": "[Avibe Harness] This run stayed queued behind its session's turn queue for too long and was never started. Check whether that session has a stuck turn, then trigger this run again."
+      },
+      "fallbackResult": {
+        "canceled": "The run was canceled before producing a result.",
+        "failed": "The run failed before producing a result."
+      },
+      "sendNowGateUnavailable": "This send-now run could not be admitted because the Session turn gate is unavailable. Retry after the service finishes starting.",
+      "bindingUnresolvedRetry": "Pinned agent session {session} cannot accept a turn ({attempt}/{threshold}). This definition will be paused after {threshold} consecutive unresolvable-target failures. Re-point it with: vibe task update {id} --session-id <id>.",
+      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}."
+    },
+    "notice": {
+      "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
+      "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
+      "commandLine": "Command: {command}",
+      "error": "Error: {error}",
+      "commandExit": "Exit code: {exitCode}",
+      "unknownError": "no error text was recorded",
+      "definition": "Definition: {id}",
+      "paused": "It is currently PAUSED and will not fire again until you resume it: vibe task resume {id}",
+      "taskFinished": "This one-shot task has already finished and will not fire again.",
+      "nextRun": "Next scheduled run: {when}",
+      "rerun": "Re-run it now with: vibe task run {id} — or inspect it with: vibe task show {id}",
+      "watchPaused": "It is currently PAUSED and will not watch again until you resume it: vibe watch resume {id}",
+      "watchRetired": "This watch has already finished and will not watch again.",
+      "watchShow": "Inspect it with: vibe watch show {id}",
+      "rebound": "[Avibe Harness] Scheduled work \"{name}\" lost the agent session it was pinned to, so it was reconnected to a new one and kept running.",
+      "reboundSessions": "Previous session: {previous} → new session: {new}",
+      "reboundSettingsPreserved": "The previous session's workdir, Agent and model were preserved.",
+      "reboundSettingsReset": "The previous session's settings could not be recovered, so this work now runs on the scope defaults.",
+      "reboundRepin": "Pin it to a different session with: vibe task update {id} --session-id <session-id>",
+      "show": "Inspect it with: vibe task show {id}",
+      "definitionDeleted": "This definition no longer exists, so it cannot be re-run, resumed or re-pinned — only this run's record remains.",
+      "runInspect": "Inspect the run with: vibe runs show {id}",
+      "workspaceSession": "Workspace notifications",
+      "workspaceSessionProtected": "This session receives Avibe's workspace failure notifications and cannot be archived or modified.",
+      "workspaceSessionReadOnly": "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
+      "failureClass": "Failure class: {failureClass}",
+      "lastSucceeded": "Last succeeded: {when}",
+      "origin": "Created in: {origin}",
+      "originLink": "Open the message that created it: {url}",
+      "originChannel": "{platform} channel {channel}",
+      "originChannelThread": "{platform} channel {channel} (thread {thread})",
+      "originDirect": "a {platform} direct message with {user}",
+      "platform": {
+        "slack": "Slack",
+        "discord": "Discord",
+        "telegram": "Telegram",
+        "lark": "Feishu/Lark",
+        "wechat": "WeChat",
+        "avibe": "the Avibe Workbench"
+      },
+      "class": {
+        "noTerminalResult": "the turn ended without the agent returning a result",
+        "refusedConcurrentTurn": "another turn was already running in its session",
+        "transportUnavailable": "the platform it delivers to was unreachable",
+        "queueHoldExpired": "it waited in the queue until its hold expired",
+        "deliveryTargetMissing": "the agent session it delivers to no longer exists"
+      },
+      "reason": {
+        "stopped": "it was stopped manually",
+        "backendRefresh": "its Agent runtime was refreshed",
+        "interrupted": "its active execution was interrupted",
+        "evicted": "its session was evicted",
+        "restarted": "the service restarted",
+        "lifetimeTimeout": "its session reached its lifetime limit",
+        "orphaned": "it was left running with nothing executing it",
+        "unknown": "for a reason outside the run itself"
       }
     }
   },
@@ -92,6 +198,63 @@
     }
   },
   "error": {
+    "settingsConflict": {
+      "message": "Agent routing changed while these settings were open.",
+      "hint": "Reload the settings and apply your change again."
+    },
+    "scopeAgentUnavailable": {
+      "message": "Agent `{agent}` is unavailable for this route.",
+      "hint": "Choose an enabled Agent and apply the setting again."
+    },
+    "projectAgentConflict": {
+      "message": "The project's Agent changed while Project Settings was open.",
+      "hint": "Reload Project Settings and apply your change again."
+    },
+    "projectAgentUnavailable": {
+      "message": "Agent `{agent}` is unavailable for this project.",
+      "hint": "Choose an enabled Agent and apply the project setting again."
+    },
+    "sessionFork": {
+      "agentUnavailable": {
+        "message": "The source session's Agent is no longer available for a new fork.",
+        "hint": "Choose an enabled Agent override that uses the same backend."
+      }
+    },
+    "sessionArchived": "This session is archived and can no longer be changed.",
+    "agentArchive": {
+      "agent_builtin": {
+        "message": "Agent `{agent}` is built in and cannot be deleted.",
+        "hint": "Built-in default Agents are created from enabled Backends and cannot be deleted."
+      },
+      "agent_already_archived": {
+        "message": "Agent `{agent}` is already archived.",
+        "hint": "Use the archived Agent's internal name only for existing durable references."
+      },
+      "agent_no_default_replacement": {
+        "message": "The default Agent `{agent}` cannot be archived without another enabled Agent.",
+        "hint": "Keep another enabled Agent available when archiving the current default."
+      }
+    },
+    "agentLifecycle": {
+      "agent_archived_read_only": {
+        "message": "Agent `{agent}` is archived and cannot be edited.",
+        "hint": "Archived Agents are read-only and remain available only to existing durable references."
+      },
+      "agent_reference_metadata_invalid": {
+        "message": "Avibe cannot update Agent references because a task or watch contains invalid metadata.",
+        "hint": "Repair or remove the malformed task or watch metadata, then try again."
+      }
+    },
+    "agentNameValidation": {
+      "agent_name_reserved": {
+        "message": "Agent names starting with `_` are reserved for Avibe.",
+        "hint": "Choose an Agent name that does not start with `_`."
+      },
+      "agent_name_path_separator": {
+        "message": "Agent names cannot contain `/` or `\\`.",
+        "hint": "Choose an Agent name without path separators."
+      }
+    },
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",
@@ -127,6 +290,10 @@
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
     "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",
+    "claudeProcessSignal": "{signal} (signal {number})",
+    "claudeProcessExitCode": "exit code {code}",
+    "claudeProcessTerminated": "Claude Code process terminated ({reason}); the session was reset. Please try your message again.",
+    "claudeCredentialTypeInvalid": "Choose either API key or auth token for the Claude Code credential.",
     "claudeSessionNotFound": "Claude Code could not find the historical session `{sessionId}` in the current working directory:\n`{path}`\n\nClaude Code sessions are scoped to a working directory. This usually means the conversation was resumed after switching workdirs, or the local Claude Code session data changed. Switch back to the original working directory to continue that session, or start a new Claude Code session from the current directory.",
     "sessionGeneric": "An error occurred: {error}",
     "resultAttachmentUploadFailed": "Failed to upload attachment. Want me to split the result into multiple messages?",
@@ -136,7 +303,9 @@
     "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
-    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}"
+    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
+    "opencodeBackendError": "OpenCode error: {error}",
+    "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted."
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
@@ -249,7 +418,7 @@
       "mentionStatusOn": "Require @",
       "mentionStatusOff": "Don't require @",
       "requireMentionLarkNote": "Note: To receive non-mention messages in groups, the Feishu app needs the `im:message.group_msg` permission.",
-      "language": "Language / \u8bed\u8a00",
+      "language": "Language / 语言",
       "languageHint": "Changes the language for bot messages in Slack and the Web UI."
     },
     "cwd": {
@@ -326,12 +495,15 @@
       "directMessage": "Direct Message"
     },
     "new": {
-      "started": "Started a fresh session. Your next message will begin a new conversation."
+      "started": "Started a fresh session. Your next message will begin a new conversation.",
+      "pausedReason": "the bound agent session was cleared by /new",
+      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
+      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
     },
     "clear": {
       "noSessions": "No active sessions to clear.\nSession state has been reset.",
       "cleared": "Cleared active sessions for:\n{details}\nAll sessions reset.",
-      "sessionItem": "{agent} \u2192 {count} session(s)"
+      "sessionItem": "{agent} → {count} session(s)"
     },
     "cwd": {
       "current": "Current Working Directory:",
@@ -380,6 +552,7 @@
       "claudeMethodFallback": "Choose a Claude sign-in source with `/setup claude claudeai` or `/setup claude console`.",
       "resetPrompt": "{backend} looks logged out. Use the button below to restart OAuth setup.",
       "resetPromptPlain": "{backend} looks logged out. Run `/setup {backend}` to restart OAuth setup.",
+      "apiKeyRecoveryPrompt": "{backend} rejected the configured API key. Check the API key and Base URL in Settings, save them, and retry.",
       "manualFallback": "If inline buttons are unavailable, run `/setup {backend}`.",
       "codexInstructions": "Codex setup started.\n\n1. Open this URL in your browser:\n{url}\n\n2. Enter this one-time code:\n`{code}`\n\nThe bot will keep waiting here and confirm when login finishes.",
       "claudeInstructions": "Claude setup started.\n\nOpen this URL in your browser and finish the login flow:\n{url}\n\nWhen the browser callback page shows the final `authorizationCode#state` value, send it back directly in this chat.",
@@ -466,10 +639,29 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
+  "memory": {
+    "cli": {
+      "error": "Memory {operation} failed: {code}",
+      "status": "Memory status: {state}",
+      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "fault": {
+        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
+        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+      },
+      "empty": "No memory items found.",
+      "remembered": "Memory queued.",
+      "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
+    },
+    "alert": {
+      "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",
+      "engine": "Memory processing paused at {occurred_at}: the Memory engine reported an internal error. Try repairing the Memory runtime. Queued captures: {queued}.",
+      "recovered": "Memory processing recovered at {occurred_at}. Queued captures: {queued}."
+    }
+  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
-    "zh": "\u4e2d\u6587"
+    "zh": "中文"
   },
   "desktopRuntime": {
     "checkUpdate": "Updates are delivered with the Avibe desktop app.",
@@ -509,7 +701,7 @@
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
       "discovery_failed": "Could not validate or discover this source.",
-      "invalid_priority_order": "Priority must include every source exactly once.",
+      "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mapping_target_unavailable": "The selected model is unavailable for this backend.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local Model Hub runtime is unavailable.",
@@ -526,7 +718,11 @@
       "switch": "{from_source}: {reason} -> switched to {to_source}",
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
-      "status": "{from_source}: {reason}",
+      "skip": "{from_source}: {reason}; skipped",
+      "mapping_applied": "{from_source} -> {model}: model mapping applied",
+      "channel_switch": "{from_source}: supply channel changed",
+      "needs_action": "{from_source}: {reason}; action required",
+      "supply_interrupted": "{model}: {reason}; model supply interrupted",
       "reason": {
         "quota_exhausted": "quota exhausted",
         "rate_limited": "rate limited",
@@ -534,8 +730,26 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
-        "mapping": "model mapping applied"
+        "mapping": "model mapping applied",
+        "credential_expired": "credential expired",
+        "credential_revoked": "credential revoked",
+        "balance_exhausted": "balance exhausted",
+        "account_banned": "account unavailable",
+        "permission_denied": "request permission denied",
+        "unclassified_error": "unclassified source error",
+        "no_enabled_source": "no source is enabled",
+        "no_eligible_source": "no source is eligible",
+        "model_unsupported": "no source supports this model"
       }
+    },
+    "launch": {
+      "retry": "The next turn has already switched routes. Retry directly.",
+      "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
+      "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
+      "native_cli_unavailable": "CLI login is not available in this process",
+      "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
+      "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
+      "model_unsupported": "No source supports model {model}. Open Models to configure one."
     }
   },
   "remote_access": {

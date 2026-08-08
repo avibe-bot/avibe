@@ -91,7 +91,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
   const meta = statusMeta(node.status);
   const background = isBackground(node);
   const timeLabel = node.live
-    ? formatElapsed(node.elapsed_seconds)
+    ? formatElapsed(node.elapsed_seconds, t)
     : formatRelativeTime(node.last_active_at ?? node.created_at, t);
 
   const callerTitle = (sessionId: string): string => {
@@ -198,7 +198,11 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
       <div className="flex flex-col gap-1">
         <div className="text-[16px] font-bold text-foreground">{nodeDisplayTitle(node)}</div>
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
-          {node.agent_name && <span className="font-medium text-foreground">{node.agent_name}</span>}
+          {(node.agent_display_name || node.agent_name) && (
+            <span className="font-medium text-foreground">
+              {node.agent_display_name || node.agent_name}
+            </span>
+          )}
           {node.agent_backend && (
             <span className="rounded border border-border-strong bg-foreground/[0.04] px-1 font-mono text-[9px] font-bold uppercase">
               {node.agent_backend}
@@ -287,7 +291,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
                 <code className="font-mono text-foreground">{run.id}</code>
                 <span className="text-muted">{t(statusMeta(runStatus(run.status)).labelKey)}</span>
                 <span className="flex-1" />
-                <span className="font-mono text-[10px] text-muted">{formatElapsed(runElapsedSeconds(run))}</span>
+                <span className="font-mono text-[10px] text-muted">{formatElapsed(runElapsedSeconds(run), t)}</span>
               </Link>
             ))}
           </div>

@@ -107,6 +107,7 @@ def test_group_message_uses_channel_require_mention_override() -> None:
     )
 
     bot.on_message_callback.assert_awaited_once()
+    assert bot.on_message_callback.await_args.args[0].is_ordinary_text is True
     assert bot.on_message_callback.await_args.args[1] == "hello team"
 
 

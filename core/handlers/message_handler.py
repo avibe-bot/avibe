@@ -1,5 +1,6 @@
 """Message routing and Agent communication handlers"""
 
+import asyncio
 import logging
 import inspect
 from datetime import datetime
@@ -12,8 +13,16 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.message_output import terminal_output_for, terminal_turn_output
+from core.message_output import (
+    HARNESS_PROMPT_ECHO_SPEC_KEY,
+    terminal_output_for,
+    terminal_turn_output,
+)
 from core.message_context import resolve_context_thread_id
+from core.native_dispatch_phase import (
+    DISPATCH_PHASE_PREWRITE,
+    set_dispatch_phase,
+)
 from modules.agents.base import AgentRequest
 from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
@@ -52,10 +61,36 @@ class MessageHandler(BaseHandler):
         self.session_manager = controller.session_manager
         self.session_handler = None  # Will be set after creation
         self.receiver_tasks = controller.receiver_tasks
+        self._memory_capture_tasks: set[asyncio.Task[Any]] = set()
 
     def set_session_handler(self, session_handler):
         """Set reference to session handler"""
         self.session_handler = session_handler
+
+    def _track_memory_capture_task(self, task: asyncio.Task[Any]) -> None:
+        """Retain a best-effort capture until asyncio reports its completion."""
+
+        self._memory_capture_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task[Any]) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Memory capture task failed", exc_info=True)
+            finally:
+                self._memory_capture_tasks.discard(done_task)
+
+        task.add_done_callback(_on_done)
+
+    async def drain_memory_capture_tasks(self) -> None:
+        """Settle captures accepted before controller shutdown closes Memory."""
+
+        while self._memory_capture_tasks:
+            tasks = tuple(self._memory_capture_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._memory_capture_tasks.difference_update(tasks)
 
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
@@ -79,10 +114,56 @@ class MessageHandler(BaseHandler):
         prepared.platform_specific = prepared_payload
         return prepared
 
+    @staticmethod
+    def _processed_message_dedup_keys(
+        context: MessageContext,
+        thread_id: str,
+        message_id: str,
+    ) -> tuple[str, str, str]:
+        """Namespace native event ids before claiming the cross-platform dedup record."""
+
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        platform = context.platform or payload.get("platform")
+        if not isinstance(platform, str) or not platform:
+            return str(context.channel_id), thread_id, message_id
+        prefix = f"im:{platform}:"
+        return f"{prefix}{context.channel_id}", f"{prefix}{thread_id}", f"{prefix}{message_id}"
+
+    def _claimed_before_dedup_namespacing(
+        self,
+        dedup_keys: tuple[str, str, str],
+        legacy_keys: tuple[str, str, str],
+    ) -> bool:
+        """Honor dedup rows a previous version wrote without the platform prefix.
+
+        A runtime that processed an IM event before namespaced keys shipped stored
+        the raw native ids. When the platform redelivers such an event after the
+        upgrade — a Slack event that ran but was never acked, a Socket Mode
+        reconnect — the namespaced lookup misses and the turn would be dispatched
+        a second time. This check is read-only: the claim below always uses the
+        namespaced key, so legacy rows are neither written nor migrated. They age
+        out with the existing per-thread dedup retention.
+        """
+
+        if dedup_keys == legacy_keys:
+            return False
+        checker = getattr(self.sessions, "is_message_already_processed", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(*legacy_keys))
+        except Exception:
+            logger.debug(
+                "Legacy dedup lookup failed; continuing with the namespaced claim",
+                exc_info=True,
+            )
+            return False
+
     async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
+        dispatch_evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
         # Tracks whether we actually dispatched an agent turn (whose reply
         # streams in asynchronously). If we leave this method WITHOUT having
         # dispatched — early returns, missing/disabled backend, errors — no
@@ -91,11 +172,26 @@ class MessageHandler(BaseHandler):
         agent_dispatched = False
         try:
             is_human = source == self.TURN_SOURCE_HUMAN
+            durable_delivery_owned = bool(
+                (context.platform_specific or {}).get("delivery_ids")
+            )
+            delivery_manager = getattr(self.controller, "session_turns", None)
+            durable_ingress_enabled = bool(
+                is_human
+                and callable(getattr(delivery_manager, "deliver", None))
+            )
             control_message = self._get_control_message(context, message) if is_human else message
 
             # Record user activity for auto-update idle detection
             if is_human and hasattr(self.controller, "update_checker"):
                 self.controller.update_checker.record_activity()
+
+            if (
+                durable_ingress_enabled
+                and not durable_delivery_owned
+                and self._is_duplicate_human_delivery(context)
+            ):
+                return None
 
             # If message is empty AND no files attached (e.g., user just @mentioned bot without text),
             # trigger the /start command instead of sending empty message to agent
@@ -105,34 +201,27 @@ class MessageHandler(BaseHandler):
                     await self.controller.command_handler.handle_start(context, "")
                 return None
 
-            if is_human:
-                # Claim the message before processing so duplicate IM deliveries or
-                # parallel runtime instances cannot start separate agent turns.
-                message_ts = context.message_id
-                thread_ts = context.thread_id or context.message_id
-                if message_ts and thread_ts:
-                    try_record = getattr(self.sessions, "try_record_processed_message", None)
-                    if callable(try_record):
-                        recorded = try_record(context.channel_id, thread_ts, message_ts)
-                    else:
-                        recorded = not self.sessions.is_message_already_processed(
-                            context.channel_id,
-                            thread_ts,
-                            message_ts,
-                        )
-                        if recorded:
-                            self.sessions.record_processed_message(context.channel_id, thread_ts, message_ts)
-                    if not recorded:
-                        logger.info(
-                            f"Skipping already processed message: channel={context.channel_id}, "
-                            f"thread={thread_ts}, message={message_ts}"
-                        )
-                        return None
+            if (
+                is_human
+                and not durable_delivery_owned
+                and not durable_ingress_enabled
+            ):
+                if not self._claim_native_human_event(context):
+                    return None
 
-            if is_human and not has_files:
+            if is_human and not durable_delivery_owned and not has_files:
                 maybe_consume_setup_reply = getattr(self.controller.agent_auth_service, "maybe_consume_setup_reply", None)
                 if callable(maybe_consume_setup_reply):
-                    consumed = await maybe_consume_setup_reply(context, control_message)
+                    kwargs = {}
+                    if durable_ingress_enabled:
+                        kwargs["claim_native_event"] = lambda: self._claim_native_human_event(
+                            context
+                        )
+                    consumed = await maybe_consume_setup_reply(
+                        context,
+                        control_message,
+                        **kwargs,
+                    )
                     if consumed:
                         return None
 
@@ -140,7 +229,16 @@ class MessageHandler(BaseHandler):
 
             # Allow "stop" shortcut inside Slack threads
             active_thread_id = resolve_context_thread_id(context) or context.thread_id
-            if is_human and active_thread_id and control_message.strip().lower() in ["stop", "/stop"]:
+            if (
+                is_human
+                and not durable_delivery_owned
+                and active_thread_id
+                and control_message.strip().lower() in ["stop", "/stop"]
+            ):
+                if durable_ingress_enabled and not self._claim_native_human_event(
+                    context
+                ):
+                    return None
                 if await self._handle_inline_stop(context):
                     return None
 
@@ -148,23 +246,23 @@ class MessageHandler(BaseHandler):
                 raise RuntimeError("Session handler not initialized")
 
             context = await self._prepare_turn_context(context, source)
+            set_dispatch_phase(
+                context,
+                DISPATCH_PHASE_PREWRITE,
+                evidence=dispatch_evidence,
+            )
 
-            # Mirror the originating prompt into the workbench messages table
-            # before we kick off the agent, so the transcript shows the turn
-            # that produced the reply. Human turns are source='user'; harness
-            # turns (scheduled task / watch / webhook) use a first-class harness
-            # author/type so they cannot be mistaken for human input. Wrapped in
-            # try/except inside the helper so a mirror failure can't break the turn.
-            if source == self.TURN_SOURCE_HUMAN:
-                from core.message_mirror import mirror_inbound
+            # Durable Deliveries materialize their Message only after exact native
+            # acceptance. Legacy direct turns still mirror at this boundary.
+            if not durable_delivery_owned and not durable_ingress_enabled:
+                if source == self.TURN_SOURCE_HUMAN:
+                    from core.message_mirror import mirror_inbound
 
-                mirror_inbound(context, control_message)
-            else:
-                # Harness turns retain a complete local transcript even when their
-                # session is background-only; visibility gates outward delivery.
-                from core.message_mirror import mirror_harness_inbound
+                    mirror_inbound(context, control_message)
+                else:
+                    from core.message_mirror import mirror_harness_inbound
 
-                mirror_harness_inbound(context, message)
+                    mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             payload = dict(context.platform_specific or {})
@@ -174,6 +272,19 @@ class MessageHandler(BaseHandler):
                 context, source=source
             )
             context.platform_specific = payload
+
+            # Memory capture is deliberately outside the agent turn. Native IM
+            # dedup has already claimed this message and the stable base session
+            # is now known, so the controller can make one best-effort capture
+            # decision without delaying dispatch.
+            if is_human:
+                capture_memory = getattr(self.controller, "capture_user_memory", None)
+                if callable(capture_memory):
+                    capture_task = asyncio.create_task(
+                        capture_memory(context, control_message, base_session_id),
+                        name="memory-capture",
+                    )
+                    self._track_memory_capture_task(capture_task)
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -204,11 +315,26 @@ class MessageHandler(BaseHandler):
                 else self._get_settings_manager(context).get_channel_routing(settings_key)
             )
             requested_vibe_agent = platform_payload.get("vibe_agent_name")
+            requested_vibe_agent_id = platform_payload.get("vibe_agent_id")
             session_target = platform_payload.get("agent_session_target")
+            scope_agent_name = getattr(routing, "agent_name", None) if routing else None
+            durable_agent_identity = bool(requested_vibe_agent_id or scope_agent_name)
+            if not requested_vibe_agent_id and isinstance(session_target, dict):
+                requested_vibe_agent_id = session_target.get("agent_id")
             if not requested_vibe_agent and isinstance(session_target, dict):
                 requested_vibe_agent = session_target.get("agent_name")
+            if isinstance(session_target, dict) and (
+                session_target.get("agent_id") or session_target.get("agent_name")
+            ):
+                durable_agent_identity = True
             if not requested_vibe_agent:
                 requested_vibe_agent = resolved_target.get("agent_name")
+            if not requested_vibe_agent_id:
+                requested_vibe_agent_id = resolved_target.get("agent_id")
+            if resolved_target and (
+                resolved_target.get("agent_id") or resolved_target.get("agent_name")
+            ):
+                durable_agent_identity = True
             session_agent_backend = (
                 str(session_target["agent_backend"])
                 if isinstance(session_target, dict) and session_target.get("agent_backend")
@@ -240,7 +366,12 @@ class MessageHandler(BaseHandler):
                     except Exception:
                         logger.debug("find_session_for_anchor failed; falling back to routing", exc_info=True)
                 if existing_thread:
-                    requested_vibe_agent = existing_thread.get("agent_name") or requested_vibe_agent
+                    existing_agent_id = existing_thread.get("agent_id")
+                    existing_agent_name = existing_thread.get("agent_name")
+                    requested_vibe_agent_id = existing_agent_id or requested_vibe_agent_id
+                    requested_vibe_agent = existing_agent_name or requested_vibe_agent
+                    if existing_agent_id or existing_agent_name:
+                        durable_agent_identity = True
                     session_agent_backend = existing_thread.get("agent_backend") or session_agent_backend
                     # Scope is only placement. A persisted session's visibility is
                     # the single outward-delivery gate, including ordinary IM turns
@@ -251,14 +382,18 @@ class MessageHandler(BaseHandler):
                     context.platform_specific = platform_payload
             resolve_vibe_agent = getattr(self.controller, "resolve_vibe_agent_for_context", None)
             vibe_agent = None
-            if requested_vibe_agent and callable(resolve_vibe_agent):
-                vibe_agent = resolve_vibe_agent(
-                    context,
-                    override_agent_name=requested_vibe_agent,
-                    required=False,
-                )
-            elif callable(resolve_vibe_agent) and not session_agent_backend:
-                vibe_agent = resolve_vibe_agent(context, required=False)
+            if (requested_vibe_agent_id or requested_vibe_agent) and callable(resolve_vibe_agent):
+                resolve_kwargs = {
+                    "override_agent_name": requested_vibe_agent,
+                    "required": durable_agent_identity,
+                }
+                if requested_vibe_agent_id:
+                    resolve_kwargs["override_agent_id"] = requested_vibe_agent_id
+                vibe_agent = resolve_vibe_agent(context, **resolve_kwargs)
+            elif callable(resolve_vibe_agent) and (
+                durable_agent_identity or not session_agent_backend
+            ):
+                vibe_agent = resolve_vibe_agent(context, required=durable_agent_identity)
             if vibe_agent:
                 agent_name = vibe_agent.backend
             elif session_agent_backend:
@@ -315,6 +450,27 @@ class MessageHandler(BaseHandler):
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            # A session may pin a setting to NOTHING on purpose. The cascade above
+            # cannot express that: every `or` reads NULL as "inherit", which is the
+            # correct reading for the whole existing table and the WRONG one for a
+            # preserved `create_once` rebind, whose whole point is that the session
+            # it replaced pinned no model and must keep pinning none (D3). Only
+            # sessions carrying the explicit-override marker are re-read here, so
+            # the global meaning of NULL is untouched -- reinterpreting it would
+            # silently re-route every session that is merely inheriting.
+            explicit_overrides: set[str] = set()
+            if isinstance(session_target, dict):
+                session_meta = session_target.get("metadata")
+                if isinstance(session_meta, dict):
+                    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+                    marked = session_meta.get(SESSION_SETTINGS_OVERRIDE_KEY)
+                    if isinstance(marked, (list, tuple, set)):
+                        explicit_overrides = {str(name) for name in marked}
+            if "model" in explicit_overrides:
+                effective_model = session_target.get("model")
+            if "reasoning_effort" in explicit_overrides:
+                effective_reasoning_effort = session_target.get("reasoning_effort")
             # Materialize the resolved route into EMPTY workbench session
             # columns NOW, at turn start. A session created on an inherited
             # default carries NULLs (dispatch resolves the live Agent default);
@@ -345,8 +501,35 @@ class MessageHandler(BaseHandler):
             subagent_name = None
             subagent_model = None
             subagent_reasoning_effort = None
+            delivery_context = platform_payload.get("delivery_admission_context")
+            restored_route = (
+                delivery_context.get("message_handler_route")
+                if durable_delivery_owned and isinstance(delivery_context, dict)
+                else None
+            )
+            restored_route = restored_route if isinstance(restored_route, dict) else None
 
-            if agent_name in ["opencode", "claude", "codex"]:
+            if durable_delivery_owned:
+                self._restore_reaction_target(context, delivery_context)
+
+            if restored_route is not None:
+                base_session_id = str(
+                    restored_route.get("base_session_id") or base_session_id
+                )
+                composite_key = str(
+                    restored_route.get("composite_session_id") or composite_key
+                )
+                subagent_name = restored_route.get("subagent_name") or None
+                matched_prefix = restored_route.get("subagent_key") or None
+                subagent_model = restored_route.get("subagent_model") or None
+                subagent_reasoning_effort = (
+                    restored_route.get("subagent_reasoning_effort") or None
+                )
+                if restored_route.get("routing_subagent"):
+                    spec = dict(context.platform_specific or {})
+                    spec["routing_subagent"] = subagent_name
+                    context.platform_specific = spec
+            elif agent_name in ["opencode", "claude", "codex"]:
                 from modules.agents.subagent_router import (
                     load_codex_subagent,
                     load_claude_subagent,
@@ -407,30 +590,125 @@ class MessageHandler(BaseHandler):
                         matched_prefix = parsed.name
                         subagent_message = parsed.message
 
-            if subagent_name and subagent_message:
-                message = subagent_message
-                if agent_name in {"claude", "codex"}:
-                    base_session_id = f"{base_session_id}:{subagent_name}"
+            if restored_route is None:
+                if subagent_name and subagent_message:
+                    message = subagent_message
+                    if agent_name in {"claude", "codex"}:
+                        base_session_id = f"{base_session_id}:{subagent_name}"
+                        composite_key = f"{base_session_id}:{working_path}"
+                elif agent_name in {"claude", "codex"} and routing_agent and not subagent_name:
+                    # Update session IDs for routing-based agent to match SessionHandler
+                    base_session_id = f"{base_session_id}:{routing_agent}"
                     composite_key = f"{base_session_id}:{working_path}"
-            elif agent_name in {"claude", "codex"} and routing_agent and not subagent_name:
-                # Update session IDs for routing-based agent to match SessionHandler
-                base_session_id = f"{base_session_id}:{routing_agent}"
-                composite_key = f"{base_session_id}:{working_path}"
-                subagent_name = routing_agent
-                # Flag the routing-default subagent so the backends' reserved-native
-                # resume shortcut treats it like an explicit subagent: this namespaced
-                # base has its OWN thread, so resuming the MAIN session's reserved
-                # native here would wrongly replay the main transcript under the
-                # subagent on the first turn after the subagent is enabled (Codex P2).
-                spec = dict(context.platform_specific or {})
-                spec["routing_subagent"] = routing_agent
-                context.platform_specific = spec
+                    subagent_name = routing_agent
+                    # Flag the routing-default subagent so the backends' reserved-native
+                    # resume shortcut treats it like an explicit subagent: this namespaced
+                    # base has its OWN thread, so resuming the MAIN session's reserved
+                    # native here would wrongly replay the main transcript under the
+                    # subagent on the first turn after the subagent is enabled (Codex P2).
+                    spec = dict(context.platform_specific or {})
+                    spec["routing_subagent"] = routing_agent
+                    context.platform_specific = spec
+
+            from core.message_priority import delivery_intent_for_trigger
+
+            delivery_intent = delivery_intent_for_trigger("im")
+            if (
+                restored_route is None
+                and agent_name == "opencode"
+                and subagent_name
+                and subagent_message is not None
+            ):
+                # OpenCode subagents share the main Session anchor. They need a
+                # fresh Turn so the persisted route can select the requested
+                # native subagent instead of text-steering the active main Turn.
+                delivery_intent = "queue"
 
             if agent_name in {"claude", "codex"} and subagent_name:
                 spec = dict(context.platform_specific or {})
                 spec["backend_base_session_id"] = base_session_id
                 spec["backend_composite_session_id"] = composite_key
                 context.platform_specific = spec
+
+            durable_dispatch_text = None
+            if durable_ingress_enabled and not durable_delivery_owned:
+                durable_dispatch_text = await self._prepend_message_metadata(
+                    context,
+                    message,
+                    include_user_info=True,
+                )
+
+            # Resolve remote attachments before admission so a queued Delivery
+            # owns stable local media references and can survive a restart.
+            processed_files = None
+            attachment_errors: List[str] = []
+            downloaded_attachment_paths: list[str] = []
+            if context.files:
+                existing_local_paths = {
+                    str(attachment.local_path)
+                    for attachment in context.files
+                    if isinstance(attachment, FileAttachment)
+                    and attachment.local_path
+                }
+                processed_files, attachment_errors = await self._process_file_attachments(
+                    context,
+                    working_path,
+                )
+                if processed_files:
+                    downloaded_attachment_paths = [
+                        str(attachment.local_path)
+                        for attachment in processed_files
+                        if isinstance(attachment, FileAttachment)
+                        and attachment.local_path
+                        and str(attachment.local_path) not in existing_local_paths
+                    ]
+                    logger.info(
+                        "Processed %s file attachments for message",
+                        len(processed_files),
+                    )
+
+            if durable_ingress_enabled and not durable_delivery_owned:
+                assert durable_dispatch_text is not None
+                admitted = await self._admit_human_delivery(
+                    manager=delivery_manager,
+                    context=context,
+                    dispatch_text=self._append_attachment_errors(
+                        durable_dispatch_text,
+                        attachment_errors,
+                    ),
+                    display_text=control_message,
+                    processed_files=processed_files or [],
+                    session_key=session_key,
+                    agent_name=agent_name,
+                    session_anchor=base_session_id,
+                    working_path=working_path,
+                    vibe_agent=vibe_agent,
+                    delivery_intent=delivery_intent,
+                    downloaded_attachment_paths=downloaded_attachment_paths,
+                    admission_context={
+                        # The reaction target is not always the sender's own
+                        # message (a quick reply reacts on its bot echo), and it
+                        # cannot be rebuilt from the Delivery snapshot.
+                        "processing_indicator_message_id": self._reaction_target(
+                            context
+                        ),
+                        "message_handler_route": {
+                            "base_session_id": base_session_id,
+                            "composite_session_id": composite_key,
+                            "subagent_name": subagent_name,
+                            "subagent_key": matched_prefix,
+                            "subagent_model": subagent_model,
+                            "subagent_reasoning_effort": subagent_reasoning_effort,
+                            "routing_subagent": bool(
+                                (context.platform_specific or {}).get(
+                                    "routing_subagent"
+                                )
+                            ),
+                        }
+                    },
+                )
+                if admitted:
+                    return None
 
             if is_human:
                 # The concise status bubble (footer-only at turn start) is now
@@ -454,20 +732,34 @@ class MessageHandler(BaseHandler):
                 # removed here immediately, leaving no processing indicator
                 # for the entire duration of the subagent run.
 
-            # Process file attachments if present
-            processed_files = None
-            attachment_errors: List[str] = []
-            if context.files:
-                processed_files, attachment_errors = await self._process_file_attachments(context, working_path)
-                if processed_files:
-                    logger.info(f"Processed {len(processed_files)} file attachments for message")
+            # A background task's prompt is only visible in the Workbench transcript
+            # (the ``harness`` Message row); stage it so the IM conversation gets the
+            # question the following reply answers. Staged here because this point is
+            # past every ``suppress_delivery`` resolution (the ``agent_run_target`` and
+            # thread-anchor branches settle it only after ``get_session_info``) and
+            # covers the durable Delivery path too, which skips the mirror branch
+            # above; the send itself happens at the real turn start, once the runtime
+            # gate is held (see ``_stage_harness_prompt_echo``).
+            # ``control_message`` rather than ``message``: subagent routing above
+            # strips a matched ``name:`` prefix off ``message``, and the echo must show
+            # the prompt as it was stored (which is what the Workbench row shows too),
+            # including the prefix that names the requested subagent.
+            if source != self.TURN_SOURCE_HUMAN:
+                self._stage_harness_prompt_echo(context, control_message)
 
+            user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])
             if audio_transcripts:
                 message = append_audio_transcripts_to_message(message, audio_transcripts)
+                user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
-            message = await self._prepend_message_metadata(context, message, include_user_info=is_human)
+            if not (is_human and durable_delivery_owned):
+                message = await self._prepend_message_metadata(
+                    context,
+                    message,
+                    include_user_info=is_human,
+                )
 
             message = self._append_attachment_errors(message, attachment_errors)
 
@@ -483,6 +775,7 @@ class MessageHandler(BaseHandler):
             request = self._build_agent_request(
                 context=context,
                 message=message,
+                user_message=user_message,
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -510,7 +803,13 @@ class MessageHandler(BaseHandler):
                 # session PK exists (mirror_inbound runs above, pre-dispatch); the PK
                 # now lives on platform_specific['agent_session_id'] — the same field
                 # the agent reply uses — so a session's transcript stays complete.
-                if is_human and context.platform and context.platform != "avibe" and context.message_id:
+                if (
+                    is_human
+                    and not durable_delivery_owned
+                    and context.platform
+                    and context.platform != "avibe"
+                    and context.message_id
+                ):
                     bound_session_id = (context.platform_specific or {}).get("agent_session_id")
                     if bound_session_id:
                         from core.message_mirror import link_inbound_message_session
@@ -583,6 +882,323 @@ class MessageHandler(BaseHandler):
                 if callable(mark_complete):
                     mark_complete(context)
 
+    async def _admit_human_delivery(
+        self,
+        *,
+        manager: Any,
+        context: MessageContext,
+        dispatch_text: str,
+        display_text: str,
+        processed_files: List[FileAttachment],
+        session_key: str,
+        agent_name: str,
+        session_anchor: str,
+        working_path: str,
+        vibe_agent: Any,
+        delivery_intent: str,
+        downloaded_attachment_paths: List[str],
+        admission_context: dict[str, Any],
+    ) -> bool:
+        """Transfer one IM input to its durable owner before native work."""
+
+        session_id = self.session_handler.ensure_agent_session_id(
+            context,
+            session_key=session_key,
+            agent_name=agent_name,
+            session_anchor=session_anchor,
+            working_path=working_path,
+            vibe_agent_id=getattr(vibe_agent, "id", None),
+            vibe_agent_name=getattr(vibe_agent, "name", None),
+        )
+        if not session_id:
+            raise RuntimeError("Could not reserve the Agent Session before delivery")
+
+        from core.message_priority import priority_for_delivery_intent
+        from core.session_turns import DeliveryRequest
+        from storage import message_deliveries, media_service, messages_service
+        from storage.agent_session_rows import reserve_write_lock
+        from storage.db import get_cached_sqlite_engine
+
+        priority = priority_for_delivery_intent(delivery_intent)
+        scope_id = None
+        request = None
+        duplicate_delivery_id = None
+        try:
+            with get_cached_sqlite_engine().begin() as conn:
+                from core.message_mirror import _scope_id_for_session
+
+                reserve_write_lock(conn)
+                scope_id = _scope_id_for_session(conn, session_id)
+                platform = str(context.platform or "")
+                native_message_id = str(context.message_id or "").strip()
+                if native_message_id and messages_service.native_message_exists(
+                    conn,
+                    platform=platform,
+                    scope_id=scope_id,
+                    native_message_id=native_message_id,
+                ):
+                    duplicate_delivery_id = ""
+                elif native_message_id:
+                    existing = message_deliveries.get_delivery_by_native_identity(
+                        conn,
+                        platform=platform,
+                        native_message_id=native_message_id,
+                        scope_id=scope_id,
+                        session_id=session_id,
+                        normalize_legacy=True,
+                    )
+                    if existing is not None:
+                        duplicate_delivery_id = str(existing["id"])
+
+                if duplicate_delivery_id is None:
+                    attachment_refs: list[dict[str, Any]] = []
+                    for attachment in processed_files:
+                        if not attachment.local_path:
+                            continue
+                        token = media_service.register(
+                            conn,
+                            scope_id=scope_id,
+                            session_id=session_id,
+                            kind=(
+                                "image"
+                                if str(attachment.mimetype or "").startswith("image/")
+                                else "file"
+                            ),
+                            source="im_inbound",
+                            local_path=attachment.local_path,
+                            file_name=attachment.name,
+                            content_type=attachment.mimetype,
+                        )
+                        attachment_refs.append(
+                            {
+                                "token": token,
+                                "name": attachment.name,
+                                "mimetype": attachment.mimetype,
+                                "size": attachment.size,
+                            }
+                        )
+
+                    if not message_deliveries.has_substantive_input(
+                        dispatch_text,
+                        has_attachments=bool(attachment_refs),
+                    ):
+                        raise ValueError(
+                            "Message contains no deliverable text or attachment"
+                        )
+
+                    content = {"text": display_text}
+                    if attachment_refs:
+                        content["attachments"] = attachment_refs
+                    request = DeliveryRequest(
+                        session_id=session_id,
+                        priority=priority,
+                        content=dispatch_text,
+                        has_content=True,
+                        delivery_id=message_deliveries.new_delivery_id(),
+                        scope_id=scope_id,
+                        platform=platform,
+                        source="user",
+                        author="user",
+                        message_type="user",
+                        author_id=str(context.user_id or "").strip() or None,
+                        display_text=display_text,
+                        content_json=content,
+                        admission_context=admission_context,
+                        native_message_id=native_message_id or None,
+                        parent_native_message_id=(
+                            str(context.thread_id or "").strip() or None
+                        ),
+                    )
+                    reserved = manager.reserve_delivery(conn, request)
+                    if str(reserved["id"]) != request.delivery_id:
+                        raise RuntimeError(
+                            "native Delivery appeared after writer reservation"
+                        )
+        except Exception:
+            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            raise
+
+        if duplicate_delivery_id is not None:
+            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            if duplicate_delivery_id:
+                payload = dict(context.platform_specific or {})
+                payload["delivery_id"] = duplicate_delivery_id
+                context.platform_specific = payload
+            return True
+
+        if request is None:
+            raise RuntimeError("Delivery reservation did not produce a request")
+        result = await manager.deliver(request, context=context)
+        payload = dict(context.platform_specific or {})
+        payload["delivery_id"] = result.delivery_id
+        context.platform_specific = payload
+        if result.state in {
+            "queued",
+            "pending_steer",
+            "steering",
+            "reconciling_steer",
+        }:
+            from core.inbox_events import bus
+
+            bus.publish("queue.updated", {"session_id": session_id})
+        # This is the only place that knows an input's admission outcome: a
+        # Delivery that did not start its own turn returns here and the caller
+        # stops, so without a receipt the user sees nothing at all for every
+        # message sent while a turn is running.
+        await self._ack_delivery_admission(context, result)
+        return True
+
+    @staticmethod
+    def _reaction_target(context: MessageContext) -> Optional[str]:
+        """The message this input's reactions belong on, when it is not its own.
+
+        A quick-reply callback is dispatched with ``message_id=None`` (to bypass
+        platform event dedup) and reacts on its bot echo instead. The echo id
+        only exists in this process, so it has to travel with the Delivery.
+        """
+
+        target = (context.platform_specific or {}).get(
+            "processing_indicator_message_id"
+        )
+        return str(target) if target else None
+
+    @staticmethod
+    def _restore_reaction_target(
+        context: MessageContext,
+        delivery_context: Any,
+    ) -> None:
+        """Put a Delivery's reaction target back on its rehydrated context.
+
+        Durable hydration restores only the native message id, so without this a
+        promoted quick-reply Delivery computes a different receipt key: its 👌
+        would never be cleared and its own indicator would target the synthetic
+        delivery id instead of the echo.
+        """
+
+        if not isinstance(delivery_context, dict):
+            return
+        target = delivery_context.get("processing_indicator_message_id")
+        if not target:
+            return
+        spec = dict(context.platform_specific or {})
+        spec["processing_indicator_message_id"] = str(target)
+        context.platform_specific = spec
+
+    async def _ack_delivery_admission(self, context: MessageContext, result: Any) -> None:
+        """Report one admission outcome back to the sender, best effort."""
+
+        indicator = getattr(self.controller, "processing_indicator", None)
+        ack = getattr(indicator, "ack_delivery_state", None)
+        if not callable(ack):
+            return
+        try:
+            await ack(
+                context,
+                state=str(getattr(result, "state", "") or ""),
+                admission=str(getattr(result, "admission", "") or ""),
+            )
+        except Exception as err:
+            logger.debug("Failed to acknowledge delivery admission: %s", err)
+
+    @staticmethod
+    def _cleanup_unowned_attachment_paths(paths: List[str]) -> None:
+        from pathlib import Path
+
+        for path in dict.fromkeys(str(value) for value in paths if value):
+            try:
+                Path(path).unlink(missing_ok=True)
+            except Exception as err:
+                logger.warning("Failed to remove unowned attachment %s: %s", path, err)
+
+    def _is_duplicate_human_delivery(self, context: MessageContext) -> bool:
+        """Reject a retried native event before pre-admission side effects."""
+
+        if self._native_human_event_processed(context):
+            return True
+        platform = str(context.platform or "").strip()
+        native_message_id = str(context.message_id or "").strip()
+        if not platform or not native_message_id:
+            return False
+        try:
+            from storage import message_deliveries, messages_service
+            from storage.db import get_cached_sqlite_engine
+            from core.message_mirror import scope_id_for_context
+
+            scope_id = scope_id_for_context(context)
+
+            with get_cached_sqlite_engine().connect() as conn:
+                if messages_service.native_message_exists(
+                    conn,
+                    platform=platform,
+                    scope_id=scope_id,
+                    native_message_id=native_message_id,
+                ):
+                    return True
+                return bool(
+                    message_deliveries.get_delivery_by_native_identity(
+                        conn,
+                        platform=platform,
+                        native_message_id=native_message_id,
+                        scope_id=scope_id,
+                    )
+                    is not None
+                )
+        except Exception:
+            logger.exception(
+                "Could not preflight native Message dedupe for %s:%s",
+                platform,
+                native_message_id,
+            )
+            return False
+
+    def _native_human_event_processed(self, context: MessageContext) -> bool:
+        message_ts = context.message_id
+        thread_ts = context.thread_id or context.message_id
+        if not message_ts or not thread_ts:
+            return False
+        legacy_keys = (str(context.channel_id), str(thread_ts), str(message_ts))
+        dedup_keys = self._processed_message_dedup_keys(context, str(thread_ts), str(message_ts))
+        checker = getattr(self.sessions, "has_processed_message", None)
+        if callable(checker):
+            if checker(*dedup_keys):
+                return True
+            return self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys)
+        checker = getattr(self.sessions, "is_message_already_processed", None)
+        if not callable(checker):
+            return False
+        if checker(*dedup_keys):
+            return True
+        return self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys)
+
+    def _claim_native_human_event(self, context: MessageContext) -> bool:
+        """Fence a native control input that intentionally creates no Delivery."""
+
+        message_ts = context.message_id
+        thread_ts = context.thread_id or context.message_id
+        if not message_ts or not thread_ts:
+            return True
+        legacy_keys = (str(context.channel_id), str(thread_ts), str(message_ts))
+        dedup_keys = self._processed_message_dedup_keys(context, str(thread_ts), str(message_ts))
+        if self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys):
+            return False
+        try_record = getattr(self.sessions, "try_record_processed_message", None)
+        if callable(try_record):
+            recorded = try_record(*dedup_keys)
+        else:
+            recorded = not self.sessions.is_message_already_processed(*dedup_keys)
+            if recorded:
+                self.sessions.record_processed_message(
+                    *dedup_keys,
+                )
+        if not recorded:
+            logger.info(
+                "Skipping already processed message: channel=%s, thread=%s, message=%s",
+                context.channel_id,
+                thread_ts,
+                message_ts,
+            )
+        return bool(recorded)
+
     @staticmethod
     def _build_agent_request(**kwargs: Any) -> AgentRequest:
         try:
@@ -635,6 +1251,25 @@ class MessageHandler(BaseHandler):
             await self._get_im_client(context).send_message(context, echo)
         except Exception as err:
             logger.debug("Failed to echo audio transcript: %s", err, exc_info=True)
+
+    def _stage_harness_prompt_echo(self, context: MessageContext, message: str) -> None:
+        """Stage the Harness prompt for the outward echo at turn start.
+
+        Staged instead of sent here: ``AgentService.handle_message`` blocks on the
+        runtime turn gate before this turn really starts, so posting now would
+        announce a queued task's prompt while another turn is still working — and
+        would leave that prompt behind if the queued turn is cancelled.
+        ``AgentService._begin_turn_status`` emits it once the gate is held, right
+        before the status bubble, so the channel still reads trigger -> work ->
+        result. The dispatcher still owns every gate (platform,
+        ``suppress_delivery``, trigger kind, the ``runtime.harness_prompt_echo``
+        switch) and the delivery target.
+        """
+        if not (message or "").strip():
+            return
+        spec = dict(context.platform_specific or {})
+        spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
+        context.platform_specific = spec
 
     @staticmethod
     def _sanitize_identity(value: str) -> str:
@@ -695,6 +1330,14 @@ class MessageHandler(BaseHandler):
         control_text = payload.get("control_text")
         if isinstance(control_text, str):
             return control_text
+        return message
+
+    @staticmethod
+    def _get_user_message(context: MessageContext, message: str) -> str:
+        payload = context.platform_specific or {}
+        normalized_user_text = payload.get("normalized_user_text")
+        if isinstance(normalized_user_text, str):
+            return normalized_user_text
         return message
 
     async def handle_callback_query(self, context: MessageContext, callback_data: str):
@@ -799,6 +1442,7 @@ class MessageHandler(BaseHandler):
                 request = AgentRequest(
                     context=context,
                     message=callback_data,
+                    user_message="",
                     working_path=working_path,
                     base_session_id=base_session_id,
                     composite_session_id=composite_key,
@@ -888,9 +1532,30 @@ class MessageHandler(BaseHandler):
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context)
             session_key = self._get_session_key(context)
             agent_name = self.controller.resolve_agent_for_context(context)
+            manager = getattr(self.controller, "session_turns", None)
+            cancel = getattr(manager, "cancel", None)
+            session_id = str(
+                (context.platform_specific or {}).get("agent_session_id") or ""
+            ).strip()
+            if not session_id:
+                getter = getattr(self.sessions, "get_agent_session_row_id", None)
+                if callable(getter):
+                    session_id = str(
+                        getter(session_key, base_session_id, agent_name) or ""
+                    ).strip()
+            if session_id and callable(cancel):
+                result = await cancel(session_id)
+                handled = bool(isinstance(result, dict) and result.get("ok"))
+                if not handled:
+                    await self._get_im_client(context).send_message(
+                        context,
+                        f"ℹ️ {self._t('command.stop.noActiveSession')}",
+                    )
+                return handled
             request = AgentRequest(
                 context=context,
                 message="stop",
+                user_message="",
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -1038,7 +1703,7 @@ class MessageHandler(BaseHandler):
                         if key in {"name", "mimetype", "url", "content", "local_path", "size"}:
                             continue
                         file_info[key] = value
-                    timestamp = int(time.time())
+                    timestamp = time.time_ns()
                     safe_name = self._sanitize_filename(attachment.name)
                     filename = f"{timestamp}_{safe_name}"
                     local_path = attachments_dir / filename

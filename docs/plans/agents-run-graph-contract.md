@@ -57,6 +57,26 @@ Amendments (orchestrator-approved):
   definition that DID fire in-window keeps its chip (it explains lineage) —
   client renders it dimmed with a disabled marker using the existing
   `enabled` field.
+- **A11 (2026-07-26, owner feedback)**: trigger chips get an **in-graph
+  detail panel** (same interaction as session nodes) instead of navigating to
+  Harness on click: name, type (task schedule/next-run · watch command/runtime
+  state), enabled state, carrying session (click selects that node), recent
+  trigger runs (deep-links), in-place actions (enable/disable toggle; watch
+  pause/resume) via the EXISTING harness API client methods — no new backend.
+  *Amended 2026-07-26 (PR #1018 review): task run-now is DEFERRED — no HTTP
+  endpoint exposes the `vibe task run` path yet and this batch is UI-only
+  (owner-approved deferral, tracked in the PR's Deferred ledger as a candidate
+  backend micro-batch). The panel ships without a run-now control until that
+  endpoint exists.* "Open in Harness" becomes a secondary link in the panel.
+  Additionally, chips with `enabled=false` are **hidden by default**
+  (together with their trigger edges); a "show disabled" switch in the canvas
+  LEGEND reveals them (dimmed + disabled marker per A10). Client-side only;
+  payload unchanged.
+- **A12 (2026-07-30, callback ownership correction)**: only child Runs with
+  `source_kind='callback'` are callback deliveries. An agent-authored child
+  remains an independent spawn even when it targets the parent Run's callback
+  Session; parent/target coincidence never erases that lineage. This is
+  read-only classification: historical rows are never reset or replayed.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —
@@ -170,7 +190,8 @@ Semantics:
 - Edge node references: sessions by `session_id`; trigger chips by
   `def:<definition_id>`.
 - `spawn` edges: aggregated per (caller session → callee session) from runs
-  with `source_kind='agent'` and `source_actor` set.
+  with `source_kind='agent'` and `source_actor` set. Callback deliveries use
+  `source_kind='callback'` and never enter spawn aggregation.
 - `callback` edges: emitted when `callback_session_id` is set **and**
   `callback_status` is non-null (amendment A4 — sync runs that only record a
   return route draw nothing). Target may equal the spawn caller; the client

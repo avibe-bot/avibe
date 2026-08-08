@@ -30,8 +30,240 @@ Affected repositories:
 - `avibe-bot-backend`: additive runtime-status contract, latest-snapshot
   persistence, and current health display.
 
-The cross-repository payload contract is frozen in
-`docs/plans/contracts/tunnel-quality-runtime-status-v1.schema.json`.
+The cross-repository payload contracts are frozen in
+`docs/plans/contracts/tunnel-quality-runtime-status-v1.schema.json` and
+`docs/plans/contracts/tunnel-quality-runtime-status-v2.schema.json`.
+
+## V2 Amendment: Request-Path Quality and Protocol Recovery
+
+The landed V1 implementation correctly detects connector availability, errors,
+loss, and QUIC edge RTT. The August 3 incident exposed a missing layer: four
+healthy QUIC connections reported about 73 ms edge RTT while persistent public
+requests intermittently took 1.8 seconds and fresh connections reached 2.7
+seconds. Switching the connector to HTTP/2 reduced the persistent-request worst
+case to about 620 ms, even though connector-level metrics remained healthy.
+
+This amendment is normative for V2 and overrides the V1 sections below where
+they conflict. V1 remains documented because older Avibe and avibe.bot versions
+continue to exchange that payload.
+
+### Decisions
+
+1. `cloudflared` protocol `auto` is a connectivity fallback, not a performance
+   policy. It prefers QUIC and falls back to HTTP/2 only when QUIC cannot connect.
+   Avibe owns performance-driven protocol selection.
+2. The user-facing grade is request-path-first once enough request samples exist.
+   Connector RTT remains visible diagnostic evidence, never a substitute for
+   request latency.
+3. Request-path measurements use an unauthenticated public `/health` request from
+   the Avibe host with one persistent HTTP session. This includes a local
+   client-to-Cloudflare leg, so absolute numbers are diagnostic; before/after
+   measurements on the same host are the recovery decision signal.
+4. A same-tunnel replica cannot be targeted through the public hostname.
+   Protocol evaluation therefore happens after promotion and old-connector
+   drain, with make-before-break rollback when the new path is not better.
+5. `transport_protocol` is persisted as `auto`, `quic`, or `http2`. Pinned
+   `quic`/`http2` modes permit route reselection but never change protocol.
+   `auto` may remember the last verified protocol across service restarts, but
+   a remembered explicit protocol that cannot establish four connections
+   within eight seconds is replaced by Cloudflare `auto`. Availability recovery
+   in `auto` mode also uses Cloudflare `auto`, preserving connectivity fallback
+   when network policy changes.
+6. No raw URL, response body, IP, connector identifier, or per-request sample is
+   reported to avibe.bot. Only the bounded V2 aggregate is uploaded.
+
+### Request-path sampling and grading
+
+The quality monitor performs three sequential `/health` requests during each
+15-second connector sample. Requests share a session so the metric models the
+steady-state API path rather than repeated DNS/TLS setup. Each request has a
+3.5-second timeout. The rolling window is 180 seconds and retains at most 48
+samples. Public probes use Requests' normal host environment, including
+`HTTPS_PROXY`, `NO_PROXY`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE`, so the
+monitor measures the same network policy that ordinary host traffic uses.
+
+The V2 aggregate contains sample and success counts, P50/P95/P99/maximum,
+failure rate, rates above 500/1000/2000 ms, confidence, and the protocol-local
+healthy P95 baseline. Confidence is `low` below 12 samples, `medium` from 12 to
+29, and `high` from 30 samples. A low-confidence request window is displayed but
+does not replace the connector grade or trigger recovery.
+
+| Request-path grade | Required properties |
+| --- | --- |
+| Good | P95 `< 350 ms`, P99 `< 750 ms`, and `< 2%` above 1 second |
+| Fair | P95 `< 600 ms`, P99 `< 1200 ms`, and `< 5%` above 1 second |
+| Poor | P95 `< 1000 ms`, P99 `< 2000 ms`, and `< 10%` above 1 second |
+| Critical | Any remaining measured window, or failure rate `>= 10%` |
+
+Automatic tail-latency recovery requires high confidence and one of:
+
+- request failure rate `>= 10%`;
+- P95 `>= 750 ms`, or P95 at least twice the protocol-local baseline;
+- at least 5 percent of requests above 1 second; or
+- P99 `>= 1500 ms` with at least 3 percent of requests above 1 second.
+
+The rolling high-confidence window is the persistence gate; a single short
+measurement cannot trigger rotation. Healthy minute-level P95 aggregates feed a
+24-hour p20 baseline independently for QUIC and HTTP/2.
+
+### Protocol-aware recovery
+
+Availability, connector error/loss, and QUIC RTT recovery continue to use the V1
+same-protocol candidate comparison. A `tail_latency` episode uses a staged
+request-path comparison:
+
+1. Capture the active request-path aggregate before creating a candidate.
+2. First start a new connector with the current explicit protocol to request a
+   new edge route. This preserves the cheaper V1 route-reselection behavior.
+3. Wait for four ready connections, atomically promote the candidate, and drain
+   the old connector. Public probes are not evaluated while both replicas are
+   eligible because Cloudflare cannot attribute them to one connector.
+4. Reset only the rolling request window, then collect 20 persistent public
+   probes over at least 30 seconds.
+5. During the same evaluation window, collect both request-path probes and the
+   promoted connector's availability, request-error, and packet-loss metrics.
+   Accept only when those connector gates pass and either P95 improves by 20
+   percent, P99 improves by 40 percent without P95 worsening by more than 25
+   percent, the over-one-second rate is materially reduced, or a failure rate
+   of at least 10 percent is reduced by at least half and five percentage
+   points. Maximum latency is displayed but never decides a switch by itself.
+6. When same-protocol reselection is not materially better and the mode is
+   `auto`, repeat steps 2-5 with the opposite explicit protocol.
+7. If neither candidate is materially better, start a replacement using the
+   previous explicit protocol, promote it make-before-break, drain the rejected
+   connector, and record `no_improvement`.
+8. The existing cooldown and attempt budget apply to protocol attempts. A
+   successful `auto` attempt persists the verified protocol preference; pinned
+   modes never rewrite it.
+
+Promotion persists a local-only `pending_tail_rollback` transition before the
+old connector is drained. The live recovery thread remains the sole owner of
+that marker while it is evaluating; lifecycle reconciliation treats it as a
+crash orphan only when no live recovery thread exists. The marker is cleared
+only after the promoted route
+passes both request-path and connector gates, or after the previous protocol is
+restored. If Avibe restarts while the marker exists, the supervisor reuses a
+still-ready draining connector when possible; otherwise it starts a replacement
+with the previous explicit protocol and drains the unverified route. The monitor
+also retries any retained drain on every lifecycle reconciliation cycle, so a
+single failed stop cannot suppress public probes indefinitely. This transition
+state stays in the local connector aggregate and is never reported to avibe.bot.
+
+Recovery history adds previous/result protocol, P95, and P99. This makes a
+decision explainable when connector RTT is absent under HTTP/2 or unchanged
+under QUIC.
+
+### V2 surfaces
+
+Local Remote Access shows two independent lines:
+
+```text
+Connector: QUIC - 4/4 - RTT 79 ms
+Remote requests: P95 1.1 s - P99 2.3 s - 6% above 1 s
+```
+
+The overall badge follows request-path grade at medium/high confidence, while
+the connector line remains available for diagnosis. avibe.bot uses the same V2
+request-path grade and P95 in its latest-status card. Unsupported future schema
+versions remain ignorable, and the V2 parser continues accepting V1 during
+rolling deployment.
+
+### V2 acceptance scenarios
+
+| ID | Scenario | Required evidence |
+| --- | --- | --- |
+| RA-TQ-010 | Request-path tails override a healthy connector RTT grade | evaluator contract test |
+| RA-TQ-011 | HTTP/2 receives a request-path grade without QUIC RTT | evaluator contract test |
+| RA-TQ-012 | Auto mode evaluates the opposite protocol and keeps a material improvement | supervisor scenario test |
+| RA-TQ-013 | A non-improving protocol switch rolls back make-before-break | supervisor rollback test |
+| RA-TQ-014 | Avibe and avibe.bot exchange and display the bounded V2 aggregate | cross-repo contract and UI tests |
+| RA-TQ-015 | Sustained public request failures degrade the path and trigger recovery | evaluator contract test |
+| RA-TQ-016 | A failed old-connector drain is retried without disabling probes forever | supervisor lifecycle test |
+| RA-TQ-017 | Restart rolls back a promoted route that was never verified | crash-recovery scenario test |
+| RA-TQ-018 | A faster tail candidate is rejected when connector error gates fail | supervisor candidate-policy test |
+| RA-TQ-019 | A live tail recovery retains ownership of its pending rollback marker | supervisor ownership test |
+| RA-TQ-020 | A candidate that materially eliminates request failures is accepted | candidate-policy contract test |
+| RA-TQ-021 | A rollback replacement that loses readiness remains pending for reconciliation | supervisor rollback test |
+| RA-TQ-022 | Public probes honor the host proxy and CA environment | network-policy test |
+| RA-TQ-023 | Status cleanup preserves rollback after a promoted process exits | supervisor lifecycle test |
+| RA-TQ-024 | Pinned transport rejects comparison evidence from another protocol | protocol-evidence contract test |
+
+### Local network-path diagnostics
+
+The local `GET /api/remote-access/status` response adds a `network_path`
+object while a managed Connector is running. This object never enters the
+avibe.bot runtime-status payload. It combines three bounded, independently
+verified observations:
+
+- cloudflared's loopback-only `/diag/tunnel` endpoint supplies the Anycast edge
+  IP addresses for the active Connector's live connections;
+- a fresh scrape of the active Connector's existing `edge_locations` metric
+  supplies node identifiers such as `sin09`; persisted locations are not reused
+  when that live scrape fails; and
+- a remote request's `CF-Ray` suffix supplies the browser ingress colo. Avibe
+  ignores `CF-Ray` unless the request matches the paired public hostname. This
+  header is diagnostic-only input and never participates in access control or
+  route recovery.
+
+Colo codes are enriched from Cloudflare's public status component catalog. The
+catalog is cached locally for seven days and refreshed in a background thread;
+status reads never wait on that external request. Unknown codes remain visible
+as raw codes instead of being assigned a guessed location.
+
+Representative local-only shape:
+
+```json
+{
+  "network_path": {
+    "schema_version": 1,
+    "provider": "Cloudflare",
+    "asn": 13335,
+    "sampled_at": "2026-08-04T04:00:00Z",
+    "locations_pending": false,
+    "client_access": "remote",
+    "client_ingress": {
+      "colo": "SIN",
+      "location": "Singapore, Singapore",
+      "country": "Singapore"
+    },
+    "connector": {
+      "locations": [
+        {
+          "id": "sin09",
+          "colo": "SIN",
+          "location": "Singapore, Singapore",
+          "country": "Singapore"
+        }
+      ],
+      "edge_ips": ["198.41.192.47"]
+    },
+    "route": { "assessment": "same_metro" }
+  }
+}
+```
+
+The route assessment is deliberately conservative:
+
+- `same_metro`: every observed Connector colo matches the browser ingress colo;
+- `same_country`: every observed Connector colo resolves to the browser
+  ingress country, but at least one metro differs;
+- `cross_country`: at least one known active Connector colo is in another
+  country, so a cross-country path is possible; and
+- `unknown`: the browser ingress, Connector colos, or location mapping is not
+  complete enough to decide.
+
+This is a geographic diagnostic, not a traceroute. Cloudflare Anycast does not
+expose the selected facility, internal router, transit carrier, or backbone
+hops through the Tunnel APIs, and multiple live Connector edges mean Avibe
+cannot identify which connection served one browser request. The UI therefore
+says `potential cross-country route` rather than claiming a definite detour.
+Geography alone never triggers route optimization; the measured request path
+and availability gates remain authoritative.
+
+| ID | Scenario | Required evidence |
+| --- | --- | --- |
+| RA-TQ-025 | Local status shows bounded active edge nodes, locations, network owner, and Anycast IPs without uploading them | parser, status, and privacy-boundary tests |
+| RA-TQ-026 | Only paired-public-host `CF-Ray` metadata participates in a conservative geographic route assessment | request-boundary and assessment tests |
 
 ## Product Decisions
 
@@ -45,7 +277,8 @@ The cross-repository payload contract is frozen in
 4. The local runtime owns detection and recovery. avibe.bot displays the latest
    state but does not remotely command connector lifecycle changes.
 5. Cloud reporting sends one bounded aggregate, not raw Prometheus samples,
-   edge IPs, connector IDs, request URLs, or time-series telemetry.
+   edge IPs, connector IDs, request URLs, or time-series telemetry. Raw edge
+   details remain local-only diagnostics.
 6. Normal operation uses one connector. A second connector exists only during
    evaluation and drain.
 7. V1 does not expose threshold tuning. It provides one manual "Optimize route"
@@ -439,7 +672,10 @@ After a successful promotion, show one non-blocking message such as
 navigation state across the expected SSE reconnect; do not redirect or reload
 the application shell.
 
-Avoid exposing connector IDs, edge IPs, tunnel tokens, or internal log paths.
+Keep raw infrastructure out of the primary status. The owner-visible local
+Remote Access page may expose active Cloudflare node IDs and Anycast edge IPs
+behind technical details; remote callers remain session-authenticated. Never
+expose tunnel tokens, internal log paths, or the user's client IP.
 
 ## avibe.bot Runtime-Status Contract
 
@@ -449,8 +685,10 @@ The current endpoint remains additive and backward compatible:
 POST /api/v1/instances/{instance_id}/runtime-status
 ```
 
-Avibe adds an optional `tunnel_quality` property whose exact schema is
-`contracts/tunnel-quality-runtime-status-v1.schema.json`. Example:
+Avibe adds an optional `tunnel_quality` property. Its supported exact shapes
+are `contracts/tunnel-quality-runtime-status-v1.schema.json` and
+`contracts/tunnel-quality-runtime-status-v2.schema.json`. V1 remains valid
+during rolling deployment. Example V1 payload:
 
 ```json
 {
@@ -498,9 +736,9 @@ All runtime-status sends go through one serialized, coalescing reporter. A
 scheduled heartbeat must not race a newer recovery event and overwrite it with
 an older snapshot.
 
-The backend validates the nested V1 object, stores it as an additive JSONB
-column on the existing latest-status row, and returns it in serialized instance
-status. It does not create a time-series table in V1.
+The backend validates each supported nested object, stores it as an additive
+JSONB column on the existing latest-status row, and returns it in serialized
+instance status. It does not create a time-series table.
 
 ### avibe.bot receiving behavior
 
@@ -509,13 +747,25 @@ parses the required core heartbeat first, then handles `tunnel_quality`
 independently:
 
 - missing quality means an older Avibe and remains valid;
-- a supported, valid V1 object is stored;
+- a supported, valid V1 or V2 object is stored;
 - malformed or oversized quality is discarded while the core heartbeat still
   returns `200` and updates last-seen state;
 - an unsupported future `schema_version` is ignored, not rejected; and
-- a V1 sample more than five minutes ahead of backend time is discarded as
+- a supported sample more than five minutes ahead of backend time is discarded as
   unreasonable clock skew;
 - validation failures are rate-limited in logs/Sentry without echoing payloads.
+
+V2 validation also preserves the producer's correlated semantics rather than
+accepting each field independently. A non-null request path contains at least
+one probe attempt; zero attempts are represented by `request_path: null`.
+Failure and slow-request rates must be four-decimal rounded ratios of integer
+counts in that sample window, and the slow counts must agree with every reported
+nearest-rank percentile and maximum. Confidence is derived from `sample_count`;
+low confidence is `insufficient`; a successful medium-confidence path is
+`healthy`; and high-confidence `healthy`/`degraded` status is derived from the
+documented recovery thresholds. At medium/high confidence, `grade` is derived
+from the request-path grading table. A high-confidence degraded or unavailable
+path requires the aggregate state to be `degraded` or `recovering`.
 
 The backend rejects an older quality sample when its `sampled_at` predates the
 stored sample, while still accepting the core heartbeat. The comparison and
@@ -574,7 +824,10 @@ properties.
 
 - Bind metrics endpoints to `127.0.0.1` only.
 - Never report edge IP addresses, connector IDs, tunnel token fingerprints,
-  request paths, host network addresses, or public probe response bodies.
+  request paths, host network addresses, or public probe response bodies to
+  avibe.bot. The local status API may return the active Cloudflare edge IPs and
+  node IDs for owner-visible diagnostics only; remote requests remain subject
+  to the existing session authentication boundary.
 - Do not enable debug cloudflared logging; it can include request headers.
 - Keep the existing instance-secret authentication for runtime status.
 - The control plane stores only the latest bounded aggregate.
@@ -587,6 +840,42 @@ V1 ships observation, manual optimization, and guarded automatic recovery as one
 cohesive state machine. Automatic recovery is enabled for managed Vibe Cloud
 tunnels, can be disabled release-wide with `AVIBE_TUNNEL_AUTO_RECOVERY=0`, and
 does not expose per-user threshold knobs.
+
+### V2 Owner Controls
+
+The Remote Access page adds a bounded owner-facing control surface without
+exposing raw recovery thresholds:
+
+- transport protocol: `auto`, `quic`, or `http2`;
+- automatic route optimization: enabled or disabled;
+- optimization policy: `stable`, `balanced`, or `low_latency`;
+- Cloudflare edge address family: `4`, `auto`, or `6`; existing configs keep
+  cloudflared's IPv4 default and `auto` is an explicit owner choice;
+- outbound source address: system-selected or one currently assigned local
+  unicast address; and
+- on-demand connectivity diagnostics for DNS, the TCP/HTTP2 path, and the
+  currently observed QUIC path.
+
+`balanced` preserves the V1 trigger behavior. `stable` requires stronger
+latency evidence before automatic recovery, while `low_latency` may evaluate a
+candidate before the diagnostic grade becomes degraded. Availability, request
+failure, candidate acceptance, cooldown, and rollback safety gates remain
+shared across policies. The policy changes when Avibe evaluates a route, not
+how it measures or labels the route.
+
+Connector-affecting changes use the existing make-before-break lifecycle. Avibe
+starts a candidate with the requested protocol, address family, and source
+address, waits for four ready HA connections, persists the controls, promotes
+the candidate, and only then drains the prior Connector. Candidate readiness or
+persistence failures keep both the previous Connector and previous persisted
+controls. Policy-only changes do not restart cloudflared.
+
+The interface endpoint returns only currently assigned, up, non-loopback,
+non-link-local unicast addresses. A stale or mismatched source address is
+rejected before a candidate starts. Diagnostics call TCP reachability proven
+only after a port 7844 connection succeeds; they call QUIC available only when
+the active Connector currently demonstrates QUIC. An unobserved UDP path stays
+`unknown`, never inferred as available or unavailable.
 
 ## Scenario Catalog
 
@@ -601,6 +890,11 @@ does not expose per-user threshold knobs.
 | RA-TQ-007 | Doctor and avibe.bot consume the V1 aggregate | payload and backend contract tests |
 | RA-TQ-008 | Restart removes an orphan candidate when active survives | crash-recovery test |
 | RA-TQ-009 | Restart promotes a ready candidate when active is gone | crash-recovery test |
+| RA-TQ-027 | Optimization policies change recovery sensitivity without changing measurements | evaluator policy test |
+| RA-TQ-028 | Live control changes replace a ready Connector before drain and roll back failed candidates | supervisor scenario tests |
+| RA-TQ-029 | Edge IP and source-address controls accept only live assigned addresses | config and network-policy tests |
+| RA-TQ-030 | Connectivity diagnostics distinguish proven from unobserved paths | diagnostics contract test |
+| RA-TQ-031 | Tunnel controls remain usable on desktop and mobile | browser/runtime proof |
 
 ## Implementation Boundaries
 
@@ -645,4 +939,5 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-009 pass in their required evidence layers.
+- RA-TQ-001 through RA-TQ-030 pass in their required evidence layers; RA-TQ-031
+  receives browser proof at desktop and mobile widths.

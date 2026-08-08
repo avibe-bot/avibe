@@ -19,7 +19,8 @@ import { Badge } from './badge';
 import { Button } from './button';
 import { SegmentedRadio } from './segmented';
 import { Switch } from './switch';
-import { VaultRequestSessionLink, vaultRequestSessionDisplay } from './vault-request-session-link';
+import { vaultRequestSessionDisplay } from './vault-request-session';
+import { VaultRequestSessionLink } from './vault-request-session-link';
 
 /** The three approver-chosen grant-duration options (protocol v2 §7.1), as SegmentedRadio ids. */
 type GrantDurationChoice = 'one-time' | '300' | '900';

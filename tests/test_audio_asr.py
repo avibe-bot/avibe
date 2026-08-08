@@ -3,11 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from config.v2_config import AudioAsrConfig, RemoteAccessConfig, VibeCloudRemoteAccessConfig
 from core.audio_asr import (
+    AudioAsrEmptyTranscriptError,
+    AudioAsrProtocolError,
     AudioAsrService,
+    AudioAsrTimeoutError,
+    AudioAsrUnavailableError,
     AudioTranscript,
     append_audio_transcripts_to_message,
     format_audio_transcript_echo,
@@ -81,6 +85,358 @@ class AudioAsrServiceTests(unittest.TestCase):
             ),
             "Voice transcript:\nhello world",
         )
+
+    def test_http_callers_can_preserve_timeout_classification(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.webm"
+            audio_path.write_bytes(b"audio")
+            attachment = FileAttachment(
+                name="voice.webm",
+                mimetype="audio/webm",
+                local_path=str(audio_path),
+                size=5,
+            )
+            timeout = AsyncMock(side_effect=AudioAsrTimeoutError("timed out"))
+            with patch.object(service, "_transcribe_one", timeout):
+                with self.assertRaises(AudioAsrTimeoutError):
+                    asyncio.run(
+                        service.transcribe_attachments(
+                            [attachment],
+                            raise_on_timeout=True,
+                        )
+                    )
+                self.assertEqual(
+                    asyncio.run(service.transcribe_attachments([attachment])),
+                    [],
+                )
+
+    def test_empty_upstream_transcript_has_a_distinct_classification(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class EmptyResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                return {"text": "  "}
+
+        class EmptySession:
+            def post(self, *_args, **_kwargs):
+                return EmptyResponse()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=12,
+            )
+
+            with self.assertRaises(AudioAsrEmptyTranscriptError):
+                asyncio.run(
+                    service._transcribe_one(
+                        EmptySession(),
+                        service._runtime_config(),
+                        attachment,
+                        10**12,
+                    )
+                )
+
+            empty = AsyncMock(side_effect=AudioAsrEmptyTranscriptError("empty"))
+            with patch.object(service, "_transcribe_one", empty):
+                with self.assertRaises(AudioAsrEmptyTranscriptError):
+                    asyncio.run(
+                        service.transcribe_attachments(
+                            [attachment],
+                            raise_on_empty=True,
+                        )
+                    )
+                self.assertEqual(
+                    asyncio.run(service.transcribe_attachments([attachment])),
+                    [],
+                )
+
+    def test_success_payload_requires_string_and_preserves_whitespace(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class MalformedResponse:
+            status = 200
+
+            def __init__(self, payload=None, *, invalid_json=False):
+                self.payload = payload
+                self.invalid_json = invalid_json
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                if self.invalid_json:
+                    raise ValueError("invalid JSON")
+                return self.payload
+
+            async def text(self):
+                return "{"
+
+        class MalformedSession:
+            def __init__(self, response):
+                self.response = response
+
+            def post(self, *_args, **_kwargs):
+                return self.response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=12,
+            )
+
+            malformed_responses = [
+                MalformedResponse(invalid_json=True),
+                MalformedResponse({}),
+                MalformedResponse({"text": 123}),
+            ]
+            for response in malformed_responses:
+                with self.subTest(response=response):
+                    with self.assertRaises(AudioAsrProtocolError):
+                        asyncio.run(
+                            service._transcribe_one(
+                                MalformedSession(response),
+                                service._runtime_config(),
+                                attachment,
+                                10**12,
+                            )
+                        )
+
+            transcript = asyncio.run(
+                service._transcribe_one(
+                    MalformedSession(MalformedResponse({"text": "first paragraph\n\n"})),
+                    service._runtime_config(),
+                    attachment,
+                    10**12,
+                )
+            )
+            self.assertEqual(transcript.text, "first paragraph\n\n")
+
+    def test_provider_outage_has_an_opt_in_availability_classification(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class UnavailableResponse:
+            status = 503
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                return {"error": "asr_unavailable"}
+
+        class UnavailableSession:
+            def post(self, *_args, **_kwargs):
+                return UnavailableResponse()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=12,
+            )
+
+            with self.assertRaises(AudioAsrUnavailableError):
+                asyncio.run(
+                    service._transcribe_one(
+                        UnavailableSession(),
+                        service._runtime_config(),
+                        attachment,
+                        10**12,
+                    )
+                )
+
+            unavailable = AsyncMock(
+                side_effect=AudioAsrUnavailableError("unavailable"),
+            )
+            with patch.object(service, "_transcribe_one", unavailable):
+                with self.assertRaises(AudioAsrUnavailableError):
+                    asyncio.run(
+                        service.transcribe_attachments(
+                            [attachment],
+                            raise_on_unavailable=True,
+                        )
+                    )
+                self.assertEqual(
+                    asyncio.run(service.transcribe_attachments([attachment])),
+                    [],
+                )
+
+    def test_dictation_classifies_non_json_proxy_errors_by_status(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class ErrorResponse:
+            def __init__(self, status):
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                raise ValueError("proxy returned HTML")
+
+        class ErrorSession:
+            def __init__(self, status):
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, *_args, **_kwargs):
+                return ErrorResponse(self.status)
+
+        cases = [
+            (503, AudioAsrUnavailableError),
+            (504, AudioAsrTimeoutError),
+        ]
+        for status, expected_error in cases:
+            with self.subTest(status=status):
+                with patch(
+                    "core.audio_asr.aiohttp.ClientSession",
+                    return_value=ErrorSession(status),
+                ):
+                    with self.assertRaises(expected_error):
+                        asyncio.run(
+                            service.transcribe_voice_segment(
+                                None,
+                                dictation_id="dictation-1",
+                                sequence=1,
+                                overlap_ms=0,
+                                final=True,
+                                finalize_only=True,
+                                receipts=["receipt-0"],
+                                before="",
+                                after="",
+                            )
+                        )
+
+    def test_http_callers_can_override_the_request_deadline(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True, timeout_seconds=60.0),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"audio")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=5,
+            )
+            transcribe = AsyncMock(return_value=None)
+            with (
+                patch("core.audio_asr.time.monotonic", return_value=100.0),
+                patch.object(service, "_transcribe_one", transcribe),
+            ):
+                asyncio.run(
+                    service.transcribe_attachments(
+                        [attachment],
+                        timeout_seconds=120.0,
+                    )
+                )
+
+            self.assertEqual(transcribe.await_args.args[3], 220.0)
 
 
 class _AttachmentIMClient:

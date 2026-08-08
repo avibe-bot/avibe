@@ -58,9 +58,65 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             ),
             offline=(env_flag_enabled("VIBE_MODEL_HUB_ENGINE_OFFLINE") if offline is None else offline),
         )
+        self._verified_binary_cache: tuple[tuple[object, ...], Path] | None = None
 
     def resolve_engine_path(self) -> Path | None:
         return self.resolve_binary()
+
+    def _verified_manifest_binary(
+        self,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> Path | None:
+        binary = install_dir / archive.bin_path
+        metadata = install_dir / self.spec.metadata_filename
+        cache_key = self._verification_cache_key(binary, metadata, manifest, archive)
+        cached = self._verified_binary_cache
+        if cache_key is not None and cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+        verified = super()._verified_manifest_binary(install_dir, manifest, archive)
+        if verified is None:
+            self._verified_binary_cache = None
+            return None
+
+        cache_key = self._verification_cache_key(verified, metadata, manifest, archive)
+        self._verified_binary_cache = (cache_key, verified) if cache_key is not None else None
+        return verified
+
+    @staticmethod
+    def _verification_cache_key(
+        binary: Path,
+        metadata: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+    ) -> tuple[object, ...] | None:
+        try:
+            binary_stat = binary.stat()
+            metadata_stat = metadata.stat()
+        except OSError:
+            return None
+
+        return (
+            manifest.digest,
+            manifest.runtime_version,
+            archive.platform,
+            archive.sha256,
+            archive.binary_sha256,
+            archive.bin_path,
+            binary_stat.st_dev,
+            binary_stat.st_ino,
+            binary_stat.st_mode,
+            binary_stat.st_size,
+            binary_stat.st_mtime_ns,
+            binary_stat.st_ctime_ns,
+            metadata_stat.st_dev,
+            metadata_stat.st_ino,
+            metadata_stat.st_size,
+            metadata_stat.st_mtime_ns,
+            metadata_stat.st_ctime_ns,
+        )
 
     def contract_manifest(self) -> dict[str, Any]:
         manifest = self._load_manifest(allow_network=False)

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Download } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { useImageViewer } from '@/components/ui/image-viewer';
+import { useImageViewer } from '@/components/ui/image-viewer-context';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { cn } from '@/lib/utils';
 
@@ -16,6 +16,12 @@ import { cn } from '@/lib/utils';
 const LinkedImageContext = React.createContext(false);
 export const LinkedImageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <LinkedImageContext.Provider value={true}>{children}</LinkedImageContext.Provider>
+);
+export const LinkedImageContent: React.FC<{
+  linked: React.ReactNode;
+  unlinked: React.ReactNode;
+}> = ({ linked, unlinked }) => (
+  React.useContext(LinkedImageContext) ? linked : unlinked
 );
 
 // Preview caps (mirror the design): an image renders at its natural size, scaled

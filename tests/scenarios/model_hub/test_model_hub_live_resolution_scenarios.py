@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ import aiohttp
 import pytest
 
 from config.v2_config import (
+    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubModelConfig,
@@ -125,14 +127,19 @@ def _source(
 
 
 def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
-    return ModelHubConfig(
+    config = ModelHubConfig(
         sources=list(sources),
-        priority_order=[source.id for source in sources],
         agents={
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
             for backend in ("claude", "codex", "opencode")
         },
     )
+    for agent in config.agents.values():
+        agent.sources = ModelHubAgentSourcesConfig(
+            policy="custom",
+            order=[source.id for source in sources],
+        )
+    return config
 
 
 def _service(
@@ -165,6 +172,83 @@ async def _post_turn(
             json={"model": launch.runtime_model, "messages": [], "stream": stream},
         ) as response:
             return response.status, await response.read()
+
+
+def test_mh_pri_001_order_mutations_change_the_next_turn(tmp_path: Path) -> None:
+    """MH-PRI-001: custom edits and follow restoration affect the next turn."""
+
+    async def exercise() -> None:
+        alpha = _source("src_alpha001")
+        zulu = _source("src_zulu0001")
+        store = MemoryStore(_config(alpha, zulu))
+        adapter = AdapterBoundaryFake([])
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            initial = await router.resolve("claude", "model-live")
+            assert initial.source_id == alpha.id
+
+            custom = await service.set_agent_sources(
+                "claude",
+                {"policy": "custom", "order": [zulu.id, alpha.id]},
+            )
+            assert custom["sources"]["policy"] == "custom"
+            reordered = await router.resolve("claude", "model-live")
+            assert reordered.source_id == zulu.id
+
+            restored = await service.set_agent_sources(
+                "claude",
+                {"policy": "follow"},
+            )
+            assert restored["sources"]["policy"] == "follow"
+            assert restored["sources"]["order"] == [alpha.id, zulu.id]
+            recommended = await router.resolve("claude", "model-live")
+            assert recommended.source_id == alpha.id
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
+    tmp_path: Path,
+) -> None:
+    """MH-SEL-001: no pinned selection is null while the request model runs."""
+
+    async def exercise() -> None:
+        source = _source("src_explicit1")
+        store = MemoryStore(_config(source))
+        adapter = AdapterBoundaryFake([])
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        projected = next(
+            agent for agent in service.list_agents() if agent["backend"] == "claude"
+        )
+        assert projected["selected_by_agent"] is None
+        assert projected["selected_model_id"] is None
+        assert "current" not in projected
+        assert projected["supply_status"] is None
+
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve("claude", "model-live")
+            assert launch.source_id == source.id
+            assert launch.target_model == "model-live"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(
@@ -278,8 +362,10 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
-def test_mh_res_live_002_second_401_surfaces_without_fallback(tmp_path: Path) -> None:
-    """MH-RES-LIVE-002: a second 401 is terminal for the selected source."""
+def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    """MH-RES-LIVE-002: a second 401 leaves an actionable source blocker."""
 
     async def exercise() -> None:
         adapter = AdapterBoundaryFake(
@@ -300,9 +386,22 @@ def test_mh_res_live_002_second_401_surfaces_without_fallback(tmp_path: Path) ->
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
             status, _body = await _post_turn(await router.resolve("claude", "model-live"))
-            assert status == 401
-            assert [call[0] for call in adapter.invocations] == ["src_primary", "src_primary"]
-            assert store.load().sources[0].state.status == "standby"
+            assert status == 200
+            assert [call[0] for call in adapter.invocations] == [
+                "src_primary",
+                "src_primary",
+                "src_backup",
+            ]
+            primary = store.load().sources[0]
+            assert primary.state.status == "needs_action"
+            assert (
+                primary.state.detail_key
+                == "models.source.needs_action.oauth_expired"
+            )
+            assert [
+                event["kind"]
+                for event in service.list_events(limit=10)
+            ] == ["switch", "needs_action"]
         finally:
             await gateway.close()
 
@@ -345,11 +444,45 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
-def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None:
+def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
+    tmp_path: Path,
+) -> None:
     async def exercise() -> None:
         adapter = AdapterBoundaryFake(
-            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
+            [
+                AdapterResult(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    code="rate_limited",
+                    body=b'{"partial":',
+                    stream_started=True,
+                ),
+            ]
         )
+        store = MemoryStore(_config(_source("src_primary")))
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            status, body = await _post_turn(
+                await router.resolve("claude", "model-live"),
+            )
+            assert status == 429
+            assert json.loads(body)["error"]["code"] == "stream_interrupted"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
         store = MemoryStore(_config(_source("src_primary")))
         service = _service(
             tmp_path,
@@ -377,9 +510,7 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
 
 def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path) -> None:
     async def exercise() -> None:
-        adapter = AdapterBoundaryFake(
-            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')]
-        )
+        adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
         store = MemoryStore(_config(_source("src_primary")))
         service = _service(
             tmp_path,
@@ -446,8 +577,7 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             fallback = await second_router.resolve("codex", "model-live")
             assert fallback.channel == "hub"
             persisted = BoundedEventLog(tmp_path / "events.json").list(limit=10)
-            assert [event["kind"] for event in persisted[:3]] == [
-                "channel_switch",
+            assert [event["kind"] for event in persisted[:2]] == [
                 "switch",
                 "cooldown",
             ]

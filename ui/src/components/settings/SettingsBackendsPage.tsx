@@ -10,6 +10,7 @@ import { SettingsPageShell } from './SettingsPageShell';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { AGENT_BACKENDS, DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import { errorMessage } from '@/lib/errorMessage';
 
 // Mirrors design.pen qVHh4 (VR/CM/Backends): three horizontal cards
 // (OpenCode/Claude/Codex). Each card
@@ -112,8 +113,8 @@ export const SettingsBackendsPage: React.FC = () => {
         agents: nextAgents,
       });
       showToast(t('common.saved'), 'success');
-    } catch (e: any) {
-      showToast(e?.message || t('common.saveFailed'), 'error');
+    } catch (e) {
+      showToast(errorMessage(e) || t('common.saveFailed'), 'error');
     }
   };
 

@@ -8,6 +8,8 @@ config, no SQLite state, no Claude SDK, no subprocess.
 from __future__ import annotations
 
 import asyncio
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -93,6 +95,50 @@ def test_agent_denial_points_out_that_concurrency_survives():
     reason = policy.check_tool_call("Agent", {}, env={}).reason
     assert "run concurrently" in reason
     assert "run_in_background: false" in reason
+
+
+# The scheduler denials whose text embeds runnable `vibe task add` examples.
+_SCHEDULER_DENIALS = (
+    ("CronCreate", {"cron": "0 9 * * *", "prompt": "x"}),
+    ("ScheduleWakeup", {"delaySeconds": 600, "prompt": "x", "reason": "y"}),
+)
+
+
+def test_scheduler_denials_offer_the_command_task_form():
+    # A scheduled shell command has no message to write, so a denial that shows
+    # only `--message` forms leaves the agent no Harness equivalent for it and
+    # pushes it back toward the session-only tool this policy just refused.
+    for tool_name, tool_input in _SCHEDULER_DENIALS:
+        reason = policy.check_tool_call(tool_name, tool_input, env={}).reason
+        assert 'vibe task add --cron "<expr>" --shell "<cmd>"' in reason
+
+# Trailing "  (recurring)" style annotations are prose, not argv.
+_EXAMPLE_ANNOTATION = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def _embedded_task_examples() -> list[str]:
+    examples: list[str] = []
+    for tool_name, tool_input in _SCHEDULER_DENIALS:
+        reason = policy.check_tool_call(tool_name, tool_input, env={}).reason
+        for raw in reason.splitlines():
+            line = raw.strip()
+            if line.startswith("vibe task add"):
+                examples.append(_EXAMPLE_ANNOTATION.sub("", line))
+    return examples
+
+
+def test_embedded_task_examples_parse_against_the_real_cli():
+    # These denials are live callers: an agent copies the example verbatim. A
+    # renamed or removed flag must fail here, not in the user's shell.
+    from vibe import cli  # imported lazily; the policy itself pulls in no CLI
+
+    examples = _embedded_task_examples()
+    # CronCreate embeds 2 (--message, --shell); ScheduleWakeup embeds 3
+    # (one-shot --message, recurring --message, --shell).
+    assert len(examples) == 5
+    for example in examples:
+        argv = shlex.split(example)[1:]  # drop the leading `vibe`
+        cli.build_parser().parse_args(argv)  # SystemExit(2) if an example rots
 
 
 def test_missing_tool_input_is_treated_as_the_tool_default():

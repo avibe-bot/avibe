@@ -595,6 +595,8 @@ def _new_source(
     )
     return ModelHubSourceConfig(
         id=item.source_id,
+        created_at=discovered_at,
+        last_discovered_at=discovered_at if models else None,
         kind="subscription" if keep_native or controlled else "api_key",
         vendor=item.vendor,
         display_name=item.display_name,
@@ -656,8 +658,6 @@ async def apply_native_migration(
             raise MigrationConflictError
 
         provisioned: list[tuple[str, str]] = []
-        native_source_ids: list[str] = []
-        hub_source_ids: list[str] = []
         persisted = False
         try:
             for item in selected:
@@ -700,16 +700,6 @@ async def apply_native_migration(
                     ]
                     host._apply_discovered_models(source, manual_models, discovered)
                 updated.sources.append(source)
-                if item.proposed_action == "keep_native":
-                    native_source_ids.append(source.id)
-                else:
-                    hub_source_ids.append(source.id)
-
-            updated.priority_order = [
-                *updated.priority_order,
-                *native_source_ids,
-                *hub_source_ids,
-            ]
 
             await host._commit_synced(previous, updated)
             persisted = True

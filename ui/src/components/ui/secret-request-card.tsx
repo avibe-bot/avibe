@@ -1,17 +1,58 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, KeyRound, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { badgeVariants } from './badge';
+import { badgeVariants } from './badge-variants';
 import { VaultSecretDialog } from './vault-secret-dialog';
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 
 /**
- * Inline rendering of a `$<NAME>` dynamic-ask marker in an agent message. The badge
- * opens the shared {@link VaultSecretDialog} (same dialog as the Vaults "Add" flow), so
- * the provide experience is identical everywhere. Browser-side sealing happens in the form.
+ * Inline rendering of a `$<NAME>` dynamic-ask marker in an agent message.
+ *
+ * `readOnly` is for a read-only transcript (an archived session). Archiving EXPIRED the
+ * session's provision requests, so an enabled Provide button would assert that an agent
+ * is waiting for this secret when nothing is — the defect is the affordance claiming a
+ * live request, not whether the write would land (it would: the value is a machine-scoped
+ * vault secret and the server accepts it).
+ *
+ * Locked rather than hidden, matching how the quick-reply group resolves the same
+ * tension: the card is also the transcript record of what the agent asked for, so it
+ * stays legible while nothing about it is actionable. Split into its own branch so the
+ * locked card mounts NO provide machinery at all — no request lookup, no dialog, no
+ * vault write path to reach.
  */
-export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> = ({ name, requestId }) => {
+export const SecretRequestCard: React.FC<{ name: string; requestId?: string; readOnly?: boolean }> = ({
+  name,
+  requestId,
+  readOnly = false,
+}) =>
+  readOnly ? (
+    <ExpiredSecretRequest name={name} />
+  ) : (
+    <LiveSecretRequest name={name} requestId={requestId} />
+  );
+
+/** The recorded ask on a read-only transcript: same badge, disabled, and the `title`
+ *  states why (the session is archived, so the request has expired). */
+const ExpiredSecretRequest: React.FC<{ name: string }> = ({ name }) => {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      disabled
+      title={t('vaults.request.expired')}
+      className={cn(badgeVariants({ variant: 'warning' }), 'align-baseline font-medium opacity-60')}
+    >
+      <KeyRound className="mr-1 inline size-3" />
+      {name} — {t('vaults.request.provide')}
+    </button>
+  );
+};
+
+/** The live ask: the badge opens the shared {@link VaultSecretDialog} (same dialog as the
+ *  Vaults "Add" flow), so the provide experience is identical everywhere. Browser-side
+ *  sealing happens in the form. */
+const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ name, requestId }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [open, setOpen] = useState(false);

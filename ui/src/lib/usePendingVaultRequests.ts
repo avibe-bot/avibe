@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
+import { useLatestRef } from './useLatestRef';
 
 /**
  * Pending vault requests (access/sign/provision) for one chat session. Fed by
@@ -18,8 +19,7 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
   const loadSeq = useRef(0);
   // Latest requested session, updated synchronously during render so an async load resolving after
   // a switch (its effect hasn't bumped the token yet) is still rejected.
-  const currentSessionRef = useRef(sessionId);
-  currentSessionRef.current = sessionId;
+  const currentSessionRef = useLatestRef(sessionId);
 
   // Reset stale rows *during render* (not a post-commit effect) so switching from session A to B
   // never paints A's cards/float for a frame — the hook state now outlives the switch. This is

@@ -20,6 +20,7 @@ from .base import (
     MessageContext,
 )
 from .formatters import FeishuFormatter
+from .message_facts import is_ordinary_feishu_text
 from config.v2_config import LarkConfig
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
@@ -36,6 +37,7 @@ from modules.agents.native_sessions.display import format_display_summary, forma
 from modules.agents.native_sessions.types import NativeResumeSession
 
 logger = logging.getLogger(__name__)
+
 
 # Feishu emoji name mapping (common reactions)
 # See: https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
@@ -397,9 +399,17 @@ class FeishuBot(BaseIMClient):
         root_id = context.thread_id or reply_to
         if root_id:
             message_id = await self._reply_message(root_id, text, subtext=subtext)
+            # Post-send bookkeeping: the message is ALREADY delivered, so a raise
+            # here must never destroy the native id on its way out. Callers such as
+            # the message dispatcher treat any exception from the adapter as a send
+            # failure with no delivery evidence, which would re-send an
+            # already-delivered message. Same guard as discord.py send_message.
             if self.settings_manager:
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                except Exception:
+                    pass
             return message_id
 
         request = (
@@ -425,10 +435,15 @@ class FeishuBot(BaseIMClient):
             raise RuntimeError(f"Feishu send_message failed: {response.msg}")
 
         message_id = response.data.message_id
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see the thread-reply branch above).
         if self.settings_manager and (context.thread_id or reply_to):
             thread = context.thread_id or reply_to
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread)
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, thread)
+            except Exception:
+                pass
         return message_id
 
     async def _reply_message(self, parent_id: str, text: str, subtext: Optional[str] = None) -> str:
@@ -621,9 +636,14 @@ class FeishuBot(BaseIMClient):
         if root_id:
             message_id = await self._reply_message_with_card(root_id, card_json)
             self._remember_message_text(message_id, text, subtext=subtext)
+            # Post-send bookkeeping must not destroy the delivered message id
+            # (see send_message); mirrors discord.py send_message_with_buttons.
             if self.settings_manager:
-                if self.sessions:
-                    self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                try:
+                    if self.sessions:
+                        self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
+                except Exception:
+                    pass
             return message_id
 
         request = (
@@ -650,9 +670,14 @@ class FeishuBot(BaseIMClient):
 
         message_id = response.data.message_id
         self._remember_message_text(message_id, text, subtext=subtext)
+        # Post-send bookkeeping must not destroy the delivered message id
+        # (see send_message).
         if self.settings_manager and context.thread_id:
-            if self.sessions:
-                self.sessions.mark_thread_active(context.user_id, context.channel_id, context.thread_id)
+            try:
+                if self.sessions:
+                    self.sessions.mark_thread_active(context.user_id, context.channel_id, context.thread_id)
+            except Exception:
+                pass
         return message_id
 
     async def _reply_message_with_card(self, parent_id: str, card_json: str) -> str:
@@ -1675,6 +1700,11 @@ class FeishuBot(BaseIMClient):
                     "is_dm": is_p2p,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_feishu_text(
+                    event_data,
+                    file_attachments,
+                    shared_text=shared_text,
+                ),
             )
 
             # Handle commands (messages starting with /)
@@ -1945,11 +1975,11 @@ class FeishuBot(BaseIMClient):
 
         if self._on_settings_update:
             await self._on_settings_update(
-                context.user_id,
-                show_message_types,
-                context.channel_id,
-                require_mention,
-                language,
+                user_id=context.user_id,
+                show_message_types=show_message_types,
+                channel_id=context.channel_id,
+                require_mention=require_mention,
+                language=language,
                 is_dm=context.platform_specific.get("is_dm", False),
             )
 
@@ -2131,18 +2161,18 @@ class FeishuBot(BaseIMClient):
 
         if self._on_routing_update:
             await self._on_routing_update(
-                context.user_id,
-                context.channel_id,
-                backend,
-                opencode_agent,
-                opencode_model,
-                opencode_reasoning,
-                claude_agent,
-                claude_model,
-                claude_reasoning,
-                codex_agent,
-                codex_model,
-                codex_reasoning,
+                user_id=context.user_id,
+                channel_id=context.channel_id,
+                backend=backend,
+                opencode_agent=opencode_agent,
+                opencode_model=opencode_model,
+                opencode_reasoning_effort=opencode_reasoning,
+                claude_agent=claude_agent,
+                claude_model=claude_model,
+                claude_reasoning_effort=claude_reasoning,
+                codex_agent=codex_agent,
+                codex_model=codex_model,
+                codex_reasoning_effort=codex_reasoning,
                 is_dm=context.platform_specific.get("is_dm", False),
             )
 

@@ -19,6 +19,7 @@ import { SegmentedRadio } from '../shared/SegmentedRadio';
 import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOAuthFlowLock } from '../shared/useOAuthFlowLock';
+import { errorMessage } from '@/lib/errorMessage';
 
 const BACKEND_ID = 'codex';
 const DEFAULT_CLI = 'codex';
@@ -148,9 +149,9 @@ export const CodexProviderConfig: React.FC<{
       setEditingKey(false);
       showToast(t('settings.backends.codexApiKeyRemoved'), 'success');
       surfaceBackendNotices(result.notices, showToast, t);
-    } catch (err: any) {
+    } catch (err) {
       showToast(
-        t('settings.backends.codexApiKeyRemoveFailed', { detail: err?.message || 'unknown' }),
+        t('settings.backends.codexApiKeyRemoveFailed', { detail: errorMessage(err) || 'unknown' }),
         'error',
       );
     } finally {
@@ -202,8 +203,8 @@ export const CodexProviderConfig: React.FC<{
         showToast(t('settings.backends.codexSaveSuccess'), 'success');
       }
       surfaceBackendNotices(result.notices, showToast, t);
-    } catch (err: any) {
-      showToast(err?.message || t('settings.backends.codexSaveFailed'), 'error');
+    } catch (err) {
+      showToast(errorMessage(err) || t('settings.backends.codexSaveFailed'), 'error');
     } finally {
       setSaving(false);
     }

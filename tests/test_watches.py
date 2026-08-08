@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,18 +16,46 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from core import watch_worker
+from core import watch_worker, watches as watches_module
 from core.process_isolation import (
     PersistedProcessIdentity,
     ProcessIdentity,
     fingerprint_process_marker,
 )
+from core.runtime_work import RuntimeWorkItem, RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import TaskExecutionStore
-from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore, _CycleResult
+from core.watches import (
+    DELIVERY_ACK_METADATA_KEY,
+    LAST_DELIVERY_ENV,
+    NO_EVENT_EXIT_CODE,
+    NO_EVENT_MARKER,
+    WATCH_ID_ENV,
+    ManagedWatchService,
+    ManagedWatchStore,
+    WatchRuntimeStateStore,
+    _CycleResult,
+    _cycle_env,
+    _ManagedWatchRuntimeWorkHandler,
+    _StaleWorkerRecovery,
+)
 from storage.background import SQLiteBackgroundTaskStore
 
 TEST_MARKER = "test-watch-worker"
 TEST_FINGERPRINT = fingerprint_process_marker(TEST_MARKER)
+
+
+def _quiet_waiter_command(summary: str = "") -> list[str]:
+    """A waiter that ends a cycle the way the no-event protocol asks it to.
+
+    The marker is half the signal: the exit code on its own is ``sysexits`` EX_USAGE
+    and stays a failure.
+    """
+
+    script = "import sys; "
+    if summary:
+        script += f"print({summary!r}, file=sys.stderr); "
+    script += f"print({NO_EVENT_MARKER!r}, file=sys.stderr); sys.exit({NO_EVENT_EXIT_CODE})"
+    return [sys.executable, "-c", script]
 
 
 class _FakeStdin:
@@ -176,6 +206,40 @@ def test_managed_watch_store_round_trip(tmp_path: Path) -> None:
     assert saved.mode == "forever"
     assert saved.retry_exit_codes == [75]
     assert saved.post_to == "channel"
+
+
+def test_hfr_174_watch_definition_commit_emits_watch_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import inbox_events
+
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
+    events: list[tuple[str, dict]] = []
+    subscription = inbox_events.bus.subscribe_callback(
+        lambda event_type, payload: events.append((event_type, payload))
+    )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    store.add_watch(
+        name="Definition wake",
+        session_key="avibe::agent::default",
+        command=["true"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    inbox_events.bus.unsubscribe(subscription)
+
+    assert events == [
+        (inbox_events.DEFINITIONS_UPDATED_EVENT, {"definition_type": "watch"})
+    ]
 
 
 def test_managed_watch_store_preserves_zero_values_on_reload(tmp_path: Path) -> None:
@@ -1085,7 +1149,12 @@ def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: 
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.08)
+        deadline = asyncio.get_running_loop().time() + 2
+        while asyncio.get_running_loop().time() < deadline:
+            saved = store.get_watch(watch.id)
+            if saved is not None and saved.last_exit_code == 75:
+                break
+            await asyncio.sleep(0.01)
         await service.stop()
 
     asyncio.run(_run())
@@ -1095,6 +1164,208 @@ def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: 
     assert saved.enabled is True
     assert saved.last_exit_code == 75
     assert request_store.list_pending() == []
+
+
+def test_managed_watch_service_once_no_event_exit_finishes_without_follow_up(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Green CI waiter",
+        session_key="slack::channel::C123",
+        command=_quiet_waiter_command(),
+        shell_command=None,
+        prefix="CI failed. Fix it.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        for _ in range(100):
+            saved = store.get_watch(watch.id)
+            if saved and not saved.enabled:
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    saved = store.get_watch(watch.id)
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.last_exit_code == NO_EVENT_EXIT_CODE
+    assert saved.last_error is None
+    # The whole point: a completed cycle that found nothing costs no Agent turn.
+    assert request_store.list_pending() == []
+
+
+def test_managed_watch_service_logs_what_a_quiet_cycle_suppressed(tmp_path: Path, caplog) -> None:
+    """A cycle that reports nothing still has to leave its summary somewhere.
+
+    No hook carries a no-event cycle's output, so the waiter's own account of what
+    it saw and chose not to report — the green CI table, the filtered comments —
+    died with the process. ``--only-on-failure`` documents that summary as
+    inspectable, which it was not.
+    """
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Green CI waiter",
+        session_key="slack::channel::C123",
+        command=_quiet_waiter_command("All watched workflows succeeded: lint, build"),
+        shell_command=None,
+        prefix="CI failed. Fix it.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        for _ in range(100):
+            saved = store.get_watch(watch.id)
+            if saved and not saved.enabled:
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    with caplog.at_level(logging.INFO, logger="core.watches"):
+        asyncio.run(_run())
+
+    assert request_store.list_pending() == []
+    quiet_logs = [record.getMessage() for record in caplog.records if "found nothing to report" in record.getMessage()]
+    assert quiet_logs, caplog.text
+    assert watch.id in quiet_logs[0]
+    assert "All watched workflows succeeded: lint, build" in quiet_logs[0]
+
+
+def test_managed_watch_service_forever_no_event_exit_rearms_without_follow_up(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Quiet forever waiter",
+        session_key="slack::channel::C123",
+        command=_quiet_waiter_command(),
+        shell_command=None,
+        prefix="Something happened.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        deadline = asyncio.get_running_loop().time() + 2
+        while asyncio.get_running_loop().time() < deadline:
+            saved = store.get_watch(watch.id)
+            if saved is not None and saved.last_exit_code == NO_EVENT_EXIT_CODE:
+                break
+            await asyncio.sleep(0.01)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    saved = store.get_watch(watch.id)
+    assert saved is not None
+    assert saved.enabled is True
+    assert saved.last_exit_code == NO_EVENT_EXIT_CODE
+    assert saved.last_error is None
+    assert request_store.list_pending() == []
+
+
+def test_managed_watch_service_treats_an_unmarked_exit_64_as_a_failure(tmp_path: Path) -> None:
+    """64 is ``sysexits`` EX_USAGE, not a private Avibe signal.
+
+    A generic watched command that rejects its own arguments exits 64. Reading that
+    as a quiet cycle would swallow the failure notice the user relies on and, in
+    forever mode, rerun the broken command for as long as the watch lives.
+    """
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Misconfigured forever waiter",
+        session_key="slack::channel::C123",
+        command=[
+            sys.executable,
+            "-c",
+            f"import sys; print('usage: mytool [--flag]', file=sys.stderr); sys.exit({NO_EVENT_EXIT_CODE})",
+        ],
+        shell_command=None,
+        prefix="Investigate the failure.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        for _ in range(100):
+            if watch.id not in service._active_tasks:
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    saved = store.get_watch(watch.id)
+    pending = request_store.list_pending()
+    assert saved is not None
+    # Stopped, recorded with its error text, and reported once — as before the
+    # no-event code existed.
+    assert saved.enabled is False
+    assert saved.last_exit_code == NO_EVENT_EXIT_CODE
+    assert saved.last_error and "usage: mytool" in saved.last_error
+    assert len(pending) == 1
+    assert "usage: mytool" in pending[0].prompt
 
 
 def test_managed_watch_service_forever_non_retry_error_disables_and_enqueues_failure(tmp_path: Path) -> None:
@@ -1192,6 +1463,67 @@ def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> 
 
     assert store.starts == 1
     assert service._store_error_fused is True
+    assert request_store.list_pending() == []
+
+
+def test_managed_watch_service_fuses_quiet_cycle_after_store_error(tmp_path: Path) -> None:
+    """A quiet cycle commits through the same wrapper as every other result branch.
+
+    Called synchronously, a raising ``mark_cycle_result`` escapes ``_run_cycle`` and
+    kills the watch task with the store unfused and the cycle unrecorded. Reconcile
+    then restarts the same quiet cycle and repeats it, so a real storage failure
+    never reaches the user as one.
+    """
+
+    class FailingResultStore(ManagedWatchStore):
+        def __init__(self, path: Path):
+            super().__init__(path)
+            self.starts = 0
+
+        def mark_cycle_start(self, watch_id: str) -> bool:
+            self.starts += 1
+            return super().mark_cycle_start(watch_id)
+
+        def mark_cycle_result(self, *args, **kwargs) -> bool:
+            raise RuntimeError("database disk image is malformed")
+
+    store = FailingResultStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Quiet with broken persistence",
+        session_key="slack::channel::C123",
+        command=_quiet_waiter_command("nothing to report"),
+        shell_command=None,
+        prefix="Should not storm.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        await asyncio.sleep(0.12)
+        assert watch.id in service._fused_watch_ids
+        await asyncio.sleep(0.08)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert store.starts == 1, "the fused store let the quiet cycle restart"
+    assert service._store_error_fused is True
+    # A quiet cycle authorises no hook, and a failed one must not invent it.
     assert request_store.list_pending() == []
 
 
@@ -1681,7 +2013,11 @@ def test_managed_watch_service_start_keeps_recovery_off_event_loop(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
-    monkeypatch.setattr(service, "_reap_stale_workers", lambda: time.sleep(0.15))
+    def inspect_stale_workers() -> _StaleWorkerRecovery:
+        time.sleep(0.15)
+        return _StaleWorkerRecovery(True)
+
+    monkeypatch.setattr(service, "_inspect_stale_workers", inspect_stale_workers)
     monkeypatch.setattr(service, "reconcile_watches", lambda: False)
 
     async def _run() -> None:
@@ -1696,6 +2032,365 @@ def test_managed_watch_service_start_keeps_recovery_off_event_loop(
         await service.stop()
 
     asyncio.run(_run())
+
+
+def test_hfr_164_watch_restart_replaces_only_its_registration_generation(
+    tmp_path: Path,
+) -> None:
+    class EmptyHandler:
+        def scan(self, *, limit, occupied, cursor):  # noqa: ANN001, ANN202
+            del limit, occupied, cursor
+            return [], False
+
+        async def process(self, item) -> None:  # noqa: ANN001
+            raise AssertionError(item)
+
+    async def _run() -> None:
+        supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+        delivery_token = supervisor.register(
+            RuntimeWorkLane.SESSION_DELIVERIES,
+            EmptyHandler(),
+        )
+        await supervisor.activate()
+        service = ManagedWatchService(
+            controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+            store=ManagedWatchStore(tmp_path / "watches.json"),
+            request_store=TaskExecutionStore(tmp_path / "task_requests"),
+            runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+        )
+
+        await _start_watch_service(service)
+        first = service._runtime_work_token
+        assert first is not None
+        assert RuntimeWorkLane.SESSION_DELIVERIES in supervisor._registrations
+        await service.stop()
+        assert RuntimeWorkLane.WATCH_DEFINITIONS not in supervisor._registrations
+        assert supervisor._registrations[RuntimeWorkLane.SESSION_DELIVERIES].token == delivery_token
+
+        await _start_watch_service(service)
+        second = service._runtime_work_token
+        assert second is not None
+        assert second.generation > first.generation
+        await service.stop()
+        await supervisor.stop()
+
+    asyncio.run(_run())
+
+
+def test_hfr_176_legacy_watch_probe_only_wakes_watch_definitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notified: list[RuntimeWorkLane] = []
+    service = ManagedWatchService(
+        controller=SimpleNamespace(
+            runtime_work_supervisor=SimpleNamespace(
+                notify=lambda *lanes: notified.extend(lanes),
+            )
+        ),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._running = True
+    service._legacy_watch_signature = (1, 1, 1)
+    monkeypatch.setattr(watches_module, "_path_signature", lambda _path: (2, 2, 2))
+
+    async def stop_after_tick(_delay: float) -> None:
+        service._running = False
+
+    monkeypatch.setattr(watches_module.asyncio, "sleep", stop_after_tick)
+    asyncio.run(service._legacy_runtime_work_probe())
+
+    assert notified == [RuntimeWorkLane.WATCH_DEFINITIONS]
+
+
+def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._runtime_state_dirty = False
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+    guarded_entered = threading.Event()
+    scan_threads: list[int] = []
+    reconcile_threads: list[int] = []
+
+    def blocking_reload() -> bool:
+        scan_threads.append(threading.get_ident())
+        scan_entered.set()
+        assert release_scan.wait(timeout=1)
+        return True
+
+    monkeypatch.setattr(service.store, "maybe_reload", blocking_reload)
+
+    async def _run() -> None:
+        loop_thread = threading.get_ident()
+        handler = _ManagedWatchRuntimeWorkHandler(service)
+        scan = asyncio.create_task(
+            asyncio.to_thread(
+                handler.scan,
+                limit=1,
+                occupied=frozenset(),
+                cursor=None,
+            )
+        )
+        assert await asyncio.to_thread(scan_entered.wait, 1)
+
+        guarded = asyncio.create_task(
+            service._watch_store_call_async(
+                "watch-a",
+                "guarded-test",
+                lambda: guarded_entered.set() or True,
+                guarded=True,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not guarded_entered.is_set()
+        release_scan.set()
+        items, has_more = await scan
+        assert not has_more
+        assert await guarded is True
+
+        def reconcile(watches) -> bool:  # noqa: ANN001
+            del watches
+            reconcile_threads.append(threading.get_ident())
+            return False
+
+        monkeypatch.setattr(service, "reconcile_watches", reconcile)
+        assert await handler.process(items[0]) is True
+        assert scan_threads and scan_threads[0] != loop_thread
+        assert reconcile_threads == [loop_thread]
+
+    asyncio.run(_run())
+
+
+def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = RuntimeWorkSupervisor(reconcile_interval=3600)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = True
+    reload_calls = 0
+    persist_entered = asyncio.Event()
+    release_persist = asyncio.Event()
+    second_reload = threading.Event()
+
+    def reload_store() -> bool:
+        nonlocal reload_calls
+        reload_calls += 1
+        if reload_calls == 2:
+            second_reload.set()
+        return False
+
+    async def persist_runtime_state() -> None:
+        persist_entered.set()
+        await release_persist.wait()
+        service._runtime_state_dirty = False
+
+    monkeypatch.setattr(service.store, "maybe_reload", reload_store)
+    monkeypatch.setattr(service, "_persist_runtime_state", persist_runtime_state)
+
+    async def _run() -> None:
+        supervisor.register(
+            RuntimeWorkLane.WATCH_DEFINITIONS,
+            _ManagedWatchRuntimeWorkHandler(service),
+        )
+        await supervisor.activate()
+        await asyncio.wait_for(persist_entered.wait(), 1)
+
+        supervisor.notify(RuntimeWorkLane.WATCH_DEFINITIONS)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert reload_calls == 1
+
+        release_persist.set()
+        assert await asyncio.to_thread(second_reload.wait, 1)
+        assert reload_calls == 2
+        await supervisor.stop()
+
+    asyncio.run(_run())
+
+
+def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
+    tmp_path: Path,
+) -> None:
+    delayed: list[tuple[object, float]] = []
+    supervisor = SimpleNamespace(
+        notify_after=lambda token, delay: delayed.append((token, delay)),
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    token = object()
+    service._runtime_work_token = token  # type: ignore[assignment]
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = False
+    service._recovery_blocked_watch_ids.add("watch-a")
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(True),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+            "store_error": None,
+            "fused": False,
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is True
+    assert delayed == [(token, watches_module.WATCH_RECONCILE_INTERVAL_SECONDS)]
+
+
+def test_hfr_179_pending_watch_recovery_uses_watch_lane_cadence(
+    tmp_path: Path,
+) -> None:
+    delayed: list[tuple[object, float]] = []
+    supervisor = SimpleNamespace(
+        notify_after=lambda token, delay: delayed.append((token, delay)),
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(runtime_work_supervisor=supervisor),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    token = object()
+    service._runtime_work_token = token  # type: ignore[assignment]
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(False),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+            "store_error": None,
+            "fused": False,
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is True
+    assert service._recovery_pending is True
+    assert delayed == [(token, watches_module.WATCH_RECONCILE_INTERVAL_SECONDS)]
+
+
+def test_hfr_179_watch_store_fuse_stops_generation_reads_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = False
+    reads = 0
+
+    def fail_read() -> bool:
+        nonlocal reads
+        reads += 1
+        raise OSError("watch store unavailable")
+
+    monkeypatch.setattr(service.store, "maybe_reload", fail_read)
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+
+    async def _run() -> None:
+        outcomes = []
+        for _ in range(watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES):
+            items, _has_more = await asyncio.to_thread(
+                handler.scan,
+                limit=1,
+                occupied=frozenset(),
+                cursor=None,
+            )
+            outcomes.append(await handler.process(items[0]))
+
+        assert outcomes[:-1] == [False] * (len(outcomes) - 1)
+        assert outcomes[-1] is True
+        assert service._store_error_fused is True
+        assert reads == watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES
+
+        persisted = 0
+
+        async def persist_runtime_state() -> None:
+            nonlocal persisted
+            persisted += 1
+            service._runtime_state_dirty = False
+
+        monkeypatch.setattr(service, "_persist_runtime_state", persist_runtime_state)
+        service._runtime_state_dirty = True
+        items, _has_more = await asyncio.to_thread(
+            handler.scan,
+            limit=1,
+            occupied=frozenset(),
+            cursor=None,
+        )
+        assert await handler.process(items[0]) is True
+        assert reads == watches_module.WATCH_STORE_RECONCILE_FUSE_FAILURES
+        assert persisted == 1
+
+    asyncio.run(_run())
+
+
+def test_watch_runtime_state_persistence_failure_rearms_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = True
+
+    async def _persist_but_remain_dirty() -> None:
+        service._runtime_state_dirty = True
+
+    monkeypatch.setattr(service, "_persist_runtime_state", _persist_but_remain_dirty)
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    item = RuntimeWorkItem(
+        "managed-watches",
+        {
+            "recovery": _StaleWorkerRecovery(True),
+            "unblocked": (),
+            "changed": False,
+            "watches": (),
+        },
+        rearm_after_process=False,
+    )
+
+    assert asyncio.run(handler.process(item)) is False
+    assert service._runtime_state_dirty is True
 
 
 def test_managed_watch_service_start_retries_unreadable_runtime_before_reconcile(
@@ -2151,3 +2846,1364 @@ def test_managed_watch_service_ignores_runtime_state_write_failure(tmp_path: Pat
     assert saved is not None
     assert saved.enabled is False
     assert runtime_store.writes > 0
+
+
+#: The ``existing`` probe ``_upsert_definition`` runs before its guarded UPDATE.
+#: The competing reclaim is committed when THIS read completes, which puts it
+#: exactly inside the window the guard exists for: after the supervisor decided
+#: what to write, before the write takes the lock.
+_DEFINITION_EXISTS_SELECT = (
+    "SELECT run_definitions.id FROM run_definitions WHERE run_definitions.id = ? LIMIT ? OFFSET ?"
+)
+
+
+def _bare_watch_session_row(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A real Session row for a watch to be bound to."""
+    from config import paths as config_paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(config_paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def _commit_reclaim_after(engine, session_id: str, *, read: str, reason: str, occurrence: int = 1) -> dict:
+    """Commit the REAL ``/new`` reclaim from a genuinely separate connection.
+
+    The watch-side twin of ``_commit_competing_bind_after`` in
+    ``tests/test_sqlite_sessions_store.py``: hooks ``after_cursor_execute`` on the
+    engine the code under test uses, and when ``read`` completes opens its own
+    engine, runs ``reclaim_bound_definitions`` and COMMITS. Control returns to the
+    supervisor mid-write, so its next statement runs against a database another
+    writer has already changed. Fires once; the returned dict records it, so a
+    rendered-SQL drift shows up as "never raced" instead of a vacuous pass.
+
+    ``occurrence`` selects WHICH guarded write to race. One ``_run_watch`` iteration
+    runs several of them (``mark_cycle_start``, then ``mark_cycle_result``), and each
+    emits ``read`` once, so ``occurrence=2`` lands the reclaim inside the RESULT
+    stamp's write window -- after the start stamp has already been accepted. That is
+    the window HFR-267 is about: the cycle legitimately ran, and the teardown arrives
+    while its outcome is being recorded.
+    """
+    from sqlalchemy import event
+
+    from config import paths as config_paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+
+    state: dict = {"fired": 0, "seen": 0, "summary": None}
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["seen"] += 1
+        if state["seen"] < occurrence:
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(config_paths.get_sqlite_state_path())
+        try:
+            with other.begin() as other_conn:
+                state["summary"] = reclaim_bound_definitions(
+                    other_conn, session_id, mode=RECLAIM_PAUSE, reason=reason
+                )
+        finally:
+            other.dispose()
+
+    return state
+
+
+def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path) -> None:
+    """HFR-263 — a refused ``mark_cycle_start`` must stop the cycle, not be discarded.
+
+    THE PRODUCTION STORY. A ``forever`` watch is bound to a Session. The user types
+    ``/new`` in that channel: the teardown deletes the session row and
+    ``reclaim_bound_definitions(mode='pause')`` pauses the watch and stamps its
+    settings snapshot, and ``/new`` replies "1 watch paused". The supervisor loop was
+    already past its own ``maybe_reload``, so it holds the pre-teardown mirror.
+
+    THE CONSUMING END WAS MISSING. HFR-261 made ``mark_cycle_start`` a guarded
+    full-row write that correctly REFUSES the stale payload and returns ``False`` --
+    but ``_watch_store_call`` was ``callback(); return True``, discarding the
+    callback's own return value. The refusal was reported to the loop as success, so
+    the cycle went on to spawn its waiter subprocess and enqueue a hook against the
+    definition the database had just torn down: the user is told the watch is paused
+    while it runs a command and delivers a prompt into a dead session.
+
+    Driven through the REAL ``_run_watch``, with the reclaim committed from a second
+    connection INSIDE the write window. ``_run_cycle`` is the only double, and it
+    returns a SUCCESS result on purpose: on the unfixed wrapper that is what produces
+    the enqueued hook this test forbids.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+
+    reason = "the bound agent session was cleared"
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path)
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="CI is green.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    cycles: list[str] = []
+
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        cycles.append(watch_arg.id)
+        return _CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)
+
+    service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine, session_id, read=_DEFINITION_EXISTS_SELECT, reason=reason
+    )
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert race["fired"] == 1, (
+        "the competing reclaim never landed inside the write window, so this test "
+        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
+    )
+    assert race["summary"] == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({race['summary']!r})"
+    )
+
+    assert cycles == [], (
+        "the cycle ran its command after the store refused the start stamp; the "
+        "waiter subprocess is spawned for a watch the teardown already paused"
+    )
+    assert request_store.list_pending() == [], (
+        "a hook was enqueued for a refused cycle; the prompt is delivered into the "
+        "session /new just tore down, after /new told the user the watch was paused"
+    )
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the refused start stamp re-enabled the watch the reclaim paused"
+    )
+    assert stored.last_error == reason, "the reclaim's pause reason was overwritten"
+    assert stored.last_started_at is None, (
+        "the start stamp partially landed — a lost compare-and-set must change NOTHING"
+    )
+    assert stored.last_exit_code is None and stored.last_finished_at is None, (
+        "a success-shaped cycle result was recorded for a cycle that never ran"
+    )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
+    )
+    # HFR-271's rule: the refusal is only proven when the DURABLE row above and the LIVE
+    # store the service is still running on say the same thing. ``store`` is the object
+    # ``_run_watch`` mutated before the refused stamp, and the one ``reconcile_watches``
+    # reads next.
+    live = store.get_watch(watch.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the start stamp was refused and the live store kept it: it serves "
+        f"enabled={None if live is None else live.enabled!r} "
+        f"last_started_at={None if live is None else live.last_started_at!r} while the "
+        f"row says enabled={stored.enabled!r} last_started_at={stored.last_started_at!r}"
+    )
+
+
+#: Sentinel ``cwd``: replaced with a path under ``tmp_path`` that is deliberately
+#: never created, so ``_missing_watch_cwd_error`` fires on the real filesystem.
+_MISSING_CWD = "<missing-cwd>"
+
+#: One row per ``_run_watch`` branch that enqueues a completion hook. ALL FIVE of
+#: them: every ``_commit_cycle_result`` call site that can produce a hook is a row
+#: here, so a branch cannot be added to production without a control below.
+#:
+#: ``cycles`` is what the doubled ``_run_cycle`` returns, one entry per call.
+#: ``occurrence`` is which guarded definition write to land the reclaim inside --
+#: every ``mark_cycle_start`` and ``mark_cycle_result`` emits the existence probe
+#: once, in order, so the number identifies the RESULT stamp of the branch under
+#: test. ``expect_hook`` is a fragment of the prompt the branch delivers, which is
+#: what proves the control run reached that branch instead of some other one.
+#: ``expect_cycle`` is False for the one branch that stops before the waiter spawns.
+_HOOK_BRANCHES: dict[str, dict] = {
+    # exit 0 -> the event fired; the watch delivers the waiter's stdout.
+    "success": {
+        "overrides": {"mode": "once", "lifetime_timeout_seconds": 0},
+        "cycles": [_CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)],
+        "occurrence": 2,
+        "expect_hook": "ci is green",
+        "expect_exit_code": 0,
+    },
+    # the waiter overran its per-cycle timeout and 124 is not a retry code.
+    "cycle_timeout": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
+        "cycles": [_CycleResult(exit_code=124, stdout="", stderr="", timed_out=True)],
+        "occurrence": 2,
+        "expect_hook": "the waiter timed out",
+        "expect_exit_code": 124,
+    },
+    # the waiter exited non-zero with a code outside ``retry_exit_codes``.
+    "terminal_failure": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
+        "cycles": [_CycleResult(exit_code=2, stdout="", stderr="boom", timed_out=False)],
+        "occurrence": 2,
+        "expect_hook": "exited with code 2",
+        "expect_exit_code": 2,
+    },
+    # the supervisor's own deadline. Cycle 1 retries (75 IS a retry code) and its
+    # ``retry_delay_seconds`` sleep pushes the loop past the lifetime, so iteration 2
+    # takes the lifetime branch BEFORE it ever reaches ``mark_cycle_start``. Writes in
+    # order: start #1, retry result #2, lifetime result #3.
+    "lifetime_expiry": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0.02, "retry_delay_seconds": 0.15},
+        "cycles": [_CycleResult(exit_code=75, stdout="", stderr="not yet", timed_out=False)],
+        "occurrence": 3,
+        "expect_hook": "reached its lifetime timeout",
+        "expect_exit_code": 124,
+    },
+    # the definition's working directory is gone (a deleted worktree). The check runs
+    # right AFTER ``mark_cycle_start`` lands and before the waiter is spawned, so this
+    # is the one hook-producing branch that never runs a cycle. Writes in order:
+    # start #1, missing-cwd result #2.
+    "missing_cwd": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0, "cwd": _MISSING_CWD},
+        "cycles": [],
+        "occurrence": 2,
+        "expect_hook": "working directory is no longer available",
+        "expect_exit_code": 1,
+        "expect_cycle": False,
+    },
+}
+
+
+def _assert_branch_was_reached(branch: str, calls: list[str]) -> None:
+    """The scenario is only wired if the branch under test was actually taken.
+
+    Four branches are reached by running a cycle. ``missing_cwd`` is reached by NOT
+    running one -- a spawned waiter there would mean the run took a different path --
+    and the guarded result write the callers assert on is what proves it arrived.
+    """
+
+    if _HOOK_BRANCHES[branch].get("expect_cycle", True):
+        assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    else:
+        assert calls == [], (
+            f"the {branch} branch spawned a waiter, so the run did not take the "
+            f"missing-cwd path at all: {calls!r}"
+        )
+
+
+def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> tuple:
+    """Build a real store/service/watch for one ``_HOOK_BRANCHES`` row.
+
+    ``request_store`` defaults to a file-backed outbox, which is enough for the
+    ordering tests. Pass ``TaskExecutionStore()`` for the SQLite outbox — the real
+    ``agent_runs`` ledger, and the only backend that can share a transaction with the
+    definition stamp (HFR-269).
+    """
+
+    spec = _HOOK_BRANCHES[branch]
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
+    if request_store is None:
+        request_store = TaskExecutionStore(tmp_path / f"requests_{branch}")
+    runtime_store = WatchRuntimeStateStore(tmp_path / f"runtime_{branch}.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor=f"slack_C_{branch}")
+    kwargs = {
+        "name": f"Watch {branch}",
+        "session_key": "",
+        "session_id": session_id,
+        "session_policy": "existing",
+        "command": [sys.executable, "-c", "print('event')"],
+        "shell_command": None,
+        "prefix": "CI update.",
+        "cwd": None,
+        "mode": "forever",
+        "timeout_seconds": 5,
+        "lifetime_timeout_seconds": 0,
+        "retry_exit_codes": [75],
+        "retry_delay_seconds": 0.01,
+        "post_to": None,
+        "deliver_key": None,
+        "metadata": {"origin": "cli"},
+    }
+    kwargs.update(spec["overrides"])
+    if kwargs.get("cwd") == _MISSING_CWD:
+        # Never created on purpose: the production check is a real ``Path.is_dir()``.
+        kwargs["cwd"] = str(tmp_path / f"removed_worktree_{branch}")
+    watch = store.add_watch(**kwargs)
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    results = list(spec["cycles"])
+    calls: list[str] = []
+
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        calls.append(watch_arg.id)
+        return results[min(len(calls) - 1, len(results) - 1)]
+
+    service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+    return store, service, watch, request_store, session_id, calls
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_run_watch_enqueues_the_branch_hook_when_the_result_stamp_lands(tmp_path: Path, branch: str) -> None:
+    """HFR-267 control — with no teardown racing it, every branch DOES deliver its hook.
+
+    Without this, the refusal tests below could pass because the branch was never
+    reached at all. Here the same wiring, minus the reclaim, must enqueue exactly one
+    hook carrying that branch's own text.
+    """
+    _store, service, watch, request_store, _session_id, calls = _hook_branch_service(tmp_path, branch)
+
+    asyncio.run(service._run_watch(watch.id))
+
+    _assert_branch_was_reached(branch, calls)
+    pending = request_store.list_pending()
+    assert len(pending) == 1, f"the {branch} branch enqueued {len(pending)} hooks, expected exactly 1"
+    assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
+        f"the enqueued hook is not the {branch} branch's: {pending[0].prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused(tmp_path: Path, branch: str) -> None:
+    """HFR-267 — the guarded stamp must run BEFORE the hook it authorises, in every branch.
+
+    THE PRODUCTION STORY. A watch is bound to a Session and its cycle completes. In the
+    same instant the user types ``/new`` in that channel: the teardown deletes the
+    session row, ``reclaim_bound_definitions(mode='pause')`` pauses the watch, and
+    ``/new`` replies "1 watch paused".
+
+    THE GUARD WAS ASKED TOO LATE. HFR-261 made ``mark_cycle_result`` a guarded
+    compare-and-set and HFR-263 taught ``_watch_store_call`` to honour its refusal --
+    but all four hook-enqueueing branches ran
+
+        self._enqueue_hook(...)                      # durable request row, now unrecallable
+        if not self._watch_store_call(..., guarded=True):
+            return                                  # refused; unqueues nothing
+
+    ``enqueue_hook_send`` writes a row a separate drain loop claims and executes, so
+    ``return`` after the refusal cancels nothing: the prompt is still delivered into
+    the session ``/new`` just deleted, for a definition the database has torn down,
+    after the user was told the watch was paused. Respecting the guard's answer is not
+    enough -- the effect has to come after the guard.
+
+    Driven through the REAL ``_run_watch``, with the real ``/new`` reclaim committed
+    from a second connection INSIDE the result stamp's write window. ``_run_cycle`` is
+    the only double, and it returns each branch's own success/timeout/failure shape on
+    purpose: on the unfixed ordering that is exactly what produces the hook this test
+    forbids.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+
+    reason = "the bound agent session was cleared"
+    store, service, watch, request_store, session_id, calls = _hook_branch_service(tmp_path, branch)
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        reason=reason,
+        occurrence=_HOOK_BRANCHES[branch]["occurrence"],
+    )
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert race["fired"] == 1, (
+        f"the competing reclaim never landed inside the {branch} result stamp's write "
+        f"window (saw {race['seen']} guarded writes, wanted #{_HOOK_BRANCHES[branch]['occurrence']}), "
+        "so this test proved nothing"
+    )
+    assert race["summary"] == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({race['summary']!r})"
+    )
+    _assert_branch_was_reached(branch, calls)
+
+    assert request_store.list_pending() == [], (
+        f"the {branch} branch enqueued a hook for a cycle result the store REFUSED; the "
+        "prompt is delivered into the session /new just tore down, after /new told the "
+        "user the watch was paused"
+    )
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False, "the refused result stamp re-enabled the watch the reclaim paused"
+    assert stored.last_error == reason, "the reclaim's pause reason was overwritten by the refused stamp"
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
+    )
+    # HFR-271's rule, on the live half a fresh store cannot see.
+    live = service.store.get_watch(watch.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the result stamp was refused and the live store kept it: it serves "
+        f"enabled={None if live is None else live.enabled!r} "
+        f"retired_at={None if live is None else live.retired_at!r} while the row says "
+        f"enabled={stored.enabled!r} retired_at={stored.retired_at!r}"
+    )
+
+
+#: The outbox row's own INSERT. Matched by prefix so a new ``agent_runs`` column
+#: cannot silently stop these tests from racing anything.
+_AGENT_RUNS_INSERT = "INSERT INTO AGENT_RUNS"
+
+
+def _is_agent_runs_insert(statement: str) -> bool:
+    return " ".join(statement.split()).upper().startswith(_AGENT_RUNS_INSERT)
+
+
+def _try_archive_before_the_outbox_insert(engines, session_id: str, *, reason: str) -> dict:
+    """Try to commit the REAL archive teardown in the gap before the outbox INSERT.
+
+    Hooks ``before_cursor_execute`` on every engine the code under test might write the
+    ``agent_runs`` row through — the watch store's and the request store's, because
+    WHICH one carries the INSERT is exactly what this test is about — and when that
+    INSERT is about to run, opens its own engine and commits
+    ``reclaim_bound_definitions(mode='delete')`` from a genuinely separate connection.
+
+    ``PRAGMA busy_timeout = 0`` is what turns the outcome into a FACT instead of a five
+    second sleep: at this instant the result stamp has already been decided, so if the
+    stamp was its OWN transaction the database is unlocked and the teardown commits
+    immediately; if the stamp and this INSERT are one transaction the write lock is
+    already held and SQLite refuses at once with "database is locked". ``blocked``
+    records which of the two happened, so "there is no gap" is asserted rather than
+    assumed, and a rendered-SQL drift shows up as "never raced".
+    """
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from config import paths as config_paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import RECLAIM_DELETE, reclaim_bound_definitions
+
+    state: dict = {"fired": 0, "blocked": None, "summary": None}
+
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or not _is_agent_runs_insert(statement):
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(config_paths.get_sqlite_state_path())
+        try:
+            with other.begin() as other_conn:
+                other_conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+                state["summary"] = reclaim_bound_definitions(
+                    other_conn, session_id, mode=RECLAIM_DELETE, reason=reason
+                )
+            state["blocked"] = False
+        except OperationalError as exc:
+            # Serialised behind the transaction that holds the stamp: the teardown
+            # cannot land in between, which is the property under test.
+            state["blocked"] = True
+            state["detail"] = str(exc)
+        finally:
+            other.dispose()
+
+    for engine in engines:
+        event.listens_for(engine, "before_cursor_execute")(_race)
+    return state
+
+
+def _fail_the_outbox_insert(engines) -> dict:
+    """Make the outbox row's INSERT fail, wherever the code under test writes it."""
+    from sqlalchemy import event
+
+    state: dict = {"fired": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not _is_agent_runs_insert(statement):
+            return
+        state["fired"] += 1
+        raise RuntimeError("outbox write failed: disk I/O error")
+
+    for engine in engines:
+        event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+def _hook_branch_service_on_the_run_ledger(tmp_path: Path, branch: str) -> tuple:
+    """``_hook_branch_service`` on the SQLite outbox — the real ``agent_runs`` ledger."""
+
+    request_store = TaskExecutionStore()
+    assert request_store._sqlite is not None, "this test needs the SQLite outbox; a transaction is the fix"
+    store, service, watch, request_store, session_id, calls = _hook_branch_service(
+        tmp_path, branch, request_store=request_store
+    )
+    assert store._sqlite.db_path == request_store._sqlite.db_path, (
+        "the definition and the outbox must be in ONE database for a shared transaction "
+        "to be possible at all"
+    )
+    engines = [store._sqlite.engine, request_store._sqlite.engine]
+    return store, service, watch, request_store, session_id, calls, engines
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_the_atomic_stamp_and_its_hook_both_land_when_nothing_races_them(tmp_path: Path, branch: str) -> None:
+    """HFR-269 control — with nothing racing and nothing faulting, BOTH halves land.
+
+    A combined operation that simply refused everything would satisfy the two tests
+    below vacuously: "no hook was queued" and "the watch was not retired" are precisely
+    what a ``_commit_cycle_result`` that always returned False, or an
+    ``upsert_watch_with_queued_run`` that never committed, would produce. So each
+    terminal branch needs its positive half too, and this is it -- the same real
+    ``_run_watch`` over the same real ``agent_runs`` ledger, with NO teardown racing the
+    write and NO injected outbox fault. The one transaction must COMMIT, carrying both
+    of the things it makes atomic:
+
+    * the branch's own result transition, read back from the definition (that branch's
+      terminal exit code, disabled, retired, finished), and
+    * exactly ONE outbox row, carrying that branch's OWN prompt text -- so a branch
+      cannot be credited with a row some other branch wrote, and "exactly one" rules
+      out the atomic write and the fallback ``enqueue`` both firing.
+
+    Parametrized over every row of ``_HOOK_BRANCHES``, which is every hook-producing
+    ``_commit_cycle_result`` call site in ``_run_watch``: success, per-cycle timeout,
+    terminal failure, lifetime expiry, and missing cwd.
+    """
+    _store, service, watch, request_store, _session_id, calls, _engines = (
+        _hook_branch_service_on_the_run_ledger(tmp_path, branch)
+    )
+
+    asyncio.run(service._run_watch(watch.id))
+
+    _assert_branch_was_reached(branch, calls)
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None, f"the {branch} branch's definition is gone"
+    assert stored.last_exit_code == _HOOK_BRANCHES[branch]["expect_exit_code"], (
+        f"the {branch} branch's result transition did not commit: the definition records "
+        f"exit {stored.last_exit_code!r}, not {_HOOK_BRANCHES[branch]['expect_exit_code']!r}"
+    )
+    assert stored.enabled is False and stored.retired_at is not None, (
+        f"the {branch} branch is terminal, but the definition is still enabled/unretired "
+        f"(enabled={stored.enabled!r}, retired_at={stored.retired_at!r}): the stamp was "
+        "refused or rolled back when nothing opposed it"
+    )
+    assert stored.last_finished_at is not None, (
+        f"the {branch} branch's stamp committed without recording that the cycle finished"
+    )
+
+    pending = request_store.list_pending()
+    assert len(pending) == 1, (
+        f"the {branch} branch queued {len(pending)} hooks on the run ledger, expected "
+        "exactly 1; with nothing racing it, the hook the branch authorises must be durable"
+    )
+    assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
+        f"the queued hook is not the {branch} branch's own: {pending[0].prompt!r}"
+    )
+    assert pending[0].task_id == watch.id, (
+        f"the queued hook belongs to {pending[0].task_id!r}, not to the watch under test"
+    )
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_no_teardown_can_commit_between_the_result_stamp_and_its_hook(tmp_path: Path, branch: str) -> None:
+    """HFR-269 — the stamp and the hook it authorises must be ONE transaction.
+
+    THE PRODUCTION STORY. A watch bound to a Session finishes a cycle. In the same
+    instant the user archives that Session: the archive runs
+    ``reclaim_bound_definitions(mode='delete')``, which soft-deletes the watch, and the
+    confirm dialog reports it.
+
+    ORDERING WAS NOT ENOUGH. HFR-267 put the guarded stamp before the hook, so the
+    guard now runs before the effect it authorises — but the two are separate
+    transactions:
+
+        self.store.mark_cycle_result(...)              # transaction 1, COMMITS
+        self.request_store.enqueue_hook_send(...)       # transaction 2, COMMITS
+
+    and the archive commits in the GAP between those commits. The stamp is accepted —
+    it won its compare-and-set fairly, against the state that existed when it ran — and
+    the hook is queued afterwards anyway: a durable request row the drain loop will
+    deliver into a session that no longer exists, under a definition the database has
+    soft-deleted, after the user was told the archive was done. Nothing is refused,
+    because by the time the teardown lands there is nothing left to refuse.
+
+    Driven through the REAL ``_run_watch`` over the REAL ``agent_runs`` ledger, with the
+    real archive reclaim attempted from a second connection at the instant the outbox
+    INSERT is about to run, and a zero busy timeout so "could it commit in the gap?" is
+    answered by the database rather than by a sleep. Green requires that it could NOT:
+    the write lock the stamp took is still held, so the teardown is serialised behind
+    the single transaction and can only land before the stamp (where HFR-267's tests
+    show it is refused) or after the hook is already durable.
+    """
+    store, service, watch, request_store, session_id, calls, engines = (
+        _hook_branch_service_on_the_run_ledger(tmp_path, branch)
+    )
+
+    race = _try_archive_before_the_outbox_insert(
+        engines, session_id, reason="the session was archived"
+    )
+
+    outcome: dict = {}
+    try:
+        asyncio.run(service._run_watch(watch.id))
+    except Exception as exc:  # noqa: BLE001 - the split-transaction path can also fault here
+        outcome["error"] = exc
+
+    _assert_branch_was_reached(branch, calls)
+    assert race["fired"] == 1, (
+        f"the {branch} branch never wrote an outbox row, so this test proved nothing; "
+        "the rendered SQL of the run INSERT drifted"
+    )
+    assert race["blocked"] is True, (
+        f"the archive teardown COMMITTED between the {branch} branch's result stamp and "
+        f"its hook ({race['summary']!r}): the two are separate transactions, so a "
+        "reclaim lands in the gap and the hook is queued anyway — delivered into the "
+        "session the archive removed, under a definition it soft-deleted"
+    )
+    assert not outcome, f"the atomic stamp+hook write faulted: {outcome.get('error')!r}"
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False and stored.retired_at is not None, (
+        f"the {branch} branch's terminal stamp did not land with its hook"
+    )
+    assert stored.last_exit_code == _HOOK_BRANCHES[branch]["expect_exit_code"], (
+        f"the stamp recorded exit {stored.last_exit_code!r} for the {branch} branch"
+    )
+    pending = request_store.list_pending()
+    assert len(pending) == 1, f"the {branch} branch queued {len(pending)} hooks, expected exactly 1"
+    assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
+        f"the queued hook is not the {branch} branch's: {pending[0].prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost(
+    tmp_path: Path, branch: str
+) -> None:
+    """HFR-269, inverse half — the other thing two commits cost.
+
+    Same scenario id as ``test_no_teardown_can_commit_between_the_result_stamp_and_its_hook``:
+    one defect (the stamp and its outbox row are not one transaction) with two failure
+    halves, tested separately because they fail for opposite reasons -- that one needs a
+    teardown racing the gap, this one needs no race at all, just a fault on the second
+    commit.
+
+    HFR-267's ordering traded one failure for another. With the stamp committed first
+    and the hook second, a fault on the outbox write — a full disk, a locked database,
+    any error between the two commits — leaves the watch DURABLY DISABLED and retired
+    while the hook that tells the user it finished is gone. A ``once`` watch is
+    unrecoverable at that point: the definition says "finished", the user was never
+    told, and nothing will run it again.
+
+    One transaction removes the trade instead of reversing it: the outbox INSERT and the
+    stamp roll back together, so the watch stays enabled and its completion is still
+    owed. The fault is injected at the INSERT itself, on whichever connection the code
+    under test writes the row through.
+    """
+    store, service, watch, request_store, _session_id, calls, engines = (
+        _hook_branch_service_on_the_run_ledger(tmp_path, branch)
+    )
+
+    boom = _fail_the_outbox_insert(engines)
+
+    outcome: dict = {}
+    try:
+        asyncio.run(service._run_watch(watch.id))
+    except Exception as exc:  # noqa: BLE001 - the unfixed path lets the fault escape the loop
+        outcome["error"] = exc
+
+    _assert_branch_was_reached(branch, calls)
+    assert boom["fired"] >= 1, (
+        f"the {branch} branch never attempted an outbox INSERT, so no fault was injected"
+    )
+    assert request_store.list_pending() == [], "the failed INSERT queued a hook anyway"
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is True, (
+        f"the {branch} branch retired the watch while the hook that reports its outcome "
+        "was lost to the failed outbox write; a once watch is finished, silent and "
+        "unrecoverable"
+    )
+    assert stored.retired_at is None and stored.last_finished_at is None, (
+        "a terminal cycle result survived the failure of the hook it authorises"
+    )
+
+    # HFR-271 — AND THE OTHER HALF OF "IT ROLLED BACK". Everything above reads the
+    # DURABLE row through a store this test just built. That is the half that was never
+    # in doubt once the write became one transaction; the half that stayed wrong is the
+    # SERVICE STILL RUNNING, whose ``ManagedWatch`` mirror ``mark_cycle_result`` mutated
+    # BEFORE the write it then lost. A rollback is not proven by re-reading the row.
+    live = service.store.get_watch(watch.id)
+    assert live is not None, "the live store dropped the watch the database still has"
+    assert (live.enabled, live.retired_at, live.last_finished_at) == (
+        stored.enabled,
+        stored.retired_at,
+        stored.last_finished_at,
+    ), (
+        "the transaction rolled back and the LIVE store did not: it reports "
+        f"enabled={live.enabled!r} retired_at={live.retired_at!r} "
+        f"last_finished_at={live.last_finished_at!r} while the durable row says "
+        f"enabled={stored.enabled!r} retired_at={stored.retired_at!r} "
+        f"last_finished_at={stored.last_finished_at!r}. Every in-process reader "
+        "(``reconcile_watches`` decides which watches to keep running from exactly "
+        "this mirror) believes a watch retired that the database never retired"
+    )
+    assert live.last_exit_code == stored.last_exit_code, (
+        f"the live mirror kept the rolled-back exit code {live.last_exit_code!r}"
+    )
+
+
+#: Any full-row write of a definition. Prefix-matched on both statement shapes so a
+#: column change cannot silently stop the fault from being injected.
+_DEFINITION_WRITES = ("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")
+
+
+def _fail_the_definition_write(engine) -> dict:
+    """Make the ``run_definitions`` write itself fail, the way a real fault would."""
+    from sqlalchemy import event
+
+    state: dict = {"fired": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        normalized = " ".join(statement.split()).upper()
+        if not normalized.startswith(_DEFINITION_WRITES):
+            return
+        state["fired"] += 1
+        raise RuntimeError("definition write failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+#: Every guarded writer that mutates the cached ``ManagedWatch`` before persisting it.
+#: The value applies the writer and returns the fields it was supposed to change.
+_MIRROR_WRITERS = {
+    "mark_cycle_start": lambda store, watch_id: store.mark_cycle_start(watch_id),
+    "mark_cycle_result": lambda store, watch_id: store.mark_cycle_result(
+        watch_id, exit_code=0, error=None, disable=True
+    ),
+    "set_enabled": lambda store, watch_id: store.set_enabled(watch_id, False),
+    "update_watch": lambda store, watch_id: store.update_watch(
+        watch_id,
+        **{**_WATCH_FIXTURE_PAYLOAD, "name": "renamed", "session_id": None},
+    ),
+}
+
+#: Values a round trip through ``run_definitions`` returns unchanged, so a baseline
+#: mismatch cannot be mistaken for a mirror the failed write left ahead.
+_WATCH_FIXTURE_PAYLOAD = {
+    "name": "original",
+    "session_key": "slack::channel::C1",
+    "command": ["true"],
+    "shell_command": None,
+    "prefix": None,
+    "cwd": None,
+    "mode": "once",
+    "timeout_seconds": 1.0,
+    "lifetime_timeout_seconds": 0.0,
+    "retry_exit_codes": [75],
+    "retry_delay_seconds": 30.0,
+    "post_to": None,
+    "deliver_key": None,
+}
+
+
+def test_a_hook_queued_after_a_rename_names_an_agent_that_still_exists(tmp_path: Path) -> None:
+    """The watch half of SCT-030 -- the completion hook must be claimable.
+
+    ``_hook_request`` composes the hook from ``watch.agent_name`` when the cycle ends,
+    and the row becomes durable inside the stamp's transaction. A rename committed
+    between those two moments rewrites the definition and every ACTIVE run, but not a
+    row still being composed, so the hook was inserted naming an Agent the catalog no
+    longer had -- and the user is never told the watch finished, which for a ``once``
+    watch is the only report it ever produces.
+
+    The mirror reload is forced because ``PRAGMA data_version`` is timing-dependent; a
+    rename the mirror has NOT absorbed is refused by the compare-and-set instead, which
+    needs no fix.
+    """
+
+    from core.vibe_agents import VibeAgentStore
+
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "the shared transaction this covers lives in SQLite"
+    request_store = TaskExecutionStore()
+    assert request_store._sqlite is not None
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        # A user Agent: a built-in one cannot be renamed at all.
+        agent_store.create(name="ops", backend="claude")
+    finally:
+        agent_store.close()
+
+    watch = store.add_watch(**{**_WATCH_FIXTURE_PAYLOAD, "agent_name": "ops"})
+    hook = request_store.build_hook_send(
+        session_key=watch.session_key,
+        prompt="the watch finished",
+        agent_name=watch.agent_name,
+        run_type="watch",
+        definition_id=watch.id,
+        source_kind="watch",
+    )
+
+    agent_store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        renamed = agent_store.rename("ops", "night-shift")
+    finally:
+        agent_store.close()
+    store.load()
+    assert store.get_watch(watch.id).agent_name == "night-shift"
+
+    assert store.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=True,
+        queued_run=hook.to_dict(),
+    ) is True
+
+    rows = [row for row in request_store._sqlite.list_runs() if row["id"] == hook.id]
+    assert len(rows) == 1, f"the hook did not become durable: {rows!r}"
+    assert rows[0]["agent_name"] == "night-shift", (
+        "the hook was queued against the pre-rename name, which resolves to no Agent "
+        f"at claim time: {rows[0]['agent_name']!r}"
+    )
+    assert rows[0]["agent_id"] == renamed.id, (
+        f"the hook was not pinned to the Agent's durable identity: {rows[0]['agent_id']!r}"
+    )
+
+
+@pytest.mark.parametrize("writer", list(_MIRROR_WRITERS))
+def test_a_definition_write_that_raises_leaves_no_live_mirror_ahead_of_the_database(
+    tmp_path: Path, writer: str
+) -> None:
+    """HFR-271 — when the write raises, the in-process mirror must roll back with it.
+
+    THE RULE THIS TEST EXISTS FOR. ``ManagedWatchStore`` is a WRITE-THROUGH CACHE: every
+    writer below edits the cached ``ManagedWatch`` first and hands the whole row to
+    ``_write_watch`` second. ``_write_watch`` already reloads when the compare-and-set
+    RETURNS ``False`` — and only then. When the write RAISES, the mirror keeps edits the
+    database rolled back, and the process goes on serving them: ``reconcile_watches``
+    picks which watches keep running out of exactly this dict, ``vibe watch list``
+    renders it, and the next guarded write derives its ``expect`` snapshot from it
+    (``_read_state``), so a stale mirror also sends the NEXT compare-and-set the wrong
+    expectation.
+
+    Nothing about that is specific to the outbox fault HFR-269 found; the outbox fault is
+    just the first caller that made the raising path reachable in a test. So this is
+    parametrized over EVERY guarded writer that goes through the shared choke point, and
+    the fault is injected at the ``run_definitions`` statement itself — a disk error, a
+    locked database, anything — rather than at one caller's second write.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+
+    durable_before = ManagedWatchStore().get_watch(watch.id)
+    live_before = store.get_watch(watch.id)
+    assert durable_before is not None and live_before is not None
+    assert live_before.to_dict() == durable_before.to_dict(), (
+        "the fixture starts with the mirror already disagreeing with the row, so the "
+        "assertion below would pass or fail for the wrong reason"
+    )
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        _MIRROR_WRITERS[writer](store, watch.id)
+
+    assert boom["fired"] >= 1, (
+        f"{writer} never wrote a run_definitions row, so no fault was injected and this "
+        "test proves nothing"
+    )
+
+    durable_after = ManagedWatchStore().get_watch(watch.id)
+    assert durable_after is not None
+    assert durable_after.to_dict() == durable_before.to_dict(), (
+        f"{writer} committed something despite the injected fault; this test can no "
+        "longer tell a rolled-back mirror from a written one"
+    )
+
+    live = store.get_watch(watch.id)
+    assert live is not None, f"{writer} dropped the watch from the live store"
+    assert live.to_dict() == durable_after.to_dict(), (
+        f"{writer} left the live mirror ahead of the database. The transaction rolled "
+        "back; the cached ManagedWatch kept the edit. Differing fields: "
+        + repr(
+            {
+                key: (value, durable_after.to_dict().get(key))
+                for key, value in live.to_dict().items()
+                if durable_after.to_dict().get(key) != value
+            }
+        )
+    )
+
+
+def test_a_failed_create_leaves_no_phantom_watch_in_the_live_store() -> None:
+    """HFR-275 — the create entry point must roll its mirror back as well.
+
+    ``upsert_watch`` is the one writer that can put an id in the mirror the database has
+    NEVER seen, and it inserted into ``self._watches`` before writing. It is also the
+    worst place to leave a mirror ahead: the caller is told the watch could not be
+    created, while ``reconcile_watches`` -- which picks what to run out of exactly this
+    dict -- STARTS it, spawning its command and posting its output on every tick, with no
+    durable row to stop it and nothing that will ever reload it away.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    before = {watch.id for watch in store.list_watches()}
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    phantom = {watch.id for watch in store.list_watches()} - before
+    assert not phantom, (
+        f"the failed create left {sorted(phantom)} in the live store: a watch the "
+        "database never accepted, that reconcile_watches will start running anyway"
+    )
+    assert not {watch.id for watch in ManagedWatchStore().list_watches()} - before, (
+        "the create committed despite the injected fault, so this test proves nothing"
+    )
+
+
+def test_a_failed_delete_does_not_stop_a_watch_the_database_still_has() -> None:
+    """HFR-275 — the delete entry point, the same class in the safer direction.
+
+    ``remove_watch`` drops the entry before the soft delete. The failure direction is the
+    conservative one (absent reads as "gone" and stops the watch), but it is silent and
+    it does NOT heal: the row is still there and UNCHANGED, so ``maybe_reload`` sees no
+    external write, and the watch the user was told could not be deleted simply stops
+    until the process restarts.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.remove_watch(watch.id)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    durable = ManagedWatchStore().get_watch(watch.id)
+    assert durable is not None, (
+        "the delete committed despite the injected fault, so this test proves nothing"
+    )
+    live = store.get_watch(watch.id)
+    assert live is not None, (
+        f"the failed delete dropped watch {watch.id} from the live store while the "
+        "database still has it: it stops running, silently, until the process restarts"
+    )
+    assert live.to_dict() == durable.to_dict()
+
+
+#: The list read ``ManagedWatchStore.load`` issues -- the only ``run_definitions``
+#: SELECT that filters by ``definition_type`` -- so the guard's own
+#: ``SELECT id ... LIMIT 1`` still runs and the write is genuinely ATTEMPTED.
+_DEFINITION_LIST_READ_MARKERS = ("FROM RUN_DEFINITIONS", "DEFINITION_TYPE = ?")
+
+
+def _fail_the_definition_write_and_the_reload(engine) -> dict:
+    """A transient fault that takes out the guarded write AND the recovery read.
+
+    The task store's twin helper. Flip ``state["live"]`` to ``False`` to end the fault
+    WITHOUT committing anything: a commit would bump ``PRAGMA data_version`` and heal the
+    mirror for a reason that has nothing to do with the fix.
+    """
+    from sqlalchemy import event
+
+    state: dict = {"writes": 0, "reads": 0, "live": True}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not state["live"]:
+            return
+        normalized = " ".join(statement.split()).upper()
+        if normalized.startswith(("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")):
+            state["writes"] += 1
+            raise RuntimeError("definition write failed: disk I/O error")
+        if all(marker in normalized for marker in _DEFINITION_LIST_READ_MARKERS):
+            state["reads"] += 1
+            raise RuntimeError("definition read failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+def test_a_dropped_watch_mirror_recovers_with_no_unrelated_commit_to_wake_it() -> None:
+    """HFR-277 — the consuming end of HFR-271's own recovery path.
+
+    THE DEFECT, and it is one WE introduced. ``_reload_after_lost_write`` drops the
+    cached ``ManagedWatch`` when the guarded write fails and the immediate recovery
+    ``load`` fails with it -- deliberately, because an absent watch reads as "gone" to
+    ``reconcile_watches`` and stops it, where a stale one keeps running against state the
+    database never had -- and promises ``maybe_reload`` restores it "as soon as the
+    database is reachable again". It did not. ``maybe_reload`` asked only
+    ``SqliteInvalidationProbe`` (``PRAGMA data_version``), which moves when another
+    connection COMMITS; the failed write ROLLED BACK, so it never moved. Every later
+    supervisor tick answered "nothing changed" and the watch stayed durably enabled in
+    SQLite and invisible in-process until the service restarted.
+
+    THE CLAUSE THAT IS THE TEST: nothing commits between the failure and the recovery.
+    A witness probe on its own connection asserts data_version is unchanged at that
+    instant, so a mirror that comes back did so because the store remembered it must
+    reload -- not because an unrelated writer woke it up.
+    """
+    from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    durable_before = ManagedWatchStore().get_watch(watch.id)
+    assert durable_before is not None and durable_before.enabled, (
+        "the fixture must start from a definition the database has, and has enabled"
+    )
+
+    # Settle the store's own probe on the fixture's commits first: a pending
+    # data_version bump would reload the mirror below for the wrong reason.
+    store.maybe_reload()
+    assert store.maybe_reload() is False, "the store's probe is not settled"
+    witness_engine = create_sqlite_engine(store._sqlite.db_path)
+    witness = SqliteInvalidationProbe(witness_engine)
+    witness.has_external_write()
+    assert witness.has_external_write() is False, "the witness probe is not settled"
+
+    fault = _fail_the_definition_write_and_the_reload(store._sqlite.engine)
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+            store.mark_cycle_start(watch.id)
+
+        assert fault["writes"] >= 1, "no run_definitions write was attempted"
+        assert fault["reads"] >= 1, (
+            "the recovery reload was never attempted, so the entry was not dropped for "
+            "the reason this test is about"
+        )
+        assert store.get_watch(watch.id) is None, (
+            "the failed write did not drop the mirror entry, so there is nothing for "
+            "maybe_reload to recover and this test proves nothing"
+        )
+        assert [item.id for item in store.list_watches()] == [], (
+            "the dropped entry is still listed; the precondition is a mirror that has "
+            "LOST the definition"
+        )
+
+        # The fault clears the way a transient one does: nothing is written.
+        fault["live"] = False
+        assert witness.has_external_write() is False, (
+            "something COMMITTED between the failed write and the reload below. A "
+            "data_version bump heals the mirror on its own, so this test would pass "
+            "without the fix"
+        )
+
+        assert store.maybe_reload() is True, (
+            "maybe_reload reported 'nothing changed' for a mirror the store itself knows "
+            "is incomplete. data_version cannot see a rolled-back write, so the dropped "
+            "watch stays invisible to reconcile_watches until the process restarts"
+        )
+        live = store.get_watch(watch.id)
+        assert live is not None, (
+            f"watch {watch.id} is still missing from the live store after a reload; it is "
+            "enabled in SQLite and will never be reconciled again"
+        )
+        assert live.to_dict() == durable_before.to_dict(), (
+            "the recovered entry does not match the durable row. Differing fields: "
+            + repr(
+                {
+                    key: (value, durable_before.to_dict().get(key))
+                    for key, value in live.to_dict().items()
+                    if durable_before.to_dict().get(key) != value
+                }
+            )
+        )
+        assert [item.id for item in store.list_watches()] == [watch.id]
+        assert store.maybe_reload() is False, (
+            "the store keeps reloading unconditionally; the flag must be cleared by the "
+            "reload that repaired the mirror"
+        )
+    finally:
+        witness.close()
+        witness_engine.dispose()
+
+    durable_after = ManagedWatchStore().get_watch(watch.id)
+    assert durable_after is not None and durable_after.to_dict() == durable_before.to_dict(), (
+        "the durable row changed, so the failed write committed something and the "
+        "recovery above was reading a different definition than the one that was dropped"
+    )
+
+
+def test_quiet_cycle_marker_must_be_a_line_of_its_own() -> None:
+    """The marker is a protocol line, not a substring.
+
+    A waiter that prints the marker's name while explaining the protocol — a usage
+    message, a log line quoting it — would otherwise have its exit 64 read as a
+    quiet cycle, and its failure notice would never reach the user.
+    """
+    from core.watches import _is_quiet_cycle
+
+    def _result(text: str) -> _CycleResult:
+        return _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=text, timed_out=False)
+
+    assert _is_quiet_cycle(_result(f"nothing new\n{NO_EVENT_MARKER}\n"))
+    # Indentation is still a line of its own; the surrounding prose is not.
+    assert _is_quiet_cycle(_result(f"  {NO_EVENT_MARKER}  "))
+    assert not _is_quiet_cycle(_result(f"usage: exit 64 with '{NO_EVENT_MARKER}' to end quietly"))
+    assert not _is_quiet_cycle(_result(f"{NO_EVENT_MARKER} is the marker"))
+
+
+def test_quiet_cycle_summary_keeps_the_end_of_a_long_waiter_report() -> None:
+    """The verdict is at the end of a waiter's report, so truncate from the front.
+
+    A green CI waiter prints the run table first and its conclusion last. Squashing
+    from the front kept the table and dropped the one line worth logging.
+    """
+    from core.watches import NO_EVENT_SUMMARY_LOG_LIMIT, _squash_tail
+
+    short = "All watched workflows succeeded: lint, build"
+    assert _squash_tail(f"  {short}\n", limit=NO_EVENT_SUMMARY_LOG_LIMIT) == short
+
+    long_report = ("workflow line\n" * 500) + short
+    squashed = _squash_tail(long_report, limit=NO_EVENT_SUMMARY_LOG_LIMIT)
+    assert len(squashed) <= NO_EVENT_SUMMARY_LOG_LIMIT
+    assert squashed.endswith(short)
+    assert squashed.startswith("…")
+
+
+def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(tmp_path: Path) -> None:
+    """A waiter learns whether an earlier report of its own was ever delivered.
+
+    A waiter cannot observe its own delivery: its stdout reaches the supervisor only
+    after the process exits, so a waiter that wants to advance its own cursors past a
+    reported event has to be told. What it is told is a count of delivered reports,
+    bumped by ``_commit_cycle_result`` in the same transaction as the follow-up hook --
+    so a waiter that staged cursors alongside the value it saw can compare, and a
+    CHANGED value means its report was queued.
+
+    A durable count rather than a one-shot flag handed to the next cycle: it is still
+    correct after a restart, and for a ``once`` watch, whose one report is followed by
+    no cycle at all until the user resumes it -- where a lost flag would replay an
+    event that was delivered long ago. And it must NOT move on a quiet cycle, which
+    queued nothing: a waiter would then promote cursors covering a report that was
+    never delivered and skip the activity for good.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store"
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="slack_C_ack")
+    watch = store.add_watch(
+        name="Watch PR",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="PR activity.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    # One event, one quiet cycle, then stop: the three states the flag has to
+    # distinguish, in the order a forever watch meets them.
+    scripted = [
+        _CycleResult(exit_code=0, stdout="review_comment #501", stderr="", timed_out=False),
+        _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=NO_EVENT_MARKER, timed_out=False),
+        _CycleResult(exit_code=NO_EVENT_EXIT_CODE, stdout="", stderr=NO_EVENT_MARKER, timed_out=False),
+    ]
+    told: list[str] = []
+
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        told.append(_cycle_env(watch_arg)[LAST_DELIVERY_ENV])
+        if len(told) >= len(scripted):
+            service._running = False
+        return scripted[min(len(told) - 1, len(scripted) - 1)]
+
+    service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert told[0] == "", "nothing has been reported yet"
+    assert told[1], "the event was delivered, so the stamp has to have moved"
+    assert told[2] == told[1], "a quiet cycle queued no hook; the stamp must not move"
+
+
+def test_resuming_a_once_watch_keeps_what_it_already_delivered(tmp_path: Path) -> None:
+    """A resume clears the cycle history and NOT the delivery acknowledgement.
+
+    A ``once`` watch reports, retires, and is resumed by the user days later. That
+    resume deliberately clears ``last_event_at`` -- the resumed watch begins a distinct
+    cycle and its row must not claim an event it has not seen. But the waiter's staged
+    cursors are still on disk beside the count they were staged against, and if that
+    count resets too, the first cycle after the resume concludes its report never left
+    and reports the same activity all over again.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store"
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="slack_C_resume_ack")
+    watch = store.add_watch(
+        name="Watch PR once",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="PR activity.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    async def _one_event(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        return _CycleResult(exit_code=0, stdout="review_comment #501", stderr="", timed_out=False)
+
+    service._run_cycle = _one_event  # type: ignore[method-assign]
+    asyncio.run(service._run_watch(watch.id))
+
+    reported = store.get_watch(watch.id)
+    assert reported is not None and not reported.enabled, "a once watch retires on its report"
+    delivered = _cycle_env(reported)[LAST_DELIVERY_ENV]
+    assert delivered == "1"
+
+    resumed = store.set_enabled(watch.id, True)
+    assert resumed.last_event_at is None, "the resume clears the cycle history it owns"
+    assert _cycle_env(resumed)[LAST_DELIVERY_ENV] == delivered
+    assert resumed.metadata["origin"] == "cli", "the ack rides along with the rest of the metadata"
+
+
+def test_the_cycle_environment_carries_the_watch_and_its_delivery_count() -> None:
+    """Both facts reach the waiter as environment variables, empty for never.
+
+    Metadata a writer never touched, or left as something other than a positive count,
+    reads as "nothing delivered yet" -- the direction that reports a staged event twice
+    rather than advancing past one that never left.
+    """
+    assert _cycle_env(SimpleNamespace(id="wat_9", metadata={})) == {
+        WATCH_ID_ENV: "wat_9",
+        LAST_DELIVERY_ENV: "",
+    }
+    assert _cycle_env(SimpleNamespace(id="wat_9", metadata={DELIVERY_ACK_METADATA_KEY: 3})) == {
+        WATCH_ID_ENV: "wat_9",
+        LAST_DELIVERY_ENV: "3",
+    }
+    for broken in ("3", True, 0, -1, None, {"count": 3}):
+        assert _cycle_env(SimpleNamespace(id="wat_9", metadata={DELIVERY_ACK_METADATA_KEY: broken})) == {
+            WATCH_ID_ENV: "wat_9",
+            LAST_DELIVERY_ENV: "",
+        }
+
+
+def test_managed_watch_service_names_the_watch_in_the_cycle_environment(tmp_path: Path) -> None:
+    """A waiter can tell which watch it is a cycle of.
+
+    Waiters that keep per-watch state on disk own that state by this id, so two
+    identically configured watches cannot silently share one state file.
+    """
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    echoed = tmp_path / "watch-id.txt"
+    watch = store.add_watch(
+        name="Identity echo waiter",
+        session_key="slack::channel::C123",
+        command=[
+            sys.executable,
+            "-c",
+            (
+                "import os, pathlib; "
+                f"pathlib.Path({str(echoed)!r}).write_text(os.environ.get('AVIBE_WATCH_ID', ''))"
+            ),
+        ],
+        shell_command=None,
+        prefix="Something happened.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        for _ in range(100):
+            if echoed.exists() and echoed.read_text(encoding="utf-8"):
+                break
+            await asyncio.sleep(0.02)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert echoed.read_text(encoding="utf-8") == watch.id

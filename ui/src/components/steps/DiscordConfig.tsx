@@ -24,6 +24,7 @@ import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { errorMessage } from '@/lib/errorMessage';
 
 interface DiscordConfigProps {
   data: any;
@@ -85,8 +86,8 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
     try {
       const result = await api.discordAuthTest(botToken, proxyUrl);
       setAuthResult(result);
-    } catch (err: any) {
-      setAuthResult({ ok: false, error: err?.message || 'Request failed' });
+    } catch (err) {
+      setAuthResult({ ok: false, error: errorMessage(err) || 'Request failed' });
     } finally {
       setChecking(false);
     }

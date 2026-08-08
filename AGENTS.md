@@ -20,7 +20,6 @@ Default mindset:
 - treat the system as **multi-platform, multi-backend** first
 - prefer root-cause fixes over narrow patches
 - preserve user-visible behavior unless the task explicitly changes product behavior
-- make the next agent/platform inherit correct behavior automatically
 
 ## 2. Design Philosophy and Architecture
 
@@ -72,11 +71,7 @@ Common commands:
 - inspect: `vibe status`
 - stop: `vibe stop`
 
-Use local `vibe` for:
-
-- local packaging checks
-- local CLI behavior checks
-- editable-install UI preview when explicitly needed
+Use local `vibe` for local packaging or CLI behavior checks.
 
 Hard rule:
 
@@ -168,18 +163,14 @@ Source-of-truth rule:
 - if the user already put you on an existing branch/worktree, continue there unless asked to move
 - keep commits small and focused; avoid mixing unrelated changes
 
-### Planning for Non-Trivial Work
+### Planning and Documentation
 
 - if the task is complex or ambiguous, create a short plan before large changes
 - capture background, goal, solution, and todo items in `docs/plans/`
 - implementations should follow the plan and update it when scope changes materially
 - if requirements are unclear, ask early before committing to a large direction
-
-### Documentation Expectations
-
 - update user documentation alongside user-visible features or changed workflows
-- store project-specific plans, investigations, and summaries under `docs/`
-- do not put ad-hoc project documentation in the repo root
+- keep project-specific plans, investigations, and summaries under `docs/`, never in the repo root
 
 ### Worktrees
 
@@ -211,13 +202,13 @@ Source-of-truth rule:
   final review and merge; an explicit merge instruction from them is carried
   out directly after a mechanical `mergeStateStatus == CLEAN` check, never by
   spawning another agent to re-review
-- keep expensive full-suite gates on GitHub CI by default, then require those
-  CI checks to pass before merge
+- require the GitHub CI checks to pass before merge
 
 ### Pre-Push Requirements
 
 - run the smallest relevant validation first, then broader checks as needed
 - before `git push`, run `ruff check` on changed Python files at minimum
+- for UI changes, run `npm run build` in `ui/` before pushing
 - fix lint errors before pushing; CI runs `pre-commit run --all-files` with Ruff
 - do not require a full local CI run before opening or updating a PR; prefer focused local validation and let GitHub CI run the slow gates asynchronously
 
@@ -250,29 +241,20 @@ Source-of-truth rule:
 ### Frontend (UI)
 
 - source lives in `ui/`; build with `cd ui && npm run build`; `ui/dist/` is served by `vibe/ui_server.py`
-- reuse `ui/src/components/ui/` primitives first (`Button`, `Badge`, `Card`, `Input`, `Popover`, `Dialog`, etc.); extend via variants/sizes/props before creating new primitives
-- follow the reuse ladder for UI and shared backend logic: inventory existing patterns -> reuse -> extend -> promote near-duplicates -> create a reusable unit only when needed; extract on the third repeat
+- follow the reuse ladder for UI and shared backend logic: inventory existing patterns -> reuse (`ui/src/components/ui/` primitives such as `Button`, `Badge`, `Card`, `Input`, `Popover`, `Dialog` first) -> extend via variants/sizes/props -> promote near-duplicates -> create a reusable unit only when needed; extract on the third repeat
 - `../avibe-docs/design.pen` is the visual source of truth; map spacing, type, radius, color, and shadow to exact tokens/classes, add missing tokens instead of hardcoding, and verify against the exported frame when visual fidelity matters
-- installed `vibe` uses packaged UI assets, not raw repo `ui/dist/`; for packaged CLI/UI preview, build UI and reinstall from a normal wheel, not `uv tool install --force --editable .`
-- do not run editable installs against system Python, and do not restart local `vibe` for UI checks unless the user explicitly requests that local-service workflow
+- installed `vibe` uses packaged UI assets, not raw repo `ui/dist/`; for packaged CLI/UI preview, build UI and reinstall from a normal wheel — never `uv tool install --force --editable .`, and never an editable install against system Python
 
 ## 7. Testing and Validation
 
-- prefer the smallest relevant checks first: focused pytest, targeted scripts, or narrow manual validation
-- keep slow full-suite gates in GitHub CI rather than running them locally for every feature PR
 - add tests when an existing test pattern already exists
 - do not introduce a brand-new test framework unless requested
-
-Testing guidance:
-
 - use pytest-style tests (`test_<feature>.py`) colocated or under `tests/`
 - for IM integrations, stub/mock platform clients and validate outbound payload/schema behavior
 - for reusable capability-first testing guidance, use `standards/scenario-testing/AGENTS.md` as the entrypoint; project-specific scenario metadata lives under `tests/scenarios/`
 - when a scenario catalog exists, make the scenario ID visible in the automated test and in the PR description
 - treat CLI examples in injected system prompts as live callers: update them with CLI flag changes and keep parser-backed contract coverage so unsupported examples cannot ship
 - for multi-step auth/setup flows, update `tests/scenarios/auth_setup/catalog.yaml` and add or update a closed-loop scenario harness case under `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`; keep provider-specific parsing and heuristics in focused unit tests
-- for UI changes, run `npm run build` in `ui/`
-- for cross-platform or user-facing verification, use the Incus regression workflow
 - until CI fully covers a flow, do a manual sanity check for the affected workflow when practical
 
 ## 8. Git, Security, and Operational Safety

@@ -95,8 +95,21 @@ def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from storage.importer import ensure_sqlite_state
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
 
     ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            session_id="ses-accept",
+            scope_id=None,
+            session_anchor=None,
+            agent_backend="claude",
+            agent_variant="claude",
+            workdir=str(tmp_path),
+        )
 
     import core.session_turns as session_turns_module
     from core.session_turns import SessionTurnManager
@@ -118,7 +131,7 @@ def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
     monkeypatch.setattr(session_turns_module, "dispatch_turn_with_outcome", _dispatch)
 
     async def _exercise():
-        await mgr._run("ses-accept", _ctx("ses-accept"), "hi")
+        await mgr.submit("ses-accept", _ctx("ses-accept"), "hi")
         # _run returns right after acceptance; the dispatch task hasn't run yet
         # (single-threaded loop) — the running mark must already be recorded.
         assert ("ses-accept", "running") in calls

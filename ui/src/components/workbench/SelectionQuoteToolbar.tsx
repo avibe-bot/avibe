@@ -13,17 +13,21 @@ const GAP = 8;
 const EDGE = 8;
 
 // A floating toolbar that appears over a text selection inside the chat
-// transcript. "Quote" appends the (quoted) selection to the current composer;
-// "Ask in a new session" forks + prefills the fork's draft (only offered when
-// the session is forkable); "Copy" (touch only) is a fallback for when the OS
-// selection menu doesn't cooperate. It follows the selection through scrolling
-// (hides while scrolling, re-shows at the new spot) and only disappears when
-// the selection is cleared — so the user can scroll to dodge the OS menu.
+// transcript. "Quote" appends the (quoted) selection to the current composer
+// (only offered when the composer can accept it); "Ask in a new session" forks +
+// prefills the fork's draft (only offered when the session is forkable); "Copy"
+// (touch only) is a fallback for when the OS selection menu doesn't cooperate. It
+// follows the selection through scrolling (hides while scrolling, re-shows at the
+// new spot) and only disappears when the selection is cleared — so the user can
+// scroll to dodge the OS menu.
 export const SelectionQuoteToolbar: React.FC<{
   containerRef: React.RefObject<HTMLDivElement | null>;
-  onQuote: (text: string) => void;
-  // Omitted when the session can't be forked yet (no native id) — the action is
-  // hidden rather than offered just to 409.
+  // Both write actions are optional and hidden rather than offered just to fail.
+  // ``onQuote`` is omitted for a read-only (archived) transcript, whose composer
+  // is disabled — inserting there would only leave an unsendable draft.
+  onQuote?: (text: string) => void;
+  // Omitted when the session can't be forked (no native id yet, or archived —
+  // archive is terminal, so the fork endpoint refuses it).
   onAskInNew?: (text: string) => void;
 }> = ({ containerRef, onQuote, onAskInNew }) => {
   const { t } = useTranslation();
@@ -87,9 +91,12 @@ export const SelectionQuoteToolbar: React.FC<{
   // (label widths vary by locale + which actions are shown).
   useLayoutEffect(() => {
     if (sel && toolbarRef.current) setWidth(toolbarRef.current.offsetWidth);
-  }, [sel, onAskInNew, isTouch]);
+  }, [sel, onQuote, onAskInNew, isTouch]);
 
   if (!sel) return null;
+  // Nothing left to offer (read-only transcript on a pointer device, where the
+  // OS already provides copy) — render no chrome rather than an empty bar.
+  if (!onQuote && !onAskInNew && !isTouch) return null;
 
   const dismiss = () => {
     window.getSelection()?.removeAllRanges();
@@ -97,7 +104,7 @@ export const SelectionQuoteToolbar: React.FC<{
     setCopied(false);
   };
   const runQuote = () => {
-    onQuote(sel.text);
+    onQuote?.(sel.text);
     dismiss();
   };
   const runAsk = () => {
@@ -162,13 +169,17 @@ export const SelectionQuoteToolbar: React.FC<{
       style={{ position: 'fixed', top, left, maxWidth: 'calc(100vw - 16px)', transform: 'translateX(-50%)', zIndex: 60 }}
       className="flex items-center overflow-x-auto rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
     >
-      <Button variant="ghost" className={itemClass} {...activate(runQuote)}>
-        <TextQuote className="size-3.5 text-muted" />
-        {t('chat.selection.quote')}
-      </Button>
+      {/* Separators sit BEFORE each item after the first, so a hidden action
+          never leaves a dangling divider at the edge of the bar. */}
+      {onQuote && (
+        <Button variant="ghost" className={itemClass} {...activate(runQuote)}>
+          <TextQuote className="size-3.5 text-muted" />
+          {t('chat.selection.quote')}
+        </Button>
+      )}
       {onAskInNew && (
         <>
-          <span className="h-5 w-px bg-border" />
+          {onQuote && <span className="h-5 w-px bg-border" />}
           <Button variant="ghost" className={itemClass} {...activate(runAsk)}>
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
@@ -177,7 +188,7 @@ export const SelectionQuoteToolbar: React.FC<{
       )}
       {isTouch && (
         <>
-          <span className="h-5 w-px bg-border" />
+          {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
           <Button variant="ghost" className={itemClass} {...activate(runCopy)}>
             {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5 text-muted" />}
             {t('chat.selection.copy')}

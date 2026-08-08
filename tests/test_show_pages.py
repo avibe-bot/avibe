@@ -1659,6 +1659,9 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     # App is a minimal shell that renders the router — no hardcoded nav/route table.
     app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "<RouterView" in app_tsx
+    assert "bg-background" in app_tsx
+    assert "text-foreground" in app_tsx
+    assert "ThemeProvider" not in app_tsx
     assert "navItems" not in app_tsx
     assert "activeLocale" not in app_tsx
 
@@ -1673,6 +1676,9 @@ def test_fresh_workspace_scaffolds_placeholder_and_minimal_router(monkeypatch, t
     styles = (page_dir / "src" / "styles.css").read_text(encoding="utf-8")
     assert styles.splitlines()[0].strip() == '@import "tailwindcss";'
     assert '@import "@avibe/show-ui/theme.css";' in styles
+    assert "background: var(--background)" in styles
+    assert "color: var(--foreground)" in styles
+    assert "--avs-" not in styles
 
 
 def test_existing_single_page_workspace_is_preserved(monkeypatch, tmp_path):
@@ -2206,11 +2212,93 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    assert payload["event"]["transcript_text"].startswith("[agent-mark] mark-default-summary")
+    assert payload["event"]["transcript_text"] == "Review this summary."
+    assert payload["event"]["message"]["type"] == "annotation"
+    assert payload["event"]["message"]["content"]["annotation"] == {
+        "direction": "agent",
+        "action": "created",
+    }
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Review this summary." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_anchor"),
+    [
+        (["--anchor-text", "Checkout"], {"text": "Checkout"}),
+        (["--anchor-selector", "#cta"], {"selector": "#cta"}),
+        (
+            ["--anchor-selector", "#cta", "--anchor-text", "Checkout"],
+            {"selector": "#cta", "text": "Checkout"},
+        ),
+    ],
+    ids=["text-only", "selector-only", "both"],
+)
+def test_show_mark_keeps_anchor_text_without_a_selector(monkeypatch, tmp_path, capsys, flags, expected_anchor):
+    """``--anchor-text`` alone is a valid invocation and must survive.
+
+    The parser advertises the two anchor flags independently, but the payload used
+    to build an anchor only when a selector was present, so a standalone
+    ``--anchor-text`` was silently discarded. That was invisible while the
+    transcript fell back to printing ``target``; now that the locator comes only
+    from anchor copy, dropping it loses the one human-readable locator the agent
+    supplied.
+    """
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses123",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_ses123",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        ["show", "mark", "--session-id", "ses123", "--target", "cta", "--body", "Aligned it.", "--json", *flags]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+
+    with engine.connect() as conn:
+        anchor = json.loads(conn.execute(select(show_session_events.c.anchor_json)).scalar_one())
+    assert anchor == expected_anchor
+
+    transcript = payload["event"]["transcript_text"]
+    display = payload["event"]["message"]["content"]["annotation"]
+    assert transcript == "Aligned it."
+    if "text" in expected_anchor:
+        assert display["quote"] == "Checkout"
+    else:
+        assert "quote" not in display
+    assert "#cta" not in transcript
 
 
 def test_show_mark_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
@@ -2296,7 +2384,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
                         "scope": "default",
                         "anchor": {},
                         "payload": {},
-                        "transcript_text": "[agent-mark] mark-default-summary\n\nReview this summary.",
+                        "transcript_text": "Page note\n\nReview this summary.",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",
@@ -2380,6 +2468,11 @@ def test_show_reply_copies_annotation_anchor_and_replaces_prior_reply(monkeypatc
     assert first["mark_id"] == second["mark_id"]
     assert first["event"]["anchor"] == annotation["anchor"]
     assert first["event"]["payload"]["target"] == "#revenue-card"
+    assert first["event"]["transcript_text"] == "First answer."
+    assert second["event"]["transcript_text"] == "Better answer."
+    assert first["event"]["message"]["content"]["annotation"]["quote"] == "Revenue"
+    assert second["event"]["message"]["content"]["annotation"]["quote"] == "Revenue"
+    assert "#revenue-card" not in first["event"]["transcript_text"]
     assert first["event"]["payload"]["replyTo"] == annotation["id"]
     assert second["replaced"] is True
     assert "vibe show marks" in second["replacement_notice"]
@@ -3021,7 +3114,10 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     dispatched = []
 
     async def _fake_run_dispatch(event):
+        from vibe import ui_server
+
         dispatched.append(event)
+        return ui_server._ShowEventDispatchOutcome.ACCEPTED
 
     monkeypatch.setattr("vibe.ui_server._run_show_event_dispatch", _fake_run_dispatch)
 
@@ -3047,6 +3143,343 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     assert dispatched and dispatched[0]["id"] == payload["event"]["id"]
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
+
+
+def test_show_event_cli_embedded_dispatch_fallback_uses_synchronous_bridge(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    captured = {}
+
+    def fake_record(session_id, payload):
+        captured.update(
+            session_id=session_id,
+            payload=payload,
+        )
+        return {"id": "show_evt_local", "type": payload["type"], "message_id": "msg_local"}
+
+    monkeypatch.setattr("vibe.ui_server.record_local_show_event", fake_record)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Deliver me.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert captured["payload"]["annotation"]["dispatch"] is True
+
+
+def test_show_event_cli_failed_delivery_reports_generated_event_id(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from core.show_session_events import ShowSessionEventError
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli, "_post_show_event_to_live_ui", lambda *_args: None)
+    attempted = {}
+
+    def fail_local_delivery(_session_id, payload):
+        attempted["event_id"] = payload["id"]
+        raise ShowSessionEventError(
+            "Show event delivery failed.",
+            code="show_event_dispatch_failed",
+        )
+
+    monkeypatch.setattr(
+        "vibe.ui_server.record_local_show_event",
+        fail_local_delivery,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {
+                        "comment": "Keep the retry identity.",
+                        "dispatch": True,
+                    },
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert attempted["event_id"].startswith("show_evt_")
+    assert error["details"]["event_id"] == attempted["event_id"]
+
+
+@pytest.mark.parametrize("blank_event_id", [None, "", "   "])
+def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
+    monkeypatch,
+    tmp_path,
+    blank_event_id,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    posted = {}
+
+    def timeout_after_receiving(request, **_kwargs):
+        posted.update(json.loads(request.data.decode("utf-8")))
+        raise TimeoutError()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_receiving)
+    replayed = []
+
+    def record_local(session_id, payload):
+        replayed.append((session_id, payload))
+        return {
+            "id": payload["id"],
+            "type": payload["type"],
+            "message_id": "msg_local",
+        }
+
+    monkeypatch.setattr(
+        "vibe.ui_server.record_local_show_event",
+        record_local,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "id": blank_event_id,
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Maybe accepted.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert len(replayed) == 1
+    replay_session_id, replay_payload = replayed[0]
+    assert replay_session_id == "ses123"
+    assert posted["id"].startswith("show_evt_")
+    assert replay_payload["id"] == posted["id"]
+
+
+def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
+    instances = []
+
+    class FakeStore:
+        def __init__(self):
+            self.delivery_states = iter(("reserved", "accepted"))
+            self.closed = False
+            instances.append(self)
+
+        def get_event(self, session_id, event_id):
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "delivery": {
+                    "id": "msg_poll_once",
+                    "session_id": session_id,
+                    "state": next(self.delivery_states),
+                },
+            }
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+    monkeypatch.setattr(cli.time, "sleep", lambda _delay: None)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_poll_once"},
+        wait_seconds=1,
+    )
+
+    assert resolved == {
+        "id": "show_evt_poll_once",
+        "session_id": "ses123",
+        "delivery": {
+            "id": "msg_poll_once",
+            "session_id": "ses123",
+            "state": "accepted",
+        },
+    }
+    assert len(instances) == 1
+    assert instances[0].closed
+
+
+def test_show_event_cli_pending_response_polls_instead_of_falling_back(
+    monkeypatch,
+):
+    payload = {
+        "id": "show_evt_pending_response",
+        "type": "human.annotation.created",
+    }
+    resolved = {"id": payload["id"], "session_id": "ses123"}
+    polls = []
+
+    class PendingResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "dispatch_pending": True,
+                    "event": payload,
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        cli,
+        "_local_show_events_url",
+        lambda _session_id: "http://127.0.0.1:5123/api/show/sessions/ses123/events",
+    )
+    monkeypatch.setattr(
+        cli.urllib.request,
+        "urlopen",
+        lambda _request, **_kwargs: PendingResponse(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_resolve_show_event_after_ambiguous_live_timeout",
+        lambda session_id, event: polls.append((session_id, event)) or resolved,
+    )
+
+    result = cli._post_show_event_to_live_ui("ses123", payload)
+
+    assert result == resolved
+    assert polls == [("ses123", payload)]
+
+
+def test_show_event_cli_pending_timeout_allows_same_reservation_retry(monkeypatch):
+    class FakeStore:
+        def get_event(self, session_id, event_id):
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "delivery": {"id": "msg_pending", "state": "reserved"},
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+    monkeypatch.setattr(cli.time, "monotonic", iter((0.0, 2.0)).__next__)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_pending_retry"},
+        wait_seconds=1,
+    )
+
+    assert resolved is None
+
+
+def test_show_event_cli_retired_delivery_is_not_reported_as_accepted(monkeypatch):
+    class FakeStore:
+        def get_event(self, session_id, event_id):
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "delivery": {"id": "msg_retired", "state": "retired"},
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_retired"},
+        wait_seconds=1,
+    )
+
+    assert resolved is None
+
+
+def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    posted = {}
+
+    def bad_gateway_after_receiving(request, **_kwargs):
+        posted.update(json.loads(request.data.decode("utf-8")))
+        raise cli.urllib.error.HTTPError(
+            request.full_url,
+            502,
+            "Bad Gateway",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", bad_gateway_after_receiving)
+    replayed = []
+
+    def record_local(session_id, payload):
+        replayed.append((session_id, payload))
+        return {
+            "id": payload["id"],
+            "type": payload["type"],
+            "message_id": "msg_local",
+        }
+
+    monkeypatch.setattr("vibe.ui_server.record_local_show_event", record_local)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Retry after 502.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert len(replayed) == 1
+    replay_session_id, replay_payload = replayed[0]
+    assert replay_session_id == "ses123"
+    assert posted["id"].startswith("show_evt_")
+    assert replay_payload["id"] == posted["id"]
 
 
 def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_path, capsys):

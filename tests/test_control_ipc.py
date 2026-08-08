@@ -17,7 +17,6 @@ import httpx
 import pytest
 
 from core import control_ipc, internal_server, session_turns
-from modules.im import MessageContext
 from vibe import internal_client, model_hub_client
 
 
@@ -40,6 +39,7 @@ def _descriptor(
 def _controller_double() -> MagicMock:
     controller = MagicMock()
     controller._t = lambda key, **_kwargs: key
+    controller._delivery_recovery_complete = None
     return controller
 
 
@@ -421,6 +421,44 @@ def test_model_hub_client_uses_windows_endpoint_auth_and_instance_validation(
     ]
 
 
+def test_memory_clients_use_windows_endpoint_auth_and_instance_validation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(internal_client, "_platform_name", lambda: "nt")
+    descriptor = _descriptor(instance_id="3" * 32, bearer_token="C" * 43)
+    control_ipc.write_descriptor_atomic(control_ipc.default_descriptor_path(), descriptor)
+    requests: list[tuple[str, str]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.headers["authorization"]))
+        return httpx.Response(
+            200,
+            json={"status": "ready"},
+            headers={
+                control_ipc.CONTROL_IPC_INSTANCE_HEADER: descriptor.instance_id,
+            },
+        )
+
+    transport = httpx.MockTransport(_handler)
+    monkeypatch.setattr(internal_client.httpx, "HTTPTransport", lambda **_kwargs: transport)
+    monkeypatch.setattr(internal_client.httpx, "AsyncHTTPTransport", lambda **_kwargs: transport)
+
+    assert asyncio.run(internal_client.memory_status()) == {
+        "status_code": 200,
+        "body": {"status": "ready"},
+    }
+    assert internal_client.memory_status_sync() == {
+        "status_code": 200,
+        "body": {"status": "ready"},
+    }
+    assert requests == [
+        ("GET", f"Bearer {descriptor.bearer_token}"),
+        ("GET", f"Bearer {descriptor.bearer_token}"),
+    ]
+
+
 def test_windows_unhandled_500_response_carries_instance_header():
     descriptor = _descriptor(instance_id="1" * 32, bearer_token="B" * 43)
     app = internal_server.create_app(
@@ -456,7 +494,7 @@ def test_windows_unhandled_500_response_carries_instance_header():
     )
 
 
-def test_real_windows_loopback_auth_and_non_ascii_dispatch_sse(monkeypatch, tmp_path):
+def test_real_windows_loopback_auth_and_non_ascii_event_sse(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(internal_client, "_platform_name", lambda: "nt")
     monkeypatch.setattr(
@@ -464,21 +502,6 @@ def test_real_windows_loopback_auth_and_non_ascii_dispatch_sse(monkeypatch, tmp_
         "recover_persisted_agent_run_queue",
         lambda _self: asyncio.sleep(0, result=[]),
     )
-    captured: dict[str, object] = {}
-    context = MessageContext(user_id="workbench", channel_id="unicode", platform="avibe")
-
-    async def _build_payload(payload):
-        captured["request_text"] = payload["text"]
-        return payload["text"], context
-
-    async def _dispatch(_controller, _context, text, *, on_chunk):
-        captured["dispatch_text"] = text
-        await on_chunk({"kind": "notify", "text": "你好，Windows"})
-        await on_chunk({"kind": "result", "text": "完成 ✓"})
-
-    monkeypatch.setattr(internal_server, "_build_dispatch_payload", _build_payload)
-    monkeypatch.setattr(internal_server, "dispatch_turn", _dispatch)
-
     async def _run():
         descriptor_path = control_ipc.default_descriptor_path()
         task = asyncio.create_task(
@@ -501,27 +524,26 @@ def test_real_windows_loopback_auth_and_non_ascii_dispatch_sse(monkeypatch, tmp_
             assert descriptor.bearer_token not in missing.text
             assert descriptor.bearer_token not in incorrect.text
 
-            events = [
-                event
-                async for event in internal_client.stream_dispatch(
-                    {"session_id": None, "text": "请处理 café 文件"}
+            stream = internal_client.stream_events()
+            try:
+                assert await anext(stream) == ("connected", {})
+                next_event = asyncio.create_task(anext(stream))
+                published = await internal_client.publish_event(
+                    "queue.updated",
+                    {"text": "请处理 café 文件：你好，Windows ✓"},
                 )
-            ]
-            assert events == [
-                ("turn.start", {"session_id": None}),
-                ("turn.chunk", {"kind": "notify", "text": "你好，Windows"}),
-                ("turn.chunk", {"kind": "result", "text": "完成 ✓"}),
-                ("turn.end", {"session_id": None}),
-            ]
+                assert published == {"ok": True}
+                assert await asyncio.wait_for(next_event, timeout=2.0) == (
+                    "queue.updated",
+                    {"text": "请处理 café 文件：你好，Windows ✓"},
+                )
+            finally:
+                await stream.aclose()
         finally:
             await _stop_server(task)
         assert not descriptor_path.exists()
 
     asyncio.run(_run())
-    assert captured == {
-        "request_text": "请处理 café 文件",
-        "dispatch_text": "请处理 café 文件",
-    }
 
 
 def test_sse_reconnect_loads_successor_descriptor(monkeypatch, tmp_path):

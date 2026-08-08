@@ -22,12 +22,6 @@ export const modelHubEnabledFromConfig = (config: unknown): boolean => {
 export const MODELS_API_MODE: 'mock' | 'live' = 'live';
 
 /**
- * Wires the 模型菜单 buttons on the Agent card to L5's mapping / menu drawers.
- * ON now that L5 is merged.
- */
-export const MODEL_MENUS_ENABLED = true;
-
-/**
  * Offers the consent-gated hub-held subscription option (`subscription_hub_
  * experimental`, spec §4.1/§7) inside the connect-subscription dialog. OFF by
  * default: subscriptions connect via the sanctioned native_cli channel only.

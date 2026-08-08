@@ -63,6 +63,52 @@ def decode_watch_worker_error(stderr: str) -> tuple[str, str | None] | None:
     return payload["code"], detail if isinstance(detail, str) else None
 
 
+#: The leaf i18n key per handshake failure the worker can report. The PROTOCOL is one
+#: thing whichever lane spawned the supervisor, but the SENTENCE is not: the same
+#: failure has to read as "watch worker" to somebody managing a watch and as "command"
+#: to somebody managing a scheduled command task, so the namespace is the caller's and
+#: only the leaf is fixed here.
+_PROTOCOL_ERROR_I18N_LEAVES = {
+    "specTooLarge": "protocolErrors.specTooLarge",
+    "invalidEncoding": "protocolErrors.invalidEncoding",
+    "invalidJson": "protocolErrors.invalidJson",
+    "unsupportedVersion": "protocolErrors.unsupportedVersion",
+    "invalidCommand": "protocolErrors.invalidCommand",
+}
+
+
+def localize_worker_error(
+    stderr: str, translate: Any, *, namespace: str = "harness.watch"
+) -> str:
+    """Turn a worker's machine-readable error line into a sentence, or pass it through.
+
+    LIVES HERE, beside the encoder, because both spawning lanes need it and only this
+    module knows the wire format. ``core/watches.py`` had the only copy, so a scheduled
+    command task whose executable did not exist stored the raw
+    ``AVIBE_WATCH_WORKER_ERROR:{...}`` JSON as its ``last_error`` -- and then repeated
+    it verbatim in the failure notice and in the Agent escalation prompt.
+
+    ``translate`` is injected rather than imported: this module is also the child
+    process's entry point, and it must stay importable without pulling the service's
+    i18n stack in behind it. ``namespace`` selects which lane's copy to read, so the
+    scheduled lane does not tell a user managing a cron job about a "watch worker".
+
+    Anything that is not a worker error line is returned UNCHANGED -- ordinary command
+    stderr is the common case, and it is nobody's to rewrite.
+    """
+
+    error = decode_watch_worker_error(stderr)
+    if error is None:
+        return stderr
+    code, detail = error
+    leaf = _PROTOCOL_ERROR_I18N_LEAVES.get(code)
+    if leaf:
+        detail = translate(f"{namespace}.{leaf}")
+    elif not detail:
+        detail = translate(f"{namespace}.unknownSupervisorFailure")
+    return translate(f"{namespace}.supervisorFailed", detail=detail)
+
+
 def _read_watch_worker_spec() -> tuple[list[str], str | None]:
     payload = sys.stdin.buffer.read(_MAX_SPEC_BYTES + 1)
     if len(payload) > _MAX_SPEC_BYTES:

@@ -9,7 +9,9 @@ details; they should only ask this service to delete or finish an indicator.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any, Optional
 
@@ -26,6 +28,39 @@ ACK_REACTION_EMOJI = "👀"
 # actually starts. See AgentService.handle_message (show_queued_reaction /
 # promote_reaction_to_running).
 QUEUED_REACTION_EMOJI = "👌"
+# Admission receipts for an IM message that did NOT start its own turn. Without
+# them a message sent while a turn is already running gets no feedback at all:
+# the message handler hands it to its durable Delivery owner and returns before
+# any processing indicator is started, and a steered input never dispatches a
+# turn of its own. See MessageHandler._admit_human_delivery.
+STEERED_REACTION_EMOJI = "✍️"
+UNCONFIRMED_REACTION_EMOJI = "🤔"
+NOT_DELIVERED_REACTION_EMOJI = "🤷"
+# Delivery state -> admission receipt. States that own a turn (``claimed``,
+# ``steering``, ``interrupt_waiting``) are absent on purpose: their feedback is
+# the turn's own processing indicator, and an ``accepted`` Delivery is only
+# reported here when it was steered into a turn already running.
+_ADMISSION_ACK_REACTIONS: dict[str, str] = {
+    "accepted": STEERED_REACTION_EMOJI,
+    "queued": QUEUED_REACTION_EMOJI,
+    "pending_steer": QUEUED_REACTION_EMOJI,
+    "reconciling_steer": UNCONFIRMED_REACTION_EMOJI,
+    "retired": NOT_DELIVERED_REACTION_EMOJI,
+}
+# Receipts that can still be replaced or cleared later, and are therefore worth
+# remembering. The rest are final: the Delivery they describe never starts a turn
+# of its own, so nothing would ever read the entry back and keeping it would grow
+# the registry by one key per mid-turn message for the life of the process.
+_REPLACEABLE_ADMISSION_STATES = frozenset(
+    {"queued", "pending_steer", "reconciling_steer"}
+)
+# Backstop for receipts whose Delivery never reaches a turn (a queue drained by a
+# Stop, a session archived mid-wait). Bounded FIFO eviction: dropping the oldest
+# key only forfeits a later replace/clear, never the reaction itself.
+_ADMISSION_ACK_REGISTRY_LIMIT = 1024
+# Registry marker for a message whose own turn has started. Kept so a receipt
+# still in flight when the turn began cannot decorate it afterwards.
+_ADMISSION_ACK_CONSUMED = "\x00turn-started"
 
 
 @dataclass
@@ -101,6 +136,8 @@ class ProcessingIndicatorService:
         self.controller = controller
         self.config = controller.config
         self._indicators_by_turn_token: dict[str, Any] = {}
+        self._admission_acks: dict[str, str] = {}
+        self._admission_ack_locks: dict[str, asyncio.Lock] = {}
 
     def _get_im_client(self, context: MessageContext):
         getter = getattr(self.controller, "get_im_client_for_context", None)
@@ -204,8 +241,193 @@ class ProcessingIndicatorService:
         except asyncio.CancelledError:
             raise
 
+    def _admission_ack_registry(self) -> dict[str, str]:
+        registry = getattr(self, "_admission_acks", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._admission_acks = registry
+        return registry
+
+    def _remember_admission_ack(self, key: str, value: str) -> None:
+        registry = self._admission_ack_registry()
+        registry.pop(key, None)
+        registry[key] = value
+        while len(registry) > _ADMISSION_ACK_REGISTRY_LIMIT:
+            registry.pop(next(iter(registry)), None)
+
+    def _admission_ack_locks_registry(self) -> dict[str, list]:
+        locks = getattr(self, "_admission_ack_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._admission_ack_locks = locks
+        return locks
+
+    @asynccontextmanager
+    async def _admission_ack_guard(self, key: str):
+        """Serialize every receipt operation on one message.
+
+        Both halves await a platform call, so without this an ``add_reaction``
+        still in flight would record its emoji *after* the turn's ``start()``
+        already looked for one to clear, stranding a 👌 next to the running
+        indicator.
+        """
+
+        locks = self._admission_ack_locks_registry()
+        entry = locks.get(key)
+        if entry is None:
+            entry = locks[key] = [asyncio.Lock(), 0]
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if entry[1] <= 0:
+                locks.pop(key, None)
+
+    def _admission_ack_key(self, context: MessageContext) -> Optional[str]:
+        message_id = self._reaction_target_message_id(context)
+        if not message_id:
+            return None
+        return "|".join(
+            (
+                self._get_context_platform(context),
+                str(context.channel_id or ""),
+                str(message_id),
+            )
+        )
+
+    @staticmethod
+    def _admission_receipt(state: str, admission: str) -> Optional[str]:
+        """Resolve one Delivery state into the receipt it should show.
+
+        ``accepted`` is deliberately gated on explicit steer provenance: an
+        idempotent re-entry of an already accepted Delivery reports the state
+        without an ``admission``, and that observation says nothing about
+        whether the input joined a running turn or started its own.
+        """
+
+        normalized = str(state or "").strip()
+        if normalized == "accepted" and admission != "steered":
+            return None
+        return _ADMISSION_ACK_REACTIONS.get(normalized)
+
+    async def ack_delivery_state(
+        self,
+        context: MessageContext,
+        *,
+        state: str,
+        admission: str = "",
+    ) -> Optional[str]:
+        """Report the admission outcome of one IM input as a reaction receipt.
+
+        Applies only to input that did not start a turn of its own: a started
+        turn already answers with the normal processing indicator. Returns the
+        emoji that was applied, or ``None`` when nothing was reported.
+        """
+
+        if admission == "started":
+            return None
+        emoji = self._admission_receipt(state, admission)
+        if not emoji:
+            return None
+        message_id = self._reaction_target_message_id(context)
+        if not message_id:
+            return None
+        capabilities = self._capabilities(context)
+        if not self._mode_supported(capabilities, "reaction", context):
+            # Platforms without reactions (e.g. WeChat) stay silent rather than
+            # posting a bubble per queued message.
+            return None
+        key = self._admission_ack_key(context)
+        if not key:
+            return None
+        async with self._admission_ack_guard(key):
+            registry = self._admission_ack_registry()
+            previous = registry.get(key)
+            if previous == _ADMISSION_ACK_CONSUMED:
+                # This message's own turn already took the message over; a late
+                # receipt would sit next to (or replace) the running indicator.
+                return None
+            if previous == emoji:
+                return emoji
+            im_client = self._get_im_client(context)
+            if previous:
+                try:
+                    await im_client.remove_reaction(context, message_id, previous)
+                except Exception as err:
+                    logger.debug("Failed to remove previous admission ack: %s", err)
+            try:
+                applied = await im_client.add_reaction(context, message_id, emoji)
+            except Exception as err:
+                logger.debug("Failed to add admission ack reaction: %s", err)
+                applied = False
+            if not applied:
+                registry.pop(key, None)
+                return None
+            if str(state or "").strip() in _REPLACEABLE_ADMISSION_STATES:
+                self._remember_admission_ack(key, emoji)
+            else:
+                # Final receipt: the Delivery behind it never starts a turn, so
+                # nothing will ever replace or clear this reaction.
+                registry.pop(key, None)
+            return emoji
+
+    async def clear_admission_ack(self, context: MessageContext) -> None:
+        """Remove the admission receipt once this input's own turn takes over."""
+
+        key = self._admission_ack_key(context)
+        if not key:
+            return
+        async with self._admission_ack_guard(key):
+            registry = self._admission_ack_registry()
+            emoji = registry.get(key)
+            # Mark the message as taken over before awaiting the platform call:
+            # a receipt that arrives late must not re-decorate a running turn.
+            self._remember_admission_ack(key, _ADMISSION_ACK_CONSUMED)
+            if not emoji or emoji == _ADMISSION_ACK_CONSUMED:
+                return
+            try:
+                await self._get_im_client(context).remove_reaction(
+                    context,
+                    self._reaction_target_message_id(context),
+                    emoji,
+                )
+            except Exception as err:
+                logger.debug("Failed to remove admission ack reaction: %s", err)
+
+    async def clear_merged_admission_acks(self, context: MessageContext) -> None:
+        """Clear the receipts of every Delivery merged into this one Turn.
+
+        Deliveries without a native message id (quick-reply callbacks) can be
+        merged into a single Turn, but only the FIRST one hydrates the dispatch
+        context. The others are accepted as part of that Turn and never
+        dispatched on their own, so their 👌 would stay up forever unless this
+        Turn clears their reaction targets too.
+        """
+
+        payload = context.platform_specific or {}
+        targets = payload.get("delivery_ack_targets") if isinstance(payload, dict) else None
+        if not isinstance(targets, (list, tuple)) or not targets:
+            return
+        own_target = self._reaction_target_message_id(context)
+        for target in targets:
+            target_id = str(target or "").strip()
+            if not target_id or target_id == own_target:
+                continue
+            merged = copy.copy(context)
+            spec = dict(payload)
+            spec["processing_indicator_message_id"] = target_id
+            merged.platform_specific = spec
+            await self.clear_admission_ack(merged)
+
     async def start(self, context: MessageContext, agent_name: str, *, enabled: bool = True) -> ProcessingIndicatorHandle:
         handle = ProcessingIndicatorHandle(context=context)
+        # A queued input carries an admission receipt (👌) that this turn's own
+        # indicator now replaces. Platforms that stack reactions would otherwise
+        # show both, and the receipt would outlive the wait it described.
+        await self.clear_admission_ack(context)
+        await self.clear_merged_admission_acks(context)
         if not enabled:
             return handle
 

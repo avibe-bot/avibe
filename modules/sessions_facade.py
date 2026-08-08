@@ -395,6 +395,13 @@ class SessionsFacade:
     def is_message_already_processed(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
         return self.sessions_store.is_message_in_processed_set(channel_id, thread_ts, message_ts)
 
+    def has_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> bool:
+        return self.sessions_store.has_processed_message(
+            channel_id,
+            thread_ts,
+            message_ts,
+        )
+
     def record_processed_message(self, channel_id: str, thread_ts: str, message_ts: str) -> None:
         self.sessions_store.add_to_processed_set(channel_id, thread_ts, message_ts)
         logger.debug("Recorded processed message: channel=%s, thread=%s, message=%s", channel_id, thread_ts, message_ts)
@@ -486,6 +493,7 @@ class SessionsFacade:
         opencode_session_id: str,
         seen_tool_calls: Optional[List[str]] = None,
         emitted_assistant_messages: Optional[List[str]] = None,
+        prompt_started_at: Optional[float] = None,
     ) -> None:
         poll_info = self.sessions_store.get_active_poll(opencode_session_id)
         if poll_info:
@@ -493,6 +501,8 @@ class SessionsFacade:
                 poll_info.seen_tool_calls = seen_tool_calls
             if emitted_assistant_messages is not None:
                 poll_info.emitted_assistant_messages = emitted_assistant_messages
+            if prompt_started_at is not None:
+                poll_info.prompt_started_at = prompt_started_at
             self.sessions_store.update_active_poll(poll_info)
 
     def get_all_active_polls(self) -> Dict[str, Any]:

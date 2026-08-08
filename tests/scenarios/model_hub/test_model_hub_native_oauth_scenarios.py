@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from core.handlers.model_hub.adapter import RetainedMaterialDisposition
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
     NativeOAuthScenarioHarness,
@@ -38,12 +41,18 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
         base_url=BASE_URL,
     ).get_json()["flow"]
     assert started["state"] == "awaiting_action"
+    assert harness.agent_auth.start_calls == [("claude", False)]
     assert started["presentation"] == {
         "auth_url": "https://claude.ai/oauth/authorize?test=true",
         "device_code": None,
         "expects": "paste_code",
         "instructions_key": "settings.models.oauth.pasteCode.hint",
     }
+    started_seam = asyncio.run(harness.adapter.oauth_status(started["flow_id"]))
+    assert started_seam.channel == "native_cli"
+    assert started_seam.credential_ref is None
+    assert started_seam.retained_material_disposition is RetainedMaterialDisposition.NONE
+    assert started_seam.retained_credential_ref is None
 
     invalid = client.post(
         "/api/models/oauth/submit",
@@ -65,6 +74,12 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     assert harness.agent_auth.submissions == [(started["flow_id"], "code-value#state-value")]
 
     harness.agent_auth.complete(started["flow_id"])
+    completed_seam = asyncio.run(harness.adapter.oauth_status(started["flow_id"]))
+    assert completed_seam.state == "success"
+    assert completed_seam.channel == "native_cli"
+    assert completed_seam.credential_ref is None
+    assert completed_seam.retained_material_disposition is RetainedMaterialDisposition.NONE
+    assert completed_seam.retained_credential_ref is None
     completed = client.get(
         f"/api/models/oauth/status/{started['flow_id']}",
         base_url=BASE_URL,
@@ -74,7 +89,7 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     assert completed["state"] == "success"
     assert len(sources) == 1
     assert sources[0]["id"] == started["source_id"]
-    assert sources[0]["state"] == {"status": "active", "retry_at": None, "detail_key": None}
+    assert sources[0]["state"] == {"status": "standby", "retry_at": None, "detail_key": None}
     assert sources[0]["account_label"] is None
     assert sources[0]["credential_ref"] is None
     assert harness.store.config.sources[0].id == started["source_id"]
@@ -92,7 +107,14 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
         for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
         if agent["backend"] == "claude"
     )
-    assert claude["current"]["source_id"] == started["source_id"]
+    assert "current" not in claude
+    assert claude["selected_model_id"] == "claude-opus-4-6"
+    assert claude["supply_status"] == "ok"
+    chain = client.get(
+        "/api/models/agents/claude/chain?model=claude-opus-4-6",
+        base_url=BASE_URL,
+    ).get_json()["chain"]
+    assert next(item for item in chain["chain"] if item["runnable"])["source_id"] == started["source_id"]
 
 
 def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_path):
@@ -107,6 +129,8 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
             "organizations": [{"title": "Example Org", "is_default": True}],
         },
     }
+    harness.store.config.agents["codex"].sources.policy = "custom"
+    harness.store.config.agents["codex"].sources.order = []
     client, headers = _client(monkeypatch, harness.service)
 
     started = client.post(
@@ -129,17 +153,46 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
     assert awaiting["presentation"]["expects"] == "none"
 
     harness.agent_auth.complete(started["flow_id"])
-    completed = client.get(
+    completion = client.get(
         f"/api/models/oauth/status/{started['flow_id']}",
         base_url=BASE_URL,
-    ).get_json()["flow"]
+    ).get_json()
+    assert set(completion) == {
+        "ok",
+        "contract_version",
+        "flow",
+        "source",
+        "adopted_by",
+        "skipped_by",
+    }
+    completed = completion["flow"]
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
+    codex = next(
+        agent
+        for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
+        if agent["backend"] == "codex"
+    )
 
     assert completed["state"] == "success"
     assert harness.agent_auth.submissions == []
-    assert source["state"]["status"] == "active"
+    assert source["state"]["status"] == "standby"
     assert source["account_label"] == "chatgpt-owner@example.com \u00b7 plus \u00b7 Example Org"
     assert source["credential_ref"] is None
+    assert completion["adopted_by"] == []
+    assert completion["skipped_by"] == [
+        {"backend": "codex", "reason": "custom_order"}
+    ]
+    assert codex["sources"]["policy"] == "custom"
+    assert codex["sources"]["order"] == []
+    assert codex["sources"]["eligibility"] == [
+        {
+            "source_id": source["id"],
+            "eligible": True,
+            "reason_key": None,
+            "in_current_model_chain": None,
+            "process_availability_reason": None,
+        }
+    ]
 
 
 def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, tmp_path):
@@ -175,23 +228,21 @@ def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, t
         f"/api/models/oauth/status/{signed_out['flow_id']}",
         base_url=BASE_URL,
     )
-    assert signed_out_response.get_json()["flow"]["state"] == "failed"
-    assert (
-        signed_out_response.get_json()["flow"]["error_key"]
-        == "settings.models.source.oauthSignedOut"
-    )
+    assert signed_out_response.get_json()["flow"]["state"] == "success"
+    assert signed_out_response.get_json()["flow"]["error_key"] is None
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
     assert source["state"] == {
-        "status": "error",
+        "status": "needs_action",
         "retry_at": None,
-        "detail_key": "settings.models.source.oauthSignedOut",
+        "detail_key": "models.source.needs_action.oauth_expired",
     }
     claude = next(
         agent
         for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
         if agent["backend"] == "claude"
     )
-    assert claude["current"] is None
+    assert "current" not in claude
+    assert claude["supply_status"] == "interrupted"
 
     cancelled = client.post(
         "/api/models/oauth/start",

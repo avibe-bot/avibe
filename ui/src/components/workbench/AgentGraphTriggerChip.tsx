@@ -7,16 +7,20 @@ import type { AgentGraphTriggerNode } from '../../lib/agentGraph';
 interface AgentGraphTriggerChipProps {
   trigger: AgentGraphTriggerNode;
   faded?: boolean;
+  selected?: boolean;
   onClick?: () => void;
   className?: string;
 }
 
 // Task/Watch trigger source — a violet chip that sits left of the session it
-// fires (spec frame anu5U). Click jumps to the matching Harness definitions
-// tab. Fills its parent so the canvas box + dagre layout stay in lockstep.
+// fires (spec frame anu5U). Click selects it and opens the in-graph trigger
+// detail panel (A11), same interaction as a session node — the old jump to
+// Harness survives as a secondary link inside that panel. Fills its parent so
+// the canvas box + dagre layout stay in lockstep.
 export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
   trigger,
   faded = false,
+  selected = false,
   onClick,
   className,
 }) => {
@@ -37,7 +41,9 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
       onClick={onClick}
       title={name}
       className={clsx(
-        'flex h-full w-full items-center gap-2 rounded-xl border border-violet/40 bg-violet-soft px-3 py-2 text-left transition hover:brightness-110',
+        'flex h-full w-full items-center gap-2 rounded-xl border bg-violet-soft px-3 py-2 text-left transition hover:brightness-110',
+        // Selected mirrors the session card's colored-border + glow (violet here).
+        selected ? 'border-violet shadow-[0_0_20px_-6px_rgba(124,91,255,0.6)]' : 'border-violet/40',
         faded ? 'opacity-25' : disabled && 'opacity-60',
         className,
       )}
