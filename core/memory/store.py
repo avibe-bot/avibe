@@ -797,10 +797,25 @@ class MemoryStore:
                         if remaining["first_unflushed_at"] is not None
                         else None
                     )
+                    next_generation = max(state.generation, row.flush_generation) + 1
+                    conn.execute(
+                        """
+                        UPDATE memory_capture_queue
+                        SET flush_generation = ?
+                        WHERE epoch = ? AND provider_session_ref = ?
+                          AND state = 'pending' AND flush_generation <= ?
+                        """,
+                        (
+                            next_generation,
+                            row.epoch,
+                            provider_session_ref.serialize(),
+                            row.flush_generation,
+                        ),
+                    )
                     conn.execute(
                         """
                         UPDATE memory_session_flush_state
-                        SET generation = MAX(generation, ? + 1), first_unflushed_at = ?,
+                        SET generation = ?, first_unflushed_at = ?,
                             last_add_ack_at = ?, watermark = ?,
                             due_at = NULL, next_attempt_at = NULL,
                             flush_state = 'not_due', fence_operation_id = NULL,
@@ -808,7 +823,7 @@ class MemoryStore:
                         WHERE provider_session_ref = ?
                         """,
                         (
-                            row.flush_generation,
+                            next_generation,
                             first_unflushed_at,
                             now,
                             watermark_after,

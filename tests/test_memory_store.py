@@ -364,6 +364,43 @@ def test_extracted_add_records_generation_settlement_and_advances_watermark(tmp_
     ) == ("add", 0, "succeeded", 2_000, "settled")
 
 
+def test_extracted_add_moves_pending_rows_to_the_next_generation(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _enqueue(store, "first-natural", occurred_at_ms=1_000)
+    second = _enqueue(store, "second-natural", occurred_at_ms=1_001)
+    assert first.row is not None
+    assert second.row is not None
+
+    claimed = store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+    assert store.settle(
+        claimed,
+        Delivered(add_request_id="first-add", add_status="extracted"),
+        lease_owner="worker",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+
+    pending = _row_for_source(store, "second-natural")
+    assert pending.flush_generation == 1
+    next_claim = store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:02.000Z")
+    assert next_claim is not None
+    assert next_claim.flush_generation == 1
+    assert store.settle(
+        next_claim,
+        Delivered(add_request_id="second-add", add_status="extracted"),
+        lease_owner="worker-2",
+        now=_dt("2026-01-01T00:00:03.000Z"),
+    ).settled
+
+    state = store.get_session_flush_state(claimed.provider_session_ref)
+    assert state is not None
+    assert state.generation == 2
+    assert [item.generation for item in store.list_flush_settlements(claimed.provider_session_ref)] == [
+        0,
+        1,
+    ]
+
+
 def test_extracted_add_settles_its_pinned_next_generation(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     provider_session_ref = _deliver(store, "first", session_ref="generation-natural")
