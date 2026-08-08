@@ -623,6 +623,13 @@ class MemoryStore:
                       WHERE s.provider_session_ref = q.provider_session_ref
                         AND s.flush_state IN ('due', 'in_flight', 'manual_required')
                   )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM memory_capture_queue AS processing
+                      WHERE processing.epoch = q.epoch
+                        AND processing.provider_session_ref = q.provider_session_ref
+                        AND processing.state = 'processing'
+                  )
                 ORDER BY q.created_at, q.source_message_digest
                 LIMIT 1
                 """,
@@ -1430,6 +1437,7 @@ class MemoryStore:
                     ),
                     now=now,
                 )
+                self._set_last_error_in_connection(conn, "memory_processing_failed", now)
             return int(result.rowcount)
 
     def _list_not_attempted_sessions(self) -> tuple[ProviderSessionRef, ...]:

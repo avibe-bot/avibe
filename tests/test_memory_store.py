@@ -219,6 +219,25 @@ def test_due_state_probe_avoids_materializing_session_history(tmp_path: Path) ->
     assert store.has_due_flush_state() is True
 
 
+def test_claim_due_serializes_same_session_adds(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "first")
+    _enqueue(store, "second", occurred_at_ms=1_001)
+
+    first = store.claim_due(lease_owner="first-worker", now="2026-01-01T00:00:00.000Z")
+    assert first is not None
+    assert store.claim_due(lease_owner="second-worker", now="2026-01-01T00:00:01.000Z") is None
+
+    assert store.settle(
+        first,
+        Delivered(add_request_id="first-add"),
+        lease_owner="first-worker",
+        now=_dt("2026-01-01T00:00:02.000Z"),
+    ).settled
+    second = store.claim_due(lease_owner="second-worker", now="2026-01-01T00:00:03.000Z")
+    assert second is not None
+
+
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     scope_key = bytes.fromhex("11" * 32)
 
@@ -1028,6 +1047,7 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
 
     assert recovery.interrupted_flushes == 1
     assert _row_for_source(store, "in-flight").flush_observation == "unknown"
+    assert store.ensure_meta().last_error == "memory_processing_failed"
     # Sessions are listed only after interrupted flushes have been resolved;
     # recover_after_boot owns that ordering.
     assert recovery.not_attempted_sessions == (not_attempted_session,)

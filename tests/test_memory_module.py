@@ -875,6 +875,33 @@ async def test_activation_recovery_turns_interrupted_flush_unknown_and_opens_bre
     assert store.ensure_meta().processing_fault_since is not None
 
 
+async def test_activation_recovery_fence_is_degraded_before_worker_fault_recovery(
+    tmp_path: Path,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+    row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.settle(
+        row,
+        Delivered(),
+        lease_owner="old",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
+    _flush_claim(store, row)
+
+    recovery = store.recover_after_boot(
+        lease_owner="new",
+        clock=lambda: _dt("2026-01-01T00:00:02.000Z"),
+    )
+    assert recovery.interrupted_flushes == 1
+    assert store.ensure_meta().processing_fault_since is None
+
+    status = await module.status()
+    assert (status.state, status.error) == ("degraded", "memory_processing_failed")
+    assert provider.flushes == []
+
+
 async def test_activation_finishes_interrupted_breaker_classification_before_claiming(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()
