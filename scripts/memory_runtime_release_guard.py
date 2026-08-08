@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
+EXPECTED_EVEROS_VERSION = "1.2.3"
 EXPECTED_PYTHON_VERSION = "3.12.12"
 EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 EXPECTED_UV_VERSION = "0.9.18"
@@ -26,6 +27,28 @@ MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 
 class ReleaseGuardError(RuntimeError):
     """Raised when published Memory Runtime bytes do not match their manifest."""
+
+
+@dataclass(frozen=True)
+class RuntimeProvenance:
+    python_version: str
+    lock_sha256: str
+    uv_version: str
+
+
+# Existing published manifests remain verifiable after the current pin moves.
+PUBLISHED_RUNTIME_PROVENANCE = {
+    "1.2.1": RuntimeProvenance(
+        python_version=EXPECTED_PYTHON_VERSION,
+        lock_sha256="e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f",
+        uv_version=EXPECTED_UV_VERSION,
+    ),
+    EXPECTED_EVEROS_VERSION: RuntimeProvenance(
+        python_version=EXPECTED_PYTHON_VERSION,
+        lock_sha256=EXPECTED_LOCK_SHA256,
+        uv_version=EXPECTED_UV_VERSION,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -73,13 +96,19 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         raise ReleaseGuardError(f"cannot read Memory Runtime manifest: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ReleaseGuardError("Memory Runtime manifest schema_version must be 1")
-    if payload.get("release_state") != "published" or payload.get("everos_version") != "1.2.3":
-        raise ReleaseGuardError("Memory Runtime manifest must describe published EverOS 1.2.3")
+    everos_version = payload.get("everos_version")
+    provenance = (
+        PUBLISHED_RUNTIME_PROVENANCE.get(everos_version)
+        if isinstance(everos_version, str)
+        else None
+    )
+    if payload.get("release_state") != "published" or provenance is None:
+        raise ReleaseGuardError("Memory Runtime manifest must describe a published supported EverOS version")
     if (
-        payload.get("python_version") != EXPECTED_PYTHON_VERSION
-        or payload.get("lock_sha256") != EXPECTED_LOCK_SHA256
-        or payload.get("lock_id") != f"uv-lock-sha256:{EXPECTED_LOCK_SHA256}"
-        or payload.get("uv_version") != EXPECTED_UV_VERSION
+        payload.get("python_version") != provenance.python_version
+        or payload.get("lock_sha256") != provenance.lock_sha256
+        or payload.get("lock_id") != f"uv-lock-sha256:{provenance.lock_sha256}"
+        or payload.get("uv_version") != provenance.uv_version
     ):
         raise ReleaseGuardError("Memory Runtime manifest provenance is invalid")
 
