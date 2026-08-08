@@ -3,8 +3,9 @@
 Status: **v3.0** (2026-08-07) · supersedes v2.0 (2026-07-29) outright
 Owner decisions incorporated through: 2026-08-07 (+08:00)
 Design source: `../avibe-docs/design.pen`. The V6 frames remain the visual baseline;
-v3's two-module information architecture supersedes their product grouping and needs
-new approved frames before UI implementation.
+the v3 interaction draft for the two-module information architecture is owner-approved
+as the implementation baseline (2026-08-07 afternoon). The design lane still owes the
+takeover-notice treatment and production-complete desktop/mobile states.
 Contracts: `model-hub-contracts/` at **FROZEN v4 (targeted)**. This docs-only revision
 does not edit them; `model-hub-implementation.md` records the coordinated v5 revision
 set for the first implementation lane.
@@ -34,18 +35,18 @@ model per source. The atomic evolution proposal and its rationale are in §4.6 a
 **owner-vetoable (2026-08-07)**. The feature remains pre-GA and default-off, so v3 does
 not justify a permanent compatibility layer or two live routing authorities.
 
-**Subscription ruling (owner 2026-08-07, amended later the same day).** Native use is
-the recommended and default subscription path. A Claude subscription stays in Claude
-Code's local login and a ChatGPT subscription stays in Codex's local login; each native
-source naturally leads its own backend's order. When native quota is exhausted or
-cooling, a failure observed before output starts falls through in that same turn to
-the first runnable Gateway upstream for the backend, then automatically returns to
-native after recovery. If native output has already started, the turn stops honestly
-and the next turn uses the Gateway; Avibe never duplicates a partial response. This
-channel handoff is a first-class product story, not an escape hatch or implementation
-detail. Native-first is the recommended Follow default, not an invisible pre-pass: a
-user who explicitly puts a Hub hop first in a Custom chain has intentionally overridden
-it, and the stored Custom order remains authoritative.
+**Subscription ruling (owner 2026-08-07, amended later the same day).** Recommended
+custody is vendor-specific. Claude subscriptions stay in Claude Code's local login by
+default for compliance; adding one as a Gateway upstream remains an explicit optional
+path. ChatGPT subscriptions are recommended and defaulted to a Gateway-held Source;
+native Codex login remains supported but is neither recommended nor the default
+add-flow guidance. When a supported native source leads a chain and its quota is
+exhausted or cooling, a failure observed before output starts falls through in that
+same turn to the first runnable Gateway upstream, then automatically returns to native
+after recovery. If native output has already started, the turn stops honestly and the
+next turn uses the Gateway; Avibe never duplicates a partial response. This handoff is
+a first-class product story, not an escape hatch or implementation detail. It is not an
+invisible pre-pass: the stored Follow projection or Custom order remains authoritative.
 
 A user may explicitly add either subscription as a Gateway-held upstream, and a
 Gateway-held subscription may participate in a cross-vendor custom chain. The only
@@ -91,12 +92,13 @@ base URLs, protocol conversion, account pools or routers.
 1. **Connect upstream access once.** A vendor subscription, API key, or API key
    with a custom Base URL becomes a Source that every eligible Gateway route can
    use.
-2. **Native subscriptions lead by default, and the Gateway takes over without drama.**
-   Follow routes for Claude Code and Codex use their own local subscription login
-   first. If that quota fails before output starts, the same turn uses the first
-   runnable Gateway upstream; after a partial streamed response, the next turn does.
-   Recovery returns subsequent Follow turns to native automatically. An explicit
-   Custom chain may put a Hub hop first, and Avibe honors that user-owned order.
+2. **Subscription custody is vendor-specific, and native takeover stays seamless.**
+   Claude recommends its compliant native login; ChatGPT recommends a Gateway-held
+   Source. Whenever a supported native subscription leads the chain and its quota
+   fails before output starts, the same turn uses the first runnable Gateway upstream;
+   after a partial streamed response, the next turn does. Recovery returns subsequent
+   Follow turns to native automatically. An explicit Custom chain may put any eligible
+   Hub hop first, and Avibe honors that user-owned order.
 3. **Routing has two explicit grains.** Each backend owns a global Source order.
    Each menu model follows the chain projected from that order by default, or the
    user gives that `(backend, menu model)` an exact custom ordered chain of
@@ -141,6 +143,12 @@ apply to UI nouns, not precise technical prose in this specification.
 | 中转站 / relay station as a category | **Banned** | It is an API Key Source with a custom Base URL; helper copy may use it as an example |
 | 优先级 / priority as a standalone global noun | **Banned** | Name the owning backend Source order or model Route chain; ordinal copy such as “first upstream” is allowed |
 
+**Copy-density rule (owner-approved interaction baseline, 2026-08-07 afternoon).**
+Use the glossary nouns in controls and status. Put explanations behind a compact info
+icon or contextual affordance; do not turn Sources or Gateway into permanent help-text
+panels. This is the vocabulary recut applied to interaction copy, not a third module or
+an excuse to hide action-required state.
+
 ## 4. Architecture: upstream → Gateway → Agents
 
 The v3 split, stated once: **Sources represent upstream access; Gateway owns local
@@ -156,6 +164,32 @@ URL (api_key kind; prefilled for known vendors), a **model list** it can supply
 model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 (subscription cycle % / monthly spend).
 
+The Source workflow is complete at both entry points:
+
+- **Manual connectivity test.** During Add Source and later from Source details, the
+  user may explicitly run a non-destructive test. The add-flow variant reuses the
+  contracted probe/refresh classification and reports reachability plus authentication
+  outcome in place; it does not save the Source, consume routing order, or run an
+  Agent turn. A failed test never blocks saving when the user chooses to proceed.
+- **Model discovery.** Third-party Anthropic-compatible and OpenAI-compatible Sources
+  expose an explicit “Fetch models” action in both Add Source and Source details.
+  Discovery uses the selected protocol adapter, replaces only the discovered slice,
+  preserves manual entries, and renders added, removed, unchanged, and failed results.
+- **Manual model entries.** A user may add and remove exact model ids. Every model-list
+  item has `{id, origin: "discovered" | "manual", reasoning_effort}`; discovery creates
+  `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
+  `reasoning_effort` is a required nullable string, where `null` means the upstream
+  default and a non-null value is adapter-validated for that model. This property
+  belongs to Source model inventory, not the deferred Configure Agents module: it
+  describes how that exact
+  upstream model is called, not which model an Agent selects.
+
+The user-selected `protocol` is authoritative. Neither the connectivity test nor model
+discovery guesses, changes, or backfills it; a wrong choice is reported as the resulting
+reachability or authentication failure under that adapter and remains the user's
+configuration. The product does not claim to diagnose that the protocol choice itself
+was wrong.
+
 A source carries **no position, rank, or priority field anywhere** — not in
 config, not in the API, not in the UI. The 来源 list is an asset inventory sorted
 for reading convenience, never a spend order.
@@ -163,13 +197,20 @@ for reading convenience, never a spend order.
 **Supply channel.** Each source has a `supply_channel`:
 
 - `native_cli` — the credential remains in the official CLI's local store. This is
-  the recommended and default channel for every subscription: Claude → Claude Code,
-  ChatGPT → Codex. It is the first hop for its own backend and participates in the
-  native-to-Gateway handoff in §4.3 step 0.
+  the recommended and default channel for Claude subscriptions (Claude → Claude
+  Code). ChatGPT native login (ChatGPT → Codex) remains supported, but is a
+  secondary, non-recommended path and is never the default add-flow guidance. A
+  native source participates in the native-to-Gateway handoff in §4.3 step 0 when
+  it leads the effective chain.
 - `hub` — the managed engine holds the credential and re-originates requests. This
-  is the default for API keys and an explicit opt-in for subscriptions. A hub-held
-  subscription is a normal Gateway upstream and may appear in a cross-vendor custom
-  chain (§4.4, §4.6).
+  is the default for API keys and the recommended add-flow path for ChatGPT
+  subscriptions. It is an explicit opt-in for Claude subscriptions. A hub-held
+  subscription is a normal Gateway upstream and may appear in a cross-vendor
+  custom chain (§4.4, §4.6).
+
+The ChatGPT recommendation is an owner product ruling based on Codex OAuth supporting
+login from third-party applications. It supersedes the earlier memo's experimental
+default; it does not weaken the single Claude warning below.
 
 There is no feature flag, consent stamp, experimental row state, or per-route warning
 for hub-held subscriptions. The single exception is informational copy shown while
@@ -219,11 +260,14 @@ hop. Omission means “not used by Follow routes,” not “globally disabled.�
 **Recommendation rule (deterministic; document verbatim, implement verbatim).**
 For a given backend, the recommended order is:
 
-1. the backend's **own-vendor `native_cli` subscription**, if present and eligible —
-   Anthropic for Claude Code, OpenAI for Codex;
-2. then all eligible hub-held subscription Sources, **by `created_at` ascending**;
-3. then all eligible API-key Sources, **by `created_at` ascending**;
-4. tie-break anywhere above by Source `id` ascending.
+1. all eligible **own-vendor subscriptions in the recommended form**, by
+   `created_at` ascending — Claude Code uses Claude `native_cli`; Codex uses ChatGPT
+   `hub`;
+2. then own-vendor subscriptions in the supported but non-recommended form, by
+   `created_at` ascending — Claude `hub`, or ChatGPT `native_cli`;
+3. then other eligible hub-held subscription Sources, by `created_at` ascending;
+4. then all eligible API-key Sources, by `created_at` ascending;
+5. tie-break anywhere above by Source `id` ascending.
 
 The rule is *exhaustive over eligible sources*: nothing eligible can fall outside
 it, which is what makes 跟随推荐 safe to auto-join. Eligibility does not mean a Source
@@ -234,13 +278,19 @@ Nothing else participates: no health score, no latency, no cost heuristic, no
 usage-based reordering. This rule is the *entire* content of 跟随推荐, and it is
 stable — the same set of sources always yields the same order.
 
+The rule preserves the own-vendor-first principle while making the vendor split
+visible: a ChatGPT subscription added through the recommended Hub path leads Codex,
+while a user who keeps a native Codex login still gets a deterministic supported
+fallback position. Claude native remains the recommended lead for Claude Code; a
+Claude Hub Source never outranks it merely because it was added later.
+
 Two obligations follow, and both are contract, not implementation detail:
 
 - **Creation order must be persisted**, as immutable `created_at` on the source
   (`source.schema.json`). Insertion order in the config file is not a contract and
   the sources array is explicitly unordered (`api.md`), so without a stored stamp
-  rules 2 and 3 are not reproducible.
-- **Rule 4 is not decoration**, and it needs one companion rule to finish the job.
+  rules 1 through 4 are not reproducible.
+- **Rule 5 is not decoration**, and it needs one companion rule to finish the job.
   Two sources imported in one migration batch can legitimately share a timestamp, and
   the id tie-break settles those. It does *not* settle how a record predating
   `created_at` compares to a stamped one — a tie-break orders equals, and null is not
@@ -262,17 +312,29 @@ cooldown pool keyed on the shared source row, `_cooldown` in
 
 ### 4.3 Resolution pipeline (step 0 + three steps)
 
-0. **Native-first channel dispatch — first-class product behavior.** On every turn,
-   first inspect the route chain projected by §4.6. If its leading runnable hop is
-   the backend's own `native_cli` subscription, launch the official CLI with its local
-   login and zero Gateway credential injection. If that native source is exhausted,
+0. **Channel dispatch — first-class product behavior.** On every turn, first inspect
+   the route chain projected by §4.6. Claude's recommended Follow lead is its own
+   `native_cli` subscription; Codex's recommended lead is its own ChatGPT
+   `hub`-held subscription. A supported native subscription is also honored whenever
+   it is the leading configured capability hop (including a user-retained native Codex
+   login), with zero Gateway credential injection while healthy. If that native source
+   is exhausted,
    cooling, or unavailable in this process **before output starts**, continue within
    the same turn to the first runnable `hub` hop in that chain. If any output was
    already streamed, do not replay the request: end with §4.5's interrupted-turn copy,
    keep native cooling, and let the next turn select the Gateway hop. Once the native
    source is retry-ready again, the next Follow turn returns to it automatically. The
    UI and product copy must make this three-state story obvious: native now → Gateway
-   takeover → native restored.
+   takeover → native restored, without implying that ChatGPT native is the default
+   recommendation.
+
+   The first automatic native-to-Gateway takeover in a conversation emits one
+   lightweight in-conversation notice: `native_takeover_notice_enabled` is a
+   user-facing setting, **default `true`**, and the notice is shown at most once per
+   conversation. It is informational session copy, never an Error or warning style;
+   the user may turn it off. No push, inbox, or other proactive delivery system is
+   introduced, and explicit Custom routing, Gateway-first turns, and automatic return
+   to native do not emit this notice.
 
    This dispatch does not prepend native outside the chain. A Custom chain is an
    explicit override: when its first runnable hop is Hub, the turn uses Hub even while
@@ -485,7 +547,7 @@ the revoked key behind the fact that something else in the chain is merely cooli
 
 | Class | Where the user meets it |
 | --- | --- |
-| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill — **and nothing in the turn when the turn survived** (07-29, review round 4 ruling): a fallback that worked is not news, and announcing it inside a turn that succeeded is exactly the interruption the push cut exists to prevent. In-turn copy appears only when the turn did **not** proceed transparently: the retry form when §4.3 forbids the transparent retry, the `waiting` form when nothing is runnable but every blocker is timed |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill. A survived fallback remains silent except for §4.3's **first native-to-Gateway takeover in that conversation**, which may add one lightweight notice when `native_takeover_notice_enabled` is true. That narrow, owner-ruled session notice is not an Error, warning, event delivery, or push. Other in-turn copy appears only when the turn did **not** proceed transparently: the retry form when §4.3 forbids the transparent retry, the `waiting` form when nothing is runnable but every blocker is timed |
 | `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型」 — and 需处理 state on the 「模型」 page until cleared. A blocker left behind by a turn that **succeeded** is page-and-feed only, by the row above |
 
 `error` is named in the second row explicitly (07-29, review round 6). It was
@@ -493,13 +555,17 @@ implicitly there all along — it is a blocker, and blockers are what the row is
 but leaving it unnamed while the status table called it 「unknown」 is how a reviewer
 ends up asking, correctly, which tier an unclassified failure belongs to.
 
-**No proactive delivery** (owner ruling 2026-07-29 10:54; supersedes the recipient
-machinery this section carried through review rounds 5, 7, 8 and 9). **No resolution
-event is pushed anywhere.** Avibe does not open a conversation to report supply state:
+**No proactive delivery** (owner ruling 2026-07-29 10:54; retained by the
+2026-08-07 takeover-notice ruling and still superseding the recipient machinery this
+section carried through review rounds 5, 7, 8 and 9). **No resolution event is pushed
+anywhere.** Avibe does not open a conversation to report supply state:
 an interruption is surfaced **in the turn that hit it**, and otherwise waits on the
 「模型」 page for the user to come looking. That is the colleague test read strictly — a
 colleague who cannot do the work says so when you ask them to do it; they do not
-message every channel they belong to the moment their key expires. It also dissolves
+message every channel they belong to the moment their key expires. The once-per-
+conversation takeover notice in §4.3 is produced only inside the active turn that
+performed the automatic handoff and therefore does not recreate delivery machinery.
+It also dissolves
 the recipient problem the earlier rounds kept narrowing without closing (which scopes,
 which grain of 「Agent」, what a zero-scope result means): with nothing delivered, there
 is nobody to address.
@@ -620,10 +686,11 @@ not a fourth string (clarified 07-29, review round 15 — the count read 「thre
 after the 16:35 split created the second variant, and read literally it would have forced
 one required form to be merged away):
 
-- **survived transparently → silent.** A fallback that carried the turn produces **no
-  in-turn copy whatsoever**. The turn worked; the user asked for work and got it, and
-  interrupting a successful answer to narrate the plumbing is the same restraint failure
-  the push cut removed one layer up — it is a push, merely delivered in-band. The switch
+- **survived transparently → silent, except the first native takeover notice.** A
+  fallback that carried the turn produces no Error, warning, or repeat copy. When this
+  is the conversation's first automatic native-to-Gateway takeover and
+  `native_takeover_notice_enabled` is true, it adds the one lightweight notice defined
+  in §4.3; every later survived fallback remains silent. The switch
   is recorded and surfaces where a record belongs: the 最近切换 feed and the row's
   已切换 state. **This includes the case where the switch left a real problem behind** —
   a revoked key a second source covered is filed as its usual two records
@@ -708,6 +775,21 @@ Any resulting protected-model gap is reported through the existing
 `would_interrupt` projection alongside `would_remove_hops`. This explicit cascade is
 not the silent side effect prohibited by §2; without the confirmation, neither the
 Source nor any chain changes.
+
+The same invariant applies to **every Source-inventory mutation**, not only Source
+deletion. Credential replacement, OAuth re-auth, model refresh, and manual-model
+deletion first stage the resulting inventory and compare it with every exact Custom
+hop. If any advertised `(source_id, model_id)` would disappear, the non-forced
+mutation is refused with `source_model_in_custom_chain` and ordered
+`would_remove_hops`; another Source supplying the same menu model does not make that
+exact reference disposable. A confirmed `force=true` applies the inventory change and
+removes only those invalidated hops in one transaction, preserving the identity and
+relative order of all survivors and keeping an empty route `custom`. Automatic
+background discovery never performs this cascade: it records the newly missing model
+as `model_unsupported`, keeps the configured hop visible and non-runnable, and waits
+for an explicit user refresh/edit to repair or confirm removal. Thus neither a
+credential lifecycle event nor inventory drift silently calls a model the Source no
+longer advertises or rewrites the user's chain.
 
 **Turn provenance.** Each turn whose attribution is **exact** records the model@source
 that served it — the write rule below is what 「exact」 means, and it is the promise's
@@ -821,8 +903,10 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
    - for a fixed-menu backend, require its native vendor — Anthropic for Claude Code,
      OpenAI for Codex — before any alias or exact-identity rule. A foreign-vendor
      Source enters that backend only through an explicit Custom hop;
-   - for a fixed-menu `native_cli` Source, preserve an exact CLI alias such as `opus`
-     or `sonnet[1m]`; the installed official CLI owns that alias;
+   - for a fixed-menu `native_cli` Source, preserve an exact sanctioned CLI alias such
+     as `opus` or `sonnet[1m]`; the installed official CLI owns that alias. The native
+     adapter must report compatible discovered family/version evidence, but the alias
+     itself need not appear literally in inventory;
    - for a fixed-menu hub Source on the backend's native vendor, resolve built-in
      aliases against **that Source's discovered inventory only**: a version alias
      chooses the latest dated id for that exact version; `opus`, `sonnet`, `haiku`,
@@ -832,7 +916,10 @@ For backend `B`, caller-facing menu model `M`, and `B`'s effective Source order 
      inventory, foreign-vendor Sources, and undiscovered ids never enter the
      automatic alias branch. The follow projection never invents a cross-vendor
      substitution; that requires a custom hop.
-   - include the hop only when the Source advertises the resulting upstream model.
+   - include the hop only when the Source advertises the resulting upstream model,
+     **except** for the sanctioned native-alias branch above, whose compatible
+     family/version evidence is sufficient. This final guard must not discard an alias
+     that the official CLI is contracted to interpret.
 4. Annotate every capability hop with its channel, source-global health, current
    process availability, `runnable`, reason, and `retry_at`. Do not remove or reorder
    blocked hops. The runnable candidate list is the resulting chain filtered to
@@ -849,11 +936,12 @@ choice and the deliberate native-first override explicit.
 `mappings` and `PUT /api/models/agents/<backend>/mappings`. Before changing any
 eligibility rule, `allowed_origins` interpretation, or backend Source order, the
 upgrade snapshots each backend's v4 resolver-effective Source order, eligibility
-decisions, and advertised models. Legacy rows are then grouped by `builtin_id`. The
-v4 resolver uses the first enabled row in stored order, so that resolver-effective row
+decisions, advertised models, and **effective chain for every menu model**, including
+models with no enabled mapping. Legacy rows are then grouped by `builtin_id`. The v4
+resolver uses the first enabled row in stored order, so that resolver-effective row
 alone defines the group's target; later enabled duplicates are ignored as shadowed and
-do not overwrite it. A group with no enabled row becomes `follow`. This normalization
-preserves current behavior even for duplicate rows that the old write path accepted.
+do not overwrite it. This normalization preserves current behavior even for duplicate
+rows that the old write path accepted.
 
 Each resolver-effective mapping is then materialized into one Custom chain by walking
 that **v4 snapshot** and emitting `(source_id, target_model_id)` for every Source the
@@ -865,6 +953,15 @@ is one-hop only when exactly one Source can supply the target. If an effective m
 cannot produce any valid hop, the upgrade fails closed and asks for configuration
 review; it never falls through to a shadowed duplicate or keeps a live mapping beside
 an empty chain.
+
+A menu model with **no enabled mapping is not assumed safe to convert to Follow**.
+Migration projects v5 Follow from the same snapshot and compares exact ordered pairs
+with the captured v4-effective chain. If they are identical, the route becomes
+`follow`; if they differ, migration materializes the captured v4 chain as `custom`.
+This preserves, for example, a v4 fixed-menu route that admitted a foreign-vendor
+Source by literal model identity even though v5 Follow deliberately filters that
+Source. An empty v4 chain follows the same comparison rule. No v5 eligibility or alias
+change is allowed to alter the baseline being compared.
 
 The upgrade also converts the two persisted diagnostic stores before publishing v5.
 Every attempt slot in `model_hub_turn_provenance.json` replaces `via_mapping` with the
@@ -955,17 +1052,27 @@ Required interaction rules:
   pairing in another.
 - A model row shows whether it follows backend Source order or owns a Custom chain.
   Opening it renders the exact §4.6 projection; blocked hops remain in place and dim.
-- Adding a subscription selects `native_cli` by default. Choosing “Use as Gateway
-  upstream” is explicit. Only the Claude + Gateway branch shows §4.1's one-sentence
-  warning; it is informational, not a consent flow.
+- Adding Claude selects `native_cli` by default and presents Gateway custody as the
+  optional path. Adding ChatGPT recommends and selects `hub` by default; native Codex
+  login remains an available secondary choice without default guidance. Only the
+  Claude + Gateway branch shows §4.1's one-sentence warning; it is informational, not
+  a consent flow.
+- Add Source and Source details both expose the §4.1 connectivity test and compatible
+  model discovery. Results stay in the current flow and use compact status plus an
+  info affordance for explanation; the page does not grow permanent instructional
+  paragraphs. Manual models expose their per-model `reasoning_effort` value beside the
+  exact id.
 - Recently switched and source/route status remain pull surfaces. A successful
-  fallback adds no copy to the turn (§4.5).
+  fallback adds no error copy to the turn; the sole exception is §4.3's default-on,
+  once-per-conversation lightweight native-takeover notice.
 
 The existing V6 frames remain a visual baseline for row density, health states, and
 mobile treatment, but their Agent-card grouping and mapping drawer are not v3 product
-authority. The future UI lane must author and obtain approval for new desktop/mobile
-frames covering both modules, native → Gateway takeover → native recovery, default
-versus custom model chains, and the Claude hub-add warning before implementation.
+authority. The owner-approved v3 interaction draft is the implementation baseline for
+the two modules, native → Gateway takeover → native recovery, default versus custom
+model chains, and the Claude hub-add warning. The design lane adds the lightweight
+takeover-notice visual and production-complete desktop/mobile states without reopening
+the approved information architecture.
 
 **Deferred third module: Configure Agents.** The intent is to let users add models,
 reasoning effort, and related model preferences to Agent definitions from this product
@@ -987,7 +1094,9 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
 - **Native-config import** remains copy-only
   and reversible, a per-item checklist grouped by backend. API keys + base URLs →
   direct import; subscription OAuth → `keep_native` by default (stays in the CLI's
-  sanctioned store and becomes a `native_cli` source by default). A hub-held
+  sanctioned store and becomes a `native_cli` source). This import-custody default
+  prevents silent credential movement; it does not replace §4.1's ChatGPT add-flow
+  recommendation. A hub-held
   subscription is established only through the explicit OAuth add flow, not by
   importing a native credential file; Codex `auth.json` → `keep_native`. Footer
   promise: originals never modified or deleted; Direct always available. Triggers:
@@ -1003,8 +1112,10 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
   API), local gateway token (the only thing backends receive), upstream
   credentials (API keys and explicitly hub-held subscription OAuth tokens;
   engine-held in a restricted local runtime directory, not `~/.cli-proxy-api`).
-  By default subscription credentials remain in the official CLI store through
-  `native_cli`; the engine holds one only after the user selects the Gateway path.
+  Claude defaults to the official CLI store through `native_cli`; ChatGPT defaults
+  to the engine-held Gateway path. A native credential is never copied into engine
+  custody implicitly: even for ChatGPT, moving from an existing native login to the
+  recommended Hub path requires an explicit OAuth add flow.
 - Credentials never enter Avibe Cloud, IM messages or logs. Static keys may
   integrate with Avibe Vault; no duplicate key entry across surfaces.
 - Gateway failure is fail-closed; Direct mode is the explicit escape hatch.
@@ -1045,10 +1156,15 @@ one pinned hop it receives.
   upstream model for a foreign vendor. Cross-vendor supply is explicit through a
   custom Source + model hop; that hop may use an API key or a hub-held subscription
   and requires no additional warning.
+- **No protocol auto-detection or backfill.** The protocol selected by the user is
+  authoritative. Connectivity tests report only reachability and authentication under
+  that adapter; discovery reports only model-list success or failure. Neither changes
+  the selected protocol or proposes a stored replacement.
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 - No v3 Configure Agents module (§5), runtime plugin UI, or GA scope beyond the
-  three directions recorded in §10.
+  three directions recorded in §10. Source-level manual-model `reasoning_effort` is
+  in scope and does not create Agent-definition configuration.
 
 ## 10. Open items and GA research directions
 
@@ -1079,24 +1195,29 @@ directions into questions that later lanes must answer before writing mechanical
 6. **Later diagnostics and accounting.** Request-log UI, fallback spend attribution,
    and quota projection remain post-v3 candidates. Each needs evidence from existing
    provenance/usage data before it becomes a product promise.
-7. **Remaining UI evidence.** New desktop/mobile frames, empty and failure states,
-   Dark variants, and English copy need owner approval under §5's two-module model.
-   Rejected V5 explorations remain history until separately deleted.
+7. **Remaining UI evidence.** The approved v3 interaction draft is the implementation
+   baseline. The design lane still owes the takeover-notice treatment, complete
+   desktop/mobile frames, empty and failure states, Dark variants, and English copy;
+   a product re-review is required only if those artifacts change the approved
+   information architecture. Rejected V5 explorations remain history until separately
+   deleted.
 8. **Engine-owned OAuth file import.** Keep `controlled_import` deferred until a
    concrete adapter capability can preserve refresh semantics; explicit OAuth add is
    the only hub-held subscription path in v3.
 
 ## 11. Owner acceptance checklist (~10 min)
 
-- [ ] §0 and §2 say “default local model Gateway” and preserve native subscription
-      first → pre-stream same-turn Gateway takeover → automatic native recovery as
-      one story, while Custom order remains authoritative.
+- [ ] §0 and §2 say “default local model Gateway,” recommend Claude native and
+      ChatGPT hub-held custody, and preserve native lead → pre-stream same-turn
+      Gateway takeover → automatic native recovery wherever a native source leads.
 - [ ] §3 makes Gateway a first-class noun and the owner-vetoable banned-term table
       matches the intended UI language.
-- [ ] §4.1 defaults every subscription to `native_cli`; explicit hub-held Claude is
-      the only branch with a warning, and no flag or consent mechanism remains.
-- [ ] §4.2's recommendation puts the own-backend native subscription first and never
-      reorders a custom backend order or custom model chain.
+- [ ] §4.1 defaults Claude to `native_cli` and ChatGPT to `hub`; explicit hub-held
+      Claude is the only branch with a warning, and no flag or consent remains.
+- [ ] §4.1 defines manual connectivity testing, model discovery, and manual model
+      `reasoning_effort`; protocol choice stays authoritative and unchanged.
+- [ ] §4.2 keeps own-vendor subscription supply first in the vendor-recommended form
+      and never reorders a custom backend order or custom model chain.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
       native CLI's sanctioned-backend binding.
 - [ ] §4.6 is the document's only chain derivation, and its custom hops are exact
@@ -1104,8 +1225,9 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] The owner-vetoable mapping evolution is acceptable: materialization from the v4
       resolver snapshot preserves every existing supplier and duplicate-row semantics;
       config plus both diagnostic stores upgrade recoverably; no dual routing authority.
-- [ ] §4.5 keeps state source-global, status live-derived, successful fallback silent,
-      and proactive delivery cut.
+- [ ] §4.5 keeps state source-global, status live-derived, proactive delivery cut,
+      and only the default-on once-per-conversation native-takeover notice as the
+      successful-fallback exception.
 - [ ] §5 has exactly Sources + Gateway modules; the connector is state-only and
       Configure Agents is deferred without a placeholder design.
 - [ ] §6 clearly distinguishes a native hop inside Gateway mode from Direct mode.
@@ -1113,5 +1235,5 @@ directions into questions that later lanes must answer before writing mechanical
       automatic model invention out of Follow policy.
 - [ ] §10 records only fidelity, asset-mirror, platform-matrix, vocabulary, and
       deferred research directions; it does not expand GA scope.
-- [ ] The implementation plan appends AC-22 through AC-24 and assigns the complete
+- [ ] The implementation plan appends AC-22 through AC-27 and assigns the complete
       frozen-contract impact to one coordinated v5 lane.

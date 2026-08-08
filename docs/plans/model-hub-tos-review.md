@@ -364,3 +364,36 @@ this use, enforces server-side blocks, real account bans have occurred, and the 
 fail intermittently. It is informational, not a consent gate. No warning appears for
 Claude native login, any ChatGPT path, automatic Gateway takeover, automatic return to
 native, or cross-vendor routing.
+
+## 13. Owner addendum — 2026-08-07 afternoon (amendment #2)
+
+This later ruling supersedes §12 where they differ and, for product behavior, all
+conflicting portions of §8 recommendations **#1 through #5**. The original memo,
+evidence, risk matrix, and recommendation text remain unchanged as historical research;
+they do not override this addendum. Recommendation #1's API-key support remains valid,
+but it is not an API-key-only product gate. Recommendations #2–#5 no longer make
+Claude Direct-only, gate ChatGPT behind consent, require an experimental flag, or bind
+Hub-held subscription credentials to their native client.
+
+Subscription custody is vendor-specific:
+
+- Claude subscriptions recommend and default to Claude Code's native local login.
+  Adding Claude as a Hub-held Source is optional and shows the sole factual warning:
+  Anthropic explicitly prohibits this use, enforces server-side blocks, real account
+  bans have occurred, and the path may fail intermittently.
+- ChatGPT subscriptions recommend and default to a Hub-held Source. Native Codex login
+  remains supported but is not recommended and is not the default add-flow guidance.
+  The owner bases this product recommendation on Codex OAuth supporting login from
+  third-party applications. No warning or consent prompt appears for either ChatGPT
+  path.
+- Any Hub-held subscription may serve any configured backend and may join a
+  cross-vendor Custom chain. Native credentials remain usable only by their sanctioned
+  client. Neither `subscription_hub_experimental` nor per-Source consent survives.
+
+When a native subscription leads the effective chain, pre-stream quota exhaustion or
+cooldown still triggers same-turn Gateway takeover; after streamed output begins, the
+turn is not replayed. The first automatic native-to-Gateway takeover in a conversation
+may emit one lightweight informational notice when the default-on
+`native_takeover_notice_enabled` setting is enabled. This is active-conversation copy,
+not a warning, risk prompt, resolution-event delivery, or proactive push system; the
+2026-07-29 proactive-push cut remains in force.
