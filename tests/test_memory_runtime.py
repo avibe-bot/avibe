@@ -79,7 +79,7 @@ def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
 
     defaults: dict = {
         "python": Path(sys.executable),
-        "root_format": "everos-1.2.1",
+        "root_format": "everos-1.2.3",
         "fingerprint": "test-artifact",
         "status_payload": {"reason": None},
     }
@@ -291,7 +291,7 @@ def test_memory_artifact_requires_exact_python_lock_and_builder_provenance(tmp_p
         "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
         "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
         "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
-        "provider_root_format": "everos-1.2.1",
+        "provider_root_format": "everos-1.2.3",
         "compatible_provider_root_formats": [],
     }
     manifest = ManagedRuntimeManifest(
@@ -326,7 +326,7 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
 
     def smoke_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="1.2.1\n3.12.12\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="1.2.3\n3.12.12\n", stderr="")
 
     monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
     manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
@@ -347,9 +347,9 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
     assert status["reason"] is None
     assert ensured["ok"] is True
     assert ensured["changed"] is False
-    assert manager.provider_root_format() == "everos-1.2.1"
-    assert manager.compatible_provider_root_formats() == frozenset({"everos-1.2.1"})
-    assert manager.artifact_fingerprint() == "dev-everos-1.2.1"
+    assert manager.provider_root_format() == "everos-1.2.3"
+    assert manager.compatible_provider_root_formats() == frozenset({"everos-1.2.3"})
+    assert manager.artifact_fingerprint() == "dev-everos-1.2.3"
     assert len(calls) == 1
     assert "DEV RUNTIME bypass active - not for production" in caplog.text
 
@@ -1884,8 +1884,8 @@ def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_
             asyncio.to_thread(
                 runtime._coordinate_artifact_activation,
                 MemoryArtifactCandidate(
-                    provider_root_format="everos-1.2.1",
-                    compatible_provider_root_formats=frozenset({"everos-1.2.1"}),
+                    provider_root_format="everos-1.2.3",
+                    compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
                     artifact_fingerprint="candidate-artifact",
                 ),
                 MemoryProviderRootState(exists=False),
@@ -2757,7 +2757,7 @@ def _pid_exists(pid: int) -> bool:
 def _artifact_manifest(provider_root_format: str, *, compatible_formats: list[str]) -> ManagedRuntimeManifest:
     return ManagedRuntimeManifest(
         schema_version=1,
-        runtime_version="1.2.1",
+        runtime_version="1.2.3",
         source="test",
         source_url=None,
         archives={},

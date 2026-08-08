@@ -141,7 +141,7 @@ jobs:
           python scripts/build_memory_runtime.py \
             --output-dir runtime-artifacts \
             --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.2.1-${{ matrix.artifact }}.json"
+            --metadata-output "runtime-artifacts/memory-runtime-1.2.3-${{ matrix.artifact }}.json"
 
       - name: Upload Memory Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
