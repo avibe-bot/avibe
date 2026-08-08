@@ -748,6 +748,16 @@ async def test_malformed_add_ack_becomes_manual_required_without_replay(
     assert status.error == "memory_processing_failed"
     assert status.receipt_unknown == 1
     assert status.buckets.unknown == 1
+    assert row.completed_at is not None
+    assert await module.failure_log() == (
+        MemoryFailureLogEntry(
+            kind="result_unknown",
+            occurred_at=row.completed_at,
+            error_code="memory_provider_response_invalid",
+            request_id="ambiguous-ack",
+            attempts=0,
+        ),
+    )
 
 
 @pytest.mark.parametrize("request_id", [None, "", "x" * 129])

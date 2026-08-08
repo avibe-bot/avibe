@@ -579,13 +579,14 @@ class MemoryStore:
                 UPDATE memory_capture_queue
                 SET state = 'manual_required', next_retry_at = NULL,
                     lease_owner = NULL, lease_at = NULL,
-                    last_error = ?, add_request_id = ?
+                    last_error = ?, add_request_id = ?, completed_at = ?
                 WHERE source_message_digest = ? AND epoch = ?
                   AND state = 'processing' AND lease_owner = ?
                 """,
                 (
                     safe_error,
                     _bounded_opaque_text(add_request_id),
+                    now,
                     row.source_message_digest,
                     row.epoch,
                     lease_owner,
@@ -918,10 +919,10 @@ class MemoryStore:
                     UPDATE memory_capture_queue
                     SET state = 'manual_required', lease_owner = NULL, lease_at = NULL,
                         next_retry_at = NULL,
-                        last_error = 'memory_provider_response_invalid'
+                        last_error = 'memory_provider_response_invalid', completed_at = ?
                     WHERE source_message_digest = ? AND state = 'processing'
                     """,
-                    (row["source_message_digest"],),
+                    (now, row["source_message_digest"]),
                 )
                 if updated.rowcount:
                     self._set_manual_required_fence_in_connection(
@@ -1038,14 +1039,17 @@ class MemoryStore:
                 SELECT kind, occurred_at, error_code, request_id, attempts
                 FROM (
                     SELECT
-                        'delivery_abandoned' AS kind,
+                        CASE
+                            WHEN state = 'dead' THEN 'delivery_abandoned'
+                            ELSE 'result_unknown'
+                        END AS kind,
                         COALESCE(completed_at, created_at) AS occurred_at,
                         last_error AS error_code,
                         add_request_id AS request_id,
                         attempts,
                         source_message_digest AS sort_key
                     FROM memory_capture_queue
-                    WHERE epoch = ? AND state = 'dead'
+                    WHERE epoch = ? AND state IN ('dead', 'manual_required')
 
                     UNION ALL
 
