@@ -3706,6 +3706,12 @@
       "clearRecovery": {
         "title": "Interrupted Clear requires a decision",
         "description": "Resume deletion from its journal, or abort and restore the captured snapshot.",
+        "state": {
+          "preparing": "Preparing snapshot",
+          "prepared": "Snapshot prepared",
+          "deleting": "Deleting Memory data",
+          "recoveryNeeded": "Recovery required"
+        },
         "resume": "Resume Clear",
         "abort": "Abort and restore",
         "abortUnavailable": "Abort is unavailable until the initial snapshot is complete.",

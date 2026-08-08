@@ -3706,6 +3706,12 @@
       "clearRecovery": {
         "title": "中断的清除操作需要处理",
         "description": "可从日志记录处继续删除，或中止并恢复已捕获的快照。",
+        "state": {
+          "preparing": "正在准备快照",
+          "prepared": "快照已准备完成",
+          "deleting": "正在删除记忆数据",
+          "recoveryNeeded": "需要恢复处理"
+        },
         "resume": "继续清除",
         "abort": "中止并恢复",
         "abortUnavailable": "初始快照完整后才能中止并恢复。",

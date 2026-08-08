@@ -33,7 +33,13 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
 )
 from core.memory.clear_journal import MemoryClearJournal
-from core.memory.everos import FakeMemoryProvider, ProviderHealthSnapshot
+from core.memory.attachments import AttachmentPinStore, attachment_pin_root
+from core.memory.everos import (
+    EverOSPort,
+    FakeMemoryProvider,
+    ProviderCapture,
+    ProviderHealthSnapshot,
+)
 import core.memory.process as memory_process
 import core.memory.runtime as memory_runtime
 from core.memory.process import (
@@ -51,14 +57,19 @@ from core.memory.process import (
     _snapshot_owned_processes,
 )
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
+from core.memory.sidecar import _request_rejection
 from core.memory.everos_insight.recorder import initialize_call_log
 from core.memory.store import MemoryStore
 from core.memory.types import (
+    CaptureAccepted,
     MemoryItem,
     MemoryItems,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     OperationFailed,
+    CaptureAttachment,
+    CaptureRequest,
+    ProviderSessionRef,
 )
 from config.v2_config import (
     AgentsConfig,
@@ -1255,15 +1266,184 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert environment["EVEROS_MULTIMODAL__BASE_URL"] == environment["EVEROS_LLM__BASE_URL"]
     assert environment["EVEROS_MULTIMODAL__MODEL"] == environment["EVEROS_LLM__MODEL"]
     assert environment["EVEROS_MULTIMODAL__API_KEY"] == "llm-secret"
-    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(tmp_path / "attachments" / "avibe")
+    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
+        attachment_pin_root(tmp_path)
+    )
     assert environment["EVEROS_EMBEDDING__API_KEY"] == "embedding-secret"
     assert "HTTP_PROXY" not in environment
     assert "SSL_CERT_FILE" not in environment
     assert "llm-secret" not in generated
     assert "embedding-secret" not in generated
     assert "rerank" in generated
-    assert str(tmp_path / "attachments" / "avibe") in generated
+    assert str(attachment_pin_root(tmp_path)) in generated
     assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
+
+
+def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "avibe-home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    source_root = home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "diagram.png"
+    source.write_bytes(b"pinned image")
+    source.chmod(0o600)
+    pin_store = AttachmentPinStore(
+        root=attachment_pin_root(home),
+        source_root=source_root,
+    )
+    bundle = pin_store.pin(
+        (
+            CaptureAttachment(
+                kind="image",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="png",
+            ),
+        )
+    )
+    pinned = pin_store.provider_attachments(bundle)
+
+    process = EverOSProcess(sys.executable, effective_home=home, settings=_settings())
+    environment = process._child_environment()
+    allowed_root = Path(environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
+    assert allowed_root == attachment_pin_root(home)
+
+    request: dict[str, object] = {}
+
+    async def capture_request(
+        method: str,
+        route: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, bytes]:
+        request.update(method=method, route=route, payload=payload)
+        return 200, b'{"data":{"status":"accumulated"}}'
+
+    provider = EverOSPort(home / "memory" / ".rt" / "everos.sock")
+    monkeypatch.setattr(provider, "_sidecar_write", capture_request)
+    session_ref = ProviderSessionRef(
+        principal_id="u-11111111111111111111111111111111",
+        epoch=1,
+        project_ref=PROJECT,
+        session_id=f"src--{'1' * 64}--e1",
+    )
+    asyncio.run(
+        provider.add(
+            ProviderCapture(
+                session_ref=session_ref,
+                text="remember this diagram",
+                provider_timestamp_ms=1_725_000_001_234,
+                attachments=pinned,
+            )
+        )
+    )
+
+    body = json.dumps(request["payload"]).encode()
+    assert request["method"] == "POST"
+    assert request["route"] == "/api/v2/memory/add"
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/add",
+            body,
+            attachments_root=allowed_root,
+        )
+        is None
+    )
+
+    outside = home / "outside.png"
+    outside.write_bytes(b"outside")
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    content = messages[0]["content"]
+    assert isinstance(content, list)
+    content[-1]["uri"] = outside.as_uri()
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/add",
+            json.dumps(payload).encode(),
+            attachments_root=allowed_root,
+        )
+        == "add"
+    )
+
+
+def test_runtime_effective_home_owns_the_attachment_pipeline(
+    monkeypatch, tmp_path: Path
+) -> None:
+    global_home = tmp_path / "global-home"
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("AVIBE_HOME", str(runtime_home))
+    store = MemoryStore()
+    monkeypatch.setenv("AVIBE_HOME", str(global_home))
+    source_root = runtime_home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "notes.txt"
+    source.write_bytes(b"runtime-owned attachment")
+    source.chmod(0o600)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=runtime_home,
+    )
+    expected_pin_root = attachment_pin_root(runtime_home)
+    assert runtime.module._effective_home == runtime_home
+    assert runtime.module._attachment_store._effective_home == runtime_home
+    assert runtime.module._attachment_store._root == expected_pin_root
+    assert runtime.module._attachment_store._source_root == source_root
+    assert runtime._snapshot_manager is not None
+    assert runtime._snapshot_manager.effective_home == runtime_home
+    assert any(
+        surface.path == "memory/attachments"
+        for surface in runtime._snapshot_manager.surfaces
+    )
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=runtime_home,
+        settings=_settings(),
+    )
+    assert process._child_environment()["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
+        expected_pin_root
+    )
+
+    async def run() -> object:
+        try:
+            return await runtime.module.capture(
+                CaptureRequest(
+                    source_message_id="source-1",
+                    session_id="session-1",
+                    principal_id="u-11111111111111111111111111111111",
+                    project_id=PROJECT,
+                    provenance="user_input",
+                    text="remember the notes",
+                    occurred_at_ms=1_725_000_001_234,
+                    attachments=(
+                        CaptureAttachment(
+                            kind="doc",
+                            name=source.name,
+                            uri=source.as_uri(),
+                            ext="txt",
+                        ),
+                    ),
+                )
+            )
+        finally:
+            await runtime.close()
+
+    assert isinstance(asyncio.run(run()), CaptureAccepted)
+    pinned_files = tuple((expected_pin_root / "bundles").glob("*/*"))
+    assert len(pinned_files) == 1
+    assert pinned_files[0].read_bytes() == b"runtime-owned attachment"
+    assert not attachment_pin_root(global_home).exists()
 
 
 def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:

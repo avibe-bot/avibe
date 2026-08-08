@@ -40,6 +40,13 @@ _VALID_KINDS = frozenset({"image", "audio", "doc", "pdf", "html", "email"})
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
+def attachment_pin_root(effective_home: Path | str | None = None) -> Path:
+    """Return the sole provider-visible root for pinned Memory attachments."""
+
+    home = paths.get_vibe_remote_dir() if effective_home is None else effective_home
+    return _absolute_lexical(home) / "memory" / "attachments"
+
+
 class AttachmentPinError(OSError):
     """A closed attachment admission or durable-storage failure."""
 
@@ -192,12 +199,23 @@ class AttachmentPinStore:
         self,
         root: Path | None = None,
         *,
+        effective_home: Path | str | None = None,
         source_root: Path | None = None,
     ) -> None:
-        self._effective_home = _absolute_lexical(paths.get_vibe_remote_dir())
-        self._root = _absolute_lexical(root or (self._effective_home / "memory" / "attachments"))
+        self._effective_home = _absolute_lexical(
+            paths.get_vibe_remote_dir()
+            if effective_home is None
+            else effective_home
+        )
+        self._root = (
+            _absolute_lexical(root)
+            if root is not None
+            else attachment_pin_root(self._effective_home)
+        )
         self._source_root = _absolute_lexical(
-            source_root or (paths.get_attachments_dir() / "avibe")
+            source_root
+            if source_root is not None
+            else self._effective_home / "attachments" / "avibe"
         )
         self._staging = self._root / "staging"
         self._bundles = self._root / "bundles"

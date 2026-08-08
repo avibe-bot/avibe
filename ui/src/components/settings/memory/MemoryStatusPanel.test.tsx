@@ -124,7 +124,7 @@ describe('MemoryStatusPanel', () => {
     render(
       <MemoryStatusPanel
         {...baseProps}
-        recovery={{ operation_id: 'clear-42', state: 'recovery_required', can_abort: true }}
+        recovery={{ operation_id: 'clear-42', state: 'recovery_needed', can_abort: true }}
         onResumeClear={onResumeClear}
         onAbortClear={onAbortClear}
       />,
@@ -135,6 +135,34 @@ describe('MemoryStatusPanel', () => {
 
     expect(onResumeClear).toHaveBeenCalledWith('clear-42');
     expect(onAbortClear).toHaveBeenCalledWith('clear-42');
+  });
+
+  it.each([
+    ['preparing', 'memory.processingRecord.clearRecovery.state.preparing'],
+    ['prepared', 'memory.processingRecord.clearRecovery.state.prepared'],
+    ['deleting', 'memory.processingRecord.clearRecovery.state.deleting'],
+    ['recovery_needed', 'memory.processingRecord.clearRecovery.state.recoveryNeeded'],
+  ])('localizes the known Clear recovery state %s', (state, label) => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{ operation_id: `clear-${state}`, state, can_abort: false }}
+      />,
+    );
+
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.queryByText(state)).toBeNull();
+  });
+
+  it('leaves a future Clear recovery state as inert fallback text', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{ operation_id: 'clear-future', state: 'future_state', can_abort: false }}
+      />,
+    );
+
+    expect(screen.getByText('future_state')).toBeTruthy();
   });
 
   it('keeps abort unavailable until the journal verifies a complete snapshot', async () => {

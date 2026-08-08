@@ -110,6 +110,7 @@ class MemoryModule:
         processing_event: ProcessingEvent | None = None,
         worker: MemoryWorker | None = None,
         attachment_store: AttachmentPinStore | None = None,
+        effective_home: Path | None = None,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -117,9 +118,13 @@ class MemoryModule:
         self._runtime_error_source = runtime_error
         self._starting_source = starting
         self._disk_free_bytes = disk_free_bytes or self._default_free_disk_bytes
-        self._provider_root = provider_root or (paths.get_vibe_remote_dir() / "memory" / "everos-root")
+        self._effective_home = (
+            paths.get_vibe_remote_dir()
+            if effective_home is None
+            else effective_home
+        )
+        self._provider_root = provider_root or (self._effective_home / "memory" / "everos-root")
         self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
-        self._effective_home = paths.get_vibe_remote_dir()
         self._provider_root_format = _root_metadata_value(
             provider_root_format,
             fallback=SLICE1_PROVIDER_ROOT_FORMAT,
@@ -144,7 +149,9 @@ class MemoryModule:
         self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
         self._clear_active = False
-        self._attachment_store = attachment_store or AttachmentPinStore()
+        self._attachment_store = attachment_store or AttachmentPinStore(
+            effective_home=self._effective_home
+        )
         self._worker = worker or MemoryWorker(
             store=store,
             provider=provider,

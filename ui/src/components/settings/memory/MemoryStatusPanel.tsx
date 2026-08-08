@@ -54,10 +54,22 @@ const ANOMALY_LABEL_KEYS = {
   },
 } as const;
 
+const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
+  preparing: 'memory.processingRecord.clearRecovery.state.preparing',
+  prepared: 'memory.processingRecord.clearRecovery.state.prepared',
+  deleting: 'memory.processingRecord.clearRecovery.state.deleting',
+  recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
+} as const;
+
 type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
 
 const anomalyLabel = (t: TFunction, group: AnomalyLabelGroup, value: string): string => {
   const keys = ANOMALY_LABEL_KEYS[group] as Record<string, string>;
+  return keys[value] ? t(keys[value]) : value;
+};
+
+const clearRecoveryStateLabel = (t: TFunction, value: string): string => {
+  const keys = CLEAR_RECOVERY_STATE_LABEL_KEYS as Record<string, string>;
   return keys[value] ? t(keys[value]) : value;
 };
 
@@ -188,7 +200,10 @@ const ClearRecoveryCard: React.FC<{
       </div>
       <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2">
         <Field label={t('memory.processingRecord.field.operationId')} value={recovery.operation_id} />
-        <Field label={t('memory.processingRecord.field.state')} value={recovery.state} />
+        <Field
+          label={t('memory.processingRecord.field.state')}
+          value={clearRecoveryStateLabel(t, recovery.state)}
+        />
         {recovery.occurred_at ? (
           <Field label={t('memory.processingRecord.field.occurredAt')} value={formatTimestamp(recovery.occurred_at)} />
         ) : null}

@@ -65,7 +65,7 @@ from core.memory.worker import ProcessingEvent
 logger = logging.getLogger(__name__)
 
 
-_SnapshotIOResult = TypeVar("_SnapshotIOResult")
+_MaintenanceIOResult = TypeVar("_MaintenanceIOResult")
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
@@ -210,6 +210,7 @@ class MemoryRuntime:
                 artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
                 compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
                 processing_event=self._processing_event,
+                effective_home=self._effective_home,
             )
         except Exception as exc:
             self._store_error = exc
@@ -415,7 +416,7 @@ class MemoryRuntime:
             self.module._worker.pause_claims()
             return {"ok": False, "error": "memory_clear_failed"}
 
-        await self._run_snapshot_io(self._reconcile_completed_clear_snapshots)
+        await self._run_maintenance_io(self._reconcile_completed_clear_snapshots)
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -896,7 +897,7 @@ class MemoryRuntime:
                 self.module._clear_active = True
                 try:
                     await self._quiesce_for_clear()
-                    return await self._run_snapshot_io(lambda: operation(manager))
+                    return await self._run_maintenance_io(lambda: operation(manager))
                 finally:
                     self._backup_active = False
                     try:
@@ -905,10 +906,10 @@ class MemoryRuntime:
                         self.module._clear_active = False
 
     @staticmethod
-    async def _run_snapshot_io(
-        operation: Callable[[], _SnapshotIOResult],
-    ) -> _SnapshotIOResult:
-        """Keep the maintenance fence until a cancelled snapshot thread settles."""
+    async def _run_maintenance_io(
+        operation: Callable[[], _MaintenanceIOResult],
+    ) -> _MaintenanceIOResult:
+        """Keep the maintenance fence until a cancelled I/O thread settles."""
 
         task = asyncio.create_task(asyncio.to_thread(operation))
         cancellation: asyncio.CancelledError | None = None
@@ -935,25 +936,32 @@ class MemoryRuntime:
             async with self.module._root_lifecycle_lock():
                 if journal.get_open_operation() is not None:
                     return self._clear_blocked_payload()
-                meta = await asyncio.to_thread(self._store.ensure_meta)
-                operation = await asyncio.to_thread(
-                    journal.start,
-                    operator_ref=operator_ref,
-                    pre_epoch=meta.epoch,
-                    target_epoch=meta.epoch + 1,
-                )
+                operation: ClearOperation | None = None
                 self.module._clear_active = True
                 try:
-                    await asyncio.to_thread(self._store.begin_clear_fence)
+                    meta = await self._run_maintenance_io(self._store.ensure_meta)
+                    operation = await self._run_maintenance_io(
+                        lambda: journal.start(
+                            operator_ref=operator_ref,
+                            pre_epoch=meta.epoch,
+                            target_epoch=meta.epoch + 1,
+                        )
+                    )
+                    await self._run_maintenance_io(self._store.begin_clear_fence)
                     operation = await self._prepare_clear(operation)
                     operation = await self._delete_clear_surfaces(operation)
                 except BaseException as error:
-                    await self._mark_clear_recovery(operation)
+                    current = await self._mark_clear_recovery(operation)
+                    if current is not None and current.state == "completed":
+                        self.module._clear_active = False
+                        await self._finish_clear(current)
                     if isinstance(error, asyncio.CancelledError):
                         raise
                     return self._clear_blocked_payload()
                 finally:
                     self.module._clear_active = False
+                if operation is None:
+                    raise RuntimeError("Memory clear operation did not start")
                 return await self._finish_clear(operation)
 
     async def resume_clear(self, operation_id: str, *, operator_ref: str) -> dict[str, Any]:
@@ -968,18 +976,22 @@ class MemoryRuntime:
                 if current is None or current.operation_id != operation_id:
                     return self._clear_blocked_payload()
                 try:
-                    operation = await asyncio.to_thread(
-                        journal.claim_resume,
-                        operation_id,
-                        operator_ref=operator_ref,
-                        expected_revision=current.revision,
+                    operation = await self._run_maintenance_io(
+                        lambda: journal.claim_resume(
+                            operation_id,
+                            operator_ref=operator_ref,
+                            expected_revision=current.revision,
+                        )
                     )
-                    await asyncio.to_thread(self._store.begin_clear_fence)
+                    await self._run_maintenance_io(self._store.begin_clear_fence)
                     operation = await self._prepare_clear(operation)
                     operation = await self._delete_clear_surfaces(operation)
                 except BaseException as error:
-                    if "operation" in locals():
-                        await self._mark_clear_recovery(operation)
+                    recovered = await self._mark_clear_recovery(
+                        operation_id=operation_id
+                    )
+                    if recovered is not None and recovered.state == "completed":
+                        await self._finish_clear(recovered)
                     if isinstance(error, asyncio.CancelledError):
                         raise
                     return self._clear_blocked_payload()
@@ -998,43 +1010,49 @@ class MemoryRuntime:
                 if current is None or current.operation_id != operation_id:
                     return self._clear_blocked_payload()
                 try:
-                    operation = await asyncio.to_thread(
-                        journal.claim_abort,
-                        operation_id,
-                        operator_ref=operator_ref,
-                        expected_revision=current.revision,
+                    operation = await self._run_maintenance_io(
+                        lambda: journal.claim_abort(
+                            operation_id,
+                            operator_ref=operator_ref,
+                            expected_revision=current.revision,
+                        )
                     )
                     await self._quiesce_for_clear()
                     digests = self._journal_surface_digests(operation.operation_id)
                     if operation.manifest_sha256 is None or operation.snapshot_path is None:
                         raise RuntimeError("clear snapshot is not sealed")
-                    await self._run_snapshot_io(
+                    await self._run_maintenance_io(
                         lambda: manager.restore(
                             operation.operation_id,
                             expected_manifest_sha256=operation.manifest_sha256,
                             expected_surface_digests=digests,
                         )
                     )
-                    await asyncio.to_thread(self._store.release_clear_fence)
+                    await self._run_maintenance_io(self._store.release_clear_fence)
                     for surface in journal.get_surfaces(operation.operation_id):
                         if surface.state == "restored":
                             continue
-                        operation = await asyncio.to_thread(
-                            journal.record_surface_restored,
+                        operation = await self._run_maintenance_io(
+                            lambda: journal.record_surface_restored(
+                                operation.operation_id,
+                                surface.surface,
+                                expected_revision=operation.revision,
+                                execution_token=self._clear_execution_token(operation),
+                            )
+                        )
+                    operation = await self._run_maintenance_io(
+                        lambda: journal.mark_aborted(
                             operation.operation_id,
-                            surface.surface,
                             expected_revision=operation.revision,
                             execution_token=self._clear_execution_token(operation),
                         )
-                    operation = await asyncio.to_thread(
-                        journal.mark_aborted,
-                        operation.operation_id,
-                        expected_revision=operation.revision,
-                        execution_token=self._clear_execution_token(operation),
                     )
                 except BaseException as error:
-                    if "operation" in locals():
-                        await self._mark_clear_recovery(operation)
+                    recovered = await self._mark_clear_recovery(
+                        operation_id=operation_id
+                    )
+                    if recovered is not None and recovered.state == "aborted":
+                        await self._resume_after_clear()
                     if isinstance(error, asyncio.CancelledError):
                         raise
                     return self._clear_blocked_payload()
@@ -1057,30 +1075,32 @@ class MemoryRuntime:
                         expected_revision=operation.revision,
                         execution_token=self._clear_execution_token(operation),
                     ) as permit:
-                        await self._run_snapshot_io(
+                        await self._run_maintenance_io(
                             lambda: manager.discard_unrecorded(permit)
                         )
                     refreshed = journal.get_operation(operation.operation_id)
                     if refreshed is None:
                         raise RuntimeError("Memory clear operation disappeared")
                     operation = refreshed
-                snapshot = await self._run_snapshot_io(
+                snapshot = await self._run_maintenance_io(
                     lambda: manager.create(operation.operation_id)
                 )
-                operation = await asyncio.to_thread(
-                    journal.record_snapshot,
-                    operation.operation_id,
-                    expected_revision=operation.revision,
-                    execution_token=self._clear_execution_token(operation),
-                    snapshot=snapshot,
+                operation = await self._run_maintenance_io(
+                    lambda: journal.record_snapshot(
+                        operation.operation_id,
+                        expected_revision=operation.revision,
+                        execution_token=self._clear_execution_token(operation),
+                        snapshot=snapshot,
+                    )
                 )
             else:
                 await self._verify_clear_snapshot(operation)
-            operation = await asyncio.to_thread(
-                journal.mark_prepared,
-                operation.operation_id,
-                expected_revision=operation.revision,
-                execution_token=self._clear_execution_token(operation),
+            operation = await self._run_maintenance_io(
+                lambda: journal.mark_prepared(
+                    operation.operation_id,
+                    expected_revision=operation.revision,
+                    execution_token=self._clear_execution_token(operation),
+                )
             )
         if operation.state == "prepared":
             await self._verify_clear_snapshot(operation)
@@ -1089,11 +1109,12 @@ class MemoryRuntime:
     async def _delete_clear_surfaces(self, operation: ClearOperation) -> ClearOperation:
         journal = self._require_clear_journal()
         if operation.state == "prepared":
-            operation = await asyncio.to_thread(
-                journal.begin_deleting,
-                operation.operation_id,
-                expected_revision=operation.revision,
-                execution_token=self._clear_execution_token(operation),
+            operation = await self._run_maintenance_io(
+                lambda: journal.begin_deleting(
+                    operation.operation_id,
+                    expected_revision=operation.revision,
+                    execution_token=self._clear_execution_token(operation),
+                )
             )
         if operation.state != "deleting":
             raise RuntimeError("clear operation is not ready for deletion")
@@ -1102,18 +1123,20 @@ class MemoryRuntime:
             if surface.state == "deleted":
                 continue
             await self._delete_clear_surface(surface, target_epoch=operation.target_epoch)
-            operation = await asyncio.to_thread(
-                journal.record_surface_deleted,
+            operation = await self._run_maintenance_io(
+                lambda: journal.record_surface_deleted(
+                    operation.operation_id,
+                    surface.surface,
+                    expected_revision=operation.revision,
+                    execution_token=self._clear_execution_token(operation),
+                )
+            )
+        return await self._run_maintenance_io(
+            lambda: journal.mark_completed(
                 operation.operation_id,
-                surface.surface,
                 expected_revision=operation.revision,
                 execution_token=self._clear_execution_token(operation),
             )
-        return await asyncio.to_thread(
-            journal.mark_completed,
-            operation.operation_id,
-            expected_revision=operation.revision,
-            execution_token=self._clear_execution_token(operation),
         )
 
     async def _delete_clear_surface(
@@ -1123,31 +1146,38 @@ class MemoryRuntime:
         target_epoch: int,
     ) -> None:
         if surface.surface == "queue":
-            await asyncio.to_thread(
-                self._store.reset_for_clear,
-                target_epoch=target_epoch,
+            await self._run_maintenance_io(
+                lambda: self._store.reset_for_clear(target_epoch=target_epoch)
             )
             return
         if surface.surface == "provider":
-            meta = await asyncio.to_thread(self._store.ensure_meta)
-            if self._provider_root.exists():
-                await asyncio.to_thread(self.module._recreate_owned_provider_root, meta)
-            else:
-                await asyncio.to_thread(self.module._ensure_owned_provider_root, meta)
+
+            def reset_provider_root() -> None:
+                meta = self._store.ensure_meta()
+                if self._provider_root.exists():
+                    self.module._recreate_owned_provider_root(meta)
+                else:
+                    self.module._ensure_owned_provider_root(meta)
+
+            await self._run_maintenance_io(reset_provider_root)
             return
         if surface.surface == "call_log":
-            await asyncio.to_thread(clear_call_log, self._call_log_db_path)
+            await self._run_maintenance_io(
+                lambda: clear_call_log(self._call_log_db_path)
+            )
             self._recorder_health = dict(_RECORDER_DISABLED)
             return
         if surface.surface == "attachments":
-            await asyncio.to_thread(self.module._attachment_store.reconcile, (), ())
+            await self._run_maintenance_io(
+                lambda: self.module._attachment_store.reconcile((), ())
+            )
             return
         raise RuntimeError("unknown Memory clear surface")
 
     async def _verify_clear_snapshot(self, operation: ClearOperation) -> MemorySnapshot:
         if operation.manifest_sha256 is None or operation.snapshot_path is None:
             raise RuntimeError("clear snapshot is not sealed")
-        return await self._run_snapshot_io(
+        return await self._run_maintenance_io(
             lambda: self._require_snapshot_manager().verify(
                 operation.operation_id,
                 expected_manifest_sha256=operation.manifest_sha256,
@@ -1170,37 +1200,48 @@ class MemoryRuntime:
         await self._stop_call_log_retention()
         self._recorder_health = dict(_RECORDER_DISABLED)
 
-    async def _mark_clear_recovery(self, operation: ClearOperation) -> None:
+    async def _mark_clear_recovery(
+        self,
+        operation: ClearOperation | None = None,
+        *,
+        operation_id: str | None = None,
+    ) -> ClearOperation | None:
         journal = self._clear_journal
         if journal is None:
-            return
-        try:
-            current = await asyncio.to_thread(
-                journal.get_operation,
-                operation.operation_id,
+            return None
+
+        def mark_recovery() -> ClearOperation | None:
+            identifier = operation.operation_id if operation is not None else operation_id
+            current = (
+                journal.get_open_operation()
+                if identifier is None
+                else journal.get_operation(identifier)
             )
             if current is None:
-                return
+                return None
             if current.state in {"preparing", "prepared", "deleting"}:
-                await asyncio.to_thread(
-                    journal.mark_recovery_needed,
+                return journal.mark_recovery_needed(
                     current.operation_id,
                     expected_revision=current.revision,
                     execution_token=self._clear_execution_token(current),
                 )
-            elif current.state == "recovery_needed" and current.execution_token is not None:
-                await asyncio.to_thread(
-                    journal.release_recovery_claim,
+            if current.state == "recovery_needed" and current.execution_token is not None:
+                return journal.release_recovery_claim(
                     current.operation_id,
                     expected_revision=current.revision,
                     execution_token=self._clear_execution_token(current),
                 )
+            return current
+
+        try:
+            return await self._run_maintenance_io(mark_recovery)
         except Exception:
             logger.exception("Memory clear failure could not be journaled")
+            return None
 
     async def _finish_clear(self, operation: ClearOperation) -> dict[str, Any]:
         try:
-            await self._run_snapshot_io(self._reconcile_completed_clear_snapshots)
+            await self._run_maintenance_io(self._reconcile_completed_clear_snapshots)
         finally:
             await self._resume_after_clear()
         return {
@@ -1225,6 +1266,26 @@ class MemoryRuntime:
                 )
 
     async def _resume_after_clear(self) -> None:
+        """Keep lifecycle ownership until runtime reconciliation settles."""
+
+        task = asyncio.create_task(self._resume_after_clear_once())
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+            except Exception:
+                break
+        if cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise cancellation
+        task.result()
+
+    async def _resume_after_clear_once(self) -> None:
         if not self._config.enabled:
             self.module._worker.resume_claims()
             return

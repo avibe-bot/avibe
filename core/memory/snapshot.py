@@ -529,7 +529,10 @@ class MemorySnapshotManager:
         _ACTIVE_PREPARING_DISCARD_LEASES.remove(permit._lease)
         directory = self.snapshot_path(permit.snapshot_id)
         _remove_safe_path(self._effective_home, directory)
-        _fsync_directory(self._snapshot_root)
+        root_info = _managed_source_info(self._effective_home, self._snapshot_root)
+        if root_info is not None:
+            _require_directory_private(root_info, "Memory snapshot root")
+            _fsync_directory(self._snapshot_root)
         _SUCCEEDED_PREPARING_DISCARD_LEASES.add(permit._lease)
 
     def _validate_surface_layout(self) -> None:

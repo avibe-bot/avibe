@@ -104,6 +104,184 @@ async def test_recovery_payload_disables_abort_before_initial_snapshot(
     await runtime.close()
 
 
+async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    journal = runtime._clear_journal
+    assert journal is not None
+    start_entered = threading.Event()
+    start_release = threading.Event()
+    original_start = journal.start
+
+    def blocking_start(**kwargs):
+        operation = original_start(**kwargs)
+        start_entered.set()
+        assert start_release.wait(2)
+        return operation
+
+    monkeypatch.setattr(journal, "start", blocking_start)
+    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    assert await asyncio.to_thread(start_entered.wait, 1)
+
+    clearing.cancel()
+    await asyncio.sleep(0)
+
+    assert clearing.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+    start_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await clearing
+
+    recovery = journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.state == "recovery_needed"
+    assert recovery.recovery_from_state == "preparing"
+    assert recovery.execution_token is None
+    assert runtime._store.ensure_meta().clear_in_progress is False
+
+    claim_entered = threading.Event()
+    claim_release = threading.Event()
+    original_claim_resume = journal.claim_resume
+
+    def blocking_claim_resume(operation_id: str, **kwargs):
+        operation = original_claim_resume(operation_id, **kwargs)
+        claim_entered.set()
+        assert claim_release.wait(2)
+        return operation
+
+    monkeypatch.setattr(journal, "claim_resume", blocking_claim_resume)
+    resuming = asyncio.create_task(
+        runtime.resume_clear(recovery.operation_id, operator_ref="user:owner")
+    )
+    assert await asyncio.to_thread(claim_entered.wait, 1)
+
+    resuming.cancel()
+    await asyncio.sleep(0)
+
+    assert resuming.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+    claim_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await resuming
+
+    claimed_recovery = journal.get_open_operation()
+    assert claimed_recovery is not None
+    assert claimed_recovery.state == "recovery_needed"
+    assert claimed_recovery.recovery_from_state == "preparing"
+    assert claimed_recovery.resolution == "resume"
+    assert claimed_recovery.execution_token is None
+
+    monkeypatch.setattr(journal, "claim_resume", original_claim_resume)
+    completed = await runtime.resume_clear(
+        claimed_recovery.operation_id,
+        operator_ref="user:owner",
+    )
+    assert completed["status"] == "completed"
+    assert journal.get_open_operation() is None
+    await runtime.close()
+
+
+async def test_cancelled_completed_clear_resumes_runtime_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    journal = runtime._clear_journal
+    assert journal is not None
+    completed_entered = threading.Event()
+    completed_release = threading.Event()
+    completed_ids: list[str] = []
+    original_mark_completed = journal.mark_completed
+
+    def blocking_mark_completed(operation_id: str, **kwargs):
+        operation = original_mark_completed(operation_id, **kwargs)
+        completed_ids.append(operation.operation_id)
+        completed_entered.set()
+        assert completed_release.wait(2)
+        return operation
+
+    resume_calls = 0
+    original_resume = runtime._resume_after_clear
+
+    async def counted_resume() -> None:
+        nonlocal resume_calls
+        resume_calls += 1
+        await original_resume()
+
+    monkeypatch.setattr(journal, "mark_completed", blocking_mark_completed)
+    monkeypatch.setattr(runtime, "_resume_after_clear", counted_resume)
+    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    assert await asyncio.to_thread(completed_entered.wait, 1)
+
+    clearing.cancel()
+    await asyncio.sleep(0)
+
+    assert clearing.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+    completed_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await clearing
+
+    assert completed_ids
+    completed = journal.get_operation(completed_ids[0])
+    assert completed is not None
+    assert completed.state == "completed"
+    assert journal.get_open_operation() is None
+    assert resume_calls == 1
+    await runtime.close()
+
+
+async def test_cancelled_post_terminal_resume_holds_lifecycle_fences(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    resume_entered = asyncio.Event()
+    resume_release = asyncio.Event()
+
+    async def blocking_reconcile(*_args, **_kwargs):
+        resume_entered.set()
+        await resume_release.wait()
+        runtime.module._worker.resume_claims()
+        return {"ok": True, "state": "running"}
+
+    monkeypatch.setattr(runtime, "_reconcile_locked", blocking_reconcile)
+    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    await asyncio.wait_for(resume_entered.wait(), timeout=1)
+
+    assert runtime._clear_journal.get_open_operation() is None
+    assert runtime.module._worker._claims_paused is True
+    assert runtime.module._worker._coordinator._paused is True
+    clearing.cancel()
+    await asyncio.sleep(0)
+
+    assert clearing.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+    resume_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await clearing
+
+    assert runtime.module._worker._claims_paused is False
+    assert runtime.module._worker._coordinator._paused is False
+    assert runtime._reconcile_lock.locked() is False
+    assert runtime.module._lifecycle_lock.locked() is False
+    assert runtime.module._root_lifecycle_lock().locked() is False
+    await runtime.close()
+
+
 async def test_abort_restores_all_surfaces_after_destructive_work(
     monkeypatch,
     tmp_path: Path,
@@ -326,6 +504,64 @@ async def test_cancelled_clear_waits_for_snapshot_verification_before_releasing_
     await runtime.close()
 
 
+async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime.module._ensure_owned_provider_root(runtime._store.ensure_meta())
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_recreate = runtime.module._recreate_owned_provider_root
+
+    def blocking_recreate(meta) -> None:
+        started.set()
+        assert release.wait(2)
+        try:
+            original_recreate(meta)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        runtime.module,
+        "_recreate_owned_provider_root",
+        blocking_recreate,
+    )
+    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    clearing.cancel()
+    await asyncio.sleep(0)
+
+    assert clearing.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await clearing
+
+    assert finished.is_set()
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.state == "recovery_needed"
+    assert recovery.recovery_from_state == "deleting"
+
+    monkeypatch.setattr(
+        runtime.module,
+        "_recreate_owned_provider_root",
+        original_recreate,
+    )
+    completed = await runtime.resume_clear(
+        recovery.operation_id,
+        operator_ref="user:owner",
+    )
+    assert completed["status"] == "completed"
+    await runtime.close()
+
+
 async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     monkeypatch,
     tmp_path: Path,
@@ -386,9 +622,48 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     assert pending.execution_token is None
 
     monkeypatch.setattr(MemorySnapshotManager, "restore", original_restore)
-    aborted = await runtime.abort_clear(pending.operation_id, operator_ref="user:owner")
-    assert aborted["status"] == "aborted"
+    journal = runtime._clear_journal
+    terminal_entered = threading.Event()
+    terminal_release = threading.Event()
+    original_mark_aborted = journal.mark_aborted
+
+    def blocking_mark_aborted(operation_id: str, **kwargs):
+        operation = original_mark_aborted(operation_id, **kwargs)
+        terminal_entered.set()
+        assert terminal_release.wait(2)
+        return operation
+
+    resume_calls = 0
+    original_resume = runtime._resume_after_clear
+
+    async def counted_resume() -> None:
+        nonlocal resume_calls
+        resume_calls += 1
+        await original_resume()
+
+    monkeypatch.setattr(journal, "mark_aborted", blocking_mark_aborted)
+    monkeypatch.setattr(runtime, "_resume_after_clear", counted_resume)
+    aborting = asyncio.create_task(
+        runtime.abort_clear(pending.operation_id, operator_ref="user:owner")
+    )
+    assert await asyncio.to_thread(terminal_entered.wait, 1)
+
+    aborting.cancel()
+    await asyncio.sleep(0)
+
+    assert aborting.done() is False
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+    terminal_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await aborting
+
+    aborted = journal.get_operation(pending.operation_id)
+    assert aborted is not None
+    assert aborted.state == "aborted"
     assert runtime._clear_journal.get_open_operation() is None
+    assert resume_calls == 1
     await runtime.close()
 
 
