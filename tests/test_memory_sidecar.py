@@ -43,7 +43,7 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
         def run(self) -> None:
             return None
 
-    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.3")
     monkeypatch.setattr(sidecar, "install_error_scrubbers", lambda: None)
     monkeypatch.setattr(sidecar.importlib, "import_module", lambda _module: _FactoryModule())
     monkeypatch.setattr(sidecar.os, "umask", lambda _mode: 0o022)
@@ -127,7 +127,7 @@ def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
 
             asyncio.run(exercise())
 
-    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.3")
     monkeypatch.setattr(
         sidecar,
         "install_error_scrubbers",
@@ -222,7 +222,7 @@ def test_sidecar_projects_recorder_state_through_existing_health_response() -> N
         await send(
             {
                 "type": "http.response.body",
-                "body": b'{"status":"ok","version":"1.2.1"}',
+                "body": b'{"status":"ok","version":"1.2.3"}',
             }
         )
 
@@ -247,7 +247,7 @@ def test_sidecar_projects_recorder_state_through_existing_health_response() -> N
     body = json.loads(messages[1]["body"])
     assert body == {
         "status": "ok",
-        "version": "1.2.1",
+        "version": "1.2.3",
         "recorder": {"state": "degraded", "reason": "call_log_corrupt"},
     }
 

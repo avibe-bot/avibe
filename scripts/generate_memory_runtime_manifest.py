@@ -8,9 +8,9 @@ import tarfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
-EVEROS_VERSION = "1.2.1"
+EVEROS_VERSION = "1.2.3"
 PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
+LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 UV_VERSION = "0.9.18"
 ARCHIVE_PREFIX = f"memory-runtime-{EVEROS_VERSION}-"
 ARCHIVE_SUFFIX = ".tar.gz"

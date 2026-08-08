@@ -18,7 +18,7 @@ from pathlib import Path
 
 RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
 EXPECTED_PYTHON_VERSION = "3.12.12"
-EXPECTED_LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
+EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 EXPECTED_UV_VERSION = "0.9.18"
 EXPECTED_PLATFORMS = frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
@@ -73,8 +73,8 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         raise ReleaseGuardError(f"cannot read Memory Runtime manifest: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ReleaseGuardError("Memory Runtime manifest schema_version must be 1")
-    if payload.get("release_state") != "published" or payload.get("everos_version") != "1.2.1":
-        raise ReleaseGuardError("Memory Runtime manifest must describe published EverOS 1.2.1")
+    if payload.get("release_state") != "published" or payload.get("everos_version") != "1.2.3":
+        raise ReleaseGuardError("Memory Runtime manifest must describe published EverOS 1.2.3")
     if (
         payload.get("python_version") != EXPECTED_PYTHON_VERSION
         or payload.get("lock_sha256") != EXPECTED_LOCK_SHA256

@@ -43,7 +43,7 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
     for platform in sorted(guard.EXPECTED_PLATFORMS):
         binary = f"python-{platform}".encode()
         archive = _archive(binary)
-        name = f"memory-runtime-1.2.1-{platform}.tar.gz"
+        name = f"memory-runtime-1.2.3-{platform}.tar.gz"
         url = f"{base_url}/{name}"
         archives[platform] = {
             "name": name,
@@ -56,7 +56,7 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
         remote[url] = archive
     payload = {
         "schema_version": 1,
-        "everos_version": "1.2.1",
+        "everos_version": "1.2.3",
         "python_version": guard.EXPECTED_PYTHON_VERSION,
         "lock_sha256": guard.EXPECTED_LOCK_SHA256,
         "lock_id": f"uv-lock-sha256:{guard.EXPECTED_LOCK_SHA256}",
