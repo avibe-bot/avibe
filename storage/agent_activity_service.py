@@ -51,16 +51,22 @@ from vibe.message_types import spec_for, types_with
 MESSAGE_SCAN_LIMIT = 500
 EVENT_SCAN_LIMIT = 2000
 
-# Message types that participate in turn structure: turn openers (user/harness),
-# terminals (result/error/notify/silent-marker), and the interim assistant activity
-# rows. The invisible ``silent`` marker is fetched here (it is NOT in TRANSCRIPT_TYPES)
-# so a turn that completed with no user-visible reply still has a terminal to close on.
+# Message types that participate in turn structure: visible or hidden turn openers,
+# terminals (result/error/notify/silent-marker), and interim assistant activity rows.
+# Hidden lifecycle rows are fetched even though they are not in TRANSCRIPT_TYPES so
+# the activity projection preserves the complete Turn boundary.
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
 _TRANSCRIPT_ACTIVITY_TYPES = tuple(
     message_type
     for message_type in types_with("transcript")
     if spec_for(message_type)["activityRole"] != "none"
     or spec_for(message_type)["terminalWhenEvents"]
+)
+_NON_TRANSCRIPT_START_TYPES = tuple(
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "turn_start"
+    and message_type not in _TRANSCRIPT_ACTIVITY_TYPES
 )
 _NON_TRANSCRIPT_TERMINAL_TYPES = tuple(
     message_type
@@ -75,6 +81,7 @@ _ACTIVITY_TYPES = tuple(
 )
 _RELEVANT_MESSAGE_TYPES = (
     *_TRANSCRIPT_ACTIVITY_TYPES,
+    *_NON_TRANSCRIPT_START_TYPES,
     *_NON_TRANSCRIPT_TERMINAL_TYPES,
     *_ACTIVITY_TYPES,
 )

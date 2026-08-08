@@ -16,7 +16,7 @@ from core.native_dispatch_phase import (
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivity, activity_completion_output
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
-from modules.agents.claude_agent import ClaudeAgent
+from modules.agents.claude_agent import ClaudeAgent, _SteeringInputFence
 from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock
 
@@ -883,16 +883,29 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
         self.assertTrue(controller.session_manager.session.session_active[composite_key])
 
-    def test_steered_result_after_assistant_response_is_not_suppressed(self):
+    def test_steered_result_after_native_query_start_is_not_suppressed(self):
         controller = _StubController()
         agent = ClaudeAgent(controller)
         composite_key = "session-1:/tmp/work"
-        agent._steering_generations[composite_key] = 1
-        agent._steering_terminal_barriers[composite_key] = ["accepted"]
-        agent._steering_response_generations[composite_key] = 1
+        input_fence = _SteeringInputFence()
+        native_query_fence = agent._queue_native_query(
+            composite_key,
+            steering=input_fence,
+        )
+        agent._advance_steering_generation(
+            composite_key,
+            input_fence=input_fence,
+        )
+        self.assertTrue(
+            agent._observe_native_query_start(
+                composite_key,
+                native_query_fence.generation,
+            )
+        )
 
         self.assertFalse(agent._terminal_claim_superseded(composite_key, 1))
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
+        self.assertNotIn(composite_key, agent._steering_input_fences)
 
     def test_buffered_result_without_steered_assistant_is_suppressed(self):
         controller = _StubController()
@@ -905,7 +918,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(agent._next_terminal_barrier(composite_key))
 
     async def test_steered_assistant_and_result_settle_the_pending_turn(self):
-        """HFR-435: the steered Assistant owns its following terminal result."""
+        """HFR-435: a native query start gives the steered Result ownership."""
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
         controller.emit_agent_message = AsyncMock()
@@ -929,9 +942,21 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ack_reaction_emoji=None,
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent._steering_generations[composite_key] = 1
-        agent._steering_terminal_barriers[composite_key] = ["accepted"]
+        input_fence = _SteeringInputFence()
+        agent._queue_native_query(
+            composite_key,
+            steering=input_fence,
+        )
+        agent._advance_steering_generation(
+            composite_key,
+            input_fence=input_fence,
+        )
 
+        init_message = type(
+            "SystemMessage",
+            (),
+            {"subtype": "init", "data": {"subtype": "init"}},
+        )()
         text_block = TextBlock("steered final answer")
         assistant_message = type(
             "AssistantMessage",
@@ -951,6 +976,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         class _Client:
             def receive_messages(self):
                 async def _iterate():
+                    yield init_message
                     yield assistant_message
                     yield result_message
 
@@ -973,6 +999,120 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             request=pending_request,
         )
         self.assertNotIn(composite_key, agent._pending_requests)
+
+    async def test_presteer_result_stays_visible_without_agent_initiated_turn(self):
+        """HFR-436: queued native steering keeps its user-owned Turn."""
+
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        begin_agent_initiated_turn = AsyncMock()
+        controller.agent_service = SimpleNamespace(
+            activity_registry=None,
+            begin_agent_initiated_turn=begin_agent_initiated_turn,
+        )
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-delayed-steer:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._queue_native_query(composite_key)
+        input_fence = _SteeringInputFence()
+        agent._queue_native_query(
+            composite_key,
+            steering=input_fence,
+        )
+        agent._advance_steering_generation(
+            composite_key,
+            input_fence=input_fence,
+        )
+
+        init_message = type(
+            "SystemMessage",
+            (),
+            {"subtype": "init", "data": {"subtype": "init"}},
+        )()
+        primary_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("primary work completed")]},
+        )()
+        primary_result = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "primary work completed",
+                "duration_ms": 1,
+            },
+        )()
+        steered_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("screenshots ready")]},
+        )()
+        steered_result = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "screenshots ready",
+                "duration_ms": 2,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield init_message
+                    yield primary_assistant
+                    yield primary_result
+                    yield init_message
+                    yield steered_assistant
+                    yield steered_result
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-delayed-steer",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "assistant",
+            "primary work completed",
+            parse_mode="markdown",
+        )
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "screenshots ready",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._pending_requests)
+        self.assertNotIn(composite_key, agent._steering_input_fences)
+        begin_agent_initiated_turn.assert_not_awaited()
 
     async def test_buffered_pre_steer_assistant_keeps_primary_result_ownership(self):
         controller = _StubController()

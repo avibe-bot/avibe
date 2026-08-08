@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
@@ -53,6 +54,17 @@ from modules.im import MessageContext
 logger = logging.getLogger(__name__)
 
 
+@dataclass(eq=False)
+class _SteeringInputFence:
+    observed: bool = False
+
+
+@dataclass(eq=False)
+class _NativeQueryFence:
+    generation: int
+    steering: _SteeringInputFence | None = None
+
+
 class ClaudeAgent(BaseAgent):
     """Existing Claude Code integration extracted into an agent backend."""
 
@@ -86,7 +98,9 @@ class ClaudeAgent(BaseAgent):
         self._steering_locks: dict[str, asyncio.Lock] = {}
         self._steering_generations: dict[str, int] = {}
         self._steering_terminal_barriers: dict[str, list[str]] = {}
-        self._steering_response_generations: dict[str, int] = {}
+        self._steering_input_fences: dict[str, list[_SteeringInputFence]] = {}
+        self._native_query_generations: dict[str, int] = {}
+        self._native_query_fences: dict[str, list[_NativeQueryFence]] = {}
         self._ambiguous_primary_results: dict[str, object] = {}
         self._ambiguous_input_shutdowns: set[str] = set()
         self._ambiguous_interrupts: set[str] = set()
@@ -194,7 +208,15 @@ class ClaudeAgent(BaseAgent):
             message = self._prepare_message_with_files(request)
 
             mark_backend_dispatch_attempted(request.context)
-            await client.query(message, session_id=runtime_session_key)
+            native_query_fence = self._queue_native_query(runtime_session_key)
+            try:
+                await client.query(message, session_id=runtime_session_key)
+            except BaseException:
+                self._remove_native_query_fence(
+                    runtime_session_key,
+                    native_query_fence,
+                )
+                raise
             if (
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
@@ -868,9 +890,15 @@ class ClaudeAgent(BaseAgent):
         barriers = getattr(self, "_steering_terminal_barriers", None)
         if barriers is not None:
             barriers.pop(composite_key, None)
-        response_generations = getattr(self, "_steering_response_generations", None)
-        if response_generations is not None:
-            response_generations.pop(composite_key, None)
+        input_fences = getattr(self, "_steering_input_fences", None)
+        if input_fences is not None:
+            input_fences.pop(composite_key, None)
+        native_query_generations = getattr(self, "_native_query_generations", None)
+        if native_query_generations is not None:
+            native_query_generations.pop(composite_key, None)
+        native_query_fences = getattr(self, "_native_query_fences", None)
+        if native_query_fences is not None:
+            native_query_fences.pop(composite_key, None)
         ambiguous_results = getattr(self, "_ambiguous_primary_results", None)
         if ambiguous_results is not None:
             ambiguous_results.pop(composite_key, None)
@@ -888,6 +916,7 @@ class ClaudeAgent(BaseAgent):
         composite_key: str,
         *,
         barrier: str = "accepted",
+        input_fence: _SteeringInputFence | None = None,
     ) -> None:
         current_generation = self._steering_generation(composite_key)
         self._steering_generations[composite_key] = current_generation + 1
@@ -896,6 +925,80 @@ class ClaudeAgent(BaseAgent):
             barriers = {}
             self._steering_terminal_barriers = barriers
         barriers.setdefault(composite_key, []).append(barrier)
+        if input_fence is not None:
+            fences = getattr(self, "_steering_input_fences", None)
+            if fences is None:
+                fences = {}
+                self._steering_input_fences = fences
+            fences.setdefault(composite_key, []).append(input_fence)
+
+    def _queue_native_query(
+        self,
+        composite_key: str,
+        *,
+        steering: _SteeringInputFence | None = None,
+    ) -> _NativeQueryFence:
+        generations = getattr(self, "_native_query_generations", None)
+        if generations is None:
+            generations = {}
+            self._native_query_generations = generations
+        generation = generations.get(composite_key, 0) + 1
+        generations[composite_key] = generation
+        fence = _NativeQueryFence(generation=generation, steering=steering)
+        pending = getattr(self, "_native_query_fences", None)
+        if pending is None:
+            pending = {}
+            self._native_query_fences = pending
+        pending.setdefault(composite_key, []).append(fence)
+        return fence
+
+    def _remove_native_query_fence(
+        self,
+        composite_key: str,
+        fence: _NativeQueryFence,
+    ) -> None:
+        all_pending = getattr(self, "_native_query_fences", None) or {}
+        pending = all_pending.get(composite_key) or []
+        try:
+            pending.remove(fence)
+        except ValueError:
+            return
+        if not pending:
+            all_pending.pop(composite_key, None)
+
+    def _observe_native_query_start(
+        self,
+        composite_key: str,
+        observed_generation: int,
+    ) -> bool:
+        """Claim an SDK init frame for the query write that preceded it."""
+
+        all_pending = getattr(self, "_native_query_fences", None) or {}
+        pending = all_pending.get(composite_key) or []
+        if not pending or pending[0].generation > observed_generation:
+            return False
+        query_fence = pending.pop(0)
+        if not pending:
+            all_pending.pop(composite_key, None)
+        steering_fence = query_fence.steering
+        if steering_fence is None:
+            return False
+        steering_fence.observed = True
+        fences = (getattr(self, "_steering_input_fences", None) or {}).get(
+            composite_key
+        ) or []
+        barriers = (getattr(self, "_steering_terminal_barriers", None) or {}).get(
+            composite_key
+        ) or []
+        try:
+            index = fences.index(steering_fence)
+        except ValueError:
+            return False
+        # A transport-ambiguous write becomes native-accepted once Claude emits
+        # the init boundary for that exact queued query.
+        if index < len(barriers) and barriers[index] == "unknown":
+            barriers[index] = "accepted"
+        return True
 
     def _next_terminal_barrier(self, composite_key: str) -> str | None:
         barriers = getattr(self, "_steering_terminal_barriers", None) or {}
@@ -919,26 +1022,35 @@ class ClaudeAgent(BaseAgent):
     ) -> bool:
         """Consume a terminal frame that predates a native steer.
 
-        Claude's receiver can deliver a ResultMessage after the steering write,
-        even when the corresponding AssistantMessage was already emitted. That
-        result belongs to the steered continuation and must settle the Turn. Only
-        suppress the accepted barrier when no post-steer assistant response was
-        observed; this preserves the guard for a buffered pre-steer ResultMessage
-        without dropping the real steered answer.
+        A successful transport write only enqueues native input. Claude may emit
+        the current query's Assistant/Result before it dequeues that input. The
+        next SystemMessage(init) is the first causal proof that a later terminal
+        frame can belong to the steer; output arrival time alone is not proof.
         """
         generation_changed = expected_steering_generation != self._steering_generation(
             composite_key
         )
         barrier = self._next_terminal_barrier(composite_key)
-        response_generation = (
-            getattr(self, "_steering_response_generations", {}) or {}
-        ).get(composite_key)
-        if (
-            barrier == "accepted"
-            and response_generation == self._steering_generation(composite_key)
-        ):
-            self._consume_terminal_barrier(composite_key)
-            return generation_changed
+        fences = (getattr(self, "_steering_input_fences", None) or {}).get(
+            composite_key
+        ) or []
+        fence = fences[0] if fences else None
+        if barrier == "accepted" and fence is not None:
+            if not fence.observed:
+                return True
+            # Claude normally dequeues one queued prompt per Result, but if it
+            # dequeues several before answering, that Result owns every observed
+            # FIFO input instead of leaving an already-consumed prompt hanging.
+            while (
+                fences
+                and fences[0].observed
+                and self._next_terminal_barrier(composite_key) == "accepted"
+            ):
+                self._consume_terminal_barrier(composite_key)
+                fences.pop(0)
+            if not fences:
+                self._steering_input_fences.pop(composite_key, None)
+            return generation_changed or bool(fences)
         buffered_terminal = self._consume_terminal_barrier(composite_key) is not None
         return generation_changed or buffered_terminal
 
@@ -1033,6 +1145,11 @@ class ClaudeAgent(BaseAgent):
 
             writers = self._steering_writer_keys()
             writers.add(composite_key)
+            input_fence = _SteeringInputFence()
+            native_query_fence = self._queue_native_query(
+                composite_key,
+                steering=input_fence,
+            )
             try:
                 try:
                     await client.query(request.text, session_id=composite_key)
@@ -1040,6 +1157,7 @@ class ClaudeAgent(BaseAgent):
                     self._advance_steering_generation(
                         composite_key,
                         barrier="unknown",
+                        input_fence=input_fence,
                     )
                     await self._end_ambiguous_steering_input(
                         composite_key,
@@ -1070,6 +1188,7 @@ class ClaudeAgent(BaseAgent):
                         self._advance_steering_generation(
                             composite_key,
                             barrier="unknown",
+                            input_fence=input_fence,
                         )
                         await self._end_ambiguous_steering_input(
                             composite_key,
@@ -1090,6 +1209,10 @@ class ClaudeAgent(BaseAgent):
                             "process that exited with error",
                         )
                     ):
+                        self._remove_native_query_fence(
+                            composite_key,
+                            native_query_fence,
+                        )
                         return steer_result(
                             SteerOutcome.REFUSED,
                             reason="runtime_unavailable",
@@ -1099,6 +1222,7 @@ class ClaudeAgent(BaseAgent):
                     self._advance_steering_generation(
                         composite_key,
                         barrier="unknown",
+                        input_fence=input_fence,
                     )
                     await self._end_ambiguous_steering_input(
                         composite_key,
@@ -1113,7 +1237,10 @@ class ClaudeAgent(BaseAgent):
             finally:
                 writers.discard(composite_key)
 
-            self._advance_steering_generation(composite_key)
+            self._advance_steering_generation(
+                composite_key,
+                input_fence=input_fence,
+            )
             if (
                 self.claude_sessions.get(composite_key) is not client
                 or self.receiver_tasks.get(composite_key) is not receiver_task
@@ -1282,6 +1409,7 @@ class ClaudeAgent(BaseAgent):
             while True:
                 settling_ambiguous_primary = False
                 terminal_steering_generation = None
+                native_query_generation = 0
                 try:
                     message = await anext(message_stream)
                     # Capture ownership at the receive boundary. The receiver may
@@ -1289,6 +1417,9 @@ class ClaudeAgent(BaseAgent):
                     # agent-initiated turn; sampling generation later can relabel a
                     # buffered pre-steer frame as the steered continuation.
                     terminal_steering_generation = self._steering_generation(composite_key)
+                    native_query_generation = (
+                        getattr(self, "_native_query_generations", None) or {}
+                    ).get(composite_key, 0)
                 except StopAsyncIteration:
                     message = self._ambiguous_primary_results.pop(composite_key, None)
                     if message is None:
@@ -1357,6 +1488,21 @@ class ClaudeAgent(BaseAgent):
                         if is_model_refusal_fallback
                         else None
                     )
+
+                    if (
+                        message_type == "system"
+                        and getattr(message, "subtype", None) == "init"
+                    ):
+                        async with self._steering_lock(composite_key):
+                            observed_steer = self._observe_native_query_start(
+                                composite_key,
+                                native_query_generation,
+                            )
+                        if observed_steer:
+                            logger.info(
+                                "Observed Claude init for steered input on %s",
+                                composite_key,
+                            )
 
                     # Unsolicited backend output (a background-task completion or
                     # a ScheduleWakeup re-invoked the agent inside this SDK
@@ -1437,10 +1583,6 @@ class ClaudeAgent(BaseAgent):
                             if assistant_text:
                                 self._detached_assistant_text[composite_key] = assistant_text
                             continue
-                        if assistant_text and terminal_steering_generation:
-                            self._steering_response_generations[composite_key] = (
-                                terminal_steering_generation
-                            )
                         async with self._steering_lock(composite_key):
                             if composite_key in self._steering_closing_keys():
                                 logger.info(
@@ -1693,6 +1835,9 @@ class ClaudeAgent(BaseAgent):
                                 )
                             self._clear_detached_foreground_tool_state(composite_key)
                             continue
+                        terminal_superseded = False
+                        superseded_result_text = ""
+                        superseded_request = None
                         async with self._steering_lock(composite_key):
                             self._pending_assistant_message.pop(composite_key, None)
                             if self._consume_suppressed_synthetic_result(
@@ -1708,7 +1853,6 @@ class ClaudeAgent(BaseAgent):
                                 not settling_ambiguous_primary
                                 and self._next_terminal_barrier(composite_key) == "unknown"
                             ):
-                                self._consume_terminal_barrier(composite_key)
                                 self._ambiguous_primary_results[composite_key] = message
                                 logger.info(
                                     "Deferring Claude primary result until ambiguous steering reaches native EOF or a later result for %s",
@@ -1718,47 +1862,71 @@ class ClaudeAgent(BaseAgent):
                             if not settling_ambiguous_primary:
                                 self._ambiguous_primary_results.pop(composite_key, None)
 
-                            if (
-                                composite_key in self._steering_closing_keys()
-                                or (
-                                    not settling_ambiguous_primary
-                                    and self._terminal_claim_superseded(
-                                        composite_key,
-                                        terminal_steering_generation,
-                                    )
-                                )
-                            ):
+                            if composite_key in self._steering_closing_keys():
                                 logger.info(
-                                    "Ignoring Claude terminal result superseded by steering or teardown for %s",
+                                    "Ignoring Claude terminal result during teardown for %s",
                                     composite_key,
                                 )
                                 continue
 
-                            failure_disposition = await self._handle_terminal_failure_result(
-                                context,
-                                composite_key,
-                                message,
-                                raw_result_text
-                                or self._last_assistant_text.get(composite_key),
+                            terminal_superseded = bool(
+                                not settling_ambiguous_primary
+                                and self._terminal_claim_superseded(
+                                    composite_key,
+                                    terminal_steering_generation,
+                                )
                             )
-                            if failure_disposition == "auth":
-                                self._foreground_tool_use_ids.pop(composite_key, None)
-                                self._turns_with_foreground_tools.discard(composite_key)
-                                return
-                            if failure_disposition:
-                                self._foreground_tool_use_ids.pop(composite_key, None)
-                                self._turns_with_foreground_tools.discard(composite_key)
-                                continue
+                            if terminal_superseded:
+                                pending = self._pending_requests.get(composite_key) or []
+                                superseded_request = pending[0] if pending else None
+                                superseded_result_text = self._select_terminal_text(
+                                    composite_key,
+                                    raw_result_text,
+                                )
+                            else:
+                                failure_disposition = await self._handle_terminal_failure_result(
+                                    context,
+                                    composite_key,
+                                    message,
+                                    raw_result_text
+                                    or self._last_assistant_text.get(composite_key),
+                                )
+                                if failure_disposition == "auth":
+                                    self._foreground_tool_use_ids.pop(composite_key, None)
+                                    self._turns_with_foreground_tools.discard(composite_key)
+                                    return
+                                if failure_disposition:
+                                    self._foreground_tool_use_ids.pop(composite_key, None)
+                                    self._turns_with_foreground_tools.discard(composite_key)
+                                    continue
 
-                            # ResultMessage.result already contains the last
-                            # AssistantMessage, so only the terminal owner emits it.
-                            pending_request = self._pop_pending_request(composite_key)
-                            output_activities = self._request_activities(pending_request)
-                            output_activity = output_activities[-1] if output_activities else None
-                            result_text = self._select_terminal_text(
+                                # ResultMessage.result already contains the last
+                                # AssistantMessage, so only the terminal owner emits it.
+                                pending_request = self._pop_pending_request(composite_key)
+                                output_activities = self._request_activities(pending_request)
+                                output_activity = output_activities[-1] if output_activities else None
+                                result_text = self._select_terminal_text(
+                                    composite_key,
+                                    raw_result_text,
+                                )
+
+                        if terminal_superseded:
+                            self._adopt_pending_turn_token(context, superseded_request)
+                            if superseded_result_text:
+                                await self.controller.emit_agent_message(
+                                    context,
+                                    "assistant",
+                                    superseded_result_text,
+                                    parse_mode="markdown",
+                                )
+                            self._last_assistant_text.pop(composite_key, None)
+                            self._foreground_tool_use_ids.pop(composite_key, None)
+                            self._turns_with_foreground_tools.discard(composite_key)
+                            logger.info(
+                                "Kept Claude Turn open across a pre-steer terminal result for %s",
                                 composite_key,
-                                raw_result_text,
                             )
+                            continue
 
                         # The receiver is long-lived and reused across a session's
                         # turns, so ``context`` still carries the FIRST turn's

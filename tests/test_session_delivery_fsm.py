@@ -5933,7 +5933,7 @@ async def test_terminal_commit_publishes_replyless_inbox_settlement(
 
 
 @pytest.mark.anyio
-async def test_agent_initiated_continuation_materializes_in_configured_language(
+async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
     managers,
 ) -> None:
     manager, _other, engine, _engine_b, _starts = managers
@@ -5943,8 +5943,15 @@ async def test_agent_initiated_continuation_materializes_in_configured_language(
     assert manager.register_agent_initiated_turn(context) is True
     with engine.connect() as conn:
         row = messages_service.get_message(conn, str(context.message_id))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_fsm",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
     assert row is not None
+    assert row["type"] == "agent_initiated"
     assert row["text"] == "Agent 主动发起的续接"
+    assert transcript["messages"] == []
 
     sink = manager.get_turn_sink(manager.controller._get_session_key(context))
     assert sink is not None

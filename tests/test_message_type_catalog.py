@@ -142,6 +142,7 @@ def test_input_turn_pairs_match_current_constant() -> None:
     expected = (
         ("user", "user"),
         ("harness", "harness"),
+        ("harness", "agent_initiated"),
         ("harness", "annotation"),
     )
     assert input_author_type_pairs() == expected
@@ -175,6 +176,7 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
     expected_relevant = (
         "user",
         "harness",
+        "agent_initiated",
         "result",
         "notify",
         "error",

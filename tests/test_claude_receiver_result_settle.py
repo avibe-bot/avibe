@@ -39,6 +39,11 @@ class _AssistantFailureMessage:
     is_error = True
 
 
+class SystemMessage:
+    subtype = "init"
+    data = {"subtype": "init"}
+
+
 def _one_result_client():
     class _Client:
         def receive_messages(self):
@@ -65,18 +70,24 @@ def _build_agent(mark_idle_calls):
         ),
         receiver_tasks={},
         claude_sessions={},
-        claude_client=SimpleNamespace(_is_skip_message=lambda message: False),
+        claude_client=SimpleNamespace(
+            _is_skip_message=lambda message: False,
+            format_message=lambda *args, **kwargs: "",
+        ),
         session_handler=SimpleNamespace(
             mark_session_idle=lambda key: mark_idle_calls.append(key),
             touch_session_activity=lambda key: None,
         ),
+        emit_agent_message=AsyncMock(return_value=None),
     )
     controller._get_session_key = lambda context: "session-key"
 
     agent = ClaudeAgent(controller)
     # Stub the external bits the result branch touches so the test isolates the
     # settle-on-failure contract.
-    agent._detect_message_type = lambda message: "result"
+    agent._detect_message_type = lambda message: (
+        "system" if isinstance(message, SystemMessage) else "result"
+    )
     agent._maybe_capture_session_id = lambda *a, **k: None
     agent._consume_suppressed_synthetic_result = lambda *a, **k: False
     agent._handle_auth_failure_result = AsyncMock(return_value=False)
@@ -274,6 +285,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     first = _ResultMessage()
                     first.result = "primary result"
                     yield first
+                    yield SystemMessage()
                     await second_result_ready.wait()
                     second = _ResultMessage()
                     second.result = "steered result"
@@ -356,6 +368,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     buffered = _ResultMessage()
                     buffered.result = "buffered primary result"
                     yield buffered
+                    yield SystemMessage()
                     await final_result_ready.wait()
                     final = _ResultMessage()
                     final.result = "steered result"
@@ -1202,7 +1215,11 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[composite_key] = [primary_request]
         agent.emit_result_message = AsyncMock(return_value=None)
         agent._detect_message_type = lambda message: (
-            "assistant" if isinstance(message, _AssistantFailureMessage) else "result"
+            "assistant"
+            if isinstance(message, _AssistantFailureMessage)
+            else "system"
+            if isinstance(message, SystemMessage)
+            else "result"
         )
         agent._handle_assistant_terminal_failure = AsyncMock(return_value="failure")
         consume_suppressed_result = ClaudeAgent._consume_suppressed_synthetic_result.__get__(agent)
@@ -1236,10 +1253,12 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
                     failed = _ResultMessage()
                     failed.result = "primary failed"
                     yield failed
+                    yield SystemMessage()
                     await first_steered_result_ready.wait()
                     first_steered = _ResultMessage()
                     first_steered.result = "first steered result"
                     yield first_steered
+                    yield SystemMessage()
                     await second_steered_result_ready.wait()
                     second_steered = _ResultMessage()
                     second_steered.result = "second steered result"

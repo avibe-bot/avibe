@@ -7309,7 +7309,10 @@ class SessionTurnManager:
                             platform="avibe",
                             author="harness",
                             source="harness",
-                            message_type="harness",
+                            # This durable row owns the backend-started Turn for
+                            # Stop/FSM/history, but it is not a user instruction
+                            # and must not render as a chat bubble.
+                            message_type="agent_initiated",
                             text=trigger_text,
                             metadata={
                                 "source": "agent_initiated",
