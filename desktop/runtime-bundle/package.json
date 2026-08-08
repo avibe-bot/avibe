@@ -1,9 +1,0 @@
-{
-  "name": "avibe-desktop-private-runtime",
-  "private": true,
-  "version": "0.0.0",
-  "description": "Build-only dependencies for the target-specific Avibe desktop Runtime",
-  "dependencies": {
-    "@openai/codex": "0.145.0"
-  }
-}

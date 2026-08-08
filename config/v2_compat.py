@@ -103,13 +103,43 @@ class AppCompatConfig:
         return [self.platform]
 
 
-def to_app_config(v2: V2Config) -> AppCompatConfig:
+def _runtime_agent_cli_path(
+    configured: str | None,
+    default: str,
+    *,
+    resolve_agent_paths: bool,
+) -> str:
+    """Project one saved selector to the executable used by desktop Runtime."""
+
+    selected = str(configured or default)
+    from vibe.upgrade import is_desktop_managed_runtime
+
+    if not resolve_agent_paths or not is_desktop_managed_runtime():
+        return selected
+
+    # GUI-launched processes do not inherit the user's shell PATH. Use the same
+    # resolver as Settings so "installed" and the executable actually launched
+    # by Claude, Codex, or OpenCode can never disagree.
+    from vibe.cli_paths import resolve_cli_path
+
+    return resolve_cli_path(selected) or selected
+
+
+def to_app_config(
+    v2: V2Config,
+    *,
+    resolve_agent_paths: bool = True,
+) -> AppCompatConfig:
     claude = ClaudeCompatConfig(
         enabled=v2.agents.claude.enabled,
         permission_mode="bypassPermissions",
         cwd=v2.runtime.default_cwd,
         system_prompt=None,
-        cli_path=v2.agents.claude.cli_path,
+        cli_path=_runtime_agent_cli_path(
+            v2.agents.claude.cli_path,
+            "claude",
+            resolve_agent_paths=resolve_agent_paths,
+        ),
         idle_timeout_seconds=v2.agents.claude.idle_timeout_seconds,
         # Forward V2Config auth fields so ``session_handler`` can inject the
         # right ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` env vars when
@@ -124,7 +154,11 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
     if v2.agents.codex.enabled:
         codex = CodexCompatConfig(
             enabled=True,
-            binary=v2.agents.codex.cli_path,
+            binary=_runtime_agent_cli_path(
+                v2.agents.codex.cli_path,
+                "codex",
+                resolve_agent_paths=resolve_agent_paths,
+            ),
             extra_args=[],
             idle_timeout_seconds=v2.agents.codex.idle_timeout_seconds,
             auth_mode=v2.agents.codex.auth_mode,
@@ -133,7 +167,11 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
     if v2.agents.opencode.enabled:
         opencode = OpenCodeCompatConfig(
             enabled=True,
-            binary=v2.agents.opencode.cli_path,
+            binary=_runtime_agent_cli_path(
+                v2.agents.opencode.cli_path,
+                "opencode",
+                resolve_agent_paths=resolve_agent_paths,
+            ),
             port=4096,
             request_timeout_seconds=60,
             default_reasoning_effort=v2.agents.opencode.default_reasoning_effort,

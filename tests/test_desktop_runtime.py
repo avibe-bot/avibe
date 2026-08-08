@@ -26,6 +26,9 @@ from vibe.desktop_runtime import (
     desktop_endpoint_payload,
     desktop_origin,
     is_private_desktop_runtime_path,
+    private_desktop_backends_root,
+    private_desktop_node_bin,
+    private_desktop_npm_cli,
     private_desktop_runtime_root,
     requires_desktop_loopback_listener,
     ui_listener_hosts,
@@ -138,6 +141,34 @@ def test_private_desktop_runtime_path_is_confined_to_absolute_launcher_root(tmp_
     assert not is_private_desktop_runtime_path(tmp_path / "runtime-other" / "codex", env)
     assert not is_private_desktop_runtime_path("tools/bin/codex", env)
     assert private_desktop_runtime_root({"AVIBE_DESKTOP_RUNTIME_ROOT": "relative/runtime"}) is None
+
+
+def test_private_desktop_backend_toolchain_paths_are_separate_and_confined(tmp_path):
+    runtime_root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
+    node = runtime_root / "tools" / "node"
+    npm_cli = runtime_root / "tools" / "npm" / "bin" / "npm-cli.js"
+    node.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    node.write_text("node", encoding="utf-8")
+    node.chmod(0o755)
+    npm_cli.write_text("npm", encoding="utf-8")
+    backends_root = tmp_path / "backends"
+    env = {
+        "AVIBE_DESKTOP_RUNTIME_ROOT": str(runtime_root),
+        "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
+        "AVIBE_DESKTOP_NPM_CLI": str(npm_cli),
+        "AVIBE_DESKTOP_BACKENDS_ROOT": str(backends_root),
+    }
+
+    assert private_desktop_node_bin(env) == node
+    assert private_desktop_npm_cli(env) == npm_cli
+    assert private_desktop_backends_root(env) == backends_root
+    assert private_desktop_backends_root(
+        {**env, "AVIBE_DESKTOP_BACKENDS_ROOT": str(runtime_root / "backends")}
+    ) is None
+    assert private_desktop_npm_cli(
+        {**env, "AVIBE_DESKTOP_NPM_CLI": str(tmp_path / "outside-npm.js")}
+    ) is None
 
 
 @pytest.mark.parametrize(

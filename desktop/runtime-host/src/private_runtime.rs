@@ -39,10 +39,10 @@ pub struct RuntimeBundleManifest {
     pub tree_sha256: String,
     pub python_entrypoint: String,
     pub node_entrypoint: String,
-    pub codex_entrypoint: String,
+    pub npm_entrypoint: String,
     pub python_distribution: RuntimeSource,
     pub node_distribution: RuntimeSource,
-    pub codex_version: String,
+    pub npm_version: String,
     pub avibe_wheel: RuntimeArtifact,
 }
 
@@ -83,7 +83,7 @@ pub struct InstalledPrivateRuntime {
     pub root: PathBuf,
     pub python: PathBuf,
     pub node: PathBuf,
-    pub codex: PathBuf,
+    pub npm_cli: PathBuf,
     pub runtime_id: String,
 }
 
@@ -242,7 +242,7 @@ impl PrivateRuntimeBundle {
 }
 
 fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
-    if manifest.schema_version != 1
+    if manifest.schema_version != 2
         || !safe_segment(&manifest.runtime_version)
         || !safe_file_name(&manifest.archive)
         || !valid_sha256(&manifest.archive_sha256)
@@ -255,13 +255,13 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<(), PrivateRunt
         || !valid_sha256(&manifest.tree_sha256)
         || !valid_relative_path(&manifest.python_entrypoint)
         || !valid_relative_path(&manifest.node_entrypoint)
-        || !valid_relative_path(&manifest.codex_entrypoint)
+        || !valid_relative_path(&manifest.npm_entrypoint)
         || !valid_sha256(&manifest.python_distribution.sha256)
         || !valid_sha256(&manifest.node_distribution.sha256)
         || !valid_sha256(&manifest.avibe_wheel.sha256)
         || manifest.python_distribution.url.is_empty()
         || manifest.node_distribution.url.is_empty()
-        || manifest.codex_version.is_empty()
+        || manifest.npm_version.is_empty()
         || !safe_file_name(&manifest.avibe_wheel.name)
     {
         return Err(PrivateRuntimeError::ManifestInvalid);
@@ -409,16 +409,18 @@ fn set_entry_permissions(_path: &Path, _mode: Option<u32>) -> Result<(), Private
 }
 
 fn validate_runtime_files(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
-    for relative in required_runtime_executables(manifest)? {
+    for (relative, must_be_executable) in required_runtime_files(manifest) {
         let path = root.join(relative);
         let metadata = fs::symlink_metadata(path).map_err(PrivateRuntimeError::Install)?;
         if !metadata.file_type().is_file() {
             return Err(PrivateRuntimeError::ArchiveInvalid);
         }
+        #[cfg(not(unix))]
+        let _ = must_be_executable;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o111 == 0 {
+            if must_be_executable && metadata.permissions().mode() & 0o111 == 0 {
                 return Err(PrivateRuntimeError::ArchiveInvalid);
             }
         }
@@ -426,35 +428,12 @@ fn validate_runtime_files(root: &Path, manifest: &RuntimeBundleManifest) -> Resu
     Ok(())
 }
 
-fn required_runtime_executables(manifest: &RuntimeBundleManifest) -> Result<Vec<PathBuf>, PrivateRuntimeError> {
-    let codex_root = Path::new(&manifest.codex_entrypoint)
-        .parent()
-        .and_then(Path::parent)
-        .ok_or(PrivateRuntimeError::ArchiveInvalid)?;
-    let mut required = vec![
-        PathBuf::from(&manifest.python_entrypoint),
-        PathBuf::from(&manifest.node_entrypoint),
-        PathBuf::from(&manifest.codex_entrypoint),
-    ];
-    if manifest.os == "windows" {
-        required.extend([
-            codex_root.join("bin").join("codex-code-mode-host.exe"),
-            codex_root.join("codex-path").join("rg.exe"),
-            codex_root.join("codex-resources").join("codex-command-runner.exe"),
-            codex_root
-                .join("codex-resources")
-                .join("codex-windows-sandbox-setup.exe"),
-        ]);
-    } else if manifest.os == "macos" {
-        required.extend([
-            codex_root.join("bin").join("codex-code-mode-host"),
-            codex_root.join("codex-path").join("rg"),
-            codex_root.join("codex-resources").join("zsh").join("bin").join("zsh"),
-        ]);
-    } else {
-        return Err(PrivateRuntimeError::ArchiveInvalid);
-    }
-    Ok(required)
+fn required_runtime_files(manifest: &RuntimeBundleManifest) -> [(PathBuf, bool); 3] {
+    [
+        (PathBuf::from(&manifest.python_entrypoint), true),
+        (PathBuf::from(&manifest.node_entrypoint), true),
+        (PathBuf::from(&manifest.npm_entrypoint), false),
+    ]
 }
 
 fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
@@ -566,7 +545,7 @@ fn installed_runtime(
         root: root.to_owned(),
         python: root.join(&manifest.python_entrypoint),
         node: root.join(&manifest.node_entrypoint),
-        codex: root.join(&manifest.codex_entrypoint),
+        npm_cli: root.join(&manifest.npm_entrypoint),
         runtime_id: manifest.archive_sha256.clone(),
     })
 }
@@ -590,26 +569,9 @@ mod tests {
 
     fn entrypoints() -> (&'static str, &'static str, &'static str) {
         if cfg!(windows) {
-            ("python/python.exe", "tools/bin/node.exe", "tools/bin/codex.exe")
+            ("python/python.exe", "tools/bin/node.exe", "tools/npm/bin/npm-cli.js")
         } else {
-            ("python/bin/python3", "tools/bin/node", "tools/bin/codex")
-        }
-    }
-
-    fn helper_entrypoints() -> Vec<&'static str> {
-        if cfg!(windows) {
-            vec![
-                "tools/bin/codex-code-mode-host.exe",
-                "tools/codex-path/rg.exe",
-                "tools/codex-resources/codex-command-runner.exe",
-                "tools/codex-resources/codex-windows-sandbox-setup.exe",
-            ]
-        } else {
-            vec![
-                "tools/bin/codex-code-mode-host",
-                "tools/codex-path/rg",
-                "tools/codex-resources/zsh/bin/zsh",
-            ]
+            ("python/bin/python3", "tools/bin/node", "tools/npm/bin/npm-cli.js")
         }
     }
 
@@ -619,18 +581,22 @@ mod tests {
         let archive_path = bundle.join("runtime.zip");
         let archive_file = File::create(&archive_path).expect("archive");
         let mut zip = ZipWriter::new(archive_file);
-        let options = SimpleFileOptions::default()
+        let executable_options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .unix_permissions(0o755);
-        let (python, node, codex) = entrypoints();
+        let data_options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+        let (python, node, npm_cli) = entrypoints();
         let mut unpacked_size = 0_u64;
         let mut entry_count = 0_u64;
-        let entries: Vec<_> = [python, node, codex]
-            .into_iter()
-            .chain(helper_entrypoints())
-            .chain(extra_entry)
-            .collect();
+        let entries: Vec<_> = [python, node, npm_cli].into_iter().chain(extra_entry).collect();
         for name in &entries {
+            let options = if *name == npm_cli {
+                data_options
+            } else {
+                executable_options
+            };
             zip.start_file(name, options).expect("zip entry");
             zip.write_all(b"runtime").expect("zip bytes");
             unpacked_size += 7;
@@ -648,7 +614,7 @@ mod tests {
         }
         let bytes = fs::read(&archive_path).expect("archive bytes");
         let manifest = RuntimeBundleManifest {
-            schema_version: 1,
+            schema_version: 2,
             runtime_version: "3.0.0-test".to_owned(),
             os: current_os().to_owned(),
             arch: current_arch().to_owned(),
@@ -660,7 +626,7 @@ mod tests {
             tree_sha256: format!("{:x}", tree_hasher.finalize()),
             python_entrypoint: python.to_owned(),
             node_entrypoint: node.to_owned(),
-            codex_entrypoint: codex.to_owned(),
+            npm_entrypoint: npm_cli.to_owned(),
             python_distribution: RuntimeSource {
                 url: "https://example.invalid/python".to_owned(),
                 sha256: "a".repeat(64),
@@ -669,7 +635,7 @@ mod tests {
                 url: "https://example.invalid/node".to_owned(),
                 sha256: "b".repeat(64),
             },
-            codex_version: "0.1.0".to_owned(),
+            npm_version: "10.9.8".to_owned(),
             avibe_wheel: RuntimeArtifact {
                 name: "avibe_os-3.0.0-py3-none-any.whl".to_owned(),
                 sha256: "c".repeat(64),
@@ -696,7 +662,7 @@ mod tests {
         assert!(first.root.ends_with(&manifest.archive_sha256[..16]));
         assert!(first.python.is_file());
         assert!(first.node.is_file());
-        assert!(first.codex.is_file());
+        assert!(first.npm_cli.is_file());
         assert_eq!(
             fs::read_dir(root.join("installs").join(&manifest.runtime_version))
                 .expect("version directory")
@@ -775,22 +741,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_runtime_with_a_non_executable_codex_ripgrep_is_repaired() {
+    fn npm_cli_does_not_need_an_executable_mode() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = scratch("installed-ripgrep-mode-tamper");
+        let root = scratch("npm-cli-mode");
         write_bundle(&root, None);
         let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
-        let first = bundle.prepare().expect("first install");
-        let ripgrep = first.root.join("tools/codex-path/rg");
-        fs::set_permissions(&ripgrep, fs::Permissions::from_mode(0o644)).expect("remove execute bits");
+        let installed = bundle.prepare().expect("Runtime with npm CLI installs");
 
-        let repaired = bundle.prepare().expect("repair install");
-
-        assert_ne!(repaired.root, first.root);
-        assert_ne!(
-            fs::metadata(repaired.root.join("tools/codex-path/rg"))
-                .expect("repaired ripgrep metadata")
+        assert_eq!(
+            fs::metadata(&installed.npm_cli)
+                .expect("npm CLI metadata")
                 .permissions()
                 .mode()
                 & 0o111,
@@ -799,34 +760,22 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
-    #[cfg(unix)]
     #[test]
-    fn every_non_executable_codex_helper_triggers_repair() {
-        use std::os::unix::fs::PermissionsExt;
+    fn a_tampered_npm_cli_is_never_reused() {
+        let root = scratch("installed-npm-tamper");
+        let manifest = write_bundle(&root, None);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let first = bundle.prepare().expect("first install");
+        fs::write(&first.npm_cli, b"tampered").expect("tamper installed npm CLI");
 
-        for helper in helper_entrypoints() {
-            let label = helper.replace('/', "-");
-            let root = scratch(&format!("installed-helper-mode-{label}"));
-            write_bundle(&root, None);
-            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
-            let first = bundle.prepare().expect("first install");
-            fs::set_permissions(first.root.join(helper), fs::Permissions::from_mode(0o644))
-                .expect("remove helper execute bits");
+        let repaired = bundle.prepare().expect("repair install");
 
-            let repaired = bundle.prepare().expect("repair install");
-
-            assert_ne!(repaired.root, first.root);
-            assert_ne!(
-                fs::metadata(repaired.root.join(helper))
-                    .expect("repaired helper metadata")
-                    .permissions()
-                    .mode()
-                    & 0o111,
-                0,
-                "{helper} must be executable after repair"
-            );
-            fs::remove_dir_all(root).ok();
-        }
+        assert_ne!(repaired.root, first.root);
+        assert!(repaired
+            .root
+            .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])));
+        assert_eq!(fs::read(&repaired.npm_cli).expect("repaired npm CLI"), b"runtime");
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -922,6 +871,22 @@ mod tests {
         let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
 
         assert!(matches!(bundle.prepare(), Err(PrivateRuntimeError::TargetMismatch)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_the_legacy_runtime_manifest_schema() {
+        let root = scratch("schema-one");
+        let mut manifest = write_bundle(&root, None);
+        manifest.schema_version = 1;
+        fs::write(
+            root.join("bundle").join(MANIFEST_NAME),
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("manifest");
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+
+        assert!(matches!(bundle.prepare(), Err(PrivateRuntimeError::ManifestInvalid)));
         fs::remove_dir_all(root).ok();
     }
 }

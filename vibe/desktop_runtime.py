@@ -18,6 +18,9 @@ from typing import Literal, TypedDict
 DESKTOP_ENDPOINT_SCHEMA_VERSION: Literal[1] = 1
 DESKTOP_RUNTIME_ID_ENV = "AVIBE_DESKTOP_RUNTIME_ID"
 DESKTOP_RUNTIME_ROOT_ENV = "AVIBE_DESKTOP_RUNTIME_ROOT"
+DESKTOP_NODE_BIN_ENV = "VIBE_SHOW_RUNTIME_NODE_BIN"
+DESKTOP_NPM_CLI_ENV = "AVIBE_DESKTOP_NPM_CLI"
+DESKTOP_BACKENDS_ROOT_ENV = "AVIBE_DESKTOP_BACKENDS_ROOT"
 
 
 class DesktopEndpointPayload(TypedDict):
@@ -46,6 +49,73 @@ def private_desktop_runtime_root(base_env: Mapping[str, str] | None = None) -> P
     if not root.is_absolute():
         return None
     return root.resolve(strict=False)
+
+
+def private_desktop_node_bin(base_env: Mapping[str, str] | None = None) -> Path | None:
+    """Return the verified bundled Node.js executable, when available."""
+
+    return _private_desktop_runtime_file(DESKTOP_NODE_BIN_ENV, base_env, executable=True)
+
+
+def private_desktop_npm_cli(base_env: Mapping[str, str] | None = None) -> Path | None:
+    """Return the verified bundled npm CLI entrypoint, when available."""
+
+    return _private_desktop_runtime_file(DESKTOP_NPM_CLI_ENV, base_env)
+
+
+def private_desktop_backends_root(base_env: Mapping[str, str] | None = None) -> Path | None:
+    """Return the mutable app-private backend root supplied by the launcher."""
+
+    env = os.environ if base_env is None else base_env
+    value = env.get(DESKTOP_BACKENDS_ROOT_ENV, "")
+    if not value:
+        return None
+    root = Path(value).expanduser()
+    if not root.is_absolute() or root.is_symlink():
+        return None
+    resolved = root.resolve(strict=False)
+    runtime_root = private_desktop_runtime_root(env)
+    if runtime_root is None:
+        return None
+    try:
+        resolved.relative_to(runtime_root)
+        return None
+    except ValueError:
+        pass
+    try:
+        runtime_root.relative_to(resolved)
+        return None
+    except ValueError:
+        return resolved
+
+
+def _private_desktop_runtime_file(
+    env_name: str,
+    base_env: Mapping[str, str] | None,
+    *,
+    executable: bool = False,
+) -> Path | None:
+    env = os.environ if base_env is None else base_env
+    value = env.get(env_name, "")
+    if not value:
+        return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute() or candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    root = private_desktop_runtime_root(env)
+    if root is None:
+        return None
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    if not resolved.is_file() or (executable and not os.access(resolved, os.X_OK)):
+        return None
+    return resolved
 
 
 def is_private_desktop_runtime_path(

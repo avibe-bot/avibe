@@ -42,6 +42,12 @@ pub const DESKTOP_MANAGED_RUNTIME_ENV: &str = "AVIBE_DESKTOP_MANAGED_RUNTIME";
 /// Identifies the app-private Runtime root to the Python process.
 pub const DESKTOP_RUNTIME_ROOT_ENV: &str = "AVIBE_DESKTOP_RUNTIME_ROOT";
 
+/// Identifies the bundled npm CLI that must be invoked through private Node.js.
+pub const DESKTOP_NPM_CLI_ENV: &str = "AVIBE_DESKTOP_NPM_CLI";
+
+/// Identifies the mutable root for app-private agent backends.
+pub const DESKTOP_BACKENDS_ROOT_ENV: &str = "AVIBE_DESKTOP_BACKENDS_ROOT";
+
 /// How the shell starts a Runtime.
 ///
 /// `start` is idempotent: it brings up what is missing without stopping what is
@@ -250,12 +256,14 @@ impl RuntimeLauncher for InstalledVibeLauncher {
 #[derive(Debug, Clone)]
 pub struct BundledVibeLauncher {
     bundle: PrivateRuntimeBundle,
+    backend_root: PathBuf,
 }
 
 impl BundledVibeLauncher {
-    pub fn new(bundle_dir: PathBuf, install_root: PathBuf) -> Self {
+    pub fn new(bundle_dir: PathBuf, install_root: PathBuf, backend_root: PathBuf) -> Self {
         Self {
             bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
+            backend_root,
         }
     }
 }
@@ -269,7 +277,8 @@ impl RuntimeLauncher for BundledVibeLauncher {
                 runtime.root.clone(),
                 runtime.python,
                 runtime.node,
-                runtime.codex,
+                runtime.npm_cli,
+                self.backend_root.clone(),
                 &runtime_id,
                 env::var_os("PATH").as_deref(),
             ),
@@ -282,21 +291,44 @@ impl RuntimeLauncher for BundledVibeLauncher {
         if state == RuntimeRemovalState::Unknown {
             return Err(LaunchError::RuntimeRemoval);
         }
+        validate_private_directory_root(&self.backend_root)?;
         if state == RuntimeRemovalState::Managed {
             let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
             let command = RuntimeCommand::private(
                 runtime.root,
                 runtime.python,
                 runtime.node,
-                runtime.codex,
+                runtime.npm_cli,
+                self.backend_root.clone(),
                 &runtime.runtime_id,
                 env::var_os("PATH").as_deref(),
             );
             run_handover(&command)?;
         }
         self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
+        remove_private_directory_root(&self.backend_root)?;
         Ok(true)
     }
+}
+
+fn validate_private_directory_root(path: &Path) -> Result<bool, LaunchError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(LaunchError::RuntimeRemoval),
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        Ok(true)
+    } else {
+        Err(LaunchError::RuntimeRemoval)
+    }
+}
+
+fn remove_private_directory_root(path: &Path) -> Result<(), LaunchError> {
+    if validate_private_directory_root(path)? {
+        std::fs::remove_dir_all(path).map_err(|_| LaunchError::RuntimeRemoval)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -369,17 +401,13 @@ impl RuntimeCommand {
         runtime_root: PathBuf,
         python: PathBuf,
         node: PathBuf,
-        codex: PathBuf,
+        npm_cli: PathBuf,
+        backends_root: PathBuf,
         runtime_id: &str,
         inherited_path: Option<&OsStr>,
     ) -> Self {
         let tools_dir = node.parent().expect("validated private Node has a parent");
-        let codex_path = codex
-            .parent()
-            .and_then(Path::parent)
-            .expect("validated private Codex has a tools root")
-            .join("codex-path");
-        let mut path_entries = vec![tools_dir.to_owned(), codex_path];
+        let mut path_entries = vec![tools_dir.to_owned()];
         if let Some(path) = inherited_path {
             path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
         }
@@ -392,6 +420,11 @@ impl RuntimeCommand {
             environment: vec![
                 (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
+                (OsString::from(DESKTOP_NPM_CLI_ENV), npm_cli.into_os_string()),
+                (
+                    OsString::from(DESKTOP_BACKENDS_ROOT_ENV),
+                    backends_root.into_os_string(),
+                ),
                 (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
                 (OsString::from(DESKTOP_RUNTIME_ROOT_ENV), runtime_root.into_os_string()),
                 (OsString::from("AVIBE_DESKTOP_RUNTIME_ID"), OsString::from(runtime_id)),
@@ -876,14 +909,26 @@ mod tests {
     fn inactive_broken_private_runtime_is_removed_without_preparing_the_bundle() {
         let root = scratch_dir("remove-broken-inactive");
         let install_root = root.join("application-data").join("runtime");
+        let backend_root = root.join("application-data").join("backends");
+        let user_state = root.join("user-state");
         std::fs::create_dir_all(&install_root).expect("broken private Runtime root");
+        std::fs::create_dir_all(&backend_root).expect("private backend root");
+        std::fs::create_dir_all(&user_state).expect("user state root");
         std::fs::write(install_root.join("corrupt"), b"not a valid Runtime").expect("broken private Runtime file");
-        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone());
+        std::fs::write(backend_root.join("codex"), b"private backend").expect("private backend file");
+        std::fs::write(user_state.join("config.json"), b"user state").expect("user state file");
+        let launcher =
+            BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root.clone());
 
         assert!(launcher
             .remove_private_runtime(RuntimeRemovalState::Inactive)
             .expect("inactive broken Runtime is removable"));
         assert!(!install_root.exists());
+        assert!(!backend_root.exists());
+        assert_eq!(
+            std::fs::read(user_state.join("config.json")).expect("preserved user state"),
+            b"user state"
+        );
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -892,9 +937,13 @@ mod tests {
     fn unknown_runtime_ownership_blocks_private_file_removal() {
         let root = scratch_dir("remove-unknown");
         let install_root = root.join("application-data").join("runtime");
+        let backend_root = root.join("application-data").join("backends");
         std::fs::create_dir_all(&install_root).expect("private Runtime root");
+        std::fs::create_dir_all(&backend_root).expect("private backend root");
         std::fs::write(install_root.join("active"), b"potentially active").expect("private Runtime file");
-        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone());
+        std::fs::write(backend_root.join("active"), b"potentially active").expect("private backend file");
+        let launcher =
+            BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root.clone());
 
         assert!(matches!(
             launcher.remove_private_runtime(RuntimeRemovalState::Unknown),
@@ -903,6 +952,60 @@ mod tests {
         assert!(
             install_root.is_dir(),
             "uncertain ownership must preserve the executable tree"
+        );
+        assert!(
+            backend_root.is_dir(),
+            "uncertain ownership must preserve private backends"
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_non_directory_backend_root_blocks_all_private_removal() {
+        let root = scratch_dir("remove-backend-file");
+        let install_root = root.join("application-data").join("runtime");
+        let backend_root = root.join("application-data").join("backends");
+        std::fs::create_dir_all(&install_root).expect("private Runtime root");
+        std::fs::write(install_root.join("runtime"), b"private Runtime").expect("private Runtime file");
+        std::fs::write(&backend_root, b"not a directory").expect("unsafe backend root");
+        let launcher =
+            BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root.clone());
+
+        assert!(matches!(
+            launcher.remove_private_runtime(RuntimeRemovalState::Inactive),
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert!(install_root.is_dir());
+        assert!(backend_root.is_file());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_backend_root_blocks_all_private_removal() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch_dir("remove-backend-symlink");
+        let install_root = root.join("application-data").join("runtime");
+        let backend_root = root.join("application-data").join("backends");
+        let external = root.join("external-backends");
+        std::fs::create_dir_all(&install_root).expect("private Runtime root");
+        std::fs::write(install_root.join("runtime"), b"private Runtime").expect("private Runtime file");
+        std::fs::create_dir_all(&external).expect("external backend root");
+        std::fs::write(external.join("preserve"), b"external backend").expect("external backend file");
+        symlink(&external, &backend_root).expect("unsafe backend symlink");
+        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone(), backend_root);
+
+        assert!(matches!(
+            launcher.remove_private_runtime(RuntimeRemovalState::Inactive),
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert!(install_root.is_dir());
+        assert_eq!(
+            std::fs::read(external.join("preserve")).expect("external backend preserved"),
+            b"external backend"
         );
 
         std::fs::remove_dir_all(root).ok();
@@ -1120,15 +1223,19 @@ mod tests {
         let runtime_root = PathBuf::from("/private/runtime");
         let python = PathBuf::from("/private/runtime/python/bin/python3");
         let node = PathBuf::from("/private/runtime/tools/bin/node");
-        let codex = PathBuf::from("/private/runtime/tools/bin/codex");
+        let npm_cli = PathBuf::from("/private/runtime/tools/npm/bin/npm-cli.js");
+        let backends_root = PathBuf::from("/private/backends");
         let inherited = env::join_paths([PathBuf::from("/usr/bin")]).expect("PATH");
         let expected_node = node.clone().into_os_string();
+        let expected_npm_cli = npm_cli.clone().into_os_string();
+        let expected_backends_root = backends_root.clone().into_os_string();
 
         let command = RuntimeCommand::private(
             runtime_root.clone(),
             python.clone(),
             node.clone(),
-            codex,
+            npm_cli,
+            backends_root,
             &"a".repeat(64),
             Some(&inherited),
         );
@@ -1142,13 +1249,18 @@ mod tests {
         let path_entries: Vec<_> =
             env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH")).collect();
         assert_eq!(path_entries.first().map(PathBuf::as_path), node.parent());
-        assert_eq!(
-            path_entries.get(1).map(PathBuf::as_path),
-            Some(Path::new("/private/runtime/tools/codex-path"))
-        );
+        assert_eq!(path_entries.get(1).map(PathBuf::as_path), Some(Path::new("/usr/bin")));
         assert_eq!(
             environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),
             Some(&expected_node)
+        );
+        assert_eq!(
+            environment.get(OsStr::new(DESKTOP_NPM_CLI_ENV)),
+            Some(&expected_npm_cli)
+        );
+        assert_eq!(
+            environment.get(OsStr::new(DESKTOP_BACKENDS_ROOT_ENV)),
+            Some(&expected_backends_root)
         );
         assert_eq!(
             environment.get(OsStr::new(DESKTOP_MANAGED_RUNTIME_ENV)),

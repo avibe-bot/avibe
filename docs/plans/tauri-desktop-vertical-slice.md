@@ -451,8 +451,10 @@ assets but lacks a native lifecycle CI proof.
 
 - macOS signed and notarized DMG;
 - Windows NSIS x64 installer first, ARM64 after the x64 gate;
-- app-private CPython, Avibe wheel, Node, and Codex; `uv` is build-time only and
+- app-private CPython, Avibe wheel, Node, and npm; `uv` is build-time only and
   is not shipped or required on the user's machine;
+- Agent backends are detected externally first and otherwise installed lazily
+  into app-private storage;
 - versioned Runtime directories with rollback;
 - uninstall preserves user data under the Avibe home;
 - updater only after cold start, upgrade, rollback, and process lifecycle pass.
@@ -467,31 +469,30 @@ pins and records:
 - the target OS and architecture;
 - the CPython and Node source URLs plus SHA-256 digests;
 - the exact Avibe wheel name and SHA-256 digest;
-- the exact Codex version;
 - the archive's compressed and uncompressed sizes, entry count, SHA-256 digest,
-  extracted-tree SHA-256 digest, and the relative Python, Node, and Codex
+  extracted-tree SHA-256 digest, and the relative Python, Node, and npm
   entrypoints.
 
 Release CI builds the wheel from the same checkout and installs its
 hash-locked dependencies into the pinned standalone CPython distribution.
 Binary wheels are mandatory except for the explicit audited sdist allowlist in
-`desktop/runtime-sources.json`; today that list contains only `http-ece`, which
-does not publish wheels. CI builds that dependency on the target runner. The
-builder then copies native Node plus the complete target-specific Codex package
-directory: the CLI, code-mode host, `codex-path` ripgrep sidecar, and platform
-resources such as zsh or Windows sandbox helpers. The private launch environment
-prepends both the tools `bin` and `codex-path` directories. A fully isolated
-`AVIBE_HOME` proves the real
-`start --no-open-browser -> /ready -> stop` lifecycle as well as the Node and
-Codex commands and the packaged ripgrep binary. Source downloads and the
+`desktop/runtime-sources.json`. `http-ece` does not publish wheels;
+`claude-agent-sdk` is intentionally built from its pure-Python sdist because its
+platform wheels embed a Claude Code executable, which belongs to the lazy
+backend lifecycle instead of the immutable Runtime. CI builds those dependencies
+on the target runner. The
+builder then copies native Node plus its complete npm package. The private
+launch environment exports the exact Node and npm CLI paths. A fully isolated
+`AVIBE_HOME` proves the real `start --no-open-browser -> /ready -> stop`
+lifecycle as well as Node-driven npm execution. Source downloads and the
 completed archive are both hash-verified. The package also contains the Python
 distribution inventory and third-party license material.
 
 On first launch the Rust host validates the bounded manifest and exact target,
 checks the archive length and SHA-256 digest, rejects path traversal, symlinks,
 oversized expansion, and entry-count mismatches, and extracts into a private
-staging directory. Only a complete install with the Python, Node, Codex, and
-Codex ripgrep entrypoints and a durable marker is atomically renamed to:
+staging directory. Only a complete install with the Python, Node, and npm
+entrypoints and a durable marker is atomically renamed to:
 
 ```text
 <OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/
@@ -516,12 +517,13 @@ older package reinstalls its own immutable archive, so rollback does not depend
 on retaining every historical extraction.
 
 The shell launches the private interpreter directly as `python -I -m vibe`; it
-prepends the private tools directory to the Runtime environment, supplies the
-exact Node path, and resolves Codex only from that private-first tools path. It
-marks the process as desktop-managed: Python package checks and in-place
-`vibe upgrade` are disabled, and localized Workbench/CLI/API messages state that
-updates arrive with the desktop application. It does not invoke a shell, system
-Python, `uv`, `npm`, or an interactive shell startup file.
+supplies the exact Node and npm CLI paths plus a separate mutable backend root.
+It marks the process as desktop-managed: Python package checks and in-place
+`vibe upgrade` are disabled, while Codex, Claude Code, and OpenCode can be
+installed or updated independently through the Workbench. Backend installation
+invokes bundled npm through bundled Node without a shell or global prefix. The
+Runtime launch itself does not invoke a shell, system Python, `uv`, or an
+interactive shell startup file.
 
 Development builds retain the installed-`vibe` resolver. A distributable build
 must enable the Rust `bundled-runtime` feature; producing a consumer installer
@@ -534,18 +536,19 @@ notarize the outer app and DMG, and apply the corresponding Authenticode
 coverage on Windows. Signing, notarization, and publication are separate
 release gates.
 
-The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and
-Codex absent from `PATH`. It must prove:
+The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and all
+Agent backends absent from `PATH`. It must prove:
 
 1. the installer completes without downloading prerequisites;
 2. first launch reaches Workbench and starts exactly one Runtime;
 3. the private Runtime answers `vibe desktop endpoint --json`;
-4. bundled Node and Codex execute, and Codex sign-in is offered as product
-   onboarding rather than an external installation step;
+4. bundled Node and npm execute, Workbench loads without a backend, and one
+   selected backend can be installed lazily without system package managers;
 5. closing and reopening the shell adopts the same daemon;
 6. a second package version installs beside the first, cuts over only after
    readiness, and can roll back without changing `~/.avibe`;
-7. uninstall removes application/runtime files but preserves `~/.avibe`.
+7. uninstall removes application/runtime/private-backend files but preserves
+   `~/.avibe` and external backend installations.
 
 ### M4: Mobile Reassessment
 

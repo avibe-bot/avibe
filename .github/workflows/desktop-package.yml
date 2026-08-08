@@ -2,7 +2,7 @@ name: desktop-self-contained-package
 
 # Manual acceptance artifacts. Production publishing remains blocked on code
 # signing/notarization, but every artifact produced here contains Python, Avibe,
-# Node, and Codex and can be tested on a machine with none of them installed.
+# Node, and npm and can be tested on a machine with none of them installed.
 on:
   workflow_dispatch:
     inputs:
@@ -50,7 +50,6 @@ jobs:
           cache-dependency-path: |
             ui/package-lock.json
             desktop/package-lock.json
-            desktop/runtime-bundle/package-lock.json
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:

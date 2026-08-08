@@ -1,11 +1,8 @@
 {
-  "schema_version": 1,
-  "codex_version": "0.145.0",
-  "codex_license": {
-    "url": "https://raw.githubusercontent.com/openai/codex/rust-v0.145.0/LICENSE",
-    "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
-  },
+  "schema_version": 2,
+  "npm_version": "10.9.8",
   "sdist_build_allowlist": [
+    "claude-agent-sdk",
     "http-ece"
   ],
   "show_runtime_manifest": {
@@ -27,8 +24,8 @@
       "python_entrypoint": "python/bin/python3",
       "node_source": "bin/node",
       "node_entrypoint": "tools/bin/node",
-      "codex_package": "@openai/codex-darwin-arm64",
-      "codex_entrypoint": "tools/bin/codex"
+      "npm_source": "lib/node_modules/npm",
+      "npm_entrypoint": "tools/npm/bin/npm-cli.js"
     },
     "x86_64-apple-darwin": {
       "os": "macos",
@@ -44,8 +41,8 @@
       "python_entrypoint": "python/bin/python3",
       "node_source": "bin/node",
       "node_entrypoint": "tools/bin/node",
-      "codex_package": "@openai/codex-darwin-x64",
-      "codex_entrypoint": "tools/bin/codex"
+      "npm_source": "lib/node_modules/npm",
+      "npm_entrypoint": "tools/npm/bin/npm-cli.js"
     },
     "x86_64-pc-windows-msvc": {
       "os": "windows",
@@ -61,8 +58,8 @@
       "python_entrypoint": "python/python.exe",
       "node_source": "node.exe",
       "node_entrypoint": "tools/bin/node.exe",
-      "codex_package": "@openai/codex-win32-x64",
-      "codex_entrypoint": "tools/bin/codex.exe"
+      "npm_source": "node_modules/npm",
+      "npm_entrypoint": "tools/npm/bin/npm-cli.js"
     }
   }
 }

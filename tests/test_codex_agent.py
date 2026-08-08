@@ -1673,6 +1673,37 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
+    def test_inject_caller_env_config_preserves_private_codex_helpers_with_vendored_git(self):
+        agent = object.__new__(CodexAgent)
+        agent.codex_config = SimpleNamespace(binary="/private/codex")
+        params = {}
+        request = SimpleNamespace(
+            working_path="/tmp/workspace",
+            context=SimpleNamespace(platform_specific={}),
+        )
+        managed_env = {"PATH": "/private/codex-path:/usr/bin"}
+
+        def inject_git(env, *, base_env, working_dir):
+            self.assertEqual(base_env, managed_env)
+            self.assertEqual(working_dir, "/tmp/workspace")
+            env["PATH"] = f"/managed/git/bin:{base_env['PATH']}"
+            return True
+
+        with (
+            patch.object(
+                _MODULE,
+                "desktop_backend_subprocess_environment",
+                return_value=managed_env,
+            ),
+            patch("core.git_runtime.prepend_vendored_git_to_path", side_effect=inject_git),
+        ):
+            agent._inject_caller_env_config(params, request)
+
+        self.assertEqual(
+            params["config"]["shell_environment_policy"]["set"]["PATH"],
+            "/managed/git/bin:/private/codex-path:/usr/bin",
+        )
+
     def test_inject_caller_env_config_adds_vendored_git_for_gitless_session(self):
         agent = object.__new__(CodexAgent)
         params = {"config": {"shell_environment_policy": {"set": {"PATH": ""}}}}
@@ -3821,6 +3852,70 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIs(result, fresh)
             self.assertEqual(calls, [(2468, "codex app-server")])
+
+    async def test_get_or_create_transport_launches_with_private_codex_helpers(self):
+        import tempfile
+
+        agent = self._agent()
+        agent.codex_config.binary = "/private/release/vendor/target/bin/codex"
+        managed_env = {"PATH": "/private/release/vendor/target/codex-path:/usr/bin"}
+        with tempfile.TemporaryDirectory() as cwd:
+            fresh = SimpleNamespace(
+                is_initialized=True,
+                pid=2468,
+                start=AsyncMock(),
+                on_notification=Mock(),
+                on_server_request=Mock(),
+            )
+            with (
+                patch.object(_MODULE, "CodexTransport", return_value=fresh) as constructor,
+                patch.object(
+                    _MODULE,
+                    "desktop_backend_subprocess_environment",
+                    return_value=managed_env,
+                ),
+            ):
+                await agent._get_or_create_transport(cwd)
+
+        self.assertEqual(constructor.call_args.kwargs["runtime_env"], managed_env)
+
+    async def test_model_hub_transport_preserves_private_codex_helpers(self):
+        import tempfile
+
+        agent = self._agent()
+        agent.codex_config.binary = "/private/release/vendor/target/bin/codex"
+        managed_env = {
+            "PATH": "/private/release/vendor/target/codex-path:/usr/bin",
+            "OPENAI_API_KEY": "native-token",
+        }
+        launch = SimpleNamespace(
+            channel="hub",
+            gateway_base_url="http://127.0.0.1:18443",
+            gateway_token="gateway-token",
+            fingerprint="hub:test",
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            fresh = SimpleNamespace(
+                is_initialized=True,
+                pid=2468,
+                start=AsyncMock(),
+                on_notification=Mock(),
+                on_server_request=Mock(),
+            )
+            with (
+                patch.object(_MODULE, "CodexTransport", return_value=fresh) as constructor,
+                patch.object(
+                    _MODULE,
+                    "desktop_backend_subprocess_environment",
+                    return_value=managed_env,
+                ),
+            ):
+                await agent._get_or_create_transport(cwd, launch)
+
+        runtime_env = constructor.call_args.kwargs["runtime_env"]
+        self.assertEqual(runtime_env["PATH"], managed_env["PATH"])
+        self.assertEqual(runtime_env["AVIBE_MODEL_HUB_TOKEN"], "gateway-token")
+        self.assertNotIn("OPENAI_API_KEY", runtime_env)
 
     async def test_cached_transport_evicted_when_cwd_inode_changes(self):
         import tempfile

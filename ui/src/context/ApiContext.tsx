@@ -1690,6 +1690,7 @@ export type InstallResult = {
   path?: string | null;
   job_id?: string;
   status?: 'running' | 'succeeded' | 'failed';
+  poll_timeout_seconds?: number;
   reason?: string | null;
   download_error?: DependencyDownloadError | null;
 };
@@ -2800,7 +2801,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const jobId = typeof started?.job_id === 'string' ? started.job_id : null;
     if (!jobId) return started;
 
-    const deadline = Date.now() + 310_000;
+    const serverBudgetSeconds = started?.poll_timeout_seconds;
+    const pollBudgetMs =
+      typeof serverBudgetSeconds === 'number' && Number.isFinite(serverBudgetSeconds)
+        ? Math.max(310_000, serverBudgetSeconds * 1000)
+        : 390_000;
+    const deadline = Date.now() + pollBudgetMs;
     let last = started;
     while (Date.now() < deadline) {
       await sleep(1000);

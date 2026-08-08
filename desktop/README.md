@@ -63,10 +63,11 @@ All three properties are asserted, in `src-tauri/tests/shell_boundaries.rs` and
 ## Product packages
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific
-CPython, the Avibe wheel and locked Python dependencies, Node, and the native
-Codex package including ripgrep, code-mode, and platform sandbox/shell
-resources. A new user does **not** install Python, `uv`, Node, npm, ripgrep, or
-Codex.
+CPython, the Avibe wheel and locked Python dependencies, Node, and npm. A new
+user does **not** install Python, `uv`, Node, or npm. Codex, Claude Code, and
+OpenCode are intentionally not part of the application payload: Avibe detects
+an existing installation first and otherwise installs the selected backend into
+its private application-data directory when the user clicks Install.
 
 The first launch verifies the embedded Runtime archive and installs it
 atomically below the operating system's application-data directory. Installs
@@ -95,11 +96,12 @@ Windows ARM64 stays outside the current product gate.
 
 Choose **Uninstall Avibe…** from the first application menu before removing the
 application. Avibe asks for confirmation, gracefully stops a private Runtime
-that it owns, deletes only the private Runtime under the operating system's
-application-data directory, and then quits. It never deletes `~/.avibe`, so
-projects, sessions, credentials, and settings remain available to a later
-installation. After the confirmation completes, delete the macOS application or
-continue with the Windows system uninstaller.
+that it owns, deletes the private Runtime and Avibe-managed backend installs
+under the operating system's application-data directory, and then quits. It
+never deletes `~/.avibe`, so projects, sessions, credentials, and settings
+remain available to a later installation. External backend installations are
+also untouched. After the confirmation completes, delete the macOS application
+or continue with the Windows system uninstaller.
 
 ## Development prerequisites
 
@@ -165,6 +167,12 @@ launch their embedded Runtime. That Runtime receives
 `AVIBE_DESKTOP_MANAGED_RUNTIME=1`, so package checks and in-place `uv`/`pip`
 upgrades are disabled; updates are delivered by replacing the signed desktop
 application while user data remains untouched.
+
+The packaged Runtime also receives immutable Node/npm paths and a separate
+app-private backend root. Backend installation invokes npm as
+`node <npm-cli.js>` without a shell or global prefix. Backend releases update
+independently from the desktop application and the selected executable is
+persisted as an absolute path.
 
 ## Layout
 

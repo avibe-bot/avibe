@@ -667,7 +667,18 @@
     "checkUpdate": "Updates are delivered with the Avibe desktop app.",
     "upgrade": "This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.",
     "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
-    "backendUpgrade": "This Codex backend is bundled with Avibe. Update the desktop app to update Codex."
+    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately."
+  },
+  "desktopBackendInstall": {
+    "success": "{backend} installed successfully.",
+    "unknownBackend": "Unknown desktop backend: {backend}.",
+    "toolchainUnavailable": "The desktop backend installer is unavailable.",
+    "installLocked": "Another {backend} installation is already running.",
+    "installFailed": "Could not install {backend}.",
+    "invalidInstall": "The installed {backend} package is invalid.",
+    "unsupportedPlatform": "{backend} is not supported on this desktop platform.",
+    "timedOut": "Installing {backend} timed out.",
+    "probeFailed": "The installed {backend} executable could not be verified."
   },
   "telegram": {
     "commandMenu": {

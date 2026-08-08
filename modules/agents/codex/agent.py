@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
@@ -49,6 +50,7 @@ from modules.agents.codex.session import CodexSessionManager
 from modules.agents.codex.transport import CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
+from vibe.desktop_backends import desktop_backend_subprocess_environment
 from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
@@ -1600,12 +1602,14 @@ class CodexAgent(BaseAgent):
                             )
 
                     runtime_args: list[str] = []
-                    runtime_env: dict[str, str] | None = None
+                    runtime_env = dict(self._codex_runtime_environment())
                     runtime_fingerprint = "direct"
                     if launch is not None:
                         from modules.agents.model_hub import build_codex_hub_launch
 
-                        runtime_args, runtime_env = build_codex_hub_launch([], os.environ.copy(), launch)
+                        runtime_args, hub_env = build_codex_hub_launch([], runtime_env, launch)
+                        if hub_env is not None:
+                            runtime_env = hub_env
                         runtime_fingerprint = launch.fingerprint
                     transport = CodexTransport(
                         binary=self.codex_config.binary,
@@ -1738,6 +1742,7 @@ class CodexAgent(BaseAgent):
         from core.git_runtime import prepend_vendored_git_to_path
 
         env = self._caller_env_for_request(request)
+        runtime_env = self._codex_runtime_environment()
         config = dict(params.get("config") or {})
         shell_policy = dict(config.get("shell_environment_policy") or {})
         set_env = dict(shell_policy.get("set") or {})
@@ -1747,10 +1752,10 @@ class CodexAgent(BaseAgent):
             set_env.update({**env, "BASH_ENV": str(env_script_path)})
         git_path_changed = prepend_vendored_git_to_path(
             set_env,
-            base_env=os.environ,
+            base_env=runtime_env,
             working_dir=getattr(request, "working_path", None),
         )
-        git_path_state = set_env["PATH"] if "PATH" in set_env else os.environ.get("PATH", "")
+        git_path_state = set_env["PATH"] if "PATH" in set_env else runtime_env.get("PATH", "")
         path_managed = had_path or git_path_changed or force_path
         if force_path:
             set_env["PATH"] = git_path_state
@@ -1764,13 +1769,24 @@ class CodexAgent(BaseAgent):
     def _git_path_state_for_request(self, request: AgentRequest) -> str:
         from core.git_runtime import prepend_vendored_git_to_path
 
+        runtime_env = self._codex_runtime_environment()
         env: dict[str, str] = {}
         prepend_vendored_git_to_path(
             env,
-            base_env=os.environ,
+            base_env=runtime_env,
             working_dir=getattr(request, "working_path", None),
         )
-        return env["PATH"] if "PATH" in env else os.environ.get("PATH", "")
+        return env["PATH"] if "PATH" in env else runtime_env.get("PATH", "")
+
+    def _codex_runtime_environment(self) -> Mapping[str, str]:
+        base_env = os.environ
+        binary = getattr(getattr(self, "codex_config", None), "binary", "codex")
+        managed = desktop_backend_subprocess_environment(
+            "codex",
+            binary,
+            base_env,
+        )
+        return managed if managed is not None else base_env
 
     async def _start_thread(
         self,
