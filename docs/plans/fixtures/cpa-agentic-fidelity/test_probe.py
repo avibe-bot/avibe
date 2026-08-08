@@ -485,8 +485,8 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_allows_indices_to_restart_each_chunk(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
-            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}]}}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}], "content": "done"}, "finish_reason": "tool_calls"}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", events))
@@ -1285,13 +1285,13 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_order_rejects_content_after_finish(self) -> None:
         allowed = [
-            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}},
             {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens": 1}}},
             {"kind": "done", "sequence": 2},
         ]
         invalid = [
             allowed[0],
-            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"content": "late"}}]}},
+            {"kind": "event", "sequence": 1, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "late"}}]}},
             {"kind": "done", "sequence": 2},
         ]
         self.assertTrue(probe._stream_order_ok("chat", allowed))
@@ -1782,6 +1782,12 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("stream_thinking_snapshot_invalid", thinking_turn.parse_errors)
         self.assertIn("stream_signature_snapshot_invalid", thinking_turn.parse_errors)
 
+        prefilled = copy.deepcopy(text_events)
+        prefilled[0]["event"]["content_block"]["text"] = "answer"
+        self.assertFalse(probe._stream_order_ok("anthropic", prefilled))
+        prefilled_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, prefilled, False, 0))
+        self.assertIn("stream_text_opening_snapshot_invalid", prefilled_turn.parse_errors)
+
     def test_responses_function_opening_arguments_must_be_empty(self) -> None:
         valid = _response_function_stream()
         invalid = copy.deepcopy(valid)
@@ -1790,6 +1796,14 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", invalid))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("stream_arguments_opening_snapshot_invalid", turn.parse_errors)
+
+    def test_responses_function_opening_snapshot_requires_identity(self) -> None:
+        for field in ("call_id", "name"):
+            invalid = _response_function_stream()
+            invalid[1]["event"]["item"].pop(field)
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+            self.assertIn("stream_function_identity_invalid", turn.parse_errors)
 
     def test_responses_content_part_opening_text_must_be_empty(self) -> None:
         valid = _response_message_stream()
@@ -2035,6 +2049,25 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("chat", events))
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
         self.assertIn("stream_failure_event", turn.parse_errors)
+
+    def test_chat_stream_error_discriminator_is_not_a_completion(self) -> None:
+        events = [
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}},
+            {"kind": "event", "type": "error", "event": {"object": "chat.completion.chunk", "type": "error", "choices": []}},
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "done"},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("stream_failure_event", turn.parse_errors)
+
+    def test_chat_stream_requires_explicit_choice_indexes(self) -> None:
+        events = [
+            {"kind": "event", "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant"}}]}},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
+        self.assertIn("choice_index_invalid", turn.parse_errors)
 
     def test_chat_stream_rejects_duplicate_terminal_usage(self) -> None:
         events = [

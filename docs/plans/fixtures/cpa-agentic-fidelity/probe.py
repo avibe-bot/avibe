@@ -453,6 +453,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     block.get(field, "") != "" for field in ("thinking", "signature")
                 ):
                     return False
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "") != "":
+                    return False
                 open_blocks.add(block_index)
                 last_start = block_index
             elif event_type == "content_block_delta":
@@ -567,6 +569,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 added.add(item_id)
                 item_types[item_id] = item_type
                 if item_types[item_id] == "function_call":
+                    if any(
+                        not isinstance(raw.get(field), str) or not raw[field]
+                        for field in ("call_id", "name")
+                    ):
+                        return False
                     opening_arguments = raw.get("arguments")
                     if opening_arguments is not None and opening_arguments != "":
                         return False
@@ -863,6 +870,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             return False
         if item.get("type") is not None and item.get("type") != event_type:
             return False
+        if event_type == "error":
+            return False
         if "error" in event:
             return False
         if terminal is not None:
@@ -874,7 +883,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             if len(choices) != 1 or not isinstance(choices[0], dict):
                 return False
             choice = choices[0]
-            if _stream_index(choice.get("index", 0)) != 0:
+            if "index" not in choice or _stream_index(choice.get("index")) != 0:
                 return False
             delta = choice.get("delta", {})
             if not isinstance(delta, dict):
@@ -1171,9 +1180,12 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                     errors.append("stream_tool_input_snapshot_invalid")
                 block["_arguments"] = ""
             elif block.get("type") == "text":
-                if not isinstance(block.get("text", ""), str):
+                text_snapshot = block.get("text", "")
+                if not isinstance(text_snapshot, str):
                     errors.append("stream_text_snapshot_invalid")
-                    block["text"] = ""
+                elif text_snapshot:
+                    errors.append("stream_text_opening_snapshot_invalid")
+                block["text"] = ""
             elif block.get("type") == "thinking":
                 for field in ("thinking", "signature"):
                     value = block.get(field, "")
@@ -1450,6 +1462,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 continue
             output[key] = raw
             if raw.get("type") == "function_call":
+                for field in ("call_id", "name"):
+                    if not isinstance(raw.get(field), str) or not raw[field]:
+                        errors.append("stream_function_identity_invalid")
                 opening_arguments = raw.get("arguments")
                 if opening_arguments is not None and opening_arguments != "":
                     errors.append("stream_arguments_opening_snapshot_invalid")
@@ -1826,6 +1841,9 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if event_type not in CHAT_STREAM_EVENT_TYPES:
             errors.append("stream_event_unknown")
             continue
+        if event_type == "error":
+            errors.append("stream_failure_event")
+            continue
         if event.get("object") != "chat.completion.chunk":
             errors.append("stream_object_invalid")
             continue
@@ -1853,9 +1871,8 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             errors.append("choice_invalid")
             continue
         choice = choices[0]
-        if _stream_index(choice.get("index", 0)) != 0:
+        if "index" not in choice or _stream_index(choice.get("index")) != 0:
             errors.append("choice_index_invalid")
-            continue
         delta = choice.get("delta", {})
         if not isinstance(delta, dict):
             errors.append("delta_invalid")
