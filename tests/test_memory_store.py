@@ -344,6 +344,62 @@ def test_successful_no_extraction_flush_confirms_the_target_watermark(tmp_path: 
     assert settlement.confirmed_watermark_ms == accepted.row.provider_timestamp_ms
 
 
+def test_blank_add_request_ids_use_distinct_digest_settlement_fallbacks(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _enqueue(store, "blank-request-first")
+    second = _enqueue(store, "blank-request-second", occurred_at_ms=2_000)
+    assert first.row is not None and second.row is not None
+    assert first.provider_session_ref == second.provider_session_ref
+
+    for now in ("2026-01-01T00:00:01.000Z", "2026-01-01T00:00:02.000Z"):
+        row = store.claim_due(lease_owner="boot", now=now)
+        assert row is not None
+        assert store.settle(
+            row,
+            Delivered(add_request_id="", add_status="accumulated"),
+            lease_owner="boot",
+            now=_dt(now),
+        ).settled
+
+    settlements = [
+        record
+        for record in store.list_flush_settlements(first.provider_session_ref)
+        if record.operation_kind == "add"
+    ]
+    assert len(settlements) == 2
+    assert {record.operation_id for record in settlements} == {
+        f"add-{first.row.source_message_digest}",
+        f"add-{second.row.source_message_digest}",
+    }
+    assert all(record.request_id is None for record in settlements)
+    assert all(row.add_request_id is None for row in store.list_queue_rows())
+
+
+def test_natural_boundary_defers_generation_while_a_pinned_row_is_pending(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    first = _enqueue(store, "natural-first")
+    second = _enqueue(store, "natural-second", occurred_at_ms=2_000)
+    assert first.row is not None and second.row is not None
+    assert first.provider_session_ref == second.provider_session_ref
+
+    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+    assert store.settle(
+        row,
+        Delivered(add_request_id="first-add", add_status="extracted"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).flush_complete
+
+    state = store.get_session_flush_state(first.provider_session_ref)
+    assert state is not None
+    assert state.generation == 0
+    assert state.flush_state == "not_due"
+    assert state.first_unflushed_at == second.row.created_at
+    next_capture = _enqueue(store, "natural-third", occurred_at_ms=3_000)
+    assert next_capture.target_generation == 0
+
+
 def test_manual_required_fence_blocks_a_later_flush_mark(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     first = _deliver(store, "manual-first", session_ref="manual-session")

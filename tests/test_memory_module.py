@@ -492,6 +492,7 @@ async def test_extracted_add_ack_skips_a_redundant_flush(
     assert row.flush_observation == "succeeded"
     assert row.flush_status == "extracted"
     assert row.flush_observed_at is not None
+    assert store.ensure_meta().last_success_at == row.flush_observed_at
     assert store.queue_stats().awaiting_receipt == 0
     assert store.recover_after_boot(
         lease_owner="recovery-boot",

@@ -1859,6 +1859,20 @@ class MemoryStore:
         if inserted.rowcount != 1:
             return False
 
+        if (
+            record.operation_kind == "add"
+            and record.source == "natural_boundary"
+            and record.outcome in {"succeeded", "committed"}
+        ):
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET last_success_at = ?, updated_at = ?
+                WHERE singleton = 1
+                """,
+                (record.observed_at, record.observed_at),
+            )
+
         projection_allowed = (
             state.generation == record.generation
             and (
@@ -1919,21 +1933,46 @@ class MemoryStore:
                 ),
             )
             if record.source == "natural_boundary" or record.flush_state == "settled":
-                conn.execute(
-                    """
-                    UPDATE memory_session_flush_state
-                    SET flush_state = 'settled', due_at = NULL,
-                        next_attempt_at = NULL, first_unflushed_at = NULL,
-                        watermark = ?, updated_at = ?
-                    WHERE provider_session_ref = ? AND generation = ?
-                    """,
-                    (
-                        watermark_after,
-                        record.observed_at,
-                        provider_session_ref.serialize(),
-                        record.generation,
-                    ),
+                remaining = self._first_unsettled_generation_created_at(
+                    conn,
+                    provider_session_ref,
+                    record.generation,
                 )
+                if remaining is None:
+                    conn.execute(
+                        """
+                        UPDATE memory_session_flush_state
+                        SET flush_state = 'settled', due_at = NULL,
+                            next_attempt_at = NULL, first_unflushed_at = NULL,
+                            watermark = ?, updated_at = ?
+                        WHERE provider_session_ref = ? AND generation = ?
+                        """,
+                        (
+                            watermark_after,
+                            record.observed_at,
+                            provider_session_ref.serialize(),
+                            record.generation,
+                        ),
+                    )
+                else:
+                    # Keep the generation live while an older pinned row is
+                    # still queued; settling it would strand that receipt.
+                    conn.execute(
+                        """
+                        UPDATE memory_session_flush_state
+                        SET flush_state = 'not_due', due_at = NULL,
+                            next_attempt_at = NULL, first_unflushed_at = ?,
+                            watermark = ?, updated_at = ?
+                        WHERE provider_session_ref = ? AND generation = ?
+                        """,
+                        (
+                            remaining,
+                            watermark_after,
+                            record.observed_at,
+                            provider_session_ref.serialize(),
+                            record.generation,
+                        ),
+                    )
         elif record.operation_kind == "flush" and record.outcome in {"succeeded", "committed"}:
             if record.source == "migration":
                 conn.execute(
@@ -1951,21 +1990,11 @@ class MemoryStore:
                     ),
                 )
                 return True
-            remaining = conn.execute(
-                """
-                SELECT MIN(created_at)
-                FROM memory_capture_queue
-                WHERE provider_session_ref = ? AND target_generation = ?
-                  AND (
-                      state IN ('pending', 'processing')
-                      OR (
-                          state = 'delivered'
-                          AND COALESCE(flush_observation, 'not_attempted') != 'succeeded'
-                      )
-                  )
-                """,
-                (provider_session_ref.serialize(), record.generation),
-            ).fetchone()[0]
+            remaining = self._first_unsettled_generation_created_at(
+                conn,
+                provider_session_ref,
+                record.generation,
+            )
             if remaining is None:
                 conn.execute(
                     """
@@ -2041,6 +2070,29 @@ class MemoryStore:
                 ),
             )
         return True
+
+    def _first_unsettled_generation_created_at(
+        self,
+        conn: sqlite3.Connection,
+        provider_session_ref: ProviderSessionRef,
+        generation: int,
+    ) -> str | None:
+        row = conn.execute(
+            """
+            SELECT MIN(created_at)
+            FROM memory_capture_queue
+            WHERE provider_session_ref = ? AND target_generation = ?
+              AND (
+                  state IN ('pending', 'processing')
+                  OR (
+                      state = 'delivered'
+                      AND COALESCE(flush_observation, 'not_attempted') != 'succeeded'
+                  )
+              )
+            """,
+            (provider_session_ref.serialize(), generation),
+        ).fetchone()
+        return str(row[0]) if row[0] is not None else None
 
     def _migrate_v1_to_v2(self, conn: sqlite3.Connection) -> None:
         """Add coordinator state without rewriting legacy delivery outcomes."""
@@ -2672,7 +2724,7 @@ def _closed_error_or(value: object, fallback: MemoryErrorCode) -> MemoryErrorCod
 
 
 def _bounded_opaque_text(value: str | None, *, max_bytes: int = 128) -> str | None:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value.strip():
         return None
     raw = value.encode("utf-8")
     if len(raw) <= max_bytes:
