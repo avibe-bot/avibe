@@ -2182,7 +2182,6 @@ def test_list_session_messages_resolves_turn_and_run_anchors(isolated_state):
             source_kind="agent",
             delivery_id=delivery["id"],
         )
-
     with engine.connect() as conn:
         by_turn = messages_service.list_session_messages(
             conn,
@@ -2194,11 +2193,85 @@ def test_list_session_messages_resolves_turn_and_run_anchors(isolated_state):
             session_id=session_id,
             around_run_id="run_anchor_identity",
         )
-
     assert by_turn["anchor_id"] == delivery["id"]
     assert by_run["anchor_id"] == delivery["id"]
     assert [row["id"] for row in by_turn["messages"]] == [delivery["id"]]
     assert [row["id"] for row in by_run["messages"]] == [delivery["id"]]
+
+
+def test_list_session_messages_resolves_legacy_run_anchor(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        session_id = "ses_legacy_run_anchor"
+        _seed_session(conn, scope_id, session_id)
+        legacy = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            source="harness",
+            text="legacy run anchor",
+            native_message_id="agent_run:run_legacy_anchor",
+        )
+        _insert_agent_run(
+            conn,
+            "run_legacy_anchor",
+            session_id=session_id,
+            source_kind="agent",
+        )
+
+    with engine.connect() as conn:
+        anchored = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_run_id="run_legacy_anchor",
+        )
+
+    assert anchored["anchor_id"] == legacy["id"]
+    assert [row["id"] for row in anchored["messages"]] == [legacy["id"]]
+
+
+def test_list_session_messages_scopes_native_anchor_by_platform(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        session_id = "ses_native_platform_anchor"
+        _seed_session(conn, scope_id, session_id)
+        slack = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="slack",
+            author="agent",
+            message_type="result",
+            text="slack reply",
+            native_message_id="same-native-id",
+        )
+        discord = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="discord",
+            author="agent",
+            message_type="result",
+            text="discord reply",
+            native_message_id="same-native-id",
+        )
+
+    with engine.connect() as conn:
+        anchored = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_native_id="same-native-id",
+            around_native_platform="discord",
+        )
+
+    assert anchored["anchor_id"] == discord["id"]
+    assert any(row["id"] == discord["id"] for row in anchored["messages"])
+    assert slack["id"] != discord["id"]
 
 
 def test_list_session_messages_before_id_returns_older_window(isolated_state):

@@ -60,6 +60,12 @@ export function vaultRequestSourceRunId(request: VaultRequest): string | null {
   return typeof runId === 'string' && runId.trim() ? runId : null;
 }
 
+export function vaultRequestSourcePlatform(request: VaultRequest): string | null {
+  const requester = record(request.requester);
+  const platform = requester.platform;
+  return typeof platform === 'string' && platform.trim() ? platform : null;
+}
+
 function sameRequestTurn(request: VaultRequest, message: WorkbenchMessage): boolean {
   const requester = record(request.requester);
   const metadata = record(message.metadata);

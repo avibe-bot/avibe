@@ -24,6 +24,7 @@ import {
   isVaultApprovalRequest,
   placeVaultProvisionRequests,
   vaultRequestSourceMessageId,
+  vaultRequestSourcePlatform,
   vaultRequestSourceRunId,
   vaultRequestSourceTurnId,
 } from '../../lib/vaultRequestPlacement';
@@ -705,7 +706,7 @@ export const ChatPage: React.FC = () => {
         : null;
       const sourceTurnId = vaultRequestSourceTurnId(candidate);
       const sourceRunId = vaultRequestSourceRunId(candidate);
-      const messageAnchorId = sourceMessageId ?? requestMessageId;
+      const messageAnchorId = requestMessageId ?? sourceMessageId;
       const anchorKey = messageAnchorId
         ? `message:${messageAnchorId}`
         : sourceTurnId
@@ -726,7 +727,8 @@ export const ChatPage: React.FC = () => {
       : null;
     const sourceTurnId = vaultRequestSourceTurnId(request);
     const sourceRunId = vaultRequestSourceRunId(request);
-    const messageAnchorId = sourceMessageId ?? requestMessageId;
+    const sourcePlatform = vaultRequestSourcePlatform(request);
+    const messageAnchorId = requestMessageId ?? sourceMessageId;
     const anchorKey = messageAnchorId
       ? `message:${messageAnchorId}`
       : sourceTurnId
@@ -739,6 +741,7 @@ export const ChatPage: React.FC = () => {
     vaultAnchorFetchesRef.current.add(fetchKey);
     vaultAnchorInFlightRef.current = true;
     let retryableFailure = false;
+    let deferredByVisibleAnchor = false;
     const loadedSource = messageAnchorId
       ? messagesRef.current.find(
         (message) => message.id === messageAnchorId || message.native_message_id === messageAnchorId,
@@ -748,17 +751,20 @@ export const ChatPage: React.FC = () => {
       const first = await api.listSessionMessages(sessionId, {
         ...(loadedSource
           ? { aroundId: loadedSource.id }
-          : sourceMessageId
-            ? { aroundNativeId: sourceMessageId }
-            : requestMessageId
-              ? { aroundId: requestMessageId }
+          : requestMessageId
+            ? { aroundId: requestMessageId }
+            : sourceMessageId
+              ? {
+                aroundNativeId: sourceMessageId,
+                ...(sourcePlatform ? { aroundNativePlatform: sourcePlatform } : {}),
+              }
               : sourceTurnId
                 ? { aroundTurnId: sourceTurnId }
                 : { aroundRunId: sourceRunId! }),
         limit: 50,
         cache: false,
       });
-      if (first.messages.length > 0 || loadedSource || !sourceMessageId) return first;
+      if (first.messages.length > 0 || loadedSource || requestMessageId || !sourceMessageId) return first;
       // A legacy request may already carry the durable id. Keep that compatibility
       // path after the native lookup so IM requests resolve before window fetch.
       return api.listSessionMessages(sessionId, {
@@ -806,6 +812,7 @@ export const ChatPage: React.FC = () => {
           // Another request currently owns the visible historical window. Let
           // the next placement cycle retry this request once that anchor is
           // fulfilled or dismissed.
+          deferredByVisibleAnchor = true;
           vaultAnchorFetchesRef.current.delete(fetchKey);
           return;
         }
@@ -862,7 +869,7 @@ export const ChatPage: React.FC = () => {
           window.setTimeout(() => {
             if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
           }, 1000);
-        } else {
+        } else if (!deferredByVisibleAnchor) {
           setVaultAnchorCycle((cycle) => cycle + 1);
         }
       });

@@ -646,6 +646,7 @@ def list_session_messages(
     before_id: Optional[str] = None,
     around_id: Optional[str] = None,
     around_native_id: Optional[str] = None,
+    around_native_platform: Optional[str] = None,
     around_turn_id: Optional[str] = None,
     around_run_id: Optional[str] = None,
     limit: int = 50,
@@ -664,7 +665,8 @@ def list_session_messages(
     ``around_id`` centers a window on a durable message id (deep-link / search
     jump). ``around_native_id`` provides the equivalent lookup for a platform
     native message id when a legacy caller context has not retained the durable
-    row id. ``around_turn_id`` and ``around_run_id`` resolve the initial accepted
+    row id; ``around_native_platform`` disambiguates native ids reused by another
+    platform in the same session. ``around_turn_id`` and ``around_run_id`` resolve the initial accepted
     delivery for a stable Agent turn/run before applying the same window logic.
     Up to ``limit`` rows are returned on either side of the anchor,
     merged chronologically. These modes take precedence over ``after_id`` /
@@ -698,15 +700,13 @@ def list_session_messages(
             )
         ).scalar_one_or_none()
         if anchor is None and around_native_id:
-            anchor_id = conn.execute(
-                select(messages.c.id)
-                .where(
-                    messages.c.native_message_id == around_native_id,
-                    messages.c.session_id == session_id,
-                )
-                .order_by(messages.c.id.asc())
-                .limit(1)
-            ).scalar_one_or_none()
+            native_query = select(messages.c.id).where(
+                messages.c.native_message_id == around_native_id,
+                messages.c.session_id == session_id,
+            )
+            if around_native_platform:
+                native_query = native_query.where(messages.c.platform == around_native_platform)
+            anchor_id = conn.execute(native_query.order_by(messages.c.id.asc()).limit(1)).scalar_one_or_none()
             if anchor_id is not None:
                 anchor = conn.execute(
                     select(order_value).where(
@@ -741,7 +741,17 @@ def list_session_messages(
                 )
                 .order_by(message_deliveries.c.turn_position.asc(), message_deliveries.c.id.asc())
                 .limit(1)
-            ).scalar_one_or_none()
+                ).scalar_one_or_none()
+            if anchor_id is None:
+                anchor_id = conn.execute(
+                    select(messages.c.id)
+                    .where(
+                        messages.c.native_message_id == f"agent_run:{around_run_id}",
+                        messages.c.session_id == session_id,
+                    )
+                    .order_by(messages.c.id.asc())
+                    .limit(1)
+                ).scalar_one_or_none()
             if anchor_id is not None:
                 anchor = conn.execute(
                     select(order_value).where(
