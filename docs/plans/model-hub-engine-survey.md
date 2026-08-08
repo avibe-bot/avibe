@@ -745,8 +745,9 @@ blocked-report shaping,
 non-stream wall-clock deadlines, non-loopback relay TLS enforcement,
 latency/cost, OAuth or subscription behavior, direct official vendor APIs, and
 cross-vendor subscription paths. Top-level Anthropic message ID validation,
-mixed primary/fallback second-turn accounting, and redaction of unrecognized
-stop reasons are also not verified. Responses
+non-stream Anthropic `stop_sequence` type/compatibility validation, mixed
+primary/fallback second-turn accounting, and redaction of unrecognized stop
+reasons are also not verified. Responses
 wire-sequence origin is not gated: the closed matrix requires monotonicity, and
 the measured relay emitted contiguous one-based values. Non-stream response
 media-type enforcement is also not verified. The historical fixture is not
@@ -754,8 +755,9 @@ independent of future product-manifest upgrades: the launcher currently selects
 the product manifest and blocks unless it still declares v7.2.95. The probe
 child also inherits the caller environment rather than receiving a minimal
 allowlist. Transport, non-stream timing and media types, TLS, fallback
-accounting, report redaction, wire-sequence origin, fixture-owned release
-resolution, and child-environment minimization are outside the closed eight-row
-S4 semantic matrix; they are recorded here as residuals rather than added as new
-probe gates. The scope guard remains unchanged: this spike concerns API-key
+accounting, Anthropic envelope schema completeness, report redaction,
+wire-sequence origin, fixture-owned release resolution, and child-environment
+minimization are outside the closed eight-row S4 semantic matrix; they are
+recorded here as residuals rather than added as new probe gates. The scope guard
+remains unchanged: this spike concerns API-key
 sources only; subscriptions stay bound to their own vendor's backend.

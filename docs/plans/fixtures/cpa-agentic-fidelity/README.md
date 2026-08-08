@@ -105,9 +105,10 @@ also fails, the affected direction is reported as blocked rather than as a
 semantic no-go.
 
 Malformed relay URL handling, including nonnumeric loopback ports, top-level
-Anthropic message ID validation, and mixed primary/fallback second-turn
-accounting remain outside the closed eight-row semantic matrix; they are
-recorded as known-by-design residuals rather than promoted into probe gates.
+Anthropic message ID and non-stream `stop_sequence` validation, and mixed
+primary/fallback second-turn accounting remain outside the closed eight-row
+semantic matrix; they are recorded as known-by-design residuals rather than
+promoted into probe gates.
 
 The closed matrix requires monotonic Responses wire sequence, not a particular
 origin. The measured relay emitted contiguous one-based values. Non-stream
