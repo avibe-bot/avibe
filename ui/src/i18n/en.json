@@ -2955,6 +2955,7 @@
       "mode": "Mode",
       "followUp": "Follow-up message",
       "runtime": "Runtime",
+      "eventProcessing": "Event processing",
       "lastError": "Last error",
       "type": "Type",
       "triggeredBy": "Triggered by",
@@ -3041,6 +3042,11 @@
       "failing": "failing",
       "degraded": "degraded",
       "unknown": "health unknown"
+    },
+    "processingHealth": {
+      "failing": "processing failed",
+      "degraded": "recent processing failure",
+      "unknown": "processing status unknown"
     },
     "lifecycle": {
       "running": "Running",
@@ -3208,6 +3214,7 @@
       "voice": "Voice input",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
+      "voicePreview": "Live transcription preview",
       "voiceProcessing": "Processing recording",
       "voiceRetry": "Retry transcription",
       "voiceCopyTranscript": "Copy recovered transcript",

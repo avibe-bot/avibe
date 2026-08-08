@@ -52,6 +52,7 @@ const setup = (options: {
     getTracks: () => [track],
   } as unknown as MediaStream;
   const onSegment = vi.fn<(blob: Blob, metadata: { durationMs: number }) => void>();
+  const onPcm = vi.fn<(samples: Int16Array) => void>();
   const onError = vi.fn();
   const onStopRequested = vi.fn();
   const onStopped = vi.fn();
@@ -63,6 +64,7 @@ const setup = (options: {
     maxFileBytes: options.maxFileBytes,
     overlapMs: options.overlapMs ?? 0,
     onSegment,
+    onPcm,
     onError,
     onStopRequested,
     onStopped,
@@ -82,6 +84,7 @@ const setup = (options: {
     capture: () => capture!,
     onError,
     onSegment,
+    onPcm,
     onStopRequested,
     onStopped,
     pipeline,
@@ -111,6 +114,16 @@ afterEach(() => {
 });
 
 describe('VoiceRecordingPipeline', () => {
+  it('delivers short PCM frames independently of WAV segmentation', async () => {
+    const { capture, onPcm, onSegment, pipeline } = setup();
+    await pipeline.start();
+    capture().emit(1, 2, 3);
+
+    expect(onPcm).toHaveBeenCalledTimes(1);
+    expect(Array.from(onPcm.mock.calls[0]?.[0] ?? [])).toEqual([1, 2, 3]);
+    expect(onSegment).not.toHaveBeenCalled();
+  });
+
   it('frames delayed PCM delivery into provider-safe segments by sample count', async () => {
     const { capture, onSegment, pipeline } = setup();
     await pipeline.start();

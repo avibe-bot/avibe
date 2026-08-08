@@ -8211,6 +8211,8 @@ def asr_telemetry():
         "backlogAtStop",
         "totalDurationMs",
         "stopToInsertionMs",
+        "firstPreviewMs",
+        "stopToFinalMs",
     }
     for key in integer_fields:
         if key not in payload:
@@ -8234,6 +8236,11 @@ def asr_telemetry():
         if not isinstance(payload["retry"], bool):
             return jsonify({"error": "invalid_field", "field": "retry"}), 400
         sanitized["retry"] = payload["retry"]
+
+    if "realtime" in payload:
+        if not isinstance(payload["realtime"], bool):
+            return jsonify({"error": "invalid_field", "field": "realtime"}), 400
+        sanitized["realtime"] = payload["realtime"]
 
     logger.info(
         "voice_reliability %s",

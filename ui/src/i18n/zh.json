@@ -2955,6 +2955,7 @@
       "mode": "模式",
       "followUp": "跟进消息",
       "runtime": "运行时",
+      "eventProcessing": "事件处理",
       "lastError": "上次错误",
       "type": "类型",
       "triggeredBy": "触发来源",
@@ -3041,6 +3042,11 @@
       "failing": "连续失败",
       "degraded": "近期失败",
       "unknown": "状态未知"
+    },
+    "processingHealth": {
+      "failing": "处理失败",
+      "degraded": "近期处理失败",
+      "unknown": "处理状态未知"
     },
     "lifecycle": {
       "running": "运行中",
@@ -3208,6 +3214,7 @@
       "voice": "语音输入",
       "stopRecording": "完成录音",
       "cancelRecording": "取消录音",
+      "voicePreview": "实时转写预览",
       "voiceProcessing": "正在处理录音",
       "voiceRetry": "重试转写",
       "voiceCopyTranscript": "复制已恢复的文字",

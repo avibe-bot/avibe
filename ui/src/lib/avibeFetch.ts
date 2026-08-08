@@ -16,6 +16,8 @@ import { apiFetch } from './apiFetch';
 
 export type CloudToken = { token: string; baseUrl: string; expiresAt: number };
 
+export type AvibeWebSocket = WebSocket;
+
 export type AvibeFetchAttemptEvent =
   | { phase: 'started'; attempt: number }
   | { phase: 'response'; attempt: number; status: number; elapsedMs: number };
@@ -127,6 +129,34 @@ const mint = (): Promise<CloudToken | null> => {
 
 const ensureToken = (): Promise<CloudToken | null> =>
   isFresh(current) ? Promise.resolve(current) : mint();
+
+export const openAvibeWebSocket = async (
+  path: string,
+  subprotocol: string,
+  signal?: AbortSignal,
+): Promise<AvibeWebSocket> => {
+  let token: CloudToken | null;
+  try {
+    token = await waitForSignal(ensureToken(), signal);
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    throw new CloudUnavailableError();
+  }
+  if (!token) throw new CloudUnavailableError();
+
+  const websocketBaseUrl = token.baseUrl.replace(/^http/i, 'ws');
+  const socket = new WebSocket(
+    `${websocketBaseUrl}${path}`,
+    `${subprotocol}.${token.token}`,
+  );
+  if (signal) {
+    const abort = () => socket.close(1000, 'aborted');
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    socket.addEventListener('close', () => signal.removeEventListener('abort', abort), { once: true });
+  }
+  return socket;
+};
 
 const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
   if (!signal) return promise;

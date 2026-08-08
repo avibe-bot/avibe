@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import event, select
 
-from core.scheduled_tasks import TaskExecutionStore
+from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     NOTICE_KIND_BINDING_CHANGE,
     NOTICE_KIND_FAILURE,
@@ -305,10 +305,10 @@ def test_a_cancel_landing_under_record_run_output_is_not_overwritten(
     assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
 
 
-def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
+def test_a_cancel_landing_before_deferred_owner_reservation_is_not_overwritten(
     tmp_path: Path,
 ) -> None:
-    """An Activity's deferred failure remains subordinate to a concurrent Stop."""
+    """A Stop that wins the writer reservation remains authoritative."""
 
     sqlite, requests = _store(tmp_path)
     request = requests.enqueue_agent_run(
@@ -324,14 +324,14 @@ def test_a_cancel_landing_under_settle_deferred_run_is_not_overwritten(
         result_text="backend failed",
     )
 
-    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="UPDATE agent_runs")
+    listener, fired = _cancel_mid_write(sqlite, request.id, fire_on="BEGIN IMMEDIATE")
     event.listen(sqlite.engine, "before_cursor_execute", listener)
     try:
         transitioned = sqlite.settle_deferred_run(request.id)
     finally:
         event.remove(sqlite.engine, "before_cursor_execute", listener)
 
-    assert fired, "the interleaved cancel never fired; the race was not exercised"
+    assert fired, "the cancel never won the writer reservation"
     saved = sqlite.get_run(request.id)
     assert transitioned is True
     assert saved["status"] == "canceled"
@@ -388,6 +388,312 @@ def test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled(tmp_path: Pa
     saved = sqlite.get_run(requested.id)
     assert saved["status"] == "canceled"
     assert (saved.get("metadata") or {}).get(OWED_FAILURE_NOTICE_KEY) is None
+
+
+def test_turn_output_batch_locks_before_re_electing_a_canceled_fallback_owner(
+    tmp_path: Path,
+) -> None:
+    """One locked snapshot owns election and every participant's terminal write."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-owner-a")
+    _task(sqlite, "watch-owner-b")
+    runs = [
+        requests.enqueue_task_run(definition_id)
+        for definition_id in ("watch-owner-a", "watch-owner-b")
+    ]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    assert sqlite.cancel_run(runs[0].id)
+
+    statements: list[str] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().upper())
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    try:
+        sqlite.record_turn_run_outputs(
+            [run.id for run in runs],
+            output_id="terminal",
+            text="",
+            provenance={
+                "turn_id": "turn-shared",
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-shared",
+                    "delivered": False,
+                    "fallback_run_id": runs[0].id,
+                },
+            },
+            terminal_status="failed",
+            error="stream disconnected",
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+
+    lock_index = statements.index("BEGIN IMMEDIATE")
+    participant_read_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("SELECT") and "FROM AGENT_RUNS" in statement
+    )
+    assert lock_index < participant_read_index
+    assert sqlite.get_run(runs[0].id)["status"] == "canceled"
+    assert sqlite.get_run(runs[1].id)["status"] == "failed"
+    notice = sqlite.owed_failure_notice(runs[1].id)
+    assert notice["turn_fallback_run_id"] == runs[1].id
+
+
+def test_turn_output_batch_prefers_an_immediately_settled_fallback_owner(
+    tmp_path: Path,
+) -> None:
+    """A running Activity cannot own notices that its terminal sibling owes now."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-immediate-owner-a")
+    _task(sqlite, "watch-immediate-owner-b")
+    runs = [
+        requests.enqueue_task_run(definition_id)
+        for definition_id in ("watch-immediate-owner-a", "watch-immediate-owner-b")
+    ]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    deferred, immediate = sorted(runs, key=lambda run: run.id)
+
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": "turn-immediate-owner",
+            "turn_failure_notification": {
+                "failure_id": "turn:turn-immediate-owner",
+                "delivered": False,
+                "fallback_run_id": deferred.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[deferred.id],
+    )
+
+    assert sqlite.get_run(deferred.id)["status"] == "running"
+    assert sqlite.get_run(immediate.id)["status"] == "failed"
+    assert sqlite.owed_failure_notice(immediate.id)["turn_fallback_run_id"] == immediate.id
+    deferred_metadata = sqlite.get_run(deferred.id)["result_payload"][
+        "deferred_terminal_metadata"
+    ]
+    assert (
+        deferred_metadata["turn_failure_notification"]["fallback_run_id"]
+        == immediate.id
+    )
+
+
+def test_all_deferred_turn_runs_elect_and_propagate_the_first_stable_owner(
+    tmp_path: Path,
+) -> None:
+    """A canceled deferred candidate cannot strand the Turn's only fallback."""
+
+    sqlite, requests = _store(tmp_path)
+    definitions = [f"watch-deferred-owner-{index}" for index in range(3)]
+    for definition_id in definitions:
+        _task(sqlite, definition_id)
+    runs = [requests.enqueue_task_run(definition_id) for definition_id in definitions]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": "turn-all-deferred",
+            "turn_failure_notification": {
+                "failure_id": "turn:turn-all-deferred",
+                "delivered": False,
+                "fallback_run_id": runs[0].id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[run.id for run in runs],
+    )
+    for run in runs:
+        metadata = sqlite.get_run(run.id)["result_payload"][
+            "deferred_terminal_metadata"
+        ]
+        assert "fallback_run_id" not in metadata["turn_failure_notification"]
+
+    assert sqlite.cancel_run(runs[0].id)
+    assert sqlite.settle_deferred_run(runs[0].id)
+    assert sqlite.get_run(runs[0].id)["status"] == "canceled"
+
+    assert sqlite.settle_deferred_run(runs[1].id)
+    first_notice = sqlite.owed_failure_notice(runs[1].id)
+    assert first_notice["turn_fallback_run_id"] == runs[1].id
+    propagated = sqlite.get_run(runs[2].id)["result_payload"][
+        "deferred_terminal_metadata"
+    ]
+    assert (
+        propagated["turn_failure_notification"]["fallback_run_id"] == runs[1].id
+    )
+
+    assert sqlite.settle_deferred_run(runs[2].id)
+    second_notice = sqlite.owed_failure_notice(runs[2].id)
+    assert second_notice["turn_fallback_run_id"] == runs[1].id
+
+
+def test_hfr_459_deferred_owner_election_reserves_writer_before_reads(
+    tmp_path: Path,
+) -> None:
+    """Independent Activity releases serialize before choosing a Turn owner."""
+
+    sqlite, requests = _store(tmp_path)
+    definitions = ["watch-deferred-lock-a", "watch-deferred-lock-b"]
+    for definition_id in definitions:
+        _task(sqlite, definition_id)
+    runs = [requests.enqueue_task_run(definition_id) for definition_id in definitions]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    turn_id = "turn-deferred-owner-lock"
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[run.id for run in runs],
+    )
+
+    statements: list[str] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.strip().upper())
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    try:
+        assert sqlite.settle_deferred_run(runs[0].id)
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+
+    lock_index = statements.index("BEGIN IMMEDIATE")
+    first_run_read = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("SELECT") and "FROM AGENT_RUNS" in statement
+    )
+    assert lock_index < first_run_read
+    first_notice = sqlite.owed_failure_notice(runs[0].id)
+    assert first_notice["turn_fallback_run_id"] == runs[0].id
+    assert sqlite.settle_deferred_run(runs[1].id)
+    second_notice = sqlite.owed_failure_notice(runs[1].id)
+    assert second_notice["turn_fallback_run_id"] == runs[0].id
+
+
+def test_hfr_447_fallback_owner_requires_writable_notice_metadata(
+    tmp_path: Path,
+) -> None:
+    """Owner election and notice persistence share one eligibility predicate."""
+
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    definitions = ["watch-bad-owner", "watch-valid-owner"]
+    for definition_id in definitions:
+        _task(sqlite, definition_id)
+    runs = sorted(
+        (requests.enqueue_task_run(definition_id) for definition_id in definitions),
+        key=lambda run: run.id,
+    )
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    malformed, valid = runs
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == malformed.id)
+            .values(metadata_json="{not-json")
+        )
+
+    turn_id = "turn-writable-owner"
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": malformed.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    assert sqlite.get_run(malformed.id)["status"] == "failed"
+    assert sqlite.owed_failure_notice(malformed.id) is None
+    assert sqlite.owed_failure_notice(valid.id)["turn_fallback_run_id"] == valid.id
+
+    deferred_definitions = ["watch-bad-deferred-owner", "watch-valid-deferred-owner"]
+    for definition_id in deferred_definitions:
+        _task(sqlite, definition_id)
+    deferred_runs = sorted(
+        (
+            requests.enqueue_task_run(definition_id)
+            for definition_id in deferred_definitions
+        ),
+        key=lambda run: run.id,
+    )
+    for run in deferred_runs:
+        assert requests.claim(run.id) is not None
+    malformed_deferred, valid_deferred = deferred_runs
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == malformed_deferred.id)
+            .values(metadata_json="[]")
+        )
+
+    deferred_turn_id = "turn-writable-deferred-owner"
+    sqlite.record_turn_run_outputs(
+        [run.id for run in deferred_runs],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": deferred_turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{deferred_turn_id}",
+                "delivered": False,
+                "fallback_run_id": malformed_deferred.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[run.id for run in deferred_runs],
+    )
+
+    assert sqlite.settle_deferred_run(malformed_deferred.id)
+    assert sqlite.owed_failure_notice(malformed_deferred.id) is None
+    pending_metadata = sqlite.get_run(valid_deferred.id)["result_payload"][
+        "deferred_terminal_metadata"
+    ]
+    assert "fallback_run_id" not in pending_metadata["turn_failure_notification"]
+    assert sqlite.settle_deferred_run(valid_deferred.id)
+    assert (
+        sqlite.owed_failure_notice(valid_deferred.id)["turn_fallback_run_id"]
+        == valid_deferred.id
+    )
 
 
 # --- group 2: the owed-notice drain ---------------------------------------
@@ -1746,6 +2052,65 @@ def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
     assert "ci waiter" in body, f"the watch's own name must survive the lookup: {body}"
 
 
+@pytest.mark.parametrize(
+    ("outcome", "headline_key"),
+    [
+        ("event", "harness.notice.watchProcessingFailed"),
+        ("waiter_failure", "harness.notice.watchFailureReportFailed"),
+    ],
+)
+def test_watch_notice_copy_preserves_the_waiter_outcome(
+    tmp_path: Path,
+    outcome: str,
+    headline_key: str,
+) -> None:
+    """A failed reporting Turn cannot turn a waiter failure into an event."""
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    from storage.background import WATCH_HOOK_OUTCOME_METADATA_KEY
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-copy", name="CI waiter")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    run = requests.enqueue_hook_send(
+        session_key="slack::channel::C1",
+        prompt="report the Watch outcome",
+        run_type="watch",
+        definition_id="watch-copy",
+        metadata={WATCH_HOOK_OUTCOME_METADATA_KEY: outcome},
+    )
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(
+        claimed,
+        ok=False,
+        error="Agent report failed",
+        task_id="watch-copy",
+    )
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service.controller = SimpleNamespace(
+        platform_settings_managers={},
+        session_turn_gate=None,
+    )
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    body = service._failure_notice_body(
+        sqlite.get_run(run.id),
+        sqlite.owed_failure_notice(run.id),
+    )
+
+    assert i18n_t(headline_key, "en").split("{")[0] in body
+    if outcome == "waiter_failure":
+        assert "detected an event" not in body
+
+
 def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
     """The task-side twin of the retired-watch copy fix — FINISHED IS NOT PAUSED.
 
@@ -1978,6 +2343,274 @@ def test_the_duplicate_short_circuit_reports_its_receipt(tmp_path: Path) -> None
     # ...and it must SAY so, or the drain cannot tell this from a lost notice.
     assert evidence.delivered is True, "a persisted row is evidence of delivery"
     assert evidence.ack_evidence == ACK_EVIDENCE_RECEIPT
+
+
+def test_suppressed_duplicate_short_circuit_is_local_history_not_a_receipt() -> None:
+    """A background Session's persisted row proves no outward delivery."""
+
+    from unittest.mock import patch
+
+    import core.message_dispatcher as dispatcher_module
+    from core.delivery_evidence import DeliveryEvidence
+    from core.message_output import MessageOutput
+    from modules.im import MessageContext
+
+    from tests.test_message_dispatcher_scheduled import _StubController
+
+    controller = _StubController()
+    dispatcher = dispatcher_module.ConsolidatedMessageDispatcher(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={
+            "task_trigger_kind": "scheduled",
+            "task_execution_id": "run-background",
+            "suppress_delivery": True,
+        },
+    )
+    evidence = DeliveryEvidence()
+
+    with patch.object(dispatcher_module, "agent_message_exists", return_value=True):
+        returned = asyncio.run(
+            dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "your background task failed",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    idempotency_key="backend-failure:failure:run-background",
+                ),
+                delivery=evidence,
+            )
+        )
+
+    assert returned and "backend-failure:failure:run-background" in returned
+    assert controller.im_client.sent == []
+    assert evidence.ack_evidence is None
+
+
+def test_suppressed_history_cannot_shadow_a_later_visible_receipt() -> None:
+    """HFR-441 — local history cannot satisfy the stable outward identity."""
+
+    from unittest.mock import patch
+
+    import core.message_dispatcher as dispatcher_module
+    from core.delivery_evidence import DeliveryEvidence
+    from core.message_output import MessageOutput
+    from modules.im import MessageContext
+
+    from tests.test_message_dispatcher_scheduled import _StubController
+
+    controller = _StubController()
+    dispatcher = dispatcher_module.ConsolidatedMessageDispatcher(controller)
+    persisted: dict[str, dict[str, Any]] = {}
+    persisted_versions: list[dict[str, Any]] = []
+
+    def _lookup(_context, native_message_id):
+        return persisted.get(str(native_message_id))
+
+    def _persist(
+        _context,
+        canonical_type,
+        text,
+        *,
+        metadata=None,
+        native_message_id=None,
+        **_kwargs,
+    ):
+        row = {
+            "id": f"row-{len(persisted) + 1}",
+            "type": canonical_type,
+            "text": text,
+            "metadata": dict(metadata or {}),
+            "native_message_id": native_message_id,
+        }
+        persisted[str(native_message_id)] = row
+        persisted_versions.append(row)
+        return row
+
+    output = MessageOutput(
+        completes_turn=False,
+        completes_run=False,
+        idempotency_key="backend-failure:failure:shared",
+    )
+    suppressed = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={"suppress_delivery": True},
+    )
+    visible = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="slack",
+    )
+    evidence = DeliveryEvidence()
+
+    with (
+        patch.object(dispatcher_module, "agent_message_exists", side_effect=_lookup),
+        patch.object(dispatcher_module, "persist_agent_message", side_effect=_persist),
+    ):
+        asyncio.run(
+            dispatcher.emit_agent_message(
+                suppressed,
+                "notify",
+                "local background failure",
+                output=output,
+            )
+        )
+        asyncio.run(
+            dispatcher.emit_agent_message(
+                visible,
+                "notify",
+                "visible durable fallback",
+                output=output,
+                delivery=evidence,
+            )
+        )
+
+    assert len(controller.im_client.sent) == 1
+    assert evidence.delivered is True
+    assert len(persisted) == 1, "local history preserves the stable output identity"
+    assert persisted_versions[0]["metadata"]["delivery_suppressed"] is True
+    assert "delivery_suppressed" not in persisted_versions[1]["metadata"]
+
+
+def test_visible_send_promotes_the_stable_suppressed_history_row(tmp_path: Path) -> None:
+    """HFR-445 — promotion keeps identity and adopts the visible target Session."""
+
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    sqlite, _requests = _store(tmp_path)
+    _callback_session(sqlite)
+    now = "2026-07-27T00:00:00+00:00"
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-suppressed-source",
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="suppressed-source",
+                native_session_id="native-suppressed-source",
+                status="active",
+                visibility="background",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        local = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-suppressed-source",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="local history",
+            metadata={"delivery_suppressed": True, "run_id": "run-promote"},
+            native_message_id="agent-output:codex:run-promote:failure",
+        )
+        promoted = messages_service.promote_suppressed_native_message(
+            conn,
+            platform="avibe",
+            scope_id=None,
+            session_id="ses-callback-target",
+            native_message_id="agent-output:codex:run-promote:failure",
+            message_type="notify",
+            text="visible fallback",
+            metadata={"run_id": "run-promote"},
+        )
+
+    assert promoted is not None
+    assert promoted["id"] == local["id"]
+    assert promoted["session_id"] == "ses-callback-target"
+    assert promoted["text"] == "visible fallback"
+    assert promoted["metadata"] == {"run_id": "run-promote"}
+
+
+def test_hfr_446_promoted_receipt_uses_visible_delivery_order(tmp_path: Path) -> None:
+    """Promotion orders the stable row by its visible send, not hidden creation."""
+
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    sqlite, _requests = _store(tmp_path)
+    _callback_session(sqlite)
+    now = "2026-07-27T00:00:00+00:00"
+    instants = iter(
+        [
+            "2026-07-27T00:00:01.000000Z",
+            "2026-07-27T00:00:02.000000Z",
+            "2026-07-27T00:00:03.000000Z",
+        ]
+    )
+    with sqlite.engine.begin() as conn, pytest.MonkeyPatch.context() as patch:
+        patch.setattr(messages_service, "_utc_now_iso", lambda: next(instants))
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-order-source",
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="order-source",
+                native_session_id="native-order-source",
+                status="active",
+                visibility="background",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        hidden = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-order-source",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="hidden failure",
+            metadata={"delivery_suppressed": True, "run_id": "run-order"},
+            native_message_id="agent-output:codex:run-order:failure",
+        )
+        newer = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-callback-target",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="already visible",
+        )
+        promoted = messages_service.promote_suppressed_native_message(
+            conn,
+            platform="avibe",
+            scope_id=None,
+            session_id="ses-callback-target",
+            native_message_id="agent-output:codex:run-order:failure",
+            message_type="notify",
+            text="visible failure",
+            metadata={"run_id": "run-order"},
+        )
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses-callback-target",
+            types={"notify"},
+            tail=True,
+        )["messages"]
+
+    assert promoted is not None
+    assert promoted["id"] == hidden["id"]
+    assert promoted["delivered_at"] == "2026-07-27T00:00:03.000000Z"
+    assert [message["id"] for message in transcript] == [newer["id"], hidden["id"]]
 
 
 def test_the_duplicate_short_circuit_receipt_acks_a_workbench_rung() -> None:
@@ -5793,7 +6426,13 @@ def _callback_session(
         )
 
 
-def _persist_callback_result(sqlite_store, run_id: str, *, text: str) -> None:
+def _persist_callback_result(
+    sqlite_store,
+    run_id: str,
+    *,
+    text: str,
+    delivery_suppressed: bool = False,
+) -> None:
     """Materialize the durable message receipt that a callback success requires."""
 
     from storage import messages_service
@@ -5808,7 +6447,10 @@ def _persist_callback_result(sqlite_store, run_id: str, *, text: str) -> None:
             source="agent",
             message_type="result",
             text=text,
-            metadata={"run_id": run_id},
+            metadata={
+                "run_id": run_id,
+                **({"delivery_suppressed": True} if delivery_suppressed else {}),
+            },
         )
 
 
@@ -6205,6 +6847,43 @@ def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
 
     assert delivered == ["run-cb-hidden"]
     assert sqlite.owed_failure_notice("run-cb-hidden")["state"] == "sent"
+
+
+def test_suppressed_callback_history_is_not_visible_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    """A foreground Session does not make a suppress_delivery row visible."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cb-suppressed", deliver_key="slack::channel::C1")
+    _callback_session(sqlite, visibility="foreground")
+    _callback_run(sqlite, "run-cb-suppressed", "task-cb-suppressed", status="pending")
+    callback = requests.enqueue_agent_run(
+        message="persist without outward delivery",
+        source_kind="callback",
+        parent_run_id="run-cb-suppressed",
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        "run-cb-suppressed",
+        status="sent",
+        callback_run_id=callback.id,
+    )
+    assert requests.claim(callback.id) is not None
+    sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="local callback history",
+        terminal_status="succeeded",
+    )
+    _persist_callback_result(
+        sqlite,
+        callback.id,
+        text="local callback history",
+        delivery_suppressed=True,
+    )
+
+    assert sqlite.run_callback_state("run-cb-suppressed") == "failed"
 
 
 def test_skip_reason_writer_cannot_erase_a_terminal_notice_from_its_write_gap(
@@ -6658,17 +7337,7 @@ def test_a_suppressed_lane_reason_never_takes_the_interruption_identity_or_copy(
 def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
     tmp_path: Path,
 ) -> None:
-    """HFR-093 — recurring live failures enter the durable policy before delivery.
-
-    Two consecutive executions fail for the same definition. Each backend reports
-    its failure live, but that path owns settlement only; the owed-notice drain owns
-    visible delivery and can therefore send the first failure while suppressing the
-    rest of the streak. Delivering before settlement would produce two rows before
-    the drain had any opportunity to classify the streak.
-    """
-
-    from core.backend_failure import emit_backend_failure
-    from core.scheduled_tasks import parse_session_key
+    """HFR-093 — live delivery is primary and the durable drain remains a fallback."""
 
     _migrated_state_db()
     controller, _dispatcher, _touched = _live_turn_dispatcher()
@@ -6676,59 +7345,917 @@ def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-suppressed-dedup", deliver_key="slack::channel::C123")
     runs = []
-    for _index in range(2):
+    for index in range(2):
         run = requests.enqueue_task_run("task-suppressed-dedup")
         requests.claim(run.id)
-        sqlite.settle_run_terminal(
+        sqlite.record_run_output(
             run.id,
+            output_id="terminal",
+            text="",
             terminal_status="failed",
             error="backend failed",
+            provenance={
+                "turn_id": f"turn-{index}",
+                "turn_failure_notification": {
+                    "failure_id": f"turn:turn-{index}",
+                    "delivered": True,
+                    "ack_evidence": "receipt",
+                    "fallback_run_id": run.id,
+                },
+            },
         )
         assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
         runs.append(run)
 
     service = _drain_service(tmp_path, controller, sqlite, requests)
 
-    target = parse_session_key("slack::channel::C123")
-    for run in runs:
-        live_context = asyncio.run(
-            service._build_context(
-                target,
-                delivery_target=target,
-                execution_id=run.id,
-                task_id="task-suppressed-dedup",
-                trigger_kind="scheduled",
-            )
-        )
-        asyncio.run(
-            emit_backend_failure(
-                controller,
-                live_context,
-                "harness",
-                "backend failed",
-                display_text="the live notice",
-            )
-        )
-    live_rows = [
-        row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
-    ]
-    assert live_rows == [], (
-        "Harness live emitters settle only; visible delivery belongs to the durable "
-        f"notice policy: {live_rows}"
-    )
-
     asyncio.run(service._drain_failure_notices())
 
-    rows = [
-        row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
+    assert [sqlite.owed_failure_notice(run.id)["state"] for run in runs] == [
+        "skipped",
+        "skipped",
     ]
-    assert len(rows) == 1, (
-        "one recurring failure streak must produce one durable notification, got "
-        f"{[row['native_message_id'] for row in rows]}"
+    assert controller.im_client.sent == [], "the fallback drain repeated a live Turn notification"
+
+
+def test_legacy_harness_delivery_evidence_suppresses_the_durable_fallback(
+    tmp_path: Path,
+) -> None:
+    """A pre-turn-token Harness receipt remains authoritative delivery evidence."""
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-legacy-delivery", deliver_key="slack::channel::C123")
+    run = requests.enqueue_task_run("watch-legacy-delivery")
+    assert requests.claim(run.id) is not None
+    sqlite.record_run_output(
+        run.id,
+        output_id="terminal",
+        text="",
+        terminal_status="failed",
+        error="backend failed",
+        provenance={
+            "turn_failure_notification": {
+                "failure_id": run.id,
+                "delivered": True,
+                "ack_evidence": "delivery_only",
+            }
+        },
     )
-    assert rows[0]["native_message_id"].endswith(f"backend-failure:{runs[0].id}")
-    assert sqlite.owed_failure_notice(runs[0].id)["state"] == "sent"
-    assert sqlite.owed_failure_notice(runs[1].id)["state"] == "skipped"
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["turn_id"] is None
+    assert notice["turn_notification_delivered"] is True
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert sqlite.owed_failure_notice(run.id)["state"] == "skipped"
+    assert controller.im_client.sent == []
+
+
+def _settle_linked_turn_failures(sqlite, runs, *, delivered: bool) -> None:
+    fallback_run_id = min(run.id for run in runs)
+    for run in runs:
+        sqlite.record_run_output(
+            run.id,
+            output_id="terminal",
+            text="",
+            terminal_status="failed",
+            error="stream disconnected",
+            provenance={
+                "turn_id": "turn-shared-failure",
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-shared-failure",
+                    "delivered": delivered,
+                    "ack_evidence": "receipt" if delivered else None,
+                    "fallback_run_id": fallback_run_id,
+                },
+            },
+        )
+
+
+def test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices(
+    tmp_path: Path,
+) -> None:
+    """One acknowledged backend error is enough, regardless of Run provenance."""
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-source-a", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-source-b", deliver_key="slack::channel::C123")
+    runs = [requests.enqueue_task_run(definition) for definition in ("watch-source-a", "watch-source-b")]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    _settle_linked_turn_failures(sqlite, runs, delivered=True)
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert controller.im_client.sent == []
+    assert {sqlite.owed_failure_notice(run.id)["state"] for run in runs} == {"skipped"}
+    assert {sqlite.get_run(run.id)["status"] for run in runs} == {"failed"}
+
+
+def test_hfr_438_missing_turn_notification_delivers_one_fallback(tmp_path: Path) -> None:
+    """A lost primary elects one Run fallback, not one fallback per definition."""
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-source-a", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-source-b", deliver_key="slack::channel::C123")
+    runs = [requests.enqueue_task_run(definition) for definition in ("watch-source-a", "watch-source-b")]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    _settle_linked_turn_failures(sqlite, runs, delivered=False)
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(controller.im_client.sent) == 1
+    notices = {run.id: sqlite.owed_failure_notice(run.id) for run in runs}
+    assert notices[min(notices)]["state"] == "sent"
+    assert {notice["state"] for run_id, notice in notices.items() if run_id != min(notices)} == {
+        "skipped"
+    }
+
+
+def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """A callback reports the shared Turn result, not only its parent Run."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-callback-a", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-callback-b", deliver_key="slack::channel::C123")
+    _callback_session(sqlite)
+    owner_id = "run-turn-owner"
+    callback_parent_id = "run-turn-callback"
+    notice = {
+        "state": "pending",
+        "attempts": 0,
+        "next_attempt_at": None,
+        "failure_id": "turn:turn-with-callback",
+        "turn_id": "turn-with-callback",
+        "turn_fallback_run_id": owner_id,
+        "turn_participant_run_ids": [owner_id, callback_parent_id],
+    }
+    _pending_failure(
+        sqlite,
+        owner_id,
+        "watch-callback-a",
+        created_at="2026-07-27T00:00:00+00:00",
+        notice=notice,
+    )
+    _callback_run(
+        sqlite,
+        callback_parent_id,
+        "watch-callback-b",
+        status="pending",
+    )
+    sqlite.update_owed_failure_notice(
+        callback_parent_id,
+        failure_id="turn:turn-with-callback",
+        turn_id="turn-with-callback",
+        turn_fallback_run_id=owner_id,
+        turn_participant_run_ids=[owner_id, callback_parent_id],
+    )
+    callback = requests.enqueue_agent_run(
+        message="deliver the shared Turn result",
+        source_kind="callback",
+        parent_run_id=callback_parent_id,
+        session_id="ses-callback-target",
+    )
+    sqlite.update_callback_status(
+        callback_parent_id,
+        status="sent",
+        callback_run_id=callback.id,
+    )
+    assert requests.claim(callback.id) is not None
+    sqlite.record_run_output(
+        callback.id,
+        output_id="terminal",
+        text="shared Turn callback delivered",
+        terminal_status="succeeded",
+    )
+    _persist_callback_result(sqlite, callback.id, text="shared Turn callback delivered")
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    import core.scheduled_tasks as scheduled_tasks
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == []
+    for run_id in (owner_id, callback_parent_id):
+        stored = sqlite.owed_failure_notice(run_id)
+        assert stored["state"] == "skipped"
+        assert stored["skip_reason"] == "delivered_by_callback"
+
+
+def test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """A deferred participant remains part of the Turn callback snapshot."""
+
+    from sqlalchemy import update as sa_update
+
+    import core.scheduled_tasks as scheduled_tasks
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-immediate-notice", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-deferred-callback", deliver_key="slack::channel::C123")
+    _callback_session(sqlite)
+    immediate = requests.enqueue_task_run("watch-immediate-notice")
+    deferred = requests.enqueue_task_run("watch-deferred-callback")
+    for run in (immediate, deferred):
+        assert requests.claim(run.id) is not None
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == deferred.id)
+            .values(
+                callback_session_id="ses-callback-target",
+                callback_status="pending",
+            )
+        )
+
+    turn_id = "turn-deferred-callback"
+    sqlite.record_turn_run_outputs(
+        [immediate.id, deferred.id],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": deferred.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[deferred.id],
+    )
+
+    assert sqlite.get_run(deferred.id)["status"] == "running"
+    assert (
+        sqlite.turn_callback_state(
+            turn_id,
+            participant_run_ids=[immediate.id, deferred.id],
+        )
+        == "pending"
+    )
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == []
+    assert sqlite.owed_failure_notice(immediate.id)["state"] == "pending"
+
+
+def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """A stopped deferred participant no longer owns callback membership."""
+
+    from sqlalchemy import update as sa_update
+
+    import core.scheduled_tasks as scheduled_tasks
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-cancel-callback-owner", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-cancel-callback-deferred", deliver_key="slack::channel::C123")
+    _callback_session(sqlite)
+    immediate = requests.enqueue_task_run("watch-cancel-callback-owner")
+    deferred = requests.enqueue_task_run("watch-cancel-callback-deferred")
+    for run in (immediate, deferred):
+        assert requests.claim(run.id) is not None
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == deferred.id)
+            .values(
+                callback_session_id="ses-callback-target",
+                callback_status="pending",
+            )
+        )
+
+    turn_id = "turn-cancel-requested-callback"
+    sqlite.record_turn_run_outputs(
+        [immediate.id, deferred.id],
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": immediate.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+        deferred_run_ids=[deferred.id],
+    )
+
+    assert sqlite.cancel_run(deferred.id)
+    assert sqlite.get_run(deferred.id)["cancel_requested"] is True
+    assert (
+        sqlite.turn_callback_state(
+            turn_id,
+            participant_run_ids=[immediate.id, deferred.id],
+        )
+        is None
+    )
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+
+    assert delivered == [f"turn:{turn_id}"]
+    assert sqlite.owed_failure_notice(immediate.id)["state"] == "sent"
+
+
+def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
+    tmp_path: Path,
+) -> None:
+    """Cancellation removes unarmed parents, not callback work already accepted."""
+
+    sqlite, requests = _store(tmp_path)
+    _callback_session(sqlite)
+
+    def _parent_with_callback(turn_id: str, *, delivered: bool) -> tuple[Any, Any]:
+        from sqlalchemy import update as sa_update
+
+        from storage.models import agent_runs
+
+        definition_id = f"watch-{turn_id}"
+        _task(sqlite, definition_id)
+        parent = requests.enqueue_task_run(definition_id)
+        assert requests.claim(parent.id) is not None
+        sqlite.record_turn_run_outputs(
+            [parent.id],
+            output_id="terminal",
+            text="",
+            provenance={
+                "turn_id": turn_id,
+                "turn_failure_notification": {
+                    "failure_id": f"turn:{turn_id}",
+                    "delivered": False,
+                    "fallback_run_id": parent.id,
+                },
+            },
+            terminal_status="failed",
+            error="stream disconnected",
+        )
+        callback = requests.enqueue_agent_run(
+            message="deliver the Turn result",
+            source_kind="callback",
+            parent_run_id=parent.id,
+            session_id="ses-callback-target",
+        )
+        with sqlite.engine.begin() as conn:
+            conn.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == parent.id)
+                .values(callback_session_id="ses-callback-target")
+            )
+        sqlite.update_callback_status(
+            parent.id,
+            status="sent",
+            callback_run_id=callback.id,
+        )
+        if delivered:
+            assert requests.claim(callback.id) is not None
+            sqlite.record_run_output(
+                callback.id,
+                output_id="terminal",
+                text="callback delivered",
+                terminal_status="succeeded",
+            )
+            _persist_callback_result(sqlite, callback.id, text="callback delivered")
+        assert sqlite.cancel_run(parent.id)
+        return parent, callback
+
+    pending_parent, _pending_callback = _parent_with_callback(
+        "turn-canceled-pending-callback", delivered=False
+    )
+    delivered_parent, _delivered_callback = _parent_with_callback(
+        "turn-canceled-delivered-callback", delivered=True
+    )
+
+    assert (
+        sqlite.turn_callback_state(
+            "turn-canceled-pending-callback",
+            participant_run_ids=[pending_parent.id],
+        )
+        == "pending"
+    )
+    assert (
+        sqlite.turn_callback_state(
+            "turn-canceled-delivered-callback",
+            participant_run_ids=[delivered_parent.id],
+        )
+        == "sent"
+    )
+
+
+def test_hfr_450_terminal_replay_promotes_new_turn_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    """A same-Turn replay upgrades its notice without resetting drain progress."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-delivery-replay")
+    run = requests.enqueue_task_run("watch-delivery-replay")
+    assert requests.claim(run.id) is not None
+    turn_id = "turn-delivery-replay"
+    provenance = {
+        "turn_id": turn_id,
+        "turn_failure_notification": {
+            "failure_id": f"turn:{turn_id}",
+            "delivered": False,
+            "fallback_run_id": run.id,
+        },
+    }
+    sqlite.record_turn_run_outputs(
+        [run.id],
+        output_id="terminal",
+        text="",
+        provenance=provenance,
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+    sqlite.update_owed_failure_notice(run.id, attempts=2)
+
+    replay = sqlite.record_run_output(
+        run.id,
+        output_id="terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": True,
+                "ack_evidence": "delivery_only",
+                "fallback_run_id": run.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert replay["recorded"] is False
+    assert replay["terminal_transition"] is False
+    assert replay["delivery_evidence_merged"] is True
+    assert notice["attempts"] == 2
+    assert notice["turn_notification_delivered"] is True
+    assert notice["turn_notification_ack_evidence"] == "delivery_only"
+
+    service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", service._spy_emit)
+        asyncio.run(service._drain_failure_notices())
+    assert delivered == []
+    assert sqlite.owed_failure_notice(run.id)["state"] == "skipped"
+
+
+def test_hfr_451_turn_callback_lookup_uses_bounded_ownership(
+    tmp_path: Path,
+) -> None:
+    """Turn callback reads use Run ids and indexed Delivery ownership, never JSON scans."""
+
+    sqlite, _requests = _store(tmp_path)
+    _pending_failure(
+        sqlite,
+        "run-bounded-callback",
+        "watch-bounded-callback",
+        created_at="2026-07-27T00:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "failure_id": "turn:turn-bounded-callback",
+            "turn_id": "turn-bounded-callback",
+            "turn_fallback_run_id": "run-bounded-callback",
+            "turn_participant_run_ids": ["run-bounded-callback"],
+        },
+    )
+    statements: list[tuple[str, Any]] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        if "callback_parent" in statement:
+            statements.append((statement, parameters))
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    try:
+        sqlite.turn_callback_state(
+            "turn-bounded-callback",
+            participant_run_ids=["run-bounded-callback"],
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+
+    assert len(statements) == 1
+    statement, parameters = statements[0]
+    normalized_statement = statement.upper()
+    assert "CALLBACK_PARENT.METADATA_JSON" not in normalized_statement
+    assert "CALLBACK_PARENT.RESULT_PAYLOAD_JSON" not in normalized_statement
+    assert "MESSAGE_DELIVERIES.TURN_ID" in normalized_statement
+    assert "CALLBACK_PARENT.ID IN" in normalized_statement
+    with sqlite.engine.connect() as conn:
+        plan = conn.exec_driver_sql(
+            f"EXPLAIN QUERY PLAN {statement}",
+            parameters,
+        ).all()
+    plan_text = " ".join(str(row[-1]) for row in plan)
+    assert "message_deliveries_turn" in plan_text
+    assert "sqlite_autoindex_agent_runs_1" in plan_text
+
+
+def test_hfr_452_callback_children_cannot_own_a_turn_fallback(
+    tmp_path: Path,
+) -> None:
+    """Owner election applies every suppression used by the notice writer."""
+
+    sqlite, requests = _store(tmp_path)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-callback-parent",
+            request_type="agent_run",
+            message="original callback parent",
+        )
+    )
+    assert requests.claim(parent.id) is not None
+    sqlite.record_run_output(
+        parent.id,
+        output_id="parent-terminal",
+        text="",
+        terminal_status="failed",
+        error="parent failed",
+    )
+    assert sqlite.owed_failure_notice(parent.id) is not None
+
+    callback_child = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-a-callback-child",
+            request_type="agent_run",
+            message="callback child",
+            source_kind="callback",
+            parent_run_id=parent.id,
+        )
+    )
+    sibling = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-b-fallback-owner",
+            request_type="agent_run",
+            message="ordinary sibling",
+        )
+    )
+    assert requests.claim(callback_child.id) is not None
+    assert requests.claim(sibling.id) is not None
+    turn_id = "turn-callback-child-owner"
+
+    sqlite.record_turn_run_outputs(
+        [callback_child.id, sibling.id],
+        output_id="turn-terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": callback_child.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    assert sqlite.owed_failure_notice(callback_child.id) is None
+    assert (
+        sqlite.owed_failure_notice(sibling.id)["turn_fallback_run_id"]
+        == sibling.id
+    )
+
+
+def test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction(
+    tmp_path: Path,
+) -> None:
+    """A durable callback child is never visible without its parent marker."""
+
+    sqlite, requests = _store(tmp_path)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-atomic-callback-parent",
+            request_type="agent_run",
+            message="parent",
+            callback_session_id="ses-callback-target",
+            callback_status="pending",
+        )
+    )
+    statements: list[str] = []
+    commits: list[int] = []
+
+    def _capture_statement(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" in statement:
+            statements.append(statement.upper())
+
+    def _capture_commit(conn):
+        commits.append(1)
+
+    event.listen(sqlite.engine, "before_cursor_execute", _capture_statement)
+    event.listen(sqlite.engine, "commit", _capture_commit)
+    try:
+        callback = requests.enqueue_agent_run(
+            message="deliver callback",
+            source_kind="callback",
+            source_actor="run-atomic-callback-parent:terminal:failed",
+            parent_run_id=parent.id,
+            callback_parent_to_arm=parent.id,
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _capture_statement)
+        event.remove(sqlite.engine, "commit", _capture_commit)
+
+    stored_parent = sqlite.get_run(parent.id)
+    assert stored_parent["callback_status"] == "sent"
+    assert stored_parent["callback_run_id"] == callback.id
+    assert sqlite.get_run(callback.id)["parent_run_id"] == parent.id
+    assert commits == [1]
+    insert_position = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("INSERT INTO AGENT_RUNS")
+    )
+    parent_update_position = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("UPDATE AGENT_RUNS")
+        and "CALLBACK_RUN_ID" in statement
+    )
+    assert insert_position < parent_update_position
+
+
+def test_hfr_455_turn_owner_excludes_same_batch_parent_suppression(
+    tmp_path: Path,
+) -> None:
+    """A child cannot own when its earlier parent acquires a notice in the batch."""
+
+    sqlite, requests = _store(tmp_path)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-b-callback-parent",
+            request_type="agent_run",
+            message="parent",
+        )
+    )
+    callback_child = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-a-callback-child",
+            request_type="agent_run",
+            message="callback child",
+            source_kind="callback",
+            parent_run_id=parent.id,
+        )
+    )
+    assert requests.claim(parent.id) is not None
+    assert requests.claim(callback_child.id) is not None
+    turn_id = "turn-parent-before-callback-child"
+
+    sqlite.record_turn_run_outputs(
+        [parent.id, callback_child.id],
+        output_id="turn-terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": callback_child.id,
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    parent_notice = sqlite.owed_failure_notice(parent.id)
+    assert parent_notice["turn_fallback_run_id"] == parent.id
+    assert sqlite.owed_failure_notice(callback_child.id) is None
+
+
+def test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks(
+    tmp_path: Path,
+) -> None:
+    """Late cancellation blocks new failure callbacks but preserves accepted evidence."""
+
+    sqlite, requests = _store(tmp_path)
+
+    def failed_parent(run_id: str) -> TaskExecutionRequest:
+        parent = requests.enqueue(
+            TaskExecutionRequest(
+                id=run_id,
+                request_type="agent_run",
+                message="parent",
+                callback_session_id="ses-callback-target",
+                callback_status="pending",
+            )
+        )
+        assert requests.claim(parent.id) is not None
+        sqlite.record_run_output(
+            parent.id,
+            output_id=f"{run_id}-terminal",
+            text="",
+            terminal_status="failed",
+            error="parent failed",
+        )
+        assert sqlite.cancel_run(parent.id)
+        return parent
+
+    rejected_parent = failed_parent("run-canceled-callback-parent")
+    rejected_actor = f"{rejected_parent.id}:terminal:failed"
+    rejected = requests.enqueue_agent_run(
+        message="new callback",
+        source_kind="callback",
+        source_actor=rejected_actor,
+        parent_run_id=rejected_parent.id,
+        callback_parent_to_arm=rejected_parent.id,
+    )
+    assert rejected is None
+    assert (
+        requests.find_callback_run(
+            parent_run_id=rejected_parent.id,
+            source_actor=rejected_actor,
+        )
+        is None
+    )
+
+    armed_parent = failed_parent("run-armed-callback-parent")
+    armed_actor = f"{armed_parent.id}:terminal:failed"
+    existing = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-existing-callback-child",
+            request_type="agent_run",
+            message="accepted callback",
+            source_kind="callback",
+            source_actor=armed_actor,
+            parent_run_id=armed_parent.id,
+        )
+    )
+    recovered = requests.enqueue_agent_run(
+        message="accepted callback",
+        source_kind="callback",
+        source_actor=armed_actor,
+        parent_run_id=armed_parent.id,
+        callback_parent_to_arm=armed_parent.id,
+    )
+    assert recovered is not None
+    assert recovered.id == existing.id
+    stored_parent = sqlite.get_run(armed_parent.id)
+    assert stored_parent["callback_status"] == "sent"
+    assert stored_parent["callback_run_id"] == existing.id
+
+
+def test_hfr_457_missing_turn_participant_does_not_rollback_valid_runs(
+    tmp_path: Path,
+) -> None:
+    """A stale attribution id is excluded before ownership and settlement."""
+
+    sqlite, requests = _store(tmp_path)
+    run = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-valid-turn-participant",
+            request_type="agent_run",
+            message="valid participant",
+        )
+    )
+    assert requests.claim(run.id) is not None
+    turn_id = "turn-with-stale-participant"
+
+    results = sqlite.record_turn_run_outputs(
+        ["run-missing-turn-participant", run.id],
+        output_id="turn-terminal",
+        text="",
+        provenance={
+            "turn_id": turn_id,
+            "turn_failure_notification": {
+                "failure_id": f"turn:{turn_id}",
+                "delivered": False,
+                "fallback_run_id": "run-missing-turn-participant",
+            },
+        },
+        terminal_status="failed",
+        error="stream disconnected",
+    )
+
+    assert list(results) == [run.id]
+    assert sqlite.get_run(run.id)["status"] == "failed"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["turn_fallback_run_id"] == run.id
+    assert notice["turn_participant_run_ids"] == [run.id]
+
+
+def test_hfr_458_steered_callback_uses_its_shared_turn_output_receipt(
+    tmp_path: Path,
+) -> None:
+    """A callback need not be the primary Run named by its persisted result."""
+
+    from storage import messages_service
+
+    sqlite, requests = _store(tmp_path)
+    _callback_session(sqlite)
+    parent = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-shared-receipt-parent",
+            request_type="agent_run",
+            message="parent",
+            callback_session_id="ses-callback-target",
+        )
+    )
+    callback = requests.enqueue(
+        TaskExecutionRequest(
+            id="run-shared-receipt-callback",
+            request_type="agent_run",
+            message="callback",
+            source_kind="callback",
+            parent_run_id=parent.id,
+            session_id="ses-callback-target",
+        )
+    )
+    for run in (parent, callback):
+        assert requests.claim(run.id) is not None
+    sqlite.update_callback_status(
+        parent.id,
+        status="sent",
+        callback_run_id=callback.id,
+    )
+    turn_id = "turn-steered-callback-receipt"
+    output_id = "steered-terminal-output"
+    sqlite.record_turn_run_outputs(
+        [callback.id],
+        output_id=output_id,
+        text="callback delivered",
+        provenance={"turn_id": turn_id, "run_id": "run-primary-human-turn"},
+        terminal_status="succeeded",
+    )
+    with sqlite.engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=None,
+            session_id="ses-callback-target",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="callback delivered",
+            metadata={
+                "turn_id": turn_id,
+                "run_id": "run-primary-human-turn",
+                "output_id": output_id,
+            },
+        )
+
+    assert sqlite.run_callback_state(parent.id) == "sent"
+
+
+@pytest.mark.parametrize("turn_notification", [None, {}], ids=["absent", "empty"])
+def test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane(
+    tmp_path: Path,
+    turn_notification: dict[str, Any] | None,
+) -> None:
+    """A direct error result has a Turn id but no notification ownership contract."""
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-direct-error", deliver_key="slack::channel::C123")
+    runs = [requests.enqueue_task_run("task-direct-error") for _ in range(2)]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    provenance: dict[str, Any] = {"turn_id": "turn-direct-error"}
+    if turn_notification is not None:
+        provenance["turn_failure_notification"] = turn_notification
+    sqlite.record_turn_run_outputs(
+        [run.id for run in runs],
+        output_id="terminal",
+        text="question tool is disabled",
+        terminal_status="failed",
+        error="question tool is disabled",
+        provenance=provenance,
+    )
+
+    notices = [sqlite.owed_failure_notice(run.id) for run in runs]
+    assert all(notice["turn_id"] is None for notice in notices)
+    assert all(notice["turn_fallback_run_id"] is None for notice in notices)
 
 
 def test_the_index_migration_and_the_query_use_the_same_expressions(tmp_path: Path) -> None:
@@ -7626,8 +9153,8 @@ def test_brief_task_payload_carries_last_error(capsys) -> None:
     assert entry["last_error"] == "unresolvable session binding"
 
 
-def test_a_watch_reports_health_on_the_same_terms_as_a_task(capsys) -> None:
-    """HFR-090 — a watch whose hook fails nightly is as invisible as a task.
+def test_a_watch_reports_processing_health_separately_from_waiter_health(capsys) -> None:
+    """HFR-090 — a failed hook stays visible without blaming the waiter.
 
     ``_enrich_definitions`` computes health for both definition types, so the only
     thing that decided whether it reached a surface was the projection allowlist.
@@ -7668,8 +9195,31 @@ def test_a_watch_reports_health_on_the_same_terms_as_a_task(capsys) -> None:
         store.close()
 
     entry = json.loads(capsys.readouterr().out)["definitions"][0]
-    assert entry["health"] == "failing"
-    assert entry["consecutive_failures"] == 1
+    assert entry["health"] == "unknown", "a never-run waiter has no success evidence"
+    assert entry["consecutive_failures"] == 0
+    assert entry["processing_health"] == "failing"
+    assert entry["processing_consecutive_failures"] == 1
+
+
+def test_hfr_444_first_in_flight_waiter_health_remains_unknown(tmp_path: Path) -> None:
+    """Starting a cycle is not evidence that its waiter succeeded."""
+
+    sqlite, _requests = _store(tmp_path)
+    _watch(
+        sqlite,
+        "watch-first-cycle",
+        last_started_at="2026-08-08T05:00:00+00:00",
+        last_finished_at=None,
+        last_exit_code=None,
+        last_error=None,
+    )
+
+    projected = sqlite.get_watch("watch-first-cycle")
+
+    assert projected is not None
+    assert projected["health"] == "unknown"
+    assert projected["consecutive_failures"] == 0
+    assert projected["recent_failures"] == 0
 
 
 def test_storage_interruption_reasons_mirror_the_settlement_vocabulary() -> None:
@@ -9955,7 +11505,15 @@ def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
     )
 
 
-def _settled_run(sqlite, definition_id: str, run_id: str, *, status: str, at: str) -> None:
+def _settled_run(
+    sqlite,
+    definition_id: str,
+    run_id: str,
+    *,
+    status: str,
+    at: str,
+    metadata: dict | None = None,
+) -> None:
     """One already-settled run of *definition_id*, stamped at *at*."""
 
     sqlite.enqueue_run(
@@ -9967,6 +11525,7 @@ def _settled_run(sqlite, definition_id: str, run_id: str, *, status: str, at: st
             "error": "boom" if status == "failed" else None,
             "created_at": at,
             "completed_at": at,
+            "metadata": metadata or {},
         }
     )
 
@@ -10413,8 +11972,8 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     The four steps, asserted in the order the failure happens:
 
     (c) the terminal timestamps agree with each other and survive a fresh read;
-    (a) the row reads FINISHED, never paused, and its health says failing on both the
-        projection and the CLI payload a coding agent actually parses;
+    (a) the row reads FINISHED, never paused, its waiter stays healthy, and its event
+        processing says failing on both the projection and the CLI payload;
     (b) the run settled ``failed`` naming the delivery failure, the notice carries the
         structured class ``delivery_target_missing``, and the DEFINITION's
         ``last_error``/``last_exit_code`` still describe the healthy waiter — the
@@ -10522,15 +12081,22 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     assert not (projected["enabled"] is False and projected.get("retired_at") in (None, "")), (
         f"``enabled=0`` with no retirement marker is the ambiguous state: {projected}"
     )
-    assert projected["health"] == "failing", (
-        f"a watch whose only delivery failed is not healthy: {projected}"
+    assert projected["health"] == "healthy", (
+        f"the waiter exited zero, so downstream delivery cannot poison it: {projected}"
+    )
+    assert projected["processing_health"] == "failing", (
+        f"the failed follow-up must remain visible on its own axis: {projected}"
     )
     # The CLI payload too, not only the store projection: a coding agent driving this
     # runtime reads ``vibe watch show``, and #1060 was discovered by a human running
     # ``vibe watch list`` for an unrelated reason. The two must agree.
     assert cli.cmd_watch_show(watch.id) == 0
     shown = json.loads(capsys.readouterr().out)["definition"]
-    assert (shown["health"], shown["lifecycle_state"]) == ("failing", "finished"), (
+    assert (shown["health"], shown["processing_health"], shown["lifecycle_state"]) == (
+        "healthy",
+        "failing",
+        "finished",
+    ), (
         f"the CLI payload must carry the same verdict as the projection: {shown}"
     )
 
@@ -10603,8 +12169,11 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     assert i18n_t("harness.notice.class.deliveryTargetMissing", "en") in body, (
         f"and name the class, not only the raw error line: {body!r}"
     )
-    assert i18n_t("harness.notice.watchRetired", "en") in body, (
-        f"a retired watch's copy has to say it finished: {body!r}"
+    assert i18n_t("harness.notice.watchProcessingFailed", "en").split("{")[0] in body, (
+        f"the fallback must identify event processing rather than waiter failure: {body!r}"
+    )
+    assert i18n_t("harness.notice.watchRetired", "en") not in body, (
+        f"normal one-shot retirement is unrelated to the processing failure: {body!r}"
     )
     assert i18n_t("harness.notice.watchPaused", "en").split("{")[0].strip() not in body, (
         "and must NOT offer ``vibe watch resume`` for a watch that retired — that is "
@@ -10760,9 +12329,12 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert projected["lifecycle_state"] == "waiting", (
         f"the watch is still armed, so it is not finished: {projected}"
     )
-    assert projected["health"] == "failing", (
-        "…and still failing: a repeating delivery failure is exactly the history the "
-        f"health badge exists to report: {projected}"
+    assert projected["health"] == "healthy", (
+        f"retry exit 75 is a healthy waiter outcome, not a failure: {projected}"
+    )
+    assert projected["processing_health"] == "failing", (
+        "the repeating delivery failure belongs to processing history instead: "
+        f"{projected}"
     )
 
     # ONE canonical notice for the streak, keyed to the FIRST failed run.
@@ -11081,11 +12653,17 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
     service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
 
     retired_copy = i18n_t("harness.notice.watchRetired", language)
+    processing_copy = i18n_t("harness.notice.watchProcessingFailed", language).split("{")[0]
     # The command, not the whole sentence: that is the part a user could act on, and
     # the part that must not appear for a watch nobody paused.
     resume_command = "vibe watch resume"
 
     def _body(definition_id: str, **watch_fields) -> str:
+        from storage.background import (
+            WATCH_HOOK_OUTCOME_EVENT,
+            WATCH_HOOK_OUTCOME_METADATA_KEY,
+        )
+
         _watch(sqlite, definition_id, enabled=False, **watch_fields)
         _settled_run(
             sqlite,
@@ -11093,6 +12671,7 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
             f"run-{definition_id}",
             status="failed",
             at="2026-07-27T03:00:00+00:00",
+            metadata={WATCH_HOOK_OUTCOME_METADATA_KEY: WATCH_HOOK_OUTCOME_EVENT},
         )
         return service._failure_notice_body(
             sqlite.get_run(f"run-{definition_id}"),
@@ -11100,7 +12679,10 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
         )
 
     retired = _body("watch-retired", retired_at="2026-07-27T03:00:00+00:00", mode="once")
-    assert retired_copy in retired, f"a retired watch must say it finished: {retired!r}"
+    assert processing_copy in retired
+    assert retired_copy not in retired, (
+        f"normal one-shot retirement is unrelated to event processing failure: {retired!r}"
+    )
     assert resume_command not in retired, (
         "and must not offer to resume something that was never paused — the copy has to "
         f"agree with the FINISHED lifecycle state: {retired!r}"

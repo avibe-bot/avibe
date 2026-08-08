@@ -113,6 +113,9 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    WATCH_HOOK_OUTCOME_EVENT,
+    WATCH_HOOK_OUTCOME_METADATA_KEY,
+    WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     compute_next_run_at,
     notice_write_expectation,
     owed_notice_eligible,
@@ -929,13 +932,6 @@ def enqueue_session_callback(
     session_id = (session_id or "").strip()
     if not session_id or not (message or "").strip():
         return None
-    if parent_run_id:
-        existing = request_store.find_callback_run(
-            parent_run_id=parent_run_id,
-            source_actor=source_actor,
-        )
-        if existing is not None:
-            return TaskExecutionRequest.from_dict(existing)
     target = resolve_session_id_target(session_id)
     from core.message_priority import delivery_intent_for_trigger
 
@@ -957,6 +953,7 @@ def enqueue_session_callback(
             **(metadata or {}),
             **({"callback_parent_run_id": parent_run_id} if parent_run_id else {}),
         },
+        callback_parent_to_arm=parent_run_id,
     )
 
 
@@ -2526,7 +2523,8 @@ class TaskExecutionStore:
         delivery_intent: str = AGENT_RUN_DELIVERY_STEER,
         metadata: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
-    ) -> TaskExecutionRequest:
+        callback_parent_to_arm: Optional[str] = None,
+    ) -> Optional[TaskExecutionRequest]:
         if not (message or "").strip():
             # Refuse at the door: a blank prompt never reaches an agent backend
             # (``MessageHandler`` returns early), so the run could never be settled
@@ -2536,31 +2534,70 @@ class TaskExecutionStore:
         normalized_delivery_intent = normalize_agent_run_delivery_intent(delivery_intent)
         run_metadata = dict(metadata or {})
         run_metadata[AGENT_RUN_DELIVERY_INTENT_METADATA_KEY] = normalized_delivery_intent
-        return self.enqueue(
-            TaskExecutionRequest(
-                id=uuid4().hex[:12],
-                request_type="agent_run",
-                session_key=session_key,
-                session_id=session_id,
-                post_to=post_to,
-                deliver_key=deliver_key,
-                prompt=message,
-                message=message,
-                source_kind=source_kind,
-                source_actor=source_actor,
-                parent_run_id=parent_run_id,
-                callback_session_id=callback_session_id,
-                callback_status="pending" if callback_session_id and callback_active else None,
-                agent_name=agent_name,
-                agent_id=agent_id,
-                agent_backend=agent_backend,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                session_policy=session_policy,
-                metadata=run_metadata,
-            ),
+        request = TaskExecutionRequest(
+            id=uuid4().hex[:12],
+            request_type="agent_run",
+            session_key=session_key,
+            session_id=session_id,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            prompt=message,
+            message=message,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
+            callback_session_id=callback_session_id,
+            callback_status="pending" if callback_session_id and callback_active else None,
+            agent_name=agent_name,
+            agent_id=agent_id,
+            agent_backend=agent_backend,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            session_policy=session_policy,
+            metadata=run_metadata,
+        )
+        normalized_callback_parent = str(callback_parent_to_arm or "").strip()
+        if normalized_callback_parent and self._sqlite is not None:
+            callback_run_id = self._sqlite.enqueue_callback_run(
+                self.queued_run_payload(request),
+                parent_run_id=normalized_callback_parent,
+                source_actor=str(source_actor or ""),
+            )
+            if callback_run_id is None:
+                return None
+            stored = self._sqlite.get_run(callback_run_id)
+            return TaskExecutionRequest.from_dict(stored) if stored is not None else request
+        if normalized_callback_parent:
+            existing = self.find_callback_run(
+                parent_run_id=normalized_callback_parent,
+                source_actor=str(source_actor or ""),
+            )
+            if existing is not None:
+                self.update_callback_status(
+                    normalized_callback_parent,
+                    status="sent",
+                    callback_run_id=str(existing["id"]),
+                )
+                return TaskExecutionRequest.from_dict(existing)
+            parent = self.get_run(normalized_callback_parent)
+            if parent is None:
+                raise ValueError(
+                    f"callback parent Run not found: {normalized_callback_parent}"
+                )
+            parent_status = _normalize_requested_run_status(parent.get("status"))
+            if bool(parent.get("cancel_requested")) and parent_status != "canceled":
+                return None
+        queued = self.enqueue(
+            request,
             expected_enabled_agent_id=expected_enabled_agent_id,
         )
+        if normalized_callback_parent:
+            self.update_callback_status(
+                normalized_callback_parent,
+                status="sent",
+                callback_run_id=queued.id,
+            )
+        return queued
 
     def list_pending(
         self,
@@ -2825,6 +2862,7 @@ class TaskExecutionStore:
         terminal_status: str,
         error: Optional[str] = None,
         result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> bool:
         if self._sqlite is None:
             return False
@@ -2833,6 +2871,7 @@ class TaskExecutionStore:
             terminal_status=terminal_status,
             error=error,
             result_text=result_text,
+            metadata=metadata,
         )
 
     def update_callback_status(
@@ -3651,7 +3690,10 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             definition_id = str(
                 row.get("definition_id") or row.get("task_id") or ""
             )
-            if definition_id and not failure_notices.bypasses_suppression(notice):
+            turn_id = failure_notices.notice_turn_id(notice)
+            if turn_id:
+                partition = f"turn:{turn_id}"
+            elif definition_id and not failure_notices.bypasses_suppression(notice):
                 partition = f"definition:{definition_id}"
             else:
                 partition = f"run:{run_id}"
@@ -5674,10 +5716,23 @@ class ScheduledTaskService:
         # callback already landed, and a stale absence would deliver beside it. A
         # read failure propagates to the drain loop's per-row handler and the row is
         # retried later, which errs toward one message rather than two.
-        callback_status = await self._run_runtime_sync(
-            store.run_callback_state,
-            run_id,
-        )
+        turn_id = failure_notices.notice_turn_id(notice)
+        if turn_id and hasattr(store, "turn_callback_state"):
+            participant_run_ids = notice.get("turn_participant_run_ids")
+            callback_status = await self._run_runtime_sync(
+                store.turn_callback_state,
+                turn_id,
+                participant_run_ids=(
+                    participant_run_ids
+                    if isinstance(participant_run_ids, list)
+                    else []
+                ),
+            )
+        else:
+            callback_status = await self._run_runtime_sync(
+                store.run_callback_state,
+                run_id,
+            )
         decision = failure_notices.decide(
             run_id=run_id,
             definition_id=definition_id,
@@ -6641,6 +6696,16 @@ class ScheduledTaskService:
                 name=name,
                 reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
             )
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_EVENT:
+            headline = self._t("harness.notice.watchProcessingFailed", name=name)
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_WAITER_FAILURE:
+            headline = self._t("harness.notice.watchFailureReportFailed", name=name)
+        elif is_watch:
+            headline = self._t("harness.notice.watchFollowUpFailed", name=name)
         else:
             headline = self._t("harness.notice.failed", name=name)
         # COMMAND COPY, ORDINARY-FAILED LANE ONLY. A command definition's notice named
@@ -6735,7 +6800,8 @@ class ScheduledTaskService:
                     # history genuinely cannot prove which of the two happened, and
                     # ``definition_lifecycle_expression`` makes the same call.
                     if str(watch.get("retired_at") or "").strip():
-                        lines.append(self._t("harness.notice.watchRetired"))
+                        if failure_notices.is_interruption(notice):
+                            lines.append(self._t("harness.notice.watchRetired"))
                     else:
                         lines.append(self._t("harness.notice.watchPaused", id=definition_id))
                 # No re-run affordance, because there is no ``vibe watch run``: a watch
@@ -8715,44 +8781,37 @@ class ScheduledTaskService:
             None,
         )
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
-        settled_any = False
-        for raw_execution_id in execution_ids:
-            execution_id = str(raw_execution_id or "").strip()
-            if not execution_id:
-                continue
-            run_terminal_status = terminal_status
-            if callable(has_blocker) and has_blocker(execution_id):
-                if not store.defer_run_terminal(
-                    execution_id,
-                    terminal_status=terminal_status,
-                    result_text=result_text,
-                    error=(
-                        str(terminal_error) if terminal_error is not None else None
-                    ),
-                ):
-                    logger.warning(
-                        "failed to defer late terminal settlement for Run=%s Turn=%s",
-                        execution_id,
-                        turn_id,
-                    )
-                run_terminal_status = None
-            result = store.record_run_output(
-                execution_id,
-                output_id=output_id,
-                text=result_text,
-                message_id=message_id,
-                provenance={
-                    **output_provenance,
-                    "turn_id": turn_id,
-                    "evidence_kind": evidence_kind,
-                    "settled_by": settled_by,
-                },
-                terminal_status=run_terminal_status,
-                error=str(terminal_error) if terminal_error is not None else None,
+        normalized_execution_ids = list(
+            dict.fromkeys(
+                execution_id
+                for value in execution_ids
+                if (execution_id := str(value or "").strip())
             )
-            settled_any = settled_any or bool(
-                result.get("terminal_transition") or result.get("text_backfilled")
-            )
+        )
+        deferred_run_ids = [
+            execution_id
+            for execution_id in normalized_execution_ids
+            if callable(has_blocker) and has_blocker(execution_id)
+        ]
+        results = store.record_turn_run_outputs(
+            normalized_execution_ids,
+            output_id=output_id,
+            text=result_text,
+            message_id=message_id,
+            provenance={
+                **output_provenance,
+                "turn_id": turn_id,
+                "evidence_kind": evidence_kind,
+                "settled_by": settled_by,
+            },
+            terminal_status=terminal_status,
+            error=str(terminal_error) if terminal_error is not None else None,
+            deferred_run_ids=deferred_run_ids,
+        )
+        settled_any = any(
+            result.get("terminal_transition") or result.get("text_backfilled")
+            for result in results.values()
+        )
         if settled_any:
             self._wake_runtime_work(
                 RuntimeWorkLane.REQUESTS,

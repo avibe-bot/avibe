@@ -27,6 +27,9 @@ export type VoiceTelemetryEvent = {
   backlogAtStop?: number;
   totalDurationMs?: number;
   stopToInsertionMs?: number;
+  realtime?: boolean;
+  firstPreviewMs?: number;
+  stopToFinalMs?: number;
   retry?: boolean;
 };
 

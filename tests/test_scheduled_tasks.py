@@ -6764,6 +6764,174 @@ def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
     } == {"steer"}
 
 
+def test_hfr_439_turn_failure_metadata_reaches_every_linked_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The failed transition and its Turn notification evidence commit together."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    requests = [
+        request_store.enqueue_agent_run(message=message, agent_name="codex")
+        for message in ("participant one", "participant two")
+    ]
+    for request in requests:
+        assert request_store.claim(request.id) is not None
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    service.settle_agent_runs_from_terminal_turn(
+        [request.id for request in requests],
+        turn_id="turn-one-error",
+        outcome="failed",
+        settled_by="terminal_result",
+        evidence_kind="terminal_result",
+        evidence={
+            "settles_run": True,
+            "terminal_error": "stream disconnected",
+            "output_provenance": {
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-one-error",
+                    "ack_evidence": "receipt",
+                    "delivered": True,
+                }
+            },
+        },
+    )
+
+    expected_owner = min(request.id for request in requests)
+    for request in requests:
+        row = request_store.get_run(request.id)
+        assert row is not None and row["status"] == "failed"
+        assert row["metadata"]["turn_id"] == "turn-one-error"
+        notice = request_store.sqlite_backend.owed_failure_notice(request.id)
+        assert notice["failure_id"] == "turn:turn-one-error"
+        assert notice["turn_id"] == "turn-one-error"
+        assert notice["turn_notification_delivered"] is True
+        assert notice["turn_notification_ack_evidence"] == "receipt"
+        assert notice["turn_fallback_run_id"] == expected_owner
+
+
+def test_turn_fallback_owner_excludes_a_canceled_participant(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A canceled Run keeps its audit state but cannot own the only fallback."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    requests = [
+        request_store.enqueue_agent_run(message=message, agent_name="codex")
+        for message in ("participant one", "participant two")
+    ]
+    for request in requests:
+        assert request_store.claim(request.id) is not None
+    canceled_id = min(request.id for request in requests)
+    assert request_store.cancel_run(canceled_id)
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    service.settle_agent_runs_from_terminal_turn(
+        [request.id for request in requests],
+        turn_id="turn-canceled-owner",
+        outcome="failed",
+        settled_by="terminal_result",
+        evidence_kind="terminal_result",
+        evidence={
+            "settles_run": True,
+            "terminal_error": "stream disconnected",
+            "output_provenance": {
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-canceled-owner",
+                    "delivered": False,
+                }
+            },
+        },
+    )
+
+    eligible_id = next(request.id for request in requests if request.id != canceled_id)
+    assert request_store.get_run(canceled_id)["status"] == "canceled"
+    notice = request_store.sqlite_backend.owed_failure_notice(eligible_id)
+    assert notice["turn_fallback_run_id"] == eligible_id
+
+
+def test_late_turn_settlement_reuses_all_durable_participants(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A late accepted Run cannot elect a second owner from only its subset."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    settle = Mock()
+    manager = SessionTurnManager(
+        SimpleNamespace(
+            scheduled_task_service=SimpleNamespace(
+                settle_agent_runs_from_terminal_turn=settle
+            )
+        )
+    )
+    manager.accepted_agent_run_ids_for_turn = lambda _turn_id: [
+        "run-initial",
+        "run-late",
+    ]
+    turn = {
+        "id": "turn-late-owner",
+        "terminal_outcome": "failed",
+        "settled_by": "terminal_result",
+        "terminal_evidence_kind": "terminal_result",
+        "terminal_evidence_json": json.dumps(
+            {
+                "settles_run": True,
+                "output_provenance": {
+                    "turn_failure_notification": {
+                        "failure_id": "turn:turn-late-owner",
+                        "fallback_run_id": "run-initial",
+                    }
+                },
+            }
+        ),
+    }
+
+    manager._settle_agent_run_ids_from_terminal_turn(["run-late"], turn)
+
+    settle.assert_called_once()
+    assert settle.call_args.args[0] == ["run-initial", "run-late"]
+
+
+def test_hfr_439_deferred_run_preserves_turn_failure_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An Activity delay cannot turn a shared Turn failure into a new Run failure."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(message="participant", agent_name="codex")
+    assert request_store.claim(request.id) is not None
+    metadata = {
+        "turn_id": "turn-deferred-error",
+        "turn_failure_notification": {
+            "failure_id": "turn:turn-deferred-error",
+            "ack_evidence": "receipt",
+            "delivered": True,
+            "fallback_run_id": request.id,
+        },
+    }
+
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="failed",
+        error="stream disconnected",
+        metadata=metadata,
+    )
+    assert request_store.sqlite_backend.settle_deferred_run(request.id)
+
+    notice = request_store.sqlite_backend.owed_failure_notice(request.id)
+    assert notice["failure_id"] == "turn:turn-deferred-error"
+    assert notice["turn_id"] == "turn-deferred-error"
+    assert notice["turn_notification_delivered"] is True
+    assert notice["turn_fallback_run_id"] == request.id
+
+
 def test_historical_conflated_sent_callback_stays_inert_on_startup(
     tmp_path: Path,
     monkeypatch,
