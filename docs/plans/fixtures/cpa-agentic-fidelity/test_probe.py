@@ -6,9 +6,15 @@ import probe
 
 
 def _responses_wire(*events):
+    normalized = []
+    for event in events:
+        event = copy.deepcopy(event)
+        if event["type"] in {"response.created", "response.in_progress", "response.completed", "response.done"} and isinstance(event.get("response"), dict):
+            event["response"].setdefault("object", "response")
+        normalized.append(event)
     return [
         {"kind": "event", "sequence": index, "wire_sequence": index, "type": event["type"], "event": event}
-        for index, event in enumerate(events)
+        for index, event in enumerate(normalized)
     ]
 
 
@@ -153,6 +159,22 @@ class ProbeParserTests(unittest.TestCase):
         self.assertNotIn("stream_text_done_mismatch", turn.parse_errors)
         self.assertEqual(turn.reasoning_text, "firstsecond")
 
+    def test_responses_stream_requires_reasoning_summary_lifecycle(self) -> None:
+        opening = _response_reasoning_stream()
+        opening[1]["event"]["item"]["summary"] = [{"type": "summary_text", "text": "eager"}]
+        self.assertFalse(probe._stream_order_ok("responses", opening))
+        opening_turn = probe._parse_responses_stream(probe.TransportResult(200, None, opening, False, 0))
+        self.assertIn("stream_reasoning_opening_snapshot_invalid", opening_turn.parse_errors)
+
+        missing = [
+            event
+            for event in _response_reasoning_stream()
+            if event["type"] not in {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
+        ]
+        self.assertFalse(probe._stream_order_ok("responses", missing))
+        missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0))
+        self.assertIn("stream_reasoning_summary_events_missing", missing_turn.parse_errors)
+
     def test_responses_stream_rejects_noncontiguous_reasoning_summary_index(self) -> None:
         events = _response_multi_summary_stream()
         events[4]["event"]["summary_index"] = 2
@@ -179,12 +201,12 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_responses_stream_rejects_argument_done_mismatch(self) -> None:
         events = [
-            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "sequence": 0, "wire_sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {"object": "response"}}},
             {"kind": "event", "sequence": 1, "wire_sequence": 1, "type": "response.output_item.added", "event": {"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather"}}},
             {"kind": "event", "sequence": 2, "wire_sequence": 2, "type": "response.function_call_arguments.delta", "event": {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0, "delta": '{"city":"Shanghai"}'}},
             {"kind": "event", "sequence": 3, "wire_sequence": 3, "type": "response.function_call_arguments.done", "event": {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0, "arguments": '{"city":"Paris"}'}},
             {"kind": "event", "sequence": 4, "wire_sequence": 4, "type": "response.output_item.done", "event": {"type": "response.output_item.done", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'}}},
-            {"kind": "event", "sequence": 5, "wire_sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
+            {"kind": "event", "sequence": 5, "wire_sequence": 5, "type": "response.completed", "event": {"type": "response.completed", "response": {"object": "response", "status": "completed", "output": [{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
         ]
         self.assertTrue(probe._stream_order_ok("responses", events))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, True))
@@ -405,6 +427,15 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertNotIn("stream_envelope_invalid", turn.parse_errors)
         self.assertTrue(turn.terminal)
+
+    def test_chat_stream_rejects_named_done_sentinel(self) -> None:
+        events = [
+            {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}},
+            {"kind": "done", "type": "bogus"},
+        ]
+        self.assertFalse(probe._stream_order_ok("chat", events))
+        turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
+        self.assertIn("stream_done_event_type_invalid", turn.parse_errors)
 
     def test_chat_stream_requires_chunk_discriminator(self) -> None:
         events = [
@@ -1120,6 +1151,32 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
         self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
 
+        events = _response_message_stream()
+        events.insert(1, {"kind": "event", "type": "response.in_progress", "event": {"type": "response.in_progress", "response": {"object": "other"}}})
+        for index, event in enumerate(events):
+            event["sequence"] = index
+            event["wire_sequence"] = index
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
+
+    def test_responses_stream_rejects_invalid_terminal_discriminator(self) -> None:
+        events = _response_message_stream()
+        events[-1]["event"]["response"]["object"] = "other"
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("response_object_invalid", turn.parse_errors)
+
+    def test_responses_stream_rejects_text_after_content_part_done(self) -> None:
+        events = _response_message_stream()
+        events[3], events[5] = events[5], events[3]
+        for index, event in enumerate(events):
+            event["sequence"] = index
+            event["wire_sequence"] = index
+        self.assertFalse(probe._stream_order_ok("responses", events))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
+        self.assertIn("stream_text_after_content_part_done", turn.parse_errors)
+
     def test_responses_stream_rejects_terminal_only_function_calls(self) -> None:
         events = [
             {"kind": "event", "type": "response.created", "event": {"type": "response.created", "response": {}}},
@@ -1765,6 +1822,14 @@ class ProbeParserTests(unittest.TestCase):
             turn = probe._parse_responses_document({"object": "response", "output": [item], "status": "completed"})
             self.assertIn("output_item_type_invalid", turn.parse_errors)
 
+    def test_responses_nonstream_rejects_duplicate_output_item_ids(self) -> None:
+        output = [
+            {"id": "same", "type": "reasoning", "summary": []},
+            {"id": "same", "type": "function_call", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}'},
+        ]
+        turn = probe._parse_responses_document({"object": "response", "output": output, "status": "completed"})
+        self.assertIn("output_item_id_duplicate", turn.parse_errors)
+
     def test_responses_nonstream_rejects_invalid_nested_part_types(self) -> None:
         message = {"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": []}]}
         reasoning = {"id": "rs_1", "type": "reasoning", "summary": [{"type": {}}]}
@@ -1830,11 +1895,12 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("stream_reasoning_snapshot_mismatch", turn.parse_errors)
 
     def test_responses_stream_created_snapshot_requires_object(self) -> None:
-        invalid = _response_message_stream()
-        invalid[0]["event"]["response"] = []
-        self.assertFalse(probe._stream_order_ok("responses", invalid))
-        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
-        self.assertIn("response_start_snapshot_invalid", turn.parse_errors)
+        for response in ([], {"object": "other"}):
+            invalid = _response_message_stream()
+            invalid[0]["event"]["response"] = response
+            self.assertFalse(probe._stream_order_ok("responses", invalid))
+            turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+            self.assertIn("response_start_snapshot_invalid", turn.parse_errors)
 
     def test_chat_nonstream_requires_envelope_discriminator(self) -> None:
         valid = {"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}

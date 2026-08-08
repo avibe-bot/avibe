@@ -40,9 +40,11 @@ child-process environments only.
 
 The output is a compact JSON report containing case names, HTTP statuses,
 redacted semantic checks, tool names/counts, and stream event counts. Each case
-makes two sequential exchanges: the first response supplies the observed
-tool-call ids and complete continuation, and the second request returns tool
-results using those exact ids. The eight cases cover single and parallel calls,
+makes a second exchange when the first response contains parsed tool calls; when
+it does not, the report records that the follow-up was skipped because the
+multi-turn path was not reached. When reached, the first response supplies the
+observed tool-call ids and complete continuation, and the second request returns
+tool results using those exact ids. The eight cases cover single and parallel calls,
 streaming, tool-fragment reconstruction, system scope, stop reasons, and
 thinking/reasoning in both directions of both conversion pairs. A semantic
 failure exits non-zero; missing credentials or an unsafe endpoint exits with a
@@ -60,10 +62,11 @@ proxy handlers, and exhausted 503 capacity is reported as blocked for every
 target while the alternate Claude model is tried only for Anthropic targets.
 Each case reports only a redacted `fallback_used` boolean and primary/fallback
 scope; fallback evidence must not be attributed to the primary model. The
-latest gate-complete rerun (r19) exercised all eight cases after the current-head
+latest gate-complete rerun (r20) exercised all eight cases after the current-head
 parser fixes: all eight completed both turns with HTTP 200 and no fallback was
 used. Messages-to-Responses single failed both parse gates and its final exact
-tuple, while the parallel case passed parsing but failed its final tuple.
+tuple, while the parallel case passed first parsing but failed final parsing and
+its final exact tuple.
 Responses-to-Messages single and parallel cases lacked reasoning; their final
 system scope, tool outputs, and exact tuples passed. Both Messages-to-Chat
 cases failed the first and final parse gates with thinking present; both final
