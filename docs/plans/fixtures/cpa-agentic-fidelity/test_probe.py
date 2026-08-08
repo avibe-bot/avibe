@@ -4,6 +4,51 @@ import unittest
 import probe
 
 
+def _responses_wire(*events):
+    return [
+        {"kind": "event", "sequence": index, "wire_sequence": index, "type": event["type"], "event": event}
+        for index, event in enumerate(events)
+    ]
+
+
+def _response_message_stream():
+    message = {"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
+    return _responses_wire(
+        {"type": "response.created", "response": {}},
+        {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message"}},
+        {
+            "type": "response.content_part.added",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        },
+        {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "answer"},
+        {"type": "response.output_text.done", "item_id": "msg_1", "output_index": 0, "content_index": 0, "text": "answer"},
+        {
+            "type": "response.content_part.done",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "answer"},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": message},
+        {"type": "response.completed", "response": {"status": "completed", "output": [message]}},
+    )
+
+
+def _response_reasoning_stream():
+    reasoning = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "thought"}]}
+    return _responses_wire(
+        {"type": "response.created", "response": {}},
+        {"type": "response.output_item.added", "output_index": 0, "item": {"id": "rs_1", "type": "reasoning"}},
+        {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "output_index": 0, "delta": "thought"},
+        {"type": "response.reasoning_summary_text.done", "item_id": "rs_1", "output_index": 0, "text": "thought"},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {"type": "response.completed", "response": {"status": "completed", "output": [reasoning]}},
+    )
+
+
 class ProbeParserTests(unittest.TestCase):
     def test_anthropic_followup_preserves_observed_id_and_thinking(self) -> None:
         turn = probe._parse_anthropic_document(
@@ -1065,8 +1110,8 @@ class ProbeParserTests(unittest.TestCase):
         ):
             events = [
                 {"kind": "event", "event": {"type": "response.output_item.added", "item": {"id": "item_1", "type": item_type, "role": "assistant"}}},
-                {"kind": "event", "event": {"type": f"{event_type}.delta", "item_id": "item_1", "delta": "delta"}},
-                {"kind": "event", "event": {"type": f"{event_type}.done", "item_id": "item_1", "text": "different"}},
+                {"kind": "event", "event": {"type": f"{event_type}.delta", "item_id": "item_1", "content_index": 0, "delta": "delta"}},
+                {"kind": "event", "event": {"type": f"{event_type}.done", "item_id": "item_1", "content_index": 0, "text": "different"}},
             ]
             turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
             self.assertIn("stream_text_done_mismatch", turn.parse_errors)
@@ -1268,6 +1313,60 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "event", "sequence": 1, "wire_sequence": 1, "type": "response.created", "event": {"type": "response.created", "response": {"id": "resp_2"}}},
         ]
         self.assertFalse(probe._stream_order_ok("responses", events))
+
+    def test_responses_text_events_require_matching_content_indexes(self) -> None:
+        valid = _response_message_stream()
+        sparse = _response_message_stream()
+        for item in sparse:
+            if "content_index" in item["event"]:
+                item["event"]["content_index"] = 5
+        mismatched = _response_message_stream()
+        mismatched[3]["event"]["content_index"] = 1
+        self.assertTrue(probe._stream_order_ok("responses", valid))
+        self.assertFalse(probe._stream_order_ok("responses", sparse))
+        self.assertFalse(probe._stream_order_ok("responses", mismatched))
+
+    def test_responses_text_done_is_required_before_item_completion(self) -> None:
+        valid_message = _response_message_stream()
+        valid_reasoning = _response_reasoning_stream()
+        message_events = _responses_wire(*(item["event"] for item in valid_message if item["type"] != "response.output_text.done"))
+        reasoning_events = _responses_wire(*(item["event"] for item in valid_reasoning if item["type"] != "response.reasoning_summary_text.done"))
+        self.assertTrue(probe._stream_order_ok("responses", valid_message))
+        self.assertTrue(probe._stream_order_ok("responses", valid_reasoning))
+        self.assertFalse(probe._stream_order_ok("responses", message_events))
+        self.assertFalse(probe._stream_order_ok("responses", reasoning_events))
+
+    def test_responses_stream_item_ids_must_be_nonempty_strings(self) -> None:
+        invalid_added = _response_message_stream()
+        invalid_added[1]["event"]["item"]["id"] = []
+        invalid_done = _response_message_stream()
+        invalid_done[6]["event"]["item"]["id"] = []
+        self.assertFalse(probe._stream_order_ok("responses", invalid_added))
+        self.assertFalse(probe._stream_order_ok("responses", invalid_done))
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid_added, False, 0, False))
+        self.assertIn("stream_item_id_invalid", turn.parse_errors)
+
+    def test_responses_nonstream_status_must_be_a_string(self) -> None:
+        for status in ([], {}):
+            turn = probe._parse_responses_document({"output": [], "status": status})
+            self.assertIn("status_invalid", turn.parse_errors)
+            self.assertFalse(turn.terminal)
+
+    def test_anthropic_stream_start_snapshots_require_strings(self) -> None:
+        text_events = [
+            {"kind": "event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": []}}},
+            {"kind": "event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}},
+        ]
+        thinking_events = [
+            {"kind": "event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": {}, "signature": []}}},
+            {"kind": "event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "thought"}}},
+            {"kind": "event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
+        ]
+        text_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, text_events, False, 0))
+        thinking_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, thinking_events, False, 0))
+        self.assertIn("stream_text_snapshot_invalid", text_turn.parse_errors)
+        self.assertIn("stream_thinking_snapshot_invalid", thinking_turn.parse_errors)
+        self.assertIn("stream_signature_snapshot_invalid", thinking_turn.parse_errors)
 
 
 if __name__ == "__main__":
