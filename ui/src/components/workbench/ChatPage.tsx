@@ -423,6 +423,11 @@ export const ChatPage: React.FC = () => {
   messagesRef.current = messages;
   const vaultAnchorFetchesRef = useRef<Set<string>>(new Set());
   const vaultAnchorInFlightRef = useRef(false);
+  const vaultAnchorMergeRef = useRef<{
+    anchorMessageId: string;
+    nextBeforeId: string | null;
+    result: ReturnType<typeof mergeAnchorWindow>;
+  } | null>(null);
   const deepLinkWindowHandledRef = useRef(false);
   const [vaultAnchorCycle, setVaultAnchorCycle] = useState(0);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
@@ -725,6 +730,7 @@ export const ChatPage: React.FC = () => {
     const fetchKey = `${request.id}:${anchorKey}`;
     vaultAnchorFetchesRef.current.add(fetchKey);
     vaultAnchorInFlightRef.current = true;
+    let retryableFailure = false;
     const loadedSource = messagesRef.current.find(
       (message) => message.id === sourceMessageId || message.native_message_id === sourceMessageId,
     );
@@ -798,54 +804,45 @@ export const ChatPage: React.FC = () => {
         if (!placement.byMessageId.size) return;
         const anchorMessageId = placement.byMessageId.keys().next().value;
         if (typeof anchorMessageId !== 'string') return;
-        const retained = mergeAnchorWindow(
-          existing,
-          incoming,
-          anchorMessageId,
-          MAX_RETAINED_MESSAGES,
-          followingTailRef.current,
-        );
-        const replaceWithAnchorWindow = disjoint || retained.replaced;
         if (disjoint) {
           const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
           setMessages(incoming);
           setHistoricalWindow(Boolean(res.next_after_id) || incomingBeforeExisting);
           setJumpTarget(anchorMessageId);
-        } else if (replaceWithAnchorWindow) {
-          // A cap trim would otherwise discard the owner reply that the request
-          // was fetched to reveal. Keep the centered response as an explicit
-          // historical window and move the reader to its anchor.
-          setMessages(incoming);
-          setHistoricalWindow(true);
-          setJumpTarget(anchorMessageId);
         } else {
-          if (retained.detachedTail) setHistoricalWindow(true);
-          if (retained.trimmedOldest) trimmedOldestRef.current = true;
-          setJumpTarget(anchorMessageId);
           setMessages((previous) => {
-            return mergeAnchorWindow(
+            const result = mergeAnchorWindow(
               previous,
               incoming,
               anchorMessageId,
               MAX_RETAINED_MESSAGES,
               followingTailRef.current,
-            ).messages;
+            );
+            vaultAnchorMergeRef.current = {
+              anchorMessageId,
+              nextBeforeId: res.next_before_id ?? null,
+              result,
+            };
+            return result.messages;
           });
         }
-        setOlderCursor(
-          retained.trimmedOldest
-            ? retained.messages[0]?.id ?? null
-            : res.next_before_id ?? null,
-        );
       })
       .catch(() => {
-        // The footer remains visible if the around-fetch fails; a fresh mount
-        // or explicit history load can still recover the anchored turn.
+        // Re-arm transient failures, but delay the next cycle so an unavailable
+        // backend cannot turn one pending card into a tight request loop.
+        retryableFailure = true;
+        vaultAnchorFetchesRef.current.delete(fetchKey);
       })
       .finally(() => {
         if (sessionId !== sessionIdRef.current) return;
         vaultAnchorInFlightRef.current = false;
-        setVaultAnchorCycle((cycle) => cycle + 1);
+        if (retryableFailure) {
+          window.setTimeout(() => {
+            if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
+          }, 1000);
+        } else {
+          setVaultAnchorCycle((cycle) => cycle + 1);
+        }
       });
   }, [api, deepLinkMessageId, jumpTarget, loading, provisionPlacement.unanchored, session?.id, sessionId, vaultAnchorCycle]);
 
@@ -970,6 +967,19 @@ export const ChatPage: React.FC = () => {
     if (trimmedOldestRef.current) {
       trimmedOldestRef.current = false;
       setOlderCursor(messages[0]?.id ?? null);
+    }
+    const anchorMerge = vaultAnchorMergeRef.current;
+    if (anchorMerge) {
+      vaultAnchorMergeRef.current = null;
+      if (messages.some((message) => message.id === anchorMerge.anchorMessageId)) {
+        if (anchorMerge.result.replaced || anchorMerge.result.detachedTail) setHistoricalWindow(true);
+        setJumpTarget(anchorMerge.anchorMessageId);
+        setOlderCursor(
+          anchorMerge.result.trimmedOldest
+            ? messages[0]?.id ?? null
+            : anchorMerge.nextBeforeId,
+        );
+      }
     }
   }, [messages]);
 
