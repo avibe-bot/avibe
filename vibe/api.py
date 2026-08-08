@@ -48,6 +48,13 @@ from vibe.opencode_config import (
     set_jsonc_top_level_string_property,
 )
 from vibe.build_identity import get_build_identity
+from vibe.desktop_backends import (
+    DesktopBackendError,
+    desktop_backend_toolchain,
+    install_desktop_backend,
+    is_desktop_backend_path,
+    resolve_published_desktop_backend,
+)
 from vibe.desktop_runtime import is_private_desktop_runtime_path
 from vibe.upgrade import (
     build_upgrade_plan,
@@ -348,6 +355,14 @@ def resolve_cli_path(binary: str) -> str | None:
     if path:
         return path
 
+    # App-private backends are a final fallback. A system/user installation
+    # discovered above always wins when the config still uses the default
+    # backend name.
+    if binary in {"claude", "codex", "opencode"}:
+        managed_path = resolve_published_desktop_backend(binary)
+        if managed_path:
+            return managed_path
+
     # The stored cli_path was an absolute path that no longer exists. Most
     # common cause: an upstream installer moved the binary out from under us.
     # Real-world example: Claude Code's official ``install.sh`` puts the
@@ -377,6 +392,10 @@ def resolve_cli_path(binary: str) -> str | None:
                         candidate,
                     )
                     return str(candidate)
+            if basename in {"claude", "codex", "opencode"}:
+                managed_path = resolve_published_desktop_backend(basename)
+                if managed_path:
+                    return managed_path
     return None
 
 
@@ -6162,6 +6181,88 @@ def get_agent_install_job(job_id: str | None = None, *, backend: str | None = No
         return dict(job)
 
 
+def _configured_agent_cli_path(name: str) -> str:
+    try:
+        config = load_config()
+    except (FileNotFoundError, OSError, ValueError):
+        return name
+    backend = getattr(getattr(config, "agents", None), name, None)
+    configured = getattr(backend, "cli_path", "") if backend is not None else ""
+    return configured or name
+
+
+def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = False) -> str | None:
+    """Persist one backend path and return its previous configured value."""
+
+    try:
+        with CONFIG_LOCK:
+            config = load_config()
+            target = getattr(getattr(config, "agents", None), name, None)
+            if target is None:
+                raise ValueError(f"Agent backend config is unavailable: {name}")
+            previous = getattr(target, "cli_path", "") or name
+            if previous != installed_path:
+                target.cli_path = installed_path
+                config.save()
+                logger.info(
+                    "install_agent: updated V2Config cli_path for %s: %s -> %s",
+                    name,
+                    previous or "<unset>",
+                    installed_path,
+                )
+            return previous
+    except FileNotFoundError:
+        if required:
+            raise
+        logger.debug(
+            "install_agent: config is not initialized; skipping cli_path persistence for %s",
+            name,
+        )
+    except Exception:
+        if required:
+            raise
+        logger.warning("install_agent: failed to persist cli_path for %s", name, exc_info=True)
+    return None
+
+
+def _restore_agent_cli_path(name: str, installed_path: str, previous_path: str) -> None:
+    """Rollback a managed activation unless the user changed it concurrently."""
+
+    with CONFIG_LOCK:
+        config = load_config()
+        target = getattr(getattr(config, "agents", None), name, None)
+        if target is None or (getattr(target, "cli_path", "") or name) != installed_path:
+            return
+        target.cli_path = previous_path
+        config.save()
+
+
+def _run_desktop_backend_install(name: str, truncate_output) -> dict:
+    def _activate(installed_path: str):
+        previous_path = _persist_agent_cli_path(name, installed_path, required=True)
+        assert previous_path is not None
+        return lambda: _restore_agent_cli_path(name, installed_path, previous_path)
+
+    try:
+        result = install_desktop_backend(name, activate=_activate)
+    except DesktopBackendError as exc:
+        return {
+            "ok": False,
+            "code": exc.code,
+            "message": str(exc),
+            "output": truncate_output(exc.output) if exc.output else None,
+        }
+    _invalidate_version_cache(name)
+    return {
+        "ok": True,
+        "message": f"{name} installed successfully",
+        "path": result.path,
+        "version": result.version,
+        "managed_by": "desktop",
+        "output": truncate_output(result.output) if result.output else None,
+    }
+
+
 def install_agent(name: str) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
@@ -6211,9 +6312,14 @@ def install_agent(name: str) -> dict:
     # Upgrade branch: if the binary is already on disk, keep the install
     # source stable. Some CLIs own a reliable self-update command; Codex has
     # multiple install sources, so choose npm/brew/self-update by source.
-    existing_path = resolve_cli_path(name)
+    configured_path = _configured_agent_cli_path(name)
+    existing_path = resolve_cli_path(configured_path)
     if existing_path:
+        if is_desktop_backend_path(existing_path):
+            return _run_desktop_backend_install(name, _truncate_output)
         if name == "codex" and is_private_desktop_runtime_path(existing_path):
+            if desktop_backend_toolchain() is not None:
+                return _run_desktop_backend_install(name, _truncate_output)
             return {
                 "ok": False,
                 "code": "desktop_managed_backend",
@@ -6238,7 +6344,17 @@ def install_agent(name: str) -> dict:
         else:
             cmd = None
         if cmd is not None:
-            return _run_install_command(name, cmd, _truncate_output, mode="upgrade", env=command_env)
+            return _run_install_command(
+                name,
+                cmd,
+                _truncate_output,
+                mode="upgrade",
+                env=command_env,
+                resolve_from=configured_path,
+            )
+
+    if desktop_backend_toolchain() is not None:
+        return _run_desktop_backend_install(name, _truncate_output)
 
     command_env: dict[str, str] | None = None
 
@@ -6307,6 +6423,7 @@ def _run_install_command(
     *,
     mode: str = "install",
     env: dict[str, str] | None = None,
+    resolve_from: str | None = None,
 ) -> dict:
     """Shared subprocess + post-success bookkeeping for install / upgrade.
 
@@ -6340,7 +6457,7 @@ def _run_install_command(
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         output = truncate_output(output.strip())
         if result.returncode == 0:
-            installed_path = resolve_cli_path(name)
+            installed_path = resolve_cli_path(resolve_from or name)
             if installed_path:
                 logger.info("Agent %s %s succeeded at %s", name, mode, installed_path)
             else:
@@ -6360,34 +6477,7 @@ def _run_install_command(
             # as askill reuse this runner but do not have ``agents.<name>``
             # config entries, so they must not touch V2Config bookkeeping.
             if installed_path and is_agent_backend(name):
-                try:
-                    with CONFIG_LOCK:
-                        try:
-                            cfg = load_config()
-                        except FileNotFoundError:
-                            logger.debug(
-                                "install_agent: config is not initialized; skipping cli_path persistence for %s",
-                                name,
-                            )
-                        else:
-                            target = getattr(getattr(cfg, "agents", None), name, None)
-                            if target is not None:
-                                previous = getattr(target, "cli_path", "") or ""
-                                if previous != installed_path:
-                                    target.cli_path = installed_path
-                                    cfg.save()
-                                    logger.info(
-                                        "install_agent: updated V2Config cli_path for %s: %s -> %s",
-                                        name,
-                                        previous or "<unset>",
-                                        installed_path,
-                                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "install_agent: failed to persist cli_path for %s: %s",
-                        name,
-                        exc,
-                    )
+                _persist_agent_cli_path(name, installed_path)
 
             return {
                 "ok": True,
@@ -8414,16 +8504,20 @@ def get_backend_runtime(name: str) -> dict:
 
     resolved_path = resolve_cli_path(configured_path)
     installed = resolved_path is not None
-    managed_by = (
-        "desktop"
-        if name == "codex"
+    private_backend = resolved_path is not None and is_desktop_backend_path(resolved_path)
+    legacy_bundled_codex = (
+        name == "codex"
         and resolved_path is not None
         and is_private_desktop_runtime_path(resolved_path)
+    )
+    managed_by = (
+        "desktop"
+        if private_backend or legacy_bundled_codex
         else None
     )
 
     current_version = _cached_version(name, resolved_path) if installed else None
-    latest_version = None if managed_by == "desktop" else _cached_latest(name)
+    latest_version = None if legacy_bundled_codex else _cached_latest(name)
     has_update = _compare_versions(current_version, latest_version)
 
     if name == "opencode":

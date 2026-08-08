@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -1528,6 +1529,134 @@ def test_backend_runtime_skips_latest_probe_for_private_desktop_codex(monkeypatc
     assert result["latest_version"] is None
     assert result["has_update"] is False
     assert result["managed_by"] == "desktop"
+
+
+def test_install_agent_upgrades_exact_configured_external_path(monkeypatch, tmp_path):
+    external = tmp_path / "custom" / "claude"
+    external.parent.mkdir()
+    external.write_text("#!/bin/sh\n", encoding="utf-8")
+    external.chmod(0o755)
+    config = SimpleNamespace(
+        agents=SimpleNamespace(claude=SimpleNamespace(cli_path=str(external)))
+    )
+    resolved: list[str] = []
+    commands: list[list[str]] = []
+
+    def fake_resolve(value):
+        resolved.append(value)
+        return str(external) if value == str(external) else None
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "updated", "")
+
+    monkeypatch.setattr(api, "load_config", lambda: config)
+    monkeypatch.setattr(api, "resolve_cli_path", fake_resolve)
+    monkeypatch.setattr(api, "desktop_backend_toolchain", lambda: object())
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda _path: False)
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "Popen", _PopenFromRun)
+    monkeypatch.setattr(api, "_persist_agent_cli_path", lambda *_args, **_kwargs: str(external))
+    monkeypatch.setattr(
+        api,
+        "install_desktop_backend",
+        lambda *_args, **_kwargs: pytest.fail("valid external CLI must win"),
+    )
+
+    result = api.install_agent("claude")
+
+    assert result["ok"] is True
+    assert result["path"] == str(external)
+    assert commands == [[str(external), "update"]]
+    assert resolved == [str(external), str(external)]
+
+
+def test_install_agent_uses_private_desktop_installer_when_external_is_missing(monkeypatch, tmp_path):
+    installed = tmp_path / "backends" / "codex" / "releases" / "new" / "codex"
+
+    class Config:
+        def __init__(self):
+            self.agents = SimpleNamespace(codex=SimpleNamespace(cli_path="codex"))
+            self.saved = 0
+
+        def save(self):
+            self.saved += 1
+
+    config = Config()
+    invalidated: list[str] = []
+
+    def fake_install(name, *, activate):
+        assert name == "codex"
+        rollback = activate(str(installed))
+        assert callable(rollback)
+        return SimpleNamespace(path=str(installed), version="1.2.3", output="installed")
+
+    monkeypatch.setattr(api, "load_config", lambda: config)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda value: None)
+    monkeypatch.setattr(api, "desktop_backend_toolchain", lambda: object())
+    monkeypatch.setattr(api, "install_desktop_backend", fake_install)
+    monkeypatch.setattr(api, "_invalidate_version_cache", invalidated.append)
+    monkeypatch.setattr(
+        api.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("system installer must not run"),
+    )
+
+    result = api.install_agent("codex")
+
+    assert result["ok"] is True
+    assert result["managed_by"] == "desktop"
+    assert result["path"] == str(installed)
+    assert config.agents.codex.cli_path == str(installed)
+    assert config.saved == 1
+    assert invalidated == ["codex"]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_install_agent_updates_existing_private_backend(monkeypatch, tmp_path, backend):
+    existing = tmp_path / "backends" / backend / "releases" / "old" / backend
+    config = SimpleNamespace(
+        agents=SimpleNamespace(**{backend: SimpleNamespace(cli_path=str(existing))})
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(api, "load_config", lambda: config)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda value: str(existing))
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda path: path == str(existing))
+    monkeypatch.setattr(
+        api,
+        "_run_desktop_backend_install",
+        lambda name, _truncate: calls.append(name) or {"ok": True, "path": "managed"},
+    )
+
+    result = api.install_agent(backend)
+
+    assert result["ok"] is True
+    assert calls == [backend]
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_backend_runtime_checks_updates_for_private_backend(monkeypatch, tmp_path, backend):
+    managed = tmp_path / "backends" / backend / "releases" / "one" / backend
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            **{backend: SimpleNamespace(enabled=True, cli_path=str(managed))}
+        )
+    )
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _value: str(managed))
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda path: path == str(managed))
+    monkeypatch.setattr(api, "is_private_desktop_runtime_path", lambda _path: False)
+    monkeypatch.setattr(api, "_cached_version", lambda _name, _path: "1.0.0")
+    monkeypatch.setattr(api, "_cached_latest", lambda _name: "1.1.0")
+    monkeypatch.setattr(api, "_opencode_process_status", lambda: "stopped")
+    monkeypatch.setattr(api, "_codex_process_status", lambda _path: "stopped")
+
+    result = api.get_backend_runtime(backend)
+
+    assert result["managed_by"] == "desktop"
+    assert result["latest_version"] == "1.1.0"
+    assert result["has_update"] is True
 
 
 def test_install_agent_returns_resolved_path(monkeypatch):
