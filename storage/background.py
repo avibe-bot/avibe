@@ -881,6 +881,7 @@ _TERMINAL_STATUS_PRIORITY = {
 # The closed set of terminal run statuses. Shared so guarded writers and reconcile
 # paths cannot drift apart (this file previously spelled the set inline).
 TERMINAL_RUN_STATUSES = frozenset(_TERMINAL_STATUS_PRIORITY)
+DEFERRED_TERMINAL_METADATA_KEY = "deferred_terminal_metadata"
 
 
 def _parse_iso_instant(value: Any) -> Optional[datetime]:
@@ -1522,6 +1523,13 @@ def _owed_failure_notice_for_transition(
         # The escalation turn IS the user-visible report for this failure.
         return None
     reason = str(metadata.get("interrupt_reason") or "").strip() or None
+    turn_id = str(metadata.get("turn_id") or "").strip() or None
+    turn_notification = metadata.get("turn_failure_notification")
+    turn_notification = (
+        dict(turn_notification) if isinstance(turn_notification, dict) else {}
+    )
+    turn_failure_id = str(turn_notification.get("failure_id") or "").strip()
+    fallback_run_id = str(turn_notification.get("fallback_run_id") or "").strip()
     return {
         "state": NOTICE_PENDING,
         "attempts": 0,
@@ -1565,8 +1573,15 @@ def _owed_failure_notice_for_transition(
         "failure_id": (
             f"interrupt:{run_id}:{reason}"
             if reason in RUN_INTERRUPTION_REASONS
-            else run_id
+            else (turn_failure_id or run_id)
         ),
+        # A Turn is the user-visible failure owner. Every accepted Run keeps its
+        # own terminal audit row, while this shared identity and elected fallback
+        # owner prevent those rows from becoming duplicate messages.
+        "turn_id": turn_id,
+        "turn_notification_delivered": bool(turn_notification.get("delivered")),
+        "turn_notification_ack_evidence": turn_notification.get("ack_evidence"),
+        "turn_fallback_run_id": fallback_run_id or None,
         # Optional, and only ever a copy selector. The lane a notice belongs to is
         # decided from this value's membership in ``RUN_INTERRUPTION_REASONS``, not
         # from its presence.
@@ -4430,6 +4445,12 @@ class SQLiteBackgroundTaskStore:
                         source_kind=terminal_row["source_kind"],
                         parent_run_id=terminal_row["parent_run_id"],
                         row_metadata_json=terminal_row["metadata_json"],
+                        extra_metadata={
+                            key: value
+                            for key in ("turn_id", "turn_failure_notification")
+                            if provenance and (value := provenance.get(key)) is not None
+                        }
+                        or None,
                         now=now,
                     )
                     transition = conn.execute(
@@ -4664,9 +4685,10 @@ class SQLiteBackgroundTaskStore:
         terminal_status: str,
         error: Optional[str] = None,
         result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
-        """Remember a terminal intent and result while an Activity blocks it."""
+        """Remember a terminal intent and its evidence while an Activity blocks it."""
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -4694,13 +4716,25 @@ class SQLiteBackgroundTaskStore:
                 deferred_result_text is not None
                 and result_payload.get("deferred_terminal_result_text") != deferred_result_text
             )
-            if not status_changed and not error_changed and not result_text_changed:
+            deferred_metadata = dict(metadata) if isinstance(metadata, dict) else None
+            metadata_changed = bool(
+                deferred_metadata is not None
+                and result_payload.get(DEFERRED_TERMINAL_METADATA_KEY) != deferred_metadata
+            )
+            if (
+                not status_changed
+                and not error_changed
+                and not result_text_changed
+                and not metadata_changed
+            ):
                 return False
             result_payload["deferred_terminal_status"] = normalized
             if error_changed:
                 result_payload["deferred_terminal_error"] = error_text
             if result_text_changed:
                 result_payload["deferred_terminal_result_text"] = deferred_result_text
+            if metadata_changed:
+                result_payload[DEFERRED_TERMINAL_METADATA_KEY] = deferred_metadata
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
@@ -4755,6 +4789,9 @@ class SQLiteBackgroundTaskStore:
                 deferred_result_text = result_payload.pop(
                     "deferred_terminal_result_text", None
                 )
+                deferred_metadata = result_payload.pop(
+                    DEFERRED_TERMINAL_METADATA_KEY, None
+                )
                 requested_status = (
                     _stronger_terminal_status(deferred_status, terminal_status)
                     if terminal_status
@@ -4780,6 +4817,11 @@ class SQLiteBackgroundTaskStore:
                     source_kind=row["source_kind"],
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
+                    extra_metadata=(
+                        dict(deferred_metadata)
+                        if isinstance(deferred_metadata, dict)
+                        else None
+                    ),
                     now=now,
                 )
                 transition = conn.execute(
@@ -6834,11 +6876,11 @@ class SQLiteBackgroundTaskStore:
                 "watch runtimes",
                 lambda: self._watch_runtimes(conn, [row.get("id") for row in rows]),
             )
-        # Derived health for the whole page in one query. It goes here rather than in
-        # a per-surface payload builder because this is the only chokepoint the CLI,
-        # the list endpoint and the detail pane all pass through — and the Harness
-        # detail pane has no fetch of its own, it re-renders the row the list
-        # returned, so a field that is not on the row cannot reach it.
+        # Derived downstream execution health for the whole page in one query. It
+        # goes here rather than in a per-surface payload builder because this is the
+        # only chokepoint the CLI, list endpoint and detail pane all pass through.
+        # The detail pane has no fetch of its own, so a field absent here cannot
+        # reach it.
         health = _lookup(
             "definition health",
             lambda: self.definition_health_batch(
@@ -6873,9 +6915,44 @@ class SQLiteBackgroundTaskStore:
                 "consecutive_failures": 0,
                 "recent_failures": 0,
             }
-            row["health"] = row_health["health"]
-            row["consecutive_failures"] = row_health["consecutive_failures"]
-            row["recent_failures"] = row_health["recent_failures"]
+            if definition_type == "watch":
+                # A Watch owns observation, not the Agent Turn created from an
+                # observed event. Keep the waiter signal on the existing health
+                # fields and expose downstream Run verdicts on a separate axis.
+                row["processing_health"] = row_health["health"]
+                row["processing_consecutive_failures"] = row_health[
+                    "consecutive_failures"
+                ]
+                row["processing_recent_failures"] = row_health["recent_failures"]
+                retry_codes = row.get("retry_exit_codes")
+                retry_codes = retry_codes if isinstance(retry_codes, list) else []
+                exit_code = row.get("last_exit_code")
+                waiter_observed = bool(
+                    row.get("last_started_at")
+                    or row.get("last_finished_at")
+                    or exit_code is not None
+                    or str(row.get("last_error") or "").strip()
+                )
+                successful_exit_codes = {0, NO_EVENT_EXIT_CODE, *retry_codes}
+                waiter_failed = bool(
+                    (exit_code is not None and exit_code not in successful_exit_codes)
+                    or (
+                        str(row.get("last_error") or "").strip()
+                        and exit_code not in retry_codes
+                        and exit_code != NO_EVENT_EXIT_CODE
+                    )
+                )
+                row["health"] = (
+                    HEALTH_UNKNOWN
+                    if not waiter_observed
+                    else (HEALTH_FAILING if waiter_failed else HEALTH_HEALTHY)
+                )
+                row["consecutive_failures"] = 1 if waiter_failed else 0
+                row["recent_failures"] = 1 if waiter_failed else 0
+            else:
+                row["health"] = row_health["health"]
+                row["consecutive_failures"] = row_health["consecutive_failures"]
+                row["recent_failures"] = row_health["recent_failures"]
             state = row.get("lifecycle_state")
             row["lifecycle_detail"] = definition_lifecycle_detail(
                 lifecycle_state=state,

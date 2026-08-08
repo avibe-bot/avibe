@@ -91,6 +91,7 @@
     },
     "notice": {
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
+      "watchProcessingFailed": "[Avibe Harness] Watch「{name}」已检测到事件,但 Agent 处理失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
       "commandLine": "命令:{command}",
       "error": "错误:{error}",

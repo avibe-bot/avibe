@@ -28,6 +28,57 @@ def _request() -> AgentRequest:
 
 
 class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_harness_turn_notifies_live_and_carries_delivery_evidence_to_settlement(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform_specific.update(
+            {
+                "task_execution_id": "run-watch-1",
+                "task_trigger_kind": "watch",
+            }
+        )
+        emissions = []
+
+        async def emit(context, message_type, text, **kwargs):
+            emissions.append((message_type, text, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.delivered_id = "msg-1"
+                evidence.persisted_row = {"id": "msg-1"}
+                evidence.send_returned = True
+                return "msg-1"
+            return None
+
+        auth = AsyncMock(return_value=False)
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(maybe_emit_auth_recovery_message=auth),
+            emit_agent_message=emit,
+        )
+
+        handled_auth = await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "provider unavailable",
+            request=request,
+        )
+
+        self.assertFalse(handled_auth)
+        auth.assert_not_awaited()
+        self.assertEqual([message_type for message_type, _text, _kwargs in emissions], ["notify", "result"])
+        notify_output = emissions[0][2]["output"]
+        self.assertEqual(notify_output.idempotency_key, "backend-failure:turn:turn-1")
+        terminal_output = emissions[1][2]["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
     async def test_auth_recovery_owns_the_only_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(

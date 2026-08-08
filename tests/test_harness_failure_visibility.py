@@ -6658,17 +6658,7 @@ def test_a_suppressed_lane_reason_never_takes_the_interruption_identity_or_copy(
 def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
     tmp_path: Path,
 ) -> None:
-    """HFR-093 — recurring live failures enter the durable policy before delivery.
-
-    Two consecutive executions fail for the same definition. Each backend reports
-    its failure live, but that path owns settlement only; the owed-notice drain owns
-    visible delivery and can therefore send the first failure while suppressing the
-    rest of the streak. Delivering before settlement would produce two rows before
-    the drain had any opportunity to classify the streak.
-    """
-
-    from core.backend_failure import emit_backend_failure
-    from core.scheduled_tasks import parse_session_key
+    """HFR-093 — live delivery is primary and the durable drain remains a fallback."""
 
     _migrated_state_db()
     controller, _dispatcher, _touched = _live_turn_dispatcher()
@@ -6676,59 +6666,105 @@ def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-suppressed-dedup", deliver_key="slack::channel::C123")
     runs = []
-    for _index in range(2):
+    for index in range(2):
         run = requests.enqueue_task_run("task-suppressed-dedup")
         requests.claim(run.id)
-        sqlite.settle_run_terminal(
+        sqlite.record_run_output(
             run.id,
+            output_id="terminal",
+            text="",
             terminal_status="failed",
             error="backend failed",
+            provenance={
+                "turn_id": f"turn-{index}",
+                "turn_failure_notification": {
+                    "failure_id": f"turn:turn-{index}",
+                    "delivered": True,
+                    "ack_evidence": "receipt",
+                    "fallback_run_id": run.id,
+                },
+            },
         )
         assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
         runs.append(run)
 
     service = _drain_service(tmp_path, controller, sqlite, requests)
 
-    target = parse_session_key("slack::channel::C123")
-    for run in runs:
-        live_context = asyncio.run(
-            service._build_context(
-                target,
-                delivery_target=target,
-                execution_id=run.id,
-                task_id="task-suppressed-dedup",
-                trigger_kind="scheduled",
-            )
-        )
-        asyncio.run(
-            emit_backend_failure(
-                controller,
-                live_context,
-                "harness",
-                "backend failed",
-                display_text="the live notice",
-            )
-        )
-    live_rows = [
-        row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
-    ]
-    assert live_rows == [], (
-        "Harness live emitters settle only; visible delivery belongs to the durable "
-        f"notice policy: {live_rows}"
-    )
-
     asyncio.run(service._drain_failure_notices())
 
-    rows = [
-        row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
+    assert [sqlite.owed_failure_notice(run.id)["state"] for run in runs] == [
+        "skipped",
+        "skipped",
     ]
-    assert len(rows) == 1, (
-        "one recurring failure streak must produce one durable notification, got "
-        f"{[row['native_message_id'] for row in rows]}"
-    )
-    assert rows[0]["native_message_id"].endswith(f"backend-failure:{runs[0].id}")
-    assert sqlite.owed_failure_notice(runs[0].id)["state"] == "sent"
-    assert sqlite.owed_failure_notice(runs[1].id)["state"] == "skipped"
+    assert controller.im_client.sent == [], "the fallback drain repeated a live Turn notification"
+
+
+def _settle_linked_turn_failures(sqlite, runs, *, delivered: bool) -> None:
+    fallback_run_id = min(run.id for run in runs)
+    for run in runs:
+        sqlite.record_run_output(
+            run.id,
+            output_id="terminal",
+            text="",
+            terminal_status="failed",
+            error="stream disconnected",
+            provenance={
+                "turn_id": "turn-shared-failure",
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-shared-failure",
+                    "delivered": delivered,
+                    "ack_evidence": "receipt" if delivered else None,
+                    "fallback_run_id": fallback_run_id,
+                },
+            },
+        )
+
+
+def test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices(
+    tmp_path: Path,
+) -> None:
+    """One acknowledged backend error is enough, regardless of Run provenance."""
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-source-a", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-source-b", deliver_key="slack::channel::C123")
+    runs = [requests.enqueue_task_run(definition) for definition in ("watch-source-a", "watch-source-b")]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    _settle_linked_turn_failures(sqlite, runs, delivered=True)
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert controller.im_client.sent == []
+    assert {sqlite.owed_failure_notice(run.id)["state"] for run in runs} == {"skipped"}
+    assert {sqlite.get_run(run.id)["status"] for run in runs} == {"failed"}
+
+
+def test_hfr_438_missing_turn_notification_delivers_one_fallback(tmp_path: Path) -> None:
+    """A lost primary elects one Run fallback, not one fallback per definition."""
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "watch-source-a", deliver_key="slack::channel::C123")
+    _task(sqlite, "watch-source-b", deliver_key="slack::channel::C123")
+    runs = [requests.enqueue_task_run(definition) for definition in ("watch-source-a", "watch-source-b")]
+    for run in runs:
+        assert requests.claim(run.id) is not None
+    _settle_linked_turn_failures(sqlite, runs, delivered=False)
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(controller.im_client.sent) == 1
+    notices = {run.id: sqlite.owed_failure_notice(run.id) for run in runs}
+    assert notices[min(notices)]["state"] == "sent"
+    assert {notice["state"] for run_id, notice in notices.items() if run_id != min(notices)} == {
+        "skipped"
+    }
 
 
 def test_the_index_migration_and_the_query_use_the_same_expressions(tmp_path: Path) -> None:
@@ -7626,8 +7662,8 @@ def test_brief_task_payload_carries_last_error(capsys) -> None:
     assert entry["last_error"] == "unresolvable session binding"
 
 
-def test_a_watch_reports_health_on_the_same_terms_as_a_task(capsys) -> None:
-    """HFR-090 — a watch whose hook fails nightly is as invisible as a task.
+def test_a_watch_reports_processing_health_separately_from_waiter_health(capsys) -> None:
+    """HFR-090 — a failed hook stays visible without blaming the waiter.
 
     ``_enrich_definitions`` computes health for both definition types, so the only
     thing that decided whether it reached a surface was the projection allowlist.
@@ -7668,8 +7704,10 @@ def test_a_watch_reports_health_on_the_same_terms_as_a_task(capsys) -> None:
         store.close()
 
     entry = json.loads(capsys.readouterr().out)["definitions"][0]
-    assert entry["health"] == "failing"
-    assert entry["consecutive_failures"] == 1
+    assert entry["health"] == "unknown", "a never-run waiter has no success evidence"
+    assert entry["consecutive_failures"] == 0
+    assert entry["processing_health"] == "failing"
+    assert entry["processing_consecutive_failures"] == 1
 
 
 def test_storage_interruption_reasons_mirror_the_settlement_vocabulary() -> None:
@@ -10413,8 +10451,8 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     The four steps, asserted in the order the failure happens:
 
     (c) the terminal timestamps agree with each other and survive a fresh read;
-    (a) the row reads FINISHED, never paused, and its health says failing on both the
-        projection and the CLI payload a coding agent actually parses;
+    (a) the row reads FINISHED, never paused, its waiter stays healthy, and its event
+        processing says failing on both the projection and the CLI payload;
     (b) the run settled ``failed`` naming the delivery failure, the notice carries the
         structured class ``delivery_target_missing``, and the DEFINITION's
         ``last_error``/``last_exit_code`` still describe the healthy waiter — the
@@ -10522,15 +10560,22 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     assert not (projected["enabled"] is False and projected.get("retired_at") in (None, "")), (
         f"``enabled=0`` with no retirement marker is the ambiguous state: {projected}"
     )
-    assert projected["health"] == "failing", (
-        f"a watch whose only delivery failed is not healthy: {projected}"
+    assert projected["health"] == "healthy", (
+        f"the waiter exited zero, so downstream delivery cannot poison it: {projected}"
+    )
+    assert projected["processing_health"] == "failing", (
+        f"the failed follow-up must remain visible on its own axis: {projected}"
     )
     # The CLI payload too, not only the store projection: a coding agent driving this
     # runtime reads ``vibe watch show``, and #1060 was discovered by a human running
     # ``vibe watch list`` for an unrelated reason. The two must agree.
     assert cli.cmd_watch_show(watch.id) == 0
     shown = json.loads(capsys.readouterr().out)["definition"]
-    assert (shown["health"], shown["lifecycle_state"]) == ("failing", "finished"), (
+    assert (shown["health"], shown["processing_health"], shown["lifecycle_state"]) == (
+        "healthy",
+        "failing",
+        "finished",
+    ), (
         f"the CLI payload must carry the same verdict as the projection: {shown}"
     )
 
@@ -10603,8 +10648,11 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     assert i18n_t("harness.notice.class.deliveryTargetMissing", "en") in body, (
         f"and name the class, not only the raw error line: {body!r}"
     )
-    assert i18n_t("harness.notice.watchRetired", "en") in body, (
-        f"a retired watch's copy has to say it finished: {body!r}"
+    assert i18n_t("harness.notice.watchProcessingFailed", "en").split("{")[0] in body, (
+        f"the fallback must identify event processing rather than waiter failure: {body!r}"
+    )
+    assert i18n_t("harness.notice.watchRetired", "en") not in body, (
+        f"normal one-shot retirement is unrelated to the processing failure: {body!r}"
     )
     assert i18n_t("harness.notice.watchPaused", "en").split("{")[0].strip() not in body, (
         "and must NOT offer ``vibe watch resume`` for a watch that retired — that is "
@@ -10760,9 +10808,12 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert projected["lifecycle_state"] == "waiting", (
         f"the watch is still armed, so it is not finished: {projected}"
     )
-    assert projected["health"] == "failing", (
-        "…and still failing: a repeating delivery failure is exactly the history the "
-        f"health badge exists to report: {projected}"
+    assert projected["health"] == "healthy", (
+        f"retry exit 75 is a healthy waiter outcome, not a failure: {projected}"
+    )
+    assert projected["processing_health"] == "failing", (
+        "the repeating delivery failure belongs to processing history instead: "
+        f"{projected}"
     )
 
     # ONE canonical notice for the streak, keyed to the FIRST failed run.
@@ -11081,6 +11132,7 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
     service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
 
     retired_copy = i18n_t("harness.notice.watchRetired", language)
+    processing_copy = i18n_t("harness.notice.watchProcessingFailed", language).split("{")[0]
     # The command, not the whole sentence: that is the part a user could act on, and
     # the part that must not appear for a watch nobody paused.
     resume_command = "vibe watch resume"
@@ -11100,7 +11152,10 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
         )
 
     retired = _body("watch-retired", retired_at="2026-07-27T03:00:00+00:00", mode="once")
-    assert retired_copy in retired, f"a retired watch must say it finished: {retired!r}"
+    assert processing_copy in retired
+    assert retired_copy not in retired, (
+        f"normal one-shot retirement is unrelated to event processing failure: {retired!r}"
+    )
     assert resume_command not in retired, (
         "and must not offer to resume something that was never paused — the copy has to "
         f"agree with the FINISHED lifecycle state: {retired!r}"

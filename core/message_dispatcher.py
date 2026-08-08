@@ -1167,6 +1167,12 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
     ) -> None:
+        terminal_provenance = dict(provenance)
+        notification = terminal_provenance.get("turn_failure_notification")
+        if isinstance(notification, dict) and run_ids:
+            notification = dict(notification)
+            notification.setdefault("fallback_run_id", min(run_ids))
+            terminal_provenance["turn_failure_notification"] = notification
         for run_id in run_ids:
             get_run = getattr(store, "get_run", None)
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
@@ -1181,6 +1187,13 @@ class ConsolidatedMessageDispatcher:
                     }
                     if terminal_error is not None:
                         defer_kwargs["error"] = terminal_error
+                    deferred_metadata = {
+                        key: value
+                        for key in ("turn_id", "turn_failure_notification")
+                        if (value := terminal_provenance.get(key)) is not None
+                    }
+                    if deferred_metadata:
+                        defer_kwargs["metadata"] = deferred_metadata
                     defer_terminal(run_id, **defer_kwargs)
                 run_terminal_status = None
             record_output = getattr(store, "record_run_output", None)
@@ -1198,7 +1211,7 @@ class ConsolidatedMessageDispatcher:
                     "text": text,
                     "message_id": message_id,
                     "sequence": output_semantics.sequence,
-                    "provenance": provenance,
+                    "provenance": terminal_provenance,
                     "terminal_status": run_terminal_status,
                 }
                 if terminal_error is not None:

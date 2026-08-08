@@ -18,6 +18,7 @@ import type {
 import {
   DetailSession,
   HealthBadge,
+  ProcessingHealthBadge,
   RunDetail,
   RunTriggerChip,
   TaskDetail,
@@ -432,6 +433,32 @@ describe('HealthBadge', () => {
 
     expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
     expect(html).toContain('text-pink');
+  });
+});
+
+describe('ProcessingHealthBadge', () => {
+  it('names a failed Watch follow-up without reporting the waiter as failed', () => {
+    const row = watch({
+      health: 'healthy',
+      consecutive_failures: 0,
+      recent_failures: 0,
+      processing_health: 'failing',
+      processing_consecutive_failures: 2,
+      processing_recent_failures: 2,
+    });
+
+    expect(render(<HealthBadge row={row} />)).toBe('');
+    const html = render(<ProcessingHealthBadge row={row} />);
+    expect(html).toContain(`>${i18n.t('harness.processingHealth.failing')} 2<`);
+    expect(html).toContain('text-pink');
+  });
+
+  it('stays quiet when event processing is healthy', () => {
+    expect(render(<ProcessingHealthBadge row={watch({ processing_health: 'healthy' })} />)).toBe('');
+  });
+
+  it('stays quiet before an event has produced a downstream Run', () => {
+    expect(render(<ProcessingHealthBadge row={watch({ processing_health: 'unknown' })} />)).toBe('');
   });
 });
 

@@ -64,6 +64,7 @@ import {
   definitionActiveCount,
   definitionChipLabel,
   definitionHealth,
+  definitionProcessingHealth,
   definitionRowLine,
   definitionRowTitle,
   definitionStatusCount,
@@ -1051,6 +1052,26 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
   );
 };
 
+export const ProcessingHealthBadge: React.FC<{ row: HarnessWatch }> = ({ row }) => {
+  const { t } = useTranslation();
+  const health = definitionProcessingHealth(row);
+  if (health !== 'failing' && health !== 'degraded') return null;
+  const count =
+    health === 'failing' ? row.processing_consecutive_failures || 0 : row.processing_recent_failures || 0;
+  return (
+    <Badge
+      variant="secondary"
+      className={clsx(
+        'shrink-0 font-mono text-[9px] uppercase',
+        health === 'failing' ? 'text-pink' : 'text-amber',
+      )}
+    >
+      {t(`harness.processingHealth.${health}`)}
+      {count > 1 ? ` ${count}` : ''}
+    </Badge>
+  );
+};
+
 // What a task *does*, when that is not the default. A command task runs a
 // subprocess instead of prompting an Agent, and nothing else on the row says so:
 // the schedule chip, the state dot and the second line read identically for both
@@ -1135,6 +1156,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
               </Badge>
             )}
             <HealthBadge row={row} />
+            {kind === 'watch' && <ProcessingHealthBadge row={row as HarnessWatch} />}
           </div>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
             {line.alert && <AlertTriangle className={clsx('size-3 shrink-0', ALERT_CLASS[line.alert])} />}
@@ -1596,6 +1618,11 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
           <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
             {watch.last_error}
           </div>
+        </DetailField>
+      )}
+      {['failing', 'degraded'].includes(definitionProcessingHealth(watch) || '') && (
+        <DetailField label={t('harness.detail.eventProcessing')}>
+          <ProcessingHealthBadge row={watch} />
         </DetailField>
       )}
       <DetailField label={t('harness.detail.id')}>

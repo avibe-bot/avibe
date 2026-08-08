@@ -2821,6 +2821,7 @@ class TaskExecutionStore:
         terminal_status: str,
         error: Optional[str] = None,
         result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> bool:
         if self._sqlite is None:
             return False
@@ -2829,6 +2830,7 @@ class TaskExecutionStore:
             terminal_status=terminal_status,
             error=error,
             result_text=result_text,
+            metadata=metadata,
         )
 
     def update_callback_status(
@@ -3647,7 +3649,10 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             definition_id = str(
                 row.get("definition_id") or row.get("task_id") or ""
             )
-            if definition_id and not failure_notices.bypasses_suppression(notice):
+            turn_id = failure_notices.notice_turn_id(notice)
+            if turn_id:
+                partition = f"turn:{turn_id}"
+            elif definition_id and not failure_notices.bypasses_suppression(notice):
                 partition = f"definition:{definition_id}"
             else:
                 partition = f"run:{run_id}"
@@ -6637,6 +6642,8 @@ class ScheduledTaskService:
                 name=name,
                 reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
             )
+        elif is_watch:
+            headline = self._t("harness.notice.watchProcessingFailed", name=name)
         else:
             headline = self._t("harness.notice.failed", name=name)
         # COMMAND COPY, ORDINARY-FAILED LANE ONLY. A command definition's notice named
@@ -6731,7 +6738,8 @@ class ScheduledTaskService:
                     # history genuinely cannot prove which of the two happened, and
                     # ``definition_lifecycle_expression`` makes the same call.
                     if str(watch.get("retired_at") or "").strip():
-                        lines.append(self._t("harness.notice.watchRetired"))
+                        if failure_notices.is_interruption(notice):
+                            lines.append(self._t("harness.notice.watchRetired"))
                     else:
                         lines.append(self._t("harness.notice.watchPaused", id=definition_id))
                 # No re-run affordance, because there is no ``vibe watch run``: a watch
@@ -8692,6 +8700,19 @@ class ScheduledTaskService:
         output_provenance = (
             dict(output_provenance) if isinstance(output_provenance, Mapping) else {}
         )
+        notification = output_provenance.get("turn_failure_notification")
+        if isinstance(notification, Mapping) and execution_ids:
+            notification = dict(notification)
+            eligible_ids = sorted(
+                {
+                    str(execution_id or "").strip()
+                    for execution_id in execution_ids
+                    if str(execution_id or "").strip()
+                }
+            )
+            if eligible_ids:
+                notification.setdefault("fallback_run_id", eligible_ids[0])
+            output_provenance["turn_failure_notification"] = notification
         output_id = str(output_provenance.get("output_id") or "").strip()
         if not output_id and output_provenance.get("sequence") is not None:
             output_id = f"sequence:{output_provenance['sequence']}"
@@ -8710,6 +8731,16 @@ class ScheduledTaskService:
                 continue
             run_terminal_status = terminal_status
             if callable(has_blocker) and has_blocker(execution_id):
+                deferred_metadata = {
+                    key: value
+                    for key, value in {
+                        "turn_id": turn_id,
+                        "turn_failure_notification": output_provenance.get(
+                            "turn_failure_notification"
+                        ),
+                    }.items()
+                    if value is not None
+                }
                 if not store.defer_run_terminal(
                     execution_id,
                     terminal_status=terminal_status,
@@ -8717,6 +8748,7 @@ class ScheduledTaskService:
                     error=(
                         str(terminal_error) if terminal_error is not None else None
                     ),
+                    metadata=deferred_metadata or None,
                 ):
                     logger.warning(
                         "failed to defer late terminal settlement for Run=%s Turn=%s",

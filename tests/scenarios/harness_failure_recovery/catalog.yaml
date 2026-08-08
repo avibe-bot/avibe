@@ -1661,12 +1661,12 @@ scenarios:
     test: tests/test_harness_failure_visibility.py::test_a_notice_stamped_without_a_backoff_field_is_still_reachable
   # Rebase onto #1061's definition read projection.
   - id: HFR-090
-    name: a watch reports derived health on the same terms as a task
+    name: a watch reports processing health without poisoning waiter health
     status: covered
     kind: failure
     layer: contract
     backend: shared
-    test: tests/test_harness_failure_visibility.py::test_a_watch_reports_health_on_the_same_terms_as_a_task
+    test: tests/test_harness_failure_visibility.py::test_a_watch_reports_processing_health_separately_from_waiter_health
   - id: HFR-091
     name: the drain preserves an authoritative interruption identity
     status: covered
@@ -1715,16 +1715,9 @@ scenarios:
     kind: failure
     layer: contract
     backend: shared
-    # The HFR-091 × HFR-092 interaction, pinned where it bites the user. With the
-    # drain's stamped ``failure_id`` authoritative and the stamp keyed by presence, a
-    # ``no_terminal_result`` failure is stamped
-    # ``interrupt:{run}:no_terminal_result`` while the live path keys the same failure
-    # by the run id — so ``agent_message_exists`` cannot see the notification the live
-    # path already persisted and the user is told twice. Neither HFR-081 (identity
-    # equality, computed directly) nor HFR-091 (interruption identity survives) can
-    # see it: one never runs the drain, the other uses a reason that IS in the
-    # interruption set. Drives BOTH paths over one real failure and counts the durable
-    # ``messages`` rows.
+    # A live Turn owns its backend failure message. Its durable Run notice remains
+    # pending until the drain observes the Turn's delivery evidence, then records a
+    # skip without replaying the same error. Separate Turns remain separate failures.
     test: tests/test_harness_failure_visibility.py::test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason
   - id: HFR-094
     name: a failed watch notice renders watch commands
@@ -1944,14 +1937,10 @@ scenarios:
     # ``test_a_dispatch_failure_class_joins_the_per_fire_lane_and_not_the_interrupted_one`` --
     # because "the pin above is an equality between two sets that both grow, so it stays
     # green for a reason added correctly AND for one added to the wrong source vocabulary".
-    # RETIRED IS NOT PAUSED. ``_failure_notice_body`` rendered the resume affordance for
-    # every disabled watch, so a retired one read FINISHED in the lifecycle projection while
-    # its notice offered ``vibe watch resume`` -- "an action that would arm a watch nobody
-    # paused". Root cause is that ``enabled=0`` carries three meanings. FIX: the copy branches
-    # on the ``retired_at`` column -- "the same column the projection's ``ended`` predicate
-    # uses, so the copy and the badge cannot disagree" -- with a new parameterless
-    # ``harness.notice.watchRetired``. A legacy row with no marker keeps the resume copy,
-    # because "its history genuinely cannot prove which of the two happened".
+    # RETIRED IS NOT PAUSED. A processing-failure fallback for a normally retired Watch
+    # names event processing and omits both lifecycle copy and resume affordances: retirement
+    # did not cause the failure. A genuinely paused Watch still carries ``vibe watch resume``.
+    # Interruption notices may still explain retirement because that lifecycle is their subject.
     # THE FIELD CASE IS DRIVEN END TO END, which no previous test did: every existing layer
     # test stubbed one of the four steps. ``test_a_watch_that_outlives_its_delivery_target_dies_visibly``
     # asserts the maintainer note's five outcomes in labelled blocks -- (a) the terminal row
@@ -1964,8 +1953,9 @@ scenarios:
     # neither duplicate nor erase it. ``test_a_forever_watch_repeating_the_field_failure_notifies_once``
     # takes the repetition half with a real waiter subprocess exiting 75/0/0/75 "so the LAST
     # recorded cycle is the sentinel -- the state #1060's row was actually read in", and pins
-    # that the sentinel never retires the watch, the projection reads ``waiting`` while health
-    # reads ``failing``, and the streak still collapses to one notice.
+    # that the sentinel never retires the watch, the projection reads ``waiting`` with
+    # healthy waiter state while ``processing_health`` reads ``failing``, and the
+    # downstream streak still collapses to one notice.
     # WHAT WAS FOUND ALREADY COHERENT IS RECORDED TOO, "because the plan predicted
     # otherwise": ``mark_cycle_result`` already writes ``retired_at``,
     # ``last_finished_at`` and ``last_event_at`` in one guarded stamp, so (c) and half of (a)
@@ -3890,6 +3880,44 @@ scenarios:
     # Once the receiver has emitted Assistant text in the current generation,
     # its ResultMessage is the real continuation and must settle the pending Turn.
     test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
+  - id: HFR-436
+    name: Watch waiter health is independent from downstream event processing
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    # A zero-exit waiter remains healthy even when the Agent Run created from its
+    # event fails. The downstream verdict is exposed as processing_health.
+    test: tests/test_harness_health_projection.py::test_watch_health_separates_waiter_from_event_processing
+  - id: HFR-437
+    name: one visible Turn failure suppresses every linked Run fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The backend failure notification is the Turn's primary user-visible error.
+    # All Runs accepted by that Turn retain failed audit state without repeating it.
+    test: tests/test_harness_failure_visibility.py::test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices
+  - id: HFR-438
+    name: one linked Run reports a missing Turn failure notification
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # If primary delivery is not acknowledged, Turn identity elects one fallback
+    # across definitions and every other linked Run records the shared outcome.
+    test: tests/test_harness_failure_visibility.py::test_hfr_438_missing_turn_notification_delivers_one_fallback
+  - id: HFR-439
+    name: Turn failure notification evidence reaches every linked Run settlement
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Terminal settlement copies the Turn notification identity and delivery proof
+    # into each owed notice atomically with the failed Run transition. If an Activity
+    # still owns the Run, the same evidence is first committed with its deferred
+    # terminal intent and survives into the eventual transition.
+    test: tests/test_scheduled_tasks.py::test_hfr_439_turn_failure_metadata_reaches_every_linked_run
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
@@ -3897,3 +3925,4 @@ plan: docs/plans/harness-session-failure-recovery.md
 plans:
   - docs/plans/harness-session-failure-recovery.md
   - docs/plans/agent-run-zombie-settlement.md
+  - docs/plans/harness-watch-run-failure-boundary.md
