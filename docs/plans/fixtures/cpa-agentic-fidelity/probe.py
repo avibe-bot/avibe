@@ -349,6 +349,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         last_start = -1
         message_stop = None
         message_started = False
+        message_delta_seen = False
         for index, item in enumerate(events):
             if item.get("kind") == "done":
                 return False
@@ -365,7 +366,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             elif event_type == "error":
                 return False
             elif event_type == "content_block_start":
-                if not message_started:
+                if not message_started or message_delta_seen:
                     return False
                 block_index = _stream_index(event.get("index"))
                 if block_index is None:
@@ -375,12 +376,16 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 open_blocks.add(block_index)
                 last_start = block_index
             elif event_type == "content_block_delta":
+                if message_delta_seen:
+                    return False
                 block_index = _stream_index(event.get("index"))
                 if block_index is None:
                     return False
                 if block_index not in open_blocks:
                     return False
             elif event_type == "content_block_stop":
+                if message_delta_seen:
+                    return False
                 block_index = _stream_index(event.get("index"))
                 if block_index is None:
                     return False
@@ -393,8 +398,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     return False
                 message_stop = index
             elif event_type == "message_delta":
-                if not message_started or open_blocks:
+                if not message_started or open_blocks or message_delta_seen:
                     return False
+                message_delta_seen = True
         return message_started and message_stop is not None and message_stop == len(events) - 1
     if protocol == "responses":
         added: set[str] = set()
@@ -558,14 +564,19 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
             invalid = [0]
             buffer = bytearray()
             previous_was_cr = False
+            first_line = True
 
             def consume_line(raw_line: bytes) -> bool:
-                nonlocal event_name
+                nonlocal event_name, first_line
                 try:
                     line = raw_line.decode("utf-8").rstrip("\r\n")
                 except UnicodeDecodeError:
                     invalid[0] += 1
                     return False
+                if first_line:
+                    first_line = False
+                    if line.startswith("\ufeff"):
+                        line = line[1:]
                 if not line:
                     flushed = _flush_sse(data_lines, event_name, events, invalid)
                     event_name = None
@@ -838,9 +849,19 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                 reasoning = True
                 reasoning_parts.extend(item_parts)
         elif item_type == "message":
-            for part in item.get("content", []):
+            if item.get("role") != "assistant":
+                errors.append("assistant_role_invalid")
+            content = item.get("content")
+            if not isinstance(content, list):
+                errors.append("message_content_invalid")
+                continue
+            for part in content:
                 if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
-                    text_parts.append(str(part.get("text", "")))
+                    text = part.get("text", "")
+                    if not isinstance(text, str):
+                        errors.append("message_text_invalid")
+                    else:
+                        text_parts.append(text)
     status = document.get("status") if isinstance(document, dict) else None
     turn = Turn("responses", calls, "".join(text_parts), reasoning, status, output, terminal if terminal is not None else status in {"completed", "incomplete"}, event_count, invalid_event_count, errors)
     turn.reasoning_text = "".join(reasoning_parts)
@@ -864,7 +885,7 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
             projected.update({"call_id": item.get("call_id"), "name": item.get("name"), "arguments": arguments})
         elif item_type == "message":
             content = item.get("content")
-            if not isinstance(content, list):
+            if item.get("role") != "assistant" or not isinstance(content, list):
                 return None
             projected["content"] = [
                 {"type": part.get("type"), "text": part.get("text")}
@@ -891,6 +912,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
     text_parts: list[str] = []
     reasoning = False
     reasoning_parts: list[str] = []
+    reasoning_by_item: dict[str, str] = {}
     status: str | None = None
     args_by_item: dict[str, str] = {}
     argument_fragment_items: set[str] = set()
@@ -912,6 +934,10 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 continue
             key = str(raw.get("id", event.get("output_index", len(output))))
             output[key] = raw
+            if raw.get("type") == "message" and raw.get("role") != "assistant":
+                errors.append("assistant_role_invalid")
+            if raw.get("type") == "reasoning":
+                reasoning_by_item[key] = _reasoning_text(raw.get("summary")) + _reasoning_text(raw.get("content"))
             if raw.get("type") == "reasoning" and _reasoning_item_has_signal(raw):
                 reasoning = True
         elif event_type == "response.output_item.done":
@@ -930,7 +956,13 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     done_arguments, done_error = _parse_arguments(raw["arguments"])
                     if delta_error or done_error or delta_arguments != done_arguments:
                         errors.append("stream_item_snapshot_mismatch")
+                if raw.get("type") == "reasoning" and key in reasoning_by_item:
+                    snapshot_reasoning = _reasoning_text(raw.get("summary")) + _reasoning_text(raw.get("content"))
+                    if snapshot_reasoning != reasoning_by_item[key]:
+                        errors.append("stream_reasoning_snapshot_mismatch")
                 output[key] = copy.deepcopy(raw)
+                if raw.get("type") == "message" and raw.get("role") != "assistant":
+                    errors.append("assistant_role_invalid")
                 if raw.get("type") == "reasoning" and _reasoning_item_has_signal(raw):
                     reasoning = True
                 elif raw.get("type") == "message":
@@ -978,6 +1010,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 if delta:
                     reasoning = True
                     reasoning_parts.append(delta)
+                    reasoning_by_item[key] = reasoning_by_item.get(key, "") + delta
             else:
                 delta = event.get("delta")
                 if not isinstance(delta, str):
@@ -1015,6 +1048,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 errors.append("terminal_output_mismatch")
         elif not items:
             items = copy.deepcopy(terminal_output)
+            for item in terminal_output:
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    errors.append("stream_arguments_missing")
             reasoning = reasoning or any(
                 isinstance(item, dict) and item.get("type") == "reasoning" and _reasoning_item_has_signal(item)
                 for item in terminal_output
@@ -1064,6 +1100,9 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
             errors.append(error)
         calls.append(ToolCall(_required_identifier(raw.get("id"), errors), str(function.get("name", "")), arguments))
     content = message.get("content", "") if isinstance(message, dict) else ""
+    if content is not None and not isinstance(content, str):
+        errors.append("message_content_invalid")
+        content = ""
     reasoning_content = message.get("reasoning_content", "") if isinstance(message, dict) else ""
     if "reasoning_content" in message and (not isinstance(reasoning_content, str) or not reasoning_content):
         errors.append("reasoning_content_invalid")

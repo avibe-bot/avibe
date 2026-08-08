@@ -458,7 +458,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_sse_accepts_cr_only_line_endings(self) -> None:
         payload = (
-            b'event: message_start\rdata: {"type":"message_start"}\r\r'
+            b'\xef\xbb\xbfevent: message_start\rdata: {"type":"message_start"}\r\r'
             b'event: message_stop\rdata: {"type":"message_stop"}\r\r'
         )
 
@@ -526,6 +526,21 @@ class ProbeParserTests(unittest.TestCase):
             self.assertFalse(turn.reasoning_present)
             self.assertIn("reasoning_content_invalid", turn.parse_errors)
 
+    def test_chat_message_content_requires_string_or_null(self) -> None:
+        for value in ({"text": "CPA_SYSTEM_MARKER_731"}, ["WEATHER_OK"]):
+            turn = probe._parse_chat_document(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": value},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            )
+            self.assertIn("message_content_invalid", turn.parse_errors)
+
     def test_missing_tool_ids_are_rejected_before_string_conversion(self) -> None:
         anthropic = probe._parse_anthropic_document(
             {"content": [{"type": "tool_use", "id": None, "name": "lookup_weather", "input": {"city": "Shanghai"}}], "stop_reason": "tool_use"}
@@ -539,6 +554,16 @@ class ProbeParserTests(unittest.TestCase):
         for turn in (anthropic, responses, chat):
             self.assertIn("tool_call_id_invalid", turn.parse_errors)
             self.assertFalse(probe._validate_first(turn, ("lookup_weather",), stream=False)["checks"]["parsed"])
+
+    def test_responses_message_items_require_assistant_list_content(self) -> None:
+        invalid_content = probe._parse_responses_document(
+            {"output": [{"type": "message", "role": "assistant", "content": None}], "status": "completed"}
+        )
+        invalid_role = probe._parse_responses_document(
+            {"output": [{"type": "message", "role": "user", "content": []}], "status": "completed"}
+        )
+        self.assertIn("message_content_invalid", invalid_content.parse_errors)
+        self.assertIn("assistant_role_invalid", invalid_role.parse_errors)
 
     def test_malformed_stream_indexes_fail_without_parser_exceptions(self) -> None:
         anthropic_events = [
@@ -678,6 +703,15 @@ class ProbeParserTests(unittest.TestCase):
         ]
         self.assertFalse(probe._stream_order_ok("anthropic", events))
 
+    def test_anthropic_stream_rejects_content_after_message_delta(self) -> None:
+        events = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start"}},
+            {"kind": "event", "sequence": 1, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}},
+            {"kind": "event", "sequence": 2, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}},
+            {"kind": "event", "sequence": 3, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertFalse(probe._stream_order_ok("anthropic", events))
+
     def test_responses_failure_event_invalidates_stream(self) -> None:
         events = [
             {"kind": "event", "sequence": 0, "type": "response.created", "event": {"type": "response.created", "response": {}}},
@@ -706,6 +740,15 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertTrue(turn.reasoning_present)
         self.assertEqual(turn.reasoning_text, "summary")
+
+    def test_responses_stream_compares_reasoning_snapshot_to_delta(self) -> None:
+        events = [
+            {"kind": "event", "type": "response.output_item.added", "event": {"type": "response.output_item.added", "item": {"id": "rs_1", "type": "reasoning"}}},
+            {"kind": "event", "type": "response.reasoning_summary_text.delta", "event": {"type": "response.reasoning_summary_text.delta", "item_id": "rs_1", "delta": "delta"}},
+            {"kind": "event", "type": "response.output_item.done", "event": {"type": "response.output_item.done", "item": {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "snapshot"}]} }},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("stream_reasoning_snapshot_mismatch", turn.parse_errors)
 
     def test_responses_stream_matches_terminal_output_snapshot(self) -> None:
         events = [
@@ -748,6 +791,14 @@ class ProbeParserTests(unittest.TestCase):
         ]
         self.assertFalse(probe._stream_order_ok("responses", missing_opening))
         self.assertFalse(probe._stream_order_ok("responses", missing_terminal_response))
+
+    def test_responses_stream_rejects_terminal_only_function_calls(self) -> None:
+        events = [
+            {"kind": "event", "type": "response.created", "event": {"type": "response.created", "response": {}}},
+            {"kind": "event", "type": "response.completed", "event": {"type": "response.completed", "response": {"status": "completed", "output": [{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup_weather", "arguments": '{"city":"Shanghai"}' }]}}},
+        ]
+        turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0))
+        self.assertIn("stream_arguments_missing", turn.parse_errors)
 
     def test_anthropic_reasoning_blocks_require_payload(self) -> None:
         thinking = probe._parse_anthropic_document(
