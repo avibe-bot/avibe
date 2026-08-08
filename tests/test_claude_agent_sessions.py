@@ -1213,6 +1213,102 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             request=pending_request,
         )
 
+    async def test_silent_presteer_result_settles_activity_without_a_message_id(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock(return_value=None)
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        composite_key = "session-silent-presteer-activity:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        activity = SessionActivity(
+            id="activity-primary",
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="session-silent-presteer-activity",
+            kind="task",
+            status="completed",
+            turn_id="T1",
+            run_id="run-primary",
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            output_activities=[activity],
+            output=activity_completion_output(
+                activity,
+                detached=False,
+                completes_turn=True,
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._turns_with_foreground_tools.add(composite_key)
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "tool-only primary",
+                            "duration_ms": 1,
+                        },
+                    )()
+                    yield UserMessage("steered prompt")
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "steered result",
+                            "duration_ms": 2,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-silent-presteer-activity",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        primary_call = controller.emit_agent_message.await_args_list[0]
+        self.assertEqual(primary_call.args[1], "output")
+        self.assertEqual(
+            primary_call.args[2],
+            "<silent>Claude turn completed without assistant text.</silent>",
+        )
+        self.assertEqual(pending_request.output_activities, [])
+        self.assertNotIn(composite_key, agent._turns_with_foreground_tools)
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered result",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+
     async def test_user_echo_allows_one_result_to_own_primary_and_steer(self):
         """HFR-460: Claude may merge a steer into the primary Result."""
 

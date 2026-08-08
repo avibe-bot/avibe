@@ -953,10 +953,14 @@ class ClaudeAgent(BaseAgent):
                 return "\n".join(texts)
         return None
 
-    def _observe_native_user_input(self, composite_key: str, message) -> bool:
+    def _observe_native_user_input(
+        self,
+        composite_key: str,
+        message,
+    ) -> _ClaudeInputReceipt | None:
         text = self._native_user_input_text(message)
         if text is None:
-            return False
+            return None
         receipt_map = self._native_input_receipt_map()
         receipts = receipt_map.get(composite_key) or []
         for index, receipt in enumerate(receipts):
@@ -970,8 +974,8 @@ class ClaudeAgent(BaseAgent):
                 receipt.kind,
                 composite_key,
             )
-            return True
-        return False
+            return receipt
+        return None
 
     def _pending_steering_input_state(self, composite_key: str) -> str | None:
         for receipt in self._native_input_receipt_map().get(composite_key) or []:
@@ -1442,7 +1446,15 @@ class ClaudeAgent(BaseAgent):
                         terminal_steering_generation = None
                     if message_type == "user":
                         async with self._steering_lock(composite_key):
-                            self._observe_native_user_input(composite_key, message)
+                            receipt = self._observe_native_user_input(
+                                composite_key,
+                                message,
+                            )
+                            if receipt is not None and receipt.kind == "steer":
+                                await self._emit_buffered_primary_phase(
+                                    context,
+                                    composite_key,
+                                )
                         continue
                     formatter = self._get_formatter(context)
                     is_model_refusal_fallback = self._is_model_refusal_fallback_message(message)
@@ -1803,37 +1815,10 @@ class ClaudeAgent(BaseAgent):
                                 self._turns_with_foreground_tools.discard(composite_key)
                                 continue
                             if not settling_ambiguous_primary:
-                                buffered_primary = self._ambiguous_primary_results.get(
-                                    composite_key
+                                await self._emit_buffered_primary_phase(
+                                    context,
+                                    composite_key,
                                 )
-                                if buffered_primary is not None:
-                                    # A later Result proves the earlier buffered
-                                    # frame was pre-steer. Emit it before either
-                                    # retaining or settling the current frame.
-                                    buffered_text = self._select_buffered_terminal_text(
-                                        composite_key,
-                                        buffered_primary,
-                                    )
-                                    pending = self._pending_requests.get(
-                                        composite_key
-                                    ) or []
-                                    buffered_request = pending[0] if pending else None
-                                    if buffered_text or self._request_activities(
-                                        buffered_request
-                                    ):
-                                        self._adopt_pending_turn_token(
-                                            context,
-                                            buffered_request,
-                                        )
-                                        await self._emit_primary_phase_output(
-                                            context,
-                                            buffered_request,
-                                            buffered_text,
-                                        )
-                                    self._ambiguous_primary_results.pop(
-                                        composite_key,
-                                        None,
-                                    )
                             if (
                                 not settling_ambiguous_primary
                                 and self._pending_steering_input_state(composite_key)
@@ -2927,19 +2912,48 @@ class ClaudeAgent(BaseAgent):
                 records_run_output=False,
             )
         )
+        emitted_text = text or (
+            str(activity.metadata.get("summary") or "") if activity else ""
+        )
         message_id = await self.controller.emit_agent_message(
             context,
             "output",
-            text or (str(activity.metadata.get("summary") or "") if activity else ""),
+            emitted_text,
             parse_mode="markdown",
             output=output,
         )
         if activity is None:
             return
-        self._require_activity_delivery(activity, message_id)
+        if strip_silent_blocks(emitted_text).strip():
+            self._require_activity_delivery(activity, message_id)
         self._clear_request_activities(request)
         if request is not None:
             request.output = terminal_turn_output()
+
+    async def _emit_buffered_primary_phase(
+        self,
+        context: MessageContext,
+        composite_key: str,
+    ) -> bool:
+        """Emit and retire a buffered Result once later input/output proves it primary."""
+
+        buffered = self._ambiguous_primary_results.pop(composite_key, None)
+        if buffered is None:
+            return False
+        buffered_text = self._select_buffered_terminal_text(
+            composite_key,
+            buffered,
+        )
+        pending = self._pending_requests.get(composite_key) or []
+        buffered_request = pending[0] if pending else None
+        if buffered_text or self._request_activities(buffered_request):
+            self._adopt_pending_turn_token(context, buffered_request)
+            await self._emit_primary_phase_output(
+                context,
+                buffered_request,
+                buffered_text,
+            )
+        return True
 
     def _select_buffered_terminal_text(self, composite_key: str, buffered) -> str:
         """Render a buffered pre-steer result without using newer assistant text."""

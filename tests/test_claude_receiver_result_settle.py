@@ -603,6 +603,51 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent.claude_sessions)
         self.assertNotIn(composite_key, agent.receiver_tasks)
 
+    async def test_ambiguous_steer_echo_then_eof_rejects_buffered_primary_as_terminal(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        composite_key = "session-ambiguous-consumed:/tmp/work"
+        primary_request = SimpleNamespace(context=context)
+        agent._pending_requests[composite_key] = [primary_request]
+        agent.emit_result_message = AsyncMock(return_value=None)
+        receipt = agent._register_native_input(
+            composite_key,
+            "ambiguous input",
+            kind="steer",
+        )
+        receipt.state = "unknown"
+        agent._advance_steering_generation(composite_key)
+
+        class _ConsumedClient:
+            def receive_messages(self):
+                async def _iterate():
+                    primary = _ResultMessage()
+                    primary.result = "primary result"
+                    yield primary
+                    yield UserMessage("ambiguous input")
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _ConsumedClient(),
+            "session-ambiguous-consumed",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "output",
+            "primary result",
+            parse_mode="markdown",
+            output=ANY,
+        )
+        agent.emit_result_message.assert_not_awaited()
+        agent._handle_receiver_eof.assert_awaited_once_with(composite_key, context)
+        self.assertNotIn(composite_key, agent._ambiguous_primary_results)
+
     async def test_failed_ambiguous_half_close_preserves_work_until_later_result(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
