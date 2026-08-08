@@ -2687,6 +2687,111 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("stream_thinking_opening_snapshot_invalid", turn.parse_errors)
         self.assertIn("stream_signature_opening_snapshot_invalid", turn.parse_errors)
+        for field in ("thinking", "signature"):
+            missing = copy.deepcopy(valid)
+            missing[1]["event"]["content_block"].pop(field)
+            self.assertFalse(probe._stream_order_ok("anthropic", missing))
+            missing_turn = probe._parse_anthropic_stream(
+                probe.TransportResult(200, None, missing, False, 0, False)
+            )
+            self.assertIn(f"stream_{field}_snapshot_missing", missing_turn.parse_errors)
+
+    def test_anthropic_stream_requires_split_argument_fragments(self) -> None:
+        valid = [
+            {
+                "kind": "event",
+                "sequence": 0,
+                "type": "message_start",
+                "event": {
+                    "type": "message_start",
+                    "message": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                    },
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": "content_block_start",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup_weather",
+                        "input": {},
+                    },
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 2,
+                "type": "content_block_delta",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"city":'},
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 3,
+                "type": "content_block_delta",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": '"Shanghai"}',
+                    },
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 4,
+                "type": "content_block_stop",
+                "event": {"type": "content_block_stop", "index": 0},
+            },
+            {
+                "kind": "event",
+                "sequence": 5,
+                "type": "message_delta",
+                "event": {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 6,
+                "type": "message_stop",
+                "event": {"type": "message_stop"},
+            },
+        ]
+        self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        turn = probe._parse_anthropic_stream(
+            probe.TransportResult(200, None, valid, True, 0, True)
+        )
+        self.assertNotIn("stream_arguments_not_fragmented", turn.parse_errors)
+        self.assertEqual(turn.tool_calls[0].arguments, {"city": "Shanghai"})
+
+        single_fragment = copy.deepcopy(valid)
+        single_fragment[2]["event"]["delta"]["partial_json"] = (
+            '{"city":"Shanghai"}'
+        )
+        single_fragment.pop(3)
+        for sequence, item in enumerate(single_fragment):
+            item["sequence"] = sequence
+        self.assertFalse(probe._stream_order_ok("anthropic", single_fragment))
+        single_turn = probe._parse_anthropic_stream(
+            probe.TransportResult(200, None, single_fragment, True, 0, False)
+        )
+        self.assertIn("stream_arguments_not_fragmented", single_turn.parse_errors)
 
     def test_anthropic_thinking_rejects_deltas_after_signature(self) -> None:
         events = [

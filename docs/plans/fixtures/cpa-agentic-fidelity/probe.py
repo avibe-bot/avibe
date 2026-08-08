@@ -446,6 +446,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         open_blocks: set[int] = set()
         closed_blocks: set[int] = set()
         signed_blocks: set[int] = set()
+        tool_blocks: set[int] = set()
+        argument_fragment_counts: dict[int, int] = {}
         last_start = -1
         message_stop = None
         message_started = False
@@ -490,12 +492,19 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if block_index != len(open_blocks) + len(closed_blocks) or block_index in open_blocks or block_index in closed_blocks:
                     return False
                 block = event.get("content_block")
-                if isinstance(block, dict) and block.get("type") == "thinking" and any(
-                    block.get(field, "") != "" for field in ("thinking", "signature")
-                ):
-                    return False
-                if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "") != "":
-                    return False
+                if isinstance(block, dict):
+                    block_type = block.get("type")
+                    if block_type == "thinking" and any(
+                        field not in block
+                        or not isinstance(block[field], str)
+                        or block[field] != ""
+                        for field in ("thinking", "signature")
+                    ):
+                        return False
+                    if block_type == "text" and block.get("text", "") != "":
+                        return False
+                    if block_type == "tool_use":
+                        tool_blocks.add(block_index)
                 open_blocks.add(block_index)
                 last_start = block_index
             elif event_type == "content_block_delta":
@@ -509,8 +518,15 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if block_index in signed_blocks:
                     return False
                 delta = event.get("delta")
-                if isinstance(delta, dict) and delta.get("type") == "signature_delta":
-                    signed_blocks.add(block_index)
+                if isinstance(delta, dict):
+                    if delta.get("type") == "signature_delta":
+                        signed_blocks.add(block_index)
+                    elif delta.get("type") == "input_json_delta":
+                        fragment = delta.get("partial_json")
+                        if block_index in tool_blocks and isinstance(fragment, str) and fragment:
+                            argument_fragment_counts[block_index] = (
+                                argument_fragment_counts.get(block_index, 0) + 1
+                            )
             elif event_type == "content_block_stop":
                 if message_delta_seen:
                     return False
@@ -547,6 +563,10 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             and message_delta_seen
             and message_stop is not None
             and message_stop == len(events) - 1
+            and all(
+                argument_fragment_counts.get(block_index, 0) >= 2
+                for block_index in tool_blocks
+            )
         )
     if protocol == "responses":
         added: set[str] = set()
@@ -1315,6 +1335,7 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
 def _parse_anthropic_stream(result: TransportResult) -> Turn:
     blocks: dict[int, dict[str, Any]] = {}
     signed_blocks: set[int] = set()
+    argument_fragment_counts: dict[int, int] = {}
     stop_reason: str | None = None
     stop_sequence: str | None = None
     errors: list[str] = []
@@ -1358,7 +1379,11 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 block["text"] = ""
             elif block.get("type") == "thinking":
                 for field in ("thinking", "signature"):
-                    value = block.get(field, "")
+                    if field not in block:
+                        errors.append(f"stream_{field}_snapshot_missing")
+                        value = ""
+                    else:
+                        value = block[field]
                     if not isinstance(value, str):
                         errors.append(f"stream_{field}_snapshot_invalid")
                     elif value:
@@ -1381,6 +1406,10 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 if block.get("type") != "tool_use" or not isinstance(fragment, str):
                     errors.append("stream_delta_block_type_mismatch")
                 else:
+                    if fragment:
+                        argument_fragment_counts[index] = (
+                            argument_fragment_counts.get(index, 0) + 1
+                        )
                     block["_arguments"] = block.get("_arguments", "") + fragment
             elif delta_type == "text_delta":
                 text = delta.get("text")
@@ -1449,6 +1478,11 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     for index in sorted(blocks):
         block = blocks[index]
         if "_arguments" in block:
+            fragment_count = argument_fragment_counts.get(index, 0)
+            if fragment_count == 0:
+                errors.append("stream_arguments_missing")
+            elif fragment_count < 2:
+                errors.append("stream_arguments_not_fragmented")
             arguments, error = _parse_arguments(block.pop("_arguments"))
             block["input"] = arguments
             if error:
