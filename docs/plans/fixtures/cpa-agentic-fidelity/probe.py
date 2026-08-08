@@ -62,6 +62,17 @@ RESPONSES_STREAM_EVENT_TYPES = {
     "response.reasoning_summary_text.delta",
     "response.reasoning_summary_text.done",
 }
+ANTHROPIC_STREAM_EVENT_TYPES = {
+    "content_block_delta",
+    "content_block_start",
+    "content_block_stop",
+    "error",
+    "message_delta",
+    "message_start",
+    "message_stop",
+    "ping",
+}
+RESPONSES_MESSAGE_PART_TYPES = {"output_text", "text"}
 ANTHROPIC_CONTENT_BLOCK_TYPES = {"redacted_thinking", "text", "thinking", "tool_use"}
 MAX_503_RETRIES = 3
 
@@ -208,9 +219,19 @@ def _tool_output(call: ToolCall) -> str:
     return f"tool={call.name};call_id={call.call_id};marker={TOOL_OUTPUTS.get(call.name, 'TOOL_OUTPUT_MISSING')}"
 
 
+_TOOL_OUTPUT_TUPLE_RE = re.compile(r"(?<![A-Za-z0-9_])tool=([A-Za-z0-9_-]+);call_id=([A-Za-z0-9_-]+);marker=([A-Za-z0-9_-]+)(?![A-Za-z0-9_])")
+
+
+def _tool_output_tuples(text: str) -> list[tuple[str, str, str]]:
+    return [match.groups() for match in _TOOL_OUTPUT_TUPLE_RE.finditer(text)]
+
+
+def _tool_output_tuple(call: ToolCall) -> tuple[str, str, str]:
+    return (call.name, call.call_id, TOOL_OUTPUTS.get(call.name, "TOOL_OUTPUT_MISSING"))
+
+
 def _tool_output_pair_present(text: str, call: ToolCall) -> bool:
-    expected = _tool_output(call)
-    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(expected)}(?![A-Za-z0-9_])", text) is not None
+    return _tool_output_tuples(text).count(_tool_output_tuple(call)) == 1
 
 
 def _token_present(text: str, token: str) -> bool:
@@ -393,6 +414,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
             event = item.get("event", {})
             event_type = event.get("type")
+            if not isinstance(event_type, str) or event_type not in ANTHROPIC_STREAM_EVENT_TYPES:
+                return False
             if item.get("type") != event_type:
                 return False
             if message_stop is not None:
@@ -746,6 +769,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         return terminal is not None and terminal == len(events) - 1
     terminal = None
     done_seen = False
+    usage_seen = False
     seen_tool_indexes: set[int] = set()
     for index, item in enumerate(events):
         if item.get("kind") == "done":
@@ -770,8 +794,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
         if "error" in event:
             return False
         if terminal is not None:
-            if choices or not isinstance(usage, dict):
+            if choices or not isinstance(usage, dict) or usage_seen:
                 return False
+            usage_seen = True
             continue
         if choices:
             if len(choices) != 1 or not isinstance(choices[0], dict):
@@ -865,7 +890,9 @@ def _request(path: str, payload: dict[str, Any], *, client_protocol: str, stream
                     event_name = None
                     return flushed
                 if line.startswith("event:"):
-                    event_name = line[6:].strip()
+                    event_name = line[6:]
+                    if event_name.startswith(" "):
+                        event_name = event_name[1:]
                 elif line.startswith("data:"):
                     data_lines.append(line[5:].lstrip())
                 return False
@@ -1033,8 +1060,17 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
     text_delta_count = 0
     envelope: dict[str, Any] = {}
     for item in result.events:
+        if item.get("kind") == "done":
+            errors.append("stream_done_sentinel")
+            continue
         event = item.get("event", {})
         event_type = event.get("type")
+        if not isinstance(event_type, str):
+            errors.append("stream_event_type_invalid")
+            continue
+        if event_type not in ANTHROPIC_STREAM_EVENT_TYPES:
+            errors.append("stream_event_unknown")
+            continue
         if event_type == "error":
             errors.append("stream_error_event")
         elif event_type == "content_block_start":
@@ -1189,9 +1225,9 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                 errors.append("message_content_invalid")
                 continue
             for part in content:
-                if not isinstance(part, dict) or not isinstance(part.get("type"), str):
+                if not isinstance(part, dict) or not isinstance(part.get("type"), str) or part.get("type") not in RESPONSES_MESSAGE_PART_TYPES:
                     errors.append("message_part_type_invalid")
-                elif part.get("type") in {"output_text", "text"}:
+                elif part.get("type") in RESPONSES_MESSAGE_PART_TYPES:
                     text = part.get("text", "")
                     if not isinstance(text, str):
                         errors.append("message_text_invalid")
@@ -1225,11 +1261,15 @@ def _responses_output_projection(output: Any) -> list[dict[str, Any]] | None:
             content = item.get("content")
             if item.get("role") != "assistant" or not isinstance(content, list):
                 return None
-            projected["content"] = [
-                {"type": part.get("type"), "text": part.get("text")}
-                for part in content
-                if isinstance(part, dict) and part.get("type") in {"output_text", "text"}
-            ]
+            projected_content: list[dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict) or not isinstance(part.get("type"), str) or part.get("type") not in RESPONSES_MESSAGE_PART_TYPES:
+                    return None
+                text = part.get("text")
+                if not isinstance(text, str):
+                    return None
+                projected_content.append({"type": part.get("type"), "text": text})
+            projected["content"] = projected_content
         elif item_type == "reasoning":
             encrypted = item.get("encrypted_content")
             projected.update(
@@ -1604,6 +1644,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
+    usage_seen = False
     errors: list[str] = []
     argument_fragment_indexes: set[int] = set()
     tool_type_seen: set[int] = set()
@@ -1626,8 +1667,11 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if event_usage is not None:
             if finish_reason is None or not isinstance(event_usage, dict):
                 errors.append("usage_before_finish")
+            elif usage_seen:
+                errors.append("usage_duplicate")
             else:
                 usage = event_usage
+                usage_seen = True
         choices = event.get("choices", [])
         if not isinstance(choices, list):
             errors.append("choice_invalid")
@@ -1780,7 +1824,7 @@ def _validate_second(
 ) -> dict[str, Any]:
     required_markers = [SYSTEM_MARKER, *(TOOL_OUTPUTS[name] for name in expected_tools)]
     call_output_pairs = (
-        all(_tool_output_pair_present(turn.text, call) for call in expected_calls)
+        sorted(_tool_output_tuples(turn.text)) == sorted(_tool_output_tuple(call) for call in expected_calls)
         if expected_calls is not None
         else all(_token_present(turn.text, marker) for marker in required_markers[1:])
     )
@@ -1789,6 +1833,7 @@ def _validate_second(
         "terminal": turn.terminal,
         "stop_reason": isinstance(turn.stop_reason, str) and turn.stop_reason in STOP_REASONS[turn.protocol]["final"],
         "no_followup_tool_calls": not turn.tool_calls,
+        "reasoning_not_visible": not any(part in turn.text for part in turn.reasoning_parts if part),
         "system_marker": _token_present(turn.text, SYSTEM_MARKER),
         "system_scope": _token_present(turn.text, SYSTEM_SCOPE_OK) and not _token_present(turn.text, USER_SCOPE_LEAK),
         "tool_outputs": all(_token_present(turn.text, marker) for marker in required_markers[1:]),
