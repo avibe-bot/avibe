@@ -709,6 +709,25 @@ async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path:
     assert row.last_error == "memory_processing_failed"
 
 
+async def test_non_retryable_add_rejection_is_terminal_even_when_processing_is_down(
+    tmp_path: Path,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="poison")) == CaptureAccepted()
+    provider.ingest_failures.append(
+        MemoryProviderFailure("memory_processing_failed", retryable=False)
+    )
+    provider.processing_healthy_flag = False
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert (row.state, row.attempts, row.payload_text) == ("dead", 1, None)
+    assert row.last_error == "memory_processing_failed"
+    assert await worker.drain_once() == 0
+    assert len(provider.captures) == 0
+
+
 async def test_old_boot_processing_row_becomes_manual_required_without_replay(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()

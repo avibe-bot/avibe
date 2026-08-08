@@ -49,7 +49,6 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
     payload_attachments TEXT,
     occurred_at_ms INTEGER NOT NULL,
     provider_timestamp_ms INTEGER NOT NULL,
-    flush_generation INTEGER NOT NULL DEFAULT 0 CHECK (flush_generation >= 0),
     state TEXT NOT NULL CHECK (
         state IN ('pending', 'processing', 'delivered', 'dead', 'manual_required')
     ),
@@ -89,85 +88,3 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
 
 CREATE INDEX IF NOT EXISTS ix_memory_capture_due
     ON memory_capture_queue (epoch, state, next_retry_at);
-
-CREATE INDEX IF NOT EXISTS ix_memory_capture_session_flush
-    ON memory_capture_queue (
-        epoch, provider_session_ref, flush_generation, state, flush_observation
-    );
-
--- Version 2 coordination state for the later session flush coordinator.
-CREATE TABLE IF NOT EXISTS memory_session_flush_state (
-    provider_session_ref TEXT PRIMARY KEY,
-    principal_id TEXT NOT NULL CHECK (
-        length(principal_id) = 34
-        AND substr(principal_id, 1, 2) = 'u-'
-        AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
-    ),
-    epoch INTEGER NOT NULL CHECK (epoch >= 0),
-    project_ref TEXT NOT NULL CHECK (
-        length(project_ref) = 34
-        AND substr(project_ref, 1, 2) = 'p-'
-        AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
-    ),
-    session_id TEXT NOT NULL,
-    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
-    first_unflushed_at TEXT,
-    last_add_ack_at TEXT,
-    due_at TEXT,
-    next_attempt_at TEXT,
-    flush_state TEXT NOT NULL DEFAULT 'not_due' CHECK (
-        flush_state IN ('not_due', 'due', 'in_flight', 'manual_required')
-    ),
-    watermark_ms INTEGER NOT NULL DEFAULT 0 CHECK (watermark_ms >= 0),
-    fence_epoch INTEGER NOT NULL DEFAULT 0 CHECK (fence_epoch >= 0),
-    fence_owner TEXT,
-    fence_acquired_at TEXT,
-    updated_at TEXT NOT NULL,
-    UNIQUE (principal_id, epoch, project_ref, session_id)
-);
-
-CREATE INDEX IF NOT EXISTS ix_memory_session_flush_due
-    ON memory_session_flush_state (flush_state, due_at, next_attempt_at);
-
--- Settlement history is append-only. A later coordinator can project the
--- latest generation without treating a mutable live row as historical proof.
-CREATE TABLE IF NOT EXISTS memory_flush_settlements (
-    settlement_id TEXT PRIMARY KEY,
-    provider_session_ref TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation >= 0),
-    fence_epoch INTEGER NOT NULL CHECK (fence_epoch >= 0),
-    operation_id TEXT NOT NULL,
-    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('add', 'flush')),
-    outcome TEXT NOT NULL CHECK (
-        outcome IN ('succeeded', 'rejected', 'unknown', 'manual_required')
-    ),
-    last_known_state TEXT,
-    last_observed_outcome TEXT CHECK (
-        last_observed_outcome IS NULL OR last_observed_outcome IN (
-            'succeeded', 'rejected', 'unknown', 'manual_required', 'in_flight'
-        )
-    ),
-    request_id TEXT,
-    error_code TEXT,
-    watermark_before INTEGER CHECK (watermark_before IS NULL OR watermark_before >= 0),
-    watermark_after INTEGER CHECK (watermark_after IS NULL OR watermark_after >= 0),
-    confirmed_watermark_ms INTEGER CHECK (
-        confirmed_watermark_ms IS NULL OR confirmed_watermark_ms >= 0
-    ),
-    flush_state TEXT CHECK (
-        flush_state IS NULL OR flush_state IN (
-            'not_due', 'due', 'in_flight', 'manual_required', 'settled'
-        )
-    ),
-    source TEXT CHECK (
-        source IS NULL OR source IN ('add', 'flush', 'natural_boundary')
-    ),
-    observed_at TEXT NOT NULL,
-    settled_at TEXT NOT NULL,
-    UNIQUE (provider_session_ref, generation, operation_id)
-);
-
-CREATE INDEX IF NOT EXISTS ix_memory_flush_settlements_session
-    ON memory_flush_settlements (provider_session_ref, generation, observed_at);
-
-PRAGMA user_version = 2;

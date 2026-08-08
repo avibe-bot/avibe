@@ -101,7 +101,6 @@ class QueueRow:
     payload_text: str | None
     occurred_at_ms: int
     provider_timestamp_ms: int
-    flush_generation: int
     state: Literal["pending", "processing", "delivered", "dead", "manual_required"]
     attempts: int
     next_retry_at: str | None
@@ -352,10 +351,10 @@ class MemoryStore:
                     principal_id,
                     project_ref, provenance, payload_text,
                     payload_attachments, occurred_at_ms, provider_timestamp_ms,
-                    flush_generation, state, attempts,
+                    state, attempts,
                     next_retry_at, lease_owner, lease_at, last_error,
                     created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 0,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0,
                           NULL, NULL, NULL, NULL, ?, NULL)
                 """,
                 (
@@ -386,7 +385,6 @@ class MemoryStore:
                     payload_text=payload_text,
                     occurred_at_ms=occurred_at_ms,
                     provider_timestamp_ms=provider_timestamp_ms,
-                    flush_generation=0,
                     state="pending",
                     attempts=0,
                     next_retry_at=None,
@@ -414,10 +412,10 @@ class MemoryStore:
                   AND (q.next_retry_at IS NULL OR q.next_retry_at <= ?)
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM memory_session_flush_state AS fence
+                      FROM memory_capture_queue AS fence
                       WHERE fence.provider_session_ref = q.provider_session_ref
                         AND fence.epoch = q.epoch
-                        AND fence.flush_state = 'manual_required'
+                        AND fence.state = 'manual_required'
                   )
                 ORDER BY q.created_at, q.source_message_digest
                 LIMIT 1
@@ -594,52 +592,8 @@ class MemoryStore:
             )
             if result.rowcount != 1:
                 return False
-            self._set_manual_required_fence_in_connection(
-                conn,
-                row.provider_session_ref,
-                now=now,
-            )
             self._set_last_error_in_connection(conn, safe_error, now)
             return True
-
-    def _set_manual_required_fence_in_connection(
-        self,
-        conn: sqlite3.Connection,
-        provider_session_ref: ProviderSessionRef,
-        *,
-        now: str,
-    ) -> None:
-        """Persist a session-scoped terminal fence for an uncertain add."""
-
-        key = provider_session_ref.serialize()
-        conn.execute(
-            """
-            INSERT INTO memory_session_flush_state (
-                provider_session_ref, principal_id, epoch, project_ref, session_id,
-                generation, first_unflushed_at, last_add_ack_at, due_at,
-                next_attempt_at, flush_state, watermark_ms, fence_epoch,
-                fence_owner, fence_acquired_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, NULL, NULL,
-                      'manual_required', 0, 1, 'manual-required', ?, ?)
-            ON CONFLICT(provider_session_ref) DO UPDATE SET
-                fence_epoch = memory_session_flush_state.fence_epoch + 1,
-                flush_state = 'manual_required',
-                due_at = NULL,
-                next_attempt_at = NULL,
-                fence_owner = 'manual-required',
-                fence_acquired_at = excluded.fence_acquired_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                key,
-                provider_session_ref.principal_id,
-                provider_session_ref.epoch,
-                provider_session_ref.project_ref,
-                provider_session_ref.session_id,
-                now,
-                now,
-            ),
-        )
 
     def has_manual_required_fence(self) -> bool:
         """Return whether the active epoch contains a terminal session fence."""
@@ -650,8 +604,8 @@ class MemoryStore:
                 return False
             row = conn.execute(
                 """
-                SELECT 1 FROM memory_session_flush_state
-                WHERE epoch = ? AND flush_state = 'manual_required'
+                SELECT 1 FROM memory_capture_queue
+                WHERE epoch = ? AND state = 'manual_required'
                 LIMIT 1
                 """,
                 (meta.epoch,),
@@ -914,7 +868,7 @@ class MemoryStore:
                 (lease_owner,),
             ).fetchall()
             for row in rows:
-                updated = conn.execute(
+                conn.execute(
                     """
                     UPDATE memory_capture_queue
                     SET state = 'manual_required', lease_owner = NULL, lease_at = NULL,
@@ -924,12 +878,6 @@ class MemoryStore:
                     """,
                     (now, row["source_message_digest"]),
                 )
-                if updated.rowcount:
-                    self._set_manual_required_fence_in_connection(
-                        conn,
-                        _provider_ref_from_row(row),
-                        now=now,
-                    )
             if rows:
                 self._set_last_error_in_connection(
                     conn,
@@ -1170,8 +1118,6 @@ class MemoryStore:
         with self._transaction() as conn:
             meta = self._ensure_meta_in_connection(conn)
             conn.execute("DELETE FROM memory_capture_queue")
-            conn.execute("DELETE FROM memory_session_flush_state")
-            conn.execute("DELETE FROM memory_flush_settlements")
             conn.execute(
                 """
                 UPDATE memory_meta
@@ -1575,10 +1521,6 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
     )
 
 
-def _provider_ref_from_row(row: sqlite3.Row | dict[str, object]) -> ProviderSessionRef:
-    return ProviderSessionRef.deserialize(str(row["provider_session_ref"]))
-
-
 def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
     last_error = (
         _closed_error_or(row["last_error"], "memory_store_unavailable")
@@ -1603,7 +1545,6 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         ),
         occurred_at_ms=int(row["occurred_at_ms"]),
         provider_timestamp_ms=int(row["provider_timestamp_ms"]),
-        flush_generation=int(row["flush_generation"]),
         state=str(row["state"]),
         attempts=int(row["attempts"]),
         next_retry_at=str(row["next_retry_at"]) if row["next_retry_at"] is not None else None,

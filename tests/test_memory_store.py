@@ -97,9 +97,11 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
         assert {
             "memory_meta",
             "memory_capture_queue",
+        }.issubset(tables)
+        assert not {
             "memory_session_flush_state",
             "memory_flush_settlements",
-        }.issubset(tables)
+        }.intersection(tables)
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
@@ -107,7 +109,6 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "principal_id",
             "project_ref",
             "provider_session_ref",
-            "flush_generation",
             "provenance",
             "payload_attachments",
             "add_request_id",
@@ -123,28 +124,6 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "processing_alert_active",
             "last_error_at",
         }.issubset(meta_columns)
-        session_state_columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info('memory_session_flush_state')")
-        }
-        assert {
-            "provider_session_ref",
-            "epoch",
-            "generation",
-            "watermark_ms",
-            "fence_epoch",
-        }.issubset(session_state_columns)
-        settlement_columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info('memory_flush_settlements')")
-        }
-        assert {
-            "provider_session_ref",
-            "generation",
-            "fence_epoch",
-            "operation_id",
-            "outcome",
-        }.issubset(settlement_columns)
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -221,35 +200,21 @@ def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> No
         ).outcome
         == "queue_full"
     )
-
-
-def test_settlement_schema_accepts_settled_natural_boundary_records(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    result = _enqueue(store, "settlement")
-    assert result.row is not None
-    reference = result.row.provider_session_ref.serialize()
-
-    with sqlite3.connect(store.path) as conn:
-        conn.execute(
-            """
-            INSERT INTO memory_flush_settlements (
-                settlement_id, provider_session_ref, generation, fence_epoch,
-                operation_id, operation_kind, outcome, flush_state, source,
-                observed_at, settled_at
-            ) VALUES (?, ?, 0, 0, ?, 'flush', 'succeeded', 'settled',
-                      'natural_boundary', '2026-01-01T00:00:00.000Z',
-                      '2026-01-01T00:00:00.000Z')
-            """,
-            ("settlement-1", reference, "operation-1"),
-        )
-        persisted = conn.execute(
-            """
-            SELECT flush_state, source
-            FROM memory_flush_settlements
-            WHERE settlement_id = 'settlement-1'
-            """
-        ).fetchone()
-    assert persisted == ("settled", "natural_boundary")
+    follow_up = store.enqueue_request(
+        source_message_id="same-session-after-manual",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="follow-up payload",
+        occurred_at_ms=2_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+        nonterminal_limit=2,
+    )
+    assert follow_up.outcome == "accepted"
+    assert follow_up.row is not None
+    assert follow_up.row.provider_session_ref == row.provider_session_ref
+    assert store.claim_due(lease_owner="worker-3", now="2026-01-01T00:00:02.000Z") is None
 
 
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:

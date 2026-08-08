@@ -269,6 +269,9 @@ class MemoryWorker:
             if error == "memory_provider_timeout":
                 await self._manual_required(row, error)
                 return False
+            if not failure.retryable:
+                await self._record_message_failure(row, error, retryable=False)
+                return False
             await self._ambiguous_failure_is_system_outage(
                 row,
                 error,

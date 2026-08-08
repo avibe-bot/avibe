@@ -70,5 +70,5 @@ provider add is terminal for automatic delivery: the row is retained and its
 provider session is fenced as `manual_required`. Boot recovery applies the same
 fence to any abandoned `processing` row, so it never silently replays an add
 whose provider outcome is unknown. The status surface reports an active manual
-fence as degraded. Flush coordination, generation routing, and per-generation
-settlement projection are owned by the later flush coordinator.
+fence as degraded. Flush scheduling and generation coordination are intentionally
+deferred to the later flush coordinator.
