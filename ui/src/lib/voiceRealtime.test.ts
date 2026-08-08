@@ -91,4 +91,21 @@ describe('voice realtime client protocol', () => {
       cleanup: 'success',
     });
   });
+
+  it('preserves a socket failure that happens before finish', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1 });
+    const socket = new FakeSocket();
+    const session = new VoiceRealtimeSession({
+      before: '',
+      after: '',
+      openSocket: async () => socket as unknown as WebSocket,
+    });
+    const start = session.start();
+    socket.open();
+    await start;
+
+    socket.close();
+
+    await expect(session.finish()).rejects.toThrow('realtime_closed');
+  });
 });

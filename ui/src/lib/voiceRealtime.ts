@@ -112,6 +112,7 @@ export class VoiceRealtimeSession {
   private finalPromise: Promise<VoiceRealtimeFinal> | null = null;
   private finalResolve: ((value: VoiceRealtimeFinal) => void) | null = null;
   private finalReject: ((error: unknown) => void) | null = null;
+  private terminalError: unknown | null = null;
   private pendingAudio: string[] = [];
 
   constructor(options: VoiceRealtimeOptions) {
@@ -211,15 +212,22 @@ export class VoiceRealtimeSession {
 
   finish(): Promise<VoiceRealtimeFinal> {
     if (this.finalPromise) return this.finalPromise;
-    this.finalPromise = new Promise<VoiceRealtimeFinal>((resolve, reject) => {
+    const pending = new Promise<VoiceRealtimeFinal>((resolve, reject) => {
       this.finalResolve = resolve;
       this.finalReject = reject;
+      if (this.terminalError) {
+        reject(this.terminalError);
+        this.finalResolve = null;
+        this.finalReject = null;
+        return;
+      }
       void this.start().then(() => {
         if (this.aborted || this.finished || !this.socket) return;
         this.socket.send(JSON.stringify({ type: 'finish' }));
       }).catch(reject);
     });
-    return waitWithTimeout(this.finalPromise, VOICE_REALTIME_FINISH_TIMEOUT_MS);
+    this.finalPromise = waitWithTimeout(pending, VOICE_REALTIME_FINISH_TIMEOUT_MS);
+    return this.finalPromise;
   }
 
   abort(): void {
@@ -230,6 +238,7 @@ export class VoiceRealtimeSession {
 
   private rejectFinal(error: unknown): void {
     if (this.finished || this.aborted) return;
+    this.terminalError ??= error;
     this.finalReject?.(error);
     this.finalResolve = null;
     this.finalReject = null;

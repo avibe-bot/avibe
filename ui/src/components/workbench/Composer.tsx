@@ -776,6 +776,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         }
         const result: VoiceRealtimeFinal = await session.realtime.finish();
         if (session.abortController.signal.aborted) return;
+        if (!result.text.trim()) throw new VoiceTranscriptionError('empty');
         session.realtimeState = 'finalized';
         session.realtimeFinalAt = Date.now();
         session.cleanupOutcome = result.cleanup;
@@ -783,11 +784,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         session.finalizedSegmentCount = session.segments.filter((segment) => segment.blob).length;
         session.finalizedFailedSegmentCount = 0;
         session.transcript = result.text;
-        if (!result.text.trim()) {
-          session.error = new VoiceTranscriptionError('empty');
-          session.status = 'failed';
-          return;
-        }
         session.segments = [];
         session.error = undefined;
         session.status = 'ready';
@@ -795,7 +791,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (session.abortController.signal.aborted) return;
         session.realtimeState = 'failed';
         activateHttpFallback(session);
-        session.finalization = undefined;
         session.status = 'transcribing';
         await runVoiceFinalization(session);
       }
@@ -1034,6 +1029,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before capture setup
       // threw. Release it so the mic does not stay on.
+      startingSession?.abortController.abort();
+      startingSession?.realtime?.abort();
+      setRealtimePreview('');
       if (recorderRef.current === startingPipeline) recorderRef.current = null;
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       clearRecordingTimers();
