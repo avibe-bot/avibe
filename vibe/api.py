@@ -6074,7 +6074,7 @@ def _prune_agent_install_jobs(now: float | None = None) -> None:
 def _agent_install_job_succeeded(result: dict, name: str) -> bool:
     if not bool(result.get("ok")):
         return False
-    if name == "claude" or not supports_runtime_refresh(name):
+    if not supports_runtime_refresh(name):
         return True
     restart = result.get("restart")
     return isinstance(restart, dict) and bool(restart.get("ok"))
@@ -6117,7 +6117,7 @@ def start_agent_install_job(name: str) -> dict:
     def _worker() -> None:
         try:
             result = install_agent(name)
-            if result.get("ok") and name != "claude" and supports_runtime_refresh(name):
+            if result.get("ok") and supports_runtime_refresh(name):
                 try:
                     result["restart"] = restart_backend(
                         name,

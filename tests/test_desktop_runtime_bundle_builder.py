@@ -83,6 +83,13 @@ def test_node_toolchain_normalizes_bundled_npm_without_command_shims(monkeypatch
     (npm / "bin" / "npm-cli.js").write_text("npm cli", encoding="utf-8")
     (npm / "lib").mkdir()
     (npm / "lib" / "npm.js").write_text("npm library", encoding="utf-8")
+    semver = npm / "node_modules" / "semver" / "bin" / "semver.js"
+    semver.parent.mkdir(parents=True)
+    semver.write_text("semver cli", encoding="utf-8")
+    bin_dir = npm / "node_modules" / ".bin"
+    bin_dir.mkdir()
+    if os.name != "nt":
+        (bin_dir / "semver").symlink_to("../semver/bin/semver.js")
     (npm / "package.json").write_text('{"version":"10.9.8"}', encoding="utf-8")
     (npm / "LICENSE").write_text("npm license", encoding="utf-8")
     (node_root / "LICENSE").write_text("node license", encoding="utf-8")
@@ -116,6 +123,10 @@ def test_node_toolchain_normalizes_bundled_npm_without_command_shims(monkeypatch
     assert {path.name for path in (payload / "tools").iterdir()} == {"bin", "npm"}
     assert {path.name for path in (payload / "tools" / "bin").iterdir()} == {"node"}
     assert (payload / "tools" / "npm" / "lib" / "npm.js").read_text() == "npm library"
+    if os.name != "nt":
+        copied_semver = payload / "tools" / "npm" / "node_modules" / ".bin" / "semver"
+        assert copied_semver.read_text() == "semver cli"
+        assert not copied_semver.is_symlink()
     assert (payload / "licenses" / "npm-LICENSE").read_text() == "npm license"
     assert calls == [
         [
@@ -127,17 +138,18 @@ def test_node_toolchain_normalizes_bundled_npm_without_command_shims(monkeypatch
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation requires extra Windows privileges")
-def test_node_toolchain_rejects_symlinks_inside_bundled_npm(monkeypatch, tmp_path):
+def test_node_toolchain_rejects_npm_links_outside_package(monkeypatch, tmp_path):
     node_root = tmp_path / "node-distribution"
     (node_root / "bin").mkdir(parents=True)
     (node_root / "bin" / "node").write_bytes(b"node")
     npm = node_root / "lib" / "node_modules" / "npm"
     npm.mkdir(parents=True)
-    (npm / "target").write_text("target", encoding="utf-8")
-    (npm / "link").symlink_to("target")
+    outside = node_root / "outside"
+    outside.write_text("outside", encoding="utf-8")
+    (npm / "link").symlink_to(outside)
     monkeypatch.setattr(builder, "extract_source", lambda _archive, _destination: node_root)
 
-    with pytest.raises(SystemExit, match="unsupported symlink"):
+    with pytest.raises(SystemExit, match="link escapes its package"):
         builder.install_node_toolchain(
             {
                 "os": "macos",

@@ -228,10 +228,10 @@ def install_node_toolchain(
     npm_destination = payload / "tools" / "npm"
     if not npm_source.is_dir():
         raise SystemExit(f"Node distribution is missing npm at {target_config['npm_source']}")
-    symlinks = [path for path in npm_source.rglob("*") if path.is_symlink()]
-    if symlinks:
-        raise SystemExit(f"Bundled npm contains an unsupported symlink: {symlinks[0]}")
+    _validate_npm_links(npm_source)
     shutil.copytree(npm_source, npm_destination)
+    if any(path.is_symlink() for path in npm_destination.rglob("*")):
+        raise SystemExit("Private Runtime npm must not contain symlinks")
 
     npm_entrypoint = payload / target_config["npm_entrypoint"]
     npm_package = npm_destination / "package.json"
@@ -272,6 +272,22 @@ def install_node_toolchain(
     )
     if completed.stdout.strip() != expected_npm_version:
         raise SystemExit("Private npm entrypoint returned an unexpected version")
+
+
+def _validate_npm_links(npm_source: Path) -> None:
+    """Allow only npm's contained file links, which copytree dereferences."""
+
+    root = npm_source.resolve(strict=True)
+    for link in npm_source.rglob("*"):
+        if not link.is_symlink():
+            continue
+        try:
+            target = link.resolve(strict=True)
+            target.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Bundled npm link escapes its package: {link}") from exc
+        if not target.is_file():
+            raise SystemExit(f"Bundled npm link must target a regular file: {link}")
 
 
 def write_inventory(private_python: Path, payload: Path) -> None:

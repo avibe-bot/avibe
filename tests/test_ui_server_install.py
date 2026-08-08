@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from vibe import api
 from vibe.ui_server import app
@@ -153,24 +155,30 @@ def test_dependency_install_route_allows_memory_runtime(monkeypatch, tmp_path):
     assert response.get_json()["backend"] == "memory-runtime"
 
 
-def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
-    monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "codex")
-    monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "codex")
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_install_job_fails_when_runtime_refresh_fails(monkeypatch, backend):
+    monkeypatch.setattr(api, "is_agent_backend", lambda name: name == backend)
+    monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == backend)
     monkeypatch.setattr(
         api,
         "install_agent",
-        lambda name: {"ok": True, "message": "Installed", "output": "done", "path": "/usr/local/bin/codex"},
+        lambda name: {
+            "ok": True,
+            "message": "Installed",
+            "output": "done",
+            "path": f"/usr/local/bin/{backend}",
+        },
     )
     monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": False, "message": "refresh timeout"})
     with api._AGENT_INSTALL_JOB_LOCK:
         api._AGENT_INSTALL_JOBS.clear()
         api._AGENT_INSTALL_LATEST_BY_BACKEND.clear()
 
-    started = api.start_agent_install_job("codex")
+    started = api.start_agent_install_job(backend)
     deadline = time.time() + 2.0
     result = {}
     while time.time() < deadline:
-        result = api.get_agent_install_job(started["job_id"], backend="codex")
+        result = api.get_agent_install_job(started["job_id"], backend=backend)
         if result.get("status") != "running":
             break
         time.sleep(0.01)
