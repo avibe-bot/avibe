@@ -643,7 +643,9 @@ def test_v1_migration_projects_the_latest_flush_verdict_chronologically(tmp_path
             """
             UPDATE memory_capture_queue
             SET flush_request_id = 'legacy-reject-request',
-                flush_error_code = 'INTERNAL_ERROR'
+                flush_error_code = 'INTERNAL_ERROR',
+                state = 'dead',
+                completed_at = '2026-01-01T00:00:00.500Z'
             WHERE source_message_digest = 'legacy-rejected'
             """
         )
@@ -652,6 +654,7 @@ def test_v1_migration_projects_the_latest_flush_verdict_chronologically(tmp_path
     state = store.list_session_flush_states()
     assert len(state) == 1
     assert state[0].flush_state == "due"
+    assert state[0].last_add_ack_at == "2026-01-01T00:00:00.200Z"
     assert [record.outcome for record in store.list_flush_settlements()] == [
         "succeeded",
         "rejected",
@@ -663,6 +666,38 @@ def test_v1_migration_projects_the_latest_flush_verdict_chronologically(tmp_path
     )
     assert rejected.request_id == "legacy-reject-request"
     assert rejected.error_code == "INTERNAL_ERROR"
+
+
+def test_v1_migration_fences_delivered_rows_without_flush_observations(
+    tmp_path: Path,
+) -> None:
+    database = _store_path(tmp_path)
+    _create_v1_store(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET flush_observation = NULL, flush_observed_at = NULL
+            WHERE source_message_digest = 'legacy-unknown'
+            """
+        )
+        conn.execute(
+            "DELETE FROM memory_capture_queue WHERE source_message_digest = 'legacy-in-flight'"
+        )
+
+    store = MemoryStore(database)
+    state = store.list_session_flush_states()
+    assert len(state) == 1
+    assert state[0].flush_state == "manual_required"
+    assert state[0].fence_epoch == 1
+    assert store.list_flush_settlements()[0].outcome == "manual_required"
+    assert (
+        store.recover_after_boot(
+            lease_owner="migration-boot",
+            clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        ).not_attempted_sessions
+        == ()
+    )
 
 
 def test_v1_migration_allows_a_newer_definitive_verdict_after_ambiguity(
@@ -1052,6 +1087,8 @@ def test_manual_flush_resolution_reconciles_unknown_queue_rows(
     ) == 1
     before = store.get_session_flush_state(provider_session_ref)
     assert before is not None
+    if outcome == "committed":
+        assert store.open_processing_fault(now="2026-01-01T00:00:02.500Z") is True
 
     assert store.record_settlement(
         MemorySettlementRecord(
@@ -1105,6 +1142,10 @@ def test_manual_flush_resolution_reconciles_unknown_queue_rows(
         assert settlement.confirmed_watermark_ms == 1_000
         assert settlement.watermark_after == 1_000
         assert store.ensure_meta().last_success_at == "2026-01-01T00:00:03.000Z"
+        meta = store.ensure_meta()
+        assert meta.processing_fault_since is None
+        assert meta.processing_fault_kind is None
+        assert meta.processing_alert_active is False
 
 
 @pytest.mark.parametrize(
@@ -1196,6 +1237,69 @@ def test_manual_add_resolution_has_operation_specific_transitions(
             now="2026-01-01T00:00:03.000Z",
         ) is None
         assert _row_for_source(store, "manual-add-later").state == "pending"
+        assert store.settle(
+            retry,
+            Delivered(add_request_id="retry-add"),
+            lease_owner="retry-worker",
+            now=_dt("2026-01-01T00:00:04.000Z"),
+        ).settled
+        retry_state = store.get_session_flush_state(accepted.provider_session_ref)
+        assert retry_state is not None
+        assert retry_state.flush_state == "not_due"
+        assert retry_state.fence_owner is None
+        next_claim = store.claim_due(
+            lease_owner="retry-worker",
+            now="2026-01-01T00:00:05.000Z",
+        )
+        assert next_claim is not None
+        assert next_claim.source_message_digest == later.row.source_message_digest
+
+
+def test_manual_add_resolution_requires_the_matching_processing_target(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    accepted = _enqueue(store, "manual-add-target")
+    assert accepted.provider_session_ref is not None
+    claimed = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert claimed is not None
+    before = store.get_session_flush_state(accepted.provider_session_ref)
+    assert before is not None
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=accepted.provider_session_ref,
+            generation=before.generation,
+            fence_epoch=before.fence_epoch,
+            operation_id="ambiguous-add",
+            operation_kind="add",
+            outcome="unknown",
+            observed_at="2026-01-01T00:00:01.000Z",
+            source="add",
+        )
+    )
+    manual_state = store.get_session_flush_state(accepted.provider_session_ref)
+    assert manual_state is not None
+    assert store.record_settlement(
+        MemorySettlementRecord(
+            provider_session_ref=accepted.provider_session_ref,
+            generation=manual_state.generation,
+            fence_epoch=manual_state.fence_epoch,
+            operation_id="add-" + "a" * 64,
+            operation_kind="add",
+            outcome="committed",
+            observed_at="2026-01-01T00:00:02.000Z",
+            actor="operator",
+            decision="committed",
+            evidence_ref="audit-wrong-add",
+            source="manual",
+        )
+    )
+
+    after = store.get_session_flush_state(accepted.provider_session_ref)
+    assert after is not None
+    assert after.flush_state == "manual_required"
+    assert after.fence_owner == "manual-required"
+    assert _row_for_source(store, "manual-add-target").state == "processing"
 
 
 def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:

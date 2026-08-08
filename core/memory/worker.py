@@ -21,6 +21,7 @@ from core.memory.everos import (
     ProviderCapture,
 )
 from core.memory.store import (
+    AmbiguousAdd,
     Delivered,
     MemoryStore,
     MessageFailure,
@@ -48,6 +49,7 @@ ProcessingEvent = Callable[
 class _DeliveryResult:
     settled: bool
     flush_complete: bool = False
+    flush_blocked: bool = False
 
 
 class MemoryWorker:
@@ -176,6 +178,8 @@ class MemoryWorker:
                         await self._close_processing_fault()
                         break
                     continue
+                if delivery.flush_blocked:
+                    continue
 
                 # `memorize.mode = "chat"` requires each delivered human turn to
                 # become searchable immediately. The store marks a whole session
@@ -287,6 +291,18 @@ class MemoryWorker:
 
         if not isinstance(ack, AddAck):
             ack = AddAck(request_id=None, status=None)
+        if ack.status not in {"accumulated", "extracted"}:
+            settled = await self._store_call(
+                self._store.settle,
+                row,
+                AmbiguousAdd(add_request_id=ack.request_id),
+                lease_owner=self._boot_id,
+                now=self._current_time(),
+            )
+            return _DeliveryResult(
+                settled=settled.settled,
+                flush_blocked=settled.settled,
+            )
         settled = await self._store_call(
             self._store.settle,
             row,

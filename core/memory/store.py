@@ -170,6 +170,13 @@ class Delivered:
 
 
 @dataclass(frozen=True)
+class AmbiguousAdd:
+    """The provider response cannot prove whether this add was accepted."""
+
+    add_request_id: str | None = None
+
+
+@dataclass(frozen=True)
 class SystemOutage:
     """Infrastructure failed, not this row. Release it without spending an attempt."""
 
@@ -185,7 +192,7 @@ class MessageFailure:
 
 
 #: Every way a claimed row can leave the ``processing`` state.
-DeliveryOutcome = Delivered | SystemOutage | MessageFailure
+DeliveryOutcome = Delivered | AmbiguousAdd | SystemOutage | MessageFailure
 
 
 @dataclass(frozen=True)
@@ -651,6 +658,14 @@ class MemoryStore:
                 state="delivered" if settled else None,
                 flush_complete=settled and outcome.add_status == "extracted",
             )
+        if isinstance(outcome, AmbiguousAdd):
+            settled = self._settle_ambiguous_add(
+                row,
+                lease_owner=lease_owner,
+                now=now_iso,
+                add_request_id=outcome.add_request_id,
+            )
+            return SettleResult(settled=settled, state="pending" if settled else None)
         if isinstance(outcome, SystemOutage):
             settled = self._return_system_failure(
                 row,
@@ -801,6 +816,67 @@ class MemoryStore:
                 ),
             )
             self._compact_terminal_tombstones_in_connection(conn, _datetime_from_iso(now))
+            return True
+
+    def _settle_ambiguous_add(
+        self,
+        row: QueueRow,
+        *,
+        lease_owner: str,
+        now: str,
+        add_request_id: str | None,
+    ) -> bool:
+        """Release an untrusted add response without scrubbing its payload."""
+
+        with self._transaction() as conn:
+            result = conn.execute(
+                """
+                UPDATE memory_capture_queue
+                SET state = 'pending', next_retry_at = NULL,
+                    lease_owner = NULL, lease_at = NULL, last_error = NULL,
+                    add_request_id = COALESCE(?, add_request_id)
+                WHERE source_message_digest = ? AND epoch = ?
+                  AND state = 'processing' AND lease_owner = ?
+                """,
+                (
+                    _bounded_opaque_text(add_request_id),
+                    row.source_message_digest,
+                    row.epoch,
+                    lease_owner,
+                ),
+            )
+            if result.rowcount != 1:
+                return False
+            provider_session_ref = row.provider_session_ref or _provider_ref_from_queue_row(row)
+            state = self._ensure_session_state_in_connection(
+                conn,
+                provider_session_ref,
+                now=now,
+                first_unflushed_at=row.created_at,
+            )
+            self._record_settlement_in_connection(
+                conn,
+                MemorySettlementRecord(
+                    provider_session_ref=provider_session_ref,
+                    generation=(
+                        row.target_generation
+                        if row.target_generation is not None
+                        else state.generation
+                    ),
+                    fence_epoch=state.fence_epoch,
+                    operation_id=f"unknown-add-{row.source_message_digest}",
+                    operation_kind="add",
+                    outcome="unknown",
+                    last_known_state="pending",
+                    last_observed_outcome="unknown",
+                    request_id=_bounded_opaque_text(add_request_id),
+                    watermark_before=state.watermark,
+                    observed_at=now,
+                    settled_at=now,
+                    source="add",
+                    settlement_id=f"unknown-add-{row.source_message_digest}",
+                ),
+            )
             return True
 
     def mark_flush_in_flight(self, session_id: str, project_ref: str) -> int:
@@ -1884,15 +1960,31 @@ class MemoryStore:
         actor = _bounded_opaque_text(record.actor)
         decision = _bounded_opaque_text(record.decision)
         evidence_ref = _bounded_opaque_text(record.evidence_ref)
+        manual_add_target_matches = True
+        if (
+            record.source == "manual"
+            and record.operation_kind == "add"
+            and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
+        ):
+            manual_add_target_matches = self._manual_add_target_matches_in_connection(
+                conn,
+                record,
+            )
         manual_resolution = (
             record.source == "manual"
             and record.outcome in {"committed", "not_committed", "settled_with_caveat"}
             and state.generation == record.generation
             and state.fence_epoch == record.fence_epoch
             and state.flush_state == "manual_required"
+            and manual_add_target_matches
             and actor is not None
             and decision is not None
             and evidence_ref is not None
+        )
+        manual_add_retry_success = self._manual_add_retry_success_in_connection(
+            conn,
+            state,
+            record,
         )
         derived_manual_watermark_ms: int | None = None
         if (
@@ -1967,6 +2059,7 @@ class MemoryStore:
                 state.flush_state != "manual_required"
                 or record.outcome in {"unknown", "manual_required"}
                 or manual_resolution
+                or manual_add_retry_success
                 # Migration replay is ordered by legacy observation time. A
                 # newer definitive observation must replace an older ambiguity.
                 or record.source == "migration"
@@ -2053,6 +2146,26 @@ class MemoryStore:
                 WHERE singleton = 1
                 """,
                 (record.observed_at, record.observed_at),
+            )
+        if manual_resolution and record.operation_kind == "flush" and record.outcome == "committed":
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_fault_kind = NULL,
+                    processing_fault_since = NULL,
+                    processing_alert_active = 0,
+                    last_error = CASE
+                        WHEN last_error = 'memory_processing_failed' THEN NULL
+                        ELSE last_error
+                    END,
+                    last_error_at = CASE
+                        WHEN last_error = 'memory_processing_failed' THEN NULL
+                        ELSE last_error_at
+                    END,
+                    updated_at = ?
+                WHERE singleton = 1 AND processing_fault_since IS NOT NULL
+                """,
+                (record.observed_at,),
             )
 
         watermark_after = (
@@ -2203,6 +2316,25 @@ class MemoryStore:
                             record.generation,
                         ),
                     )
+            if manual_add_retry_success:
+                conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET flush_state = CASE
+                            WHEN flush_state = 'settled' THEN 'settled'
+                            ELSE 'not_due'
+                        END,
+                        due_at = NULL, next_attempt_at = NULL,
+                        fence_owner = NULL, fence_acquired_at = NULL,
+                        updated_at = ?
+                    WHERE provider_session_ref = ? AND generation = ?
+                    """,
+                    (
+                        record.observed_at,
+                        provider_session_ref.serialize(),
+                        record.generation,
+                    ),
+                )
         elif record.operation_kind == "flush" and record.outcome in {"succeeded", "committed"}:
             self._reconcile_rejected_rows_in_connection(conn, record)
             if record.source == "migration":
@@ -2354,6 +2486,75 @@ class MemoryStore:
                 ),
             )
         return True
+
+    def _manual_add_target_matches_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        record: MemorySettlementRecord,
+    ) -> bool:
+        digest = _manual_add_source_digest(record.operation_id)
+        request_id = _bounded_opaque_text(record.request_id)
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM memory_capture_queue
+            WHERE provider_session_ref = ? AND target_generation = ?
+              AND state = 'processing' AND payload_text IS NOT NULL
+              AND (
+                  (? IS NOT NULL AND source_message_digest = ?)
+                  OR (
+                      ? IS NULL AND ? IS NOT NULL
+                      AND add_request_id = ?
+                  )
+              )
+            LIMIT 1
+            """,
+            (
+                record.provider_session_ref.serialize(),
+                record.generation,
+                digest,
+                digest,
+                digest,
+                request_id,
+                request_id,
+            ),
+        ).fetchone()
+        return row is not None
+
+    def _manual_add_retry_success_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        state: MemorySessionState,
+        record: MemorySettlementRecord,
+    ) -> bool:
+        if (
+            record.operation_kind != "add"
+            or record.outcome not in {"succeeded", "committed"}
+            or state.flush_state != "manual_required"
+            or state.generation != record.generation
+        ):
+            return False
+        digest = _manual_add_retry_digest(state.fence_owner)
+        if digest is None:
+            return False
+        request_id = _bounded_opaque_text(record.request_id)
+        row = conn.execute(
+            """
+            SELECT add_request_id
+            FROM memory_capture_queue
+            WHERE provider_session_ref = ? AND target_generation = ?
+              AND source_message_digest = ? AND state = 'delivered'
+            LIMIT 1
+            """,
+            (
+                record.provider_session_ref.serialize(),
+                record.generation,
+                digest,
+            ),
+        ).fetchone()
+        if row is None:
+            return False
+        return request_id is None or row["add_request_id"] == request_id
 
     def _reconcile_manual_add_row_in_connection(
         self,
@@ -2610,12 +2811,13 @@ class MemoryStore:
                 if row["state"] in {"pending", "processing", "delivered"}
             ]
             has_ambiguous_observation = any(
-                row["flush_observation"] in {"in_flight", "unknown"}
+                row["state"] == "delivered"
+                and row["flush_observation"] in {None, "in_flight", "unknown"}
                 for row in group
             )
             needs_flush = any(
                 row["state"] == "delivered"
-                and row["flush_observation"] in {None, "not_attempted"}
+                and row["flush_observation"] == "not_attempted"
                 for row in group
             )
             succeeded = [
@@ -2628,6 +2830,13 @@ class MemoryStore:
                 candidates = [
                     row for row in group if row["flush_observation"] == observation
                 ]
+                if observation == "unknown":
+                    candidates.extend(
+                        row
+                        for row in group
+                        if row["state"] == "delivered"
+                        and row["flush_observation"] is None
+                    )
                 if candidates:
                     latest_row = max(
                         candidates,
@@ -2655,7 +2864,11 @@ class MemoryStore:
                 default=None,
             )
             last_add_ack_at = max(
-                (str(row["completed_at"]) for row in group if row["completed_at"]),
+                (
+                    str(row["completed_at"])
+                    for row in group
+                    if row["state"] == "delivered" and row["completed_at"]
+                ),
                 default=None,
             )
             watermark = max(
@@ -3135,6 +3348,15 @@ def _manual_add_retry_owner(operation_id: str) -> str:
     if digest is None:
         return MANUAL_ADD_RETRY_OWNER
     return f"{MANUAL_ADD_RETRY_OWNER_PREFIX}{digest}"
+
+
+def _manual_add_retry_digest(fence_owner: str | None) -> str | None:
+    if fence_owner is None or not fence_owner.startswith(MANUAL_ADD_RETRY_OWNER_PREFIX):
+        return None
+    digest = fence_owner[len(MANUAL_ADD_RETRY_OWNER_PREFIX) :]
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        return None
+    return digest
 
 
 def _provider_ref_from_values(

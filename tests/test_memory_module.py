@@ -499,6 +499,44 @@ async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
     assert store.ensure_meta().last_success_at is not None
 
 
+async def test_malformed_add_ack_keeps_payload_and_fences_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, store, provider = _module(tmp_path)
+    assert await module.capture(_request(source="malformed-add")) == CaptureAccepted()
+
+    async def malformed(_capture) -> AddAck:
+        return AddAck(request_id="malformed-add", status=None)
+
+    monkeypatch.setattr(provider, "add", malformed)
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+    )
+
+    assert await worker.drain_once() == 1
+    row = store.list_queue_rows()[0]
+    assert row.provider_session_ref is not None
+    assert row.state == "pending"
+    assert row.payload_text == "remember this"
+    assert row.add_request_id == "malformed-add"
+    assert row.flush_observation is None
+    assert provider.flushes == []
+    state = store.get_session_flush_state(row.provider_session_ref)
+    assert state is not None
+    assert state.flush_state == "manual_required"
+    settlement = next(
+        record
+        for record in store.list_flush_settlements(row.provider_session_ref)
+        if record.operation_kind == "add"
+    )
+    assert settlement.outcome == "unknown"
+    assert settlement.request_id == "malformed-add"
+
+
 async def test_extracted_add_ack_skips_a_redundant_flush(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
