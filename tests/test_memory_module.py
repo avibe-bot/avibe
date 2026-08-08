@@ -14,6 +14,7 @@ import pytest
 
 from config import paths
 from core.memory.everos import (
+    AddAck,
     FakeMemoryProvider,
     FlushRejected,
     FlushSucceeded,
@@ -708,17 +709,42 @@ async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path:
     assert row.last_error == "memory_processing_failed"
 
 
-async def test_old_boot_processing_row_is_reclaimed_for_at_least_once_delivery(tmp_path: Path) -> None:
+async def test_old_boot_processing_row_becomes_manual_required_without_replay(tmp_path: Path) -> None:
     module, store, provider = _module(tmp_path)
     assert await module.capture(_request()) == CaptureAccepted()
     claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
     assert claimed is not None and claimed.state == "processing"
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="new-boot")
 
+    assert await worker.drain_once() == 0
+    row = store.list_queue_rows()[0]
+    assert row.state == "manual_required"
+    assert row.payload_text == "remember this"
+    assert row.last_error == "memory_provider_response_invalid"
+    assert len(provider.captures) == 0
+    assert store.has_manual_required_fence() is True
+
+
+async def test_malformed_add_ack_becomes_manual_required_without_replay(
+    tmp_path: Path,
+) -> None:
+    class MalformedAckProvider(FakeMemoryProvider):
+        async def add(self, capture):
+            self.captures.append(capture)
+            return AddAck(request_id="ambiguous-ack", status=None)
+
+    provider = MalformedAckProvider()
+    module, store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request()) == CaptureAccepted()
+    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+
     assert await worker.drain_once() == 1
     row = store.list_queue_rows()[0]
-    assert row.state == "delivered"
-    assert len(provider.captures) == 1
+    assert row.state == "manual_required"
+    assert row.payload_text == "remember this"
+    assert row.add_request_id == "ambiguous-ack"
+    assert store.has_manual_required_fence() is True
+    assert (await module.status()).error == "memory_processing_failed"
 
 
 async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_path: Path) -> None:

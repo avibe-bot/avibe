@@ -20,6 +20,7 @@ from core.memory.types import (
     MemoryResult,
     MemoryStatus,
     OperationFailed,
+    ProviderSessionRef,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "MemoryResult",
     "MemoryStatus",
     "OperationFailed",
+    "ProviderSessionRef",
 ]

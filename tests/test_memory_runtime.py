@@ -3294,11 +3294,11 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
         assert worker._boot_id != old_lease
         assert store.list_queue_rows()[0].state == "processing"
 
-        # The first tick under the replacement lease must reclaim old claimed
+        # The first tick under the replacement lease must fence old claimed
         # work before claims can resume.
         worker.pause_claims()
         assert await worker.drain_once() == 0
-        assert store.list_queue_rows()[0].state == "pending"
+        assert store.list_queue_rows()[0].state == "manual_required"
         await runtime.close()
 
     asyncio.run(run())

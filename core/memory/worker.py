@@ -20,6 +20,7 @@ from core.memory.everos import (
     ProviderCapture,
 )
 from core.memory.store import (
+    AmbiguousAdd,
     Delivered,
     MemoryStore,
     MessageFailure,
@@ -273,8 +274,13 @@ class MemoryWorker:
             await self._ambiguous_failure_is_system_outage(row, "memory_processing_failed")
             return False
 
-        if not isinstance(ack, AddAck):
-            ack = AddAck(request_id=None, status=None)
+        if not isinstance(ack, AddAck) or ack.status not in {"accumulated", "extracted"}:
+            await self._manual_required(
+                row,
+                "memory_provider_response_invalid",
+                request_id=ack.request_id if isinstance(ack, AddAck) else None,
+            )
+            return False
         settled = await self._store_call(
             self._store.settle,
             row,
@@ -430,6 +436,21 @@ class MemoryWorker:
             self._store.settle,
             row,
             MessageFailure(error=error, retryable=retryable),
+            lease_owner=self._boot_id,
+            now=self._current_time(),
+        )
+
+    async def _manual_required(
+        self,
+        row: QueueRow,
+        error: MemoryErrorCode,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        await self._store_call(
+            self._store.settle,
+            row,
+            AmbiguousAdd(add_request_id=request_id, error=error),
             lease_owner=self._boot_id,
             now=self._current_time(),
         )
