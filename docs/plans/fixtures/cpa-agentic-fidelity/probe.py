@@ -436,6 +436,14 @@ def _parsed_stream_item_id(value: Any, errors: list[str]) -> str | None:
     return item_id
 
 
+def _chat_delta_has_payload(delta: dict[str, Any]) -> bool:
+    return (
+        ("content" in delta and delta["content"] is not None)
+        or ("reasoning_content" in delta and delta["reasoning_content"] is not None)
+        or ("tool_calls" in delta and delta["tool_calls"] not in (None, []))
+    )
+
+
 def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     """Check lifecycle ordering without depending on provider-specific chunk sizes."""
     if not events:
@@ -501,7 +509,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         for field in ("thinking", "signature")
                     ):
                         return False
-                    if block_type == "text" and block.get("text", "") != "":
+                    if block_type == "text" and (
+                        "text" not in block
+                        or not isinstance(block["text"], str)
+                        or block["text"] != ""
+                    ):
                         return False
                     if block_type == "tool_use":
                         tool_blocks.add(block_index)
@@ -677,8 +689,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                         for field in ("call_id", "name")
                     ):
                         return False
-                    opening_arguments = raw.get("arguments")
-                    if opening_arguments is not None and opening_arguments != "":
+                    if "arguments" not in raw or raw["arguments"] != "":
                         return False
                 elif item_types[item_id] == "reasoning":
                     opening_summary = raw.get("summary")
@@ -999,6 +1010,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     argument_fragment_counts: dict[int, int] = {}
     tool_ids: dict[int, str] = {}
     completion_id: str | None = None
+    assistant_role_seen = False
+    payload_seen = False
     for index, item in enumerate(events):
         if item.get("kind") == "done":
             if index != len(events) - 1:
@@ -1046,9 +1059,17 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             choice = choices[0]
             if "index" not in choice or _stream_index(choice.get("index")) != 0:
                 return False
-            delta = choice.get("delta", {})
-            if not isinstance(delta, dict):
+            if "delta" not in choice or not isinstance(choice["delta"], dict):
                 return False
+            delta = choice["delta"]
+            if "role" in delta:
+                if delta["role"] != "assistant" or assistant_role_seen or payload_seen:
+                    return False
+                assistant_role_seen = True
+            if _chat_delta_has_payload(delta):
+                if not assistant_role_seen:
+                    return False
+                payload_seen = True
             tool_calls = delta.get("tool_calls", [])
             if not isinstance(tool_calls, list):
                 return False
@@ -1098,6 +1119,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     return (
         terminal is not None
         and done_seen
+        and assistant_role_seen
         and all(argument_fragment_counts.get(index, 0) >= 2 for index in seen_tool_indexes)
     )
 
@@ -1371,7 +1393,11 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                     errors.append("stream_tool_input_snapshot_invalid")
                 block["_arguments"] = ""
             elif block.get("type") == "text":
-                text_snapshot = block.get("text", "")
+                if "text" not in block:
+                    errors.append("stream_text_snapshot_missing")
+                    text_snapshot = ""
+                else:
+                    text_snapshot = block["text"]
                 if not isinstance(text_snapshot, str):
                     errors.append("stream_text_snapshot_invalid")
                 elif text_snapshot:
@@ -1743,8 +1769,9 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                 for field in ("call_id", "name"):
                     if not isinstance(raw.get(field), str) or not raw[field]:
                         errors.append("stream_function_identity_invalid")
-                opening_arguments = raw.get("arguments")
-                if opening_arguments is not None and opening_arguments != "":
+                if "arguments" not in raw:
+                    errors.append("stream_arguments_snapshot_missing")
+                elif not isinstance(raw["arguments"], str) or raw["arguments"] != "":
                     errors.append("stream_arguments_opening_snapshot_invalid")
             if raw.get("type") == "message" and raw.get("role") != "assistant":
                 errors.append("assistant_role_invalid")
@@ -2155,6 +2182,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     argument_fragment_counts: dict[int, int] = {}
     tool_type_seen: set[int] = set()
     assistant_role_seen = False
+    payload_seen = False
     completion_id: str | None = None
     for item in result.events:
         if item.get("kind") == "done":
@@ -2209,15 +2237,27 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         choice = choices[0]
         if "index" not in choice or _stream_index(choice.get("index")) != 0:
             errors.append("choice_index_invalid")
-        delta = choice.get("delta", {})
+        if "delta" not in choice:
+            errors.append("delta_missing")
+            continue
+        delta = choice["delta"]
         if not isinstance(delta, dict):
             errors.append("delta_invalid")
             continue
-        if isinstance(delta, dict) and "role" in delta:
+        if "role" in delta:
             if delta.get("role") != "assistant":
                 errors.append("assistant_role_invalid")
+            elif assistant_role_seen:
+                errors.append("assistant_role_duplicate")
+            elif payload_seen:
+                errors.append("assistant_role_late")
+                assistant_role_seen = True
             else:
                 assistant_role_seen = True
+        if _chat_delta_has_payload(delta):
+            if not assistant_role_seen:
+                errors.append("assistant_role_before_payload_missing")
+            payload_seen = True
         if "content" in delta:
             delta_content = delta["content"]
             if delta_content is not None and not isinstance(delta_content, str):

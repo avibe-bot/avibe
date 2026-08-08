@@ -554,6 +554,7 @@ class ProbeParserTests(unittest.TestCase):
                         {
                             "index": 0,
                             "delta": {
+                                "role": "assistant",
                                 "tool_calls": [
                                     {"index": 0, "id": "call_1", "function": {"arguments": '"Shanghai"}'}}
                                 ]
@@ -811,6 +812,7 @@ class ProbeParserTests(unittest.TestCase):
                         {
                             "index": 0,
                             "delta": {
+                                "role": "assistant",
                                 "tool_calls": [
                                     {
                                         "index": 0,
@@ -1807,12 +1809,42 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, invalid, True, 0))
         self.assertIn("assistant_role_invalid", turn.parse_errors)
 
+    def test_chat_stream_requires_one_assistant_role_before_payload(self) -> None:
+        valid = [
+            {"kind": "event", "sequence": 0, "type": None, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}},
+            {"kind": "event", "sequence": 1, "type": None, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}},
+            {"kind": "done", "sequence": 2, "type": None},
+        ]
+        late = copy.deepcopy(valid)
+        late[0]["event"]["choices"][0]["delta"].pop("role")
+        late[1]["event"]["choices"][0]["delta"]["role"] = "assistant"
+        duplicate = copy.deepcopy(valid)
+        duplicate[1]["event"]["choices"][0]["delta"]["role"] = "assistant"
+        changed = copy.deepcopy(valid)
+        changed[1]["event"]["choices"][0]["delta"]["role"] = "user"
+
+        self.assertTrue(probe._stream_order_ok("chat", valid))
+        for events, expected in (
+            (late, {"assistant_role_before_payload_missing", "assistant_role_late"}),
+            (duplicate, {"assistant_role_duplicate"}),
+            (changed, {"assistant_role_invalid"}),
+        ):
+            self.assertFalse(probe._stream_order_ok("chat", events))
+            turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
+            self.assertTrue(expected.issubset(turn.parse_errors))
+
     def test_chat_stream_rejects_malformed_delta(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": None}]}},
         ]
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0))
         self.assertIn("delta_invalid", turn.parse_errors)
+
+        missing = copy.deepcopy(events)
+        missing[0]["event"]["choices"][0].pop("delta")
+        self.assertFalse(probe._stream_order_ok("chat", missing))
+        missing_turn = probe._parse_chat_stream(probe.TransportResult(200, None, missing, True, 0))
+        self.assertIn("delta_missing", missing_turn.parse_errors)
 
     def test_chat_stream_rejects_choice_index_change(self) -> None:
         events = [
@@ -1826,7 +1858,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_chat_stream_order_rejects_content_after_finish(self) -> None:
         allowed = [
-            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}},
+            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "tool_calls"}]}},
             {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens": 1}}},
             {"kind": "done", "sequence": 2},
         ]
@@ -2481,6 +2513,21 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("stream_thinking_snapshot_invalid", thinking_turn.parse_errors)
         self.assertIn("stream_signature_snapshot_invalid", thinking_turn.parse_errors)
 
+        valid = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}},
+            {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}},
+            {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
+            {"kind": "event", "sequence": 4, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
+            {"kind": "event", "sequence": 5, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        missing = copy.deepcopy(valid)
+        missing[1]["event"]["content_block"].pop("text")
+        self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        self.assertFalse(probe._stream_order_ok("anthropic", missing))
+        missing_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, missing, False, 0, False))
+        self.assertIn("stream_text_snapshot_missing", missing_turn.parse_errors)
+
         prefilled = copy.deepcopy(text_events)
         prefilled[0]["event"]["content_block"]["text"] = "answer"
         self.assertFalse(probe._stream_order_ok("anthropic", prefilled))
@@ -2495,6 +2542,12 @@ class ProbeParserTests(unittest.TestCase):
         self.assertFalse(probe._stream_order_ok("responses", invalid))
         turn = probe._parse_responses_stream(probe.TransportResult(200, None, invalid, False, 0, False))
         self.assertIn("stream_arguments_opening_snapshot_invalid", turn.parse_errors)
+
+        missing = copy.deepcopy(valid)
+        missing[1]["event"]["item"].pop("arguments")
+        self.assertFalse(probe._stream_order_ok("responses", missing))
+        missing_turn = probe._parse_responses_stream(probe.TransportResult(200, None, missing, False, 0, False))
+        self.assertIn("stream_arguments_snapshot_missing", missing_turn.parse_errors)
 
     def test_responses_output_item_opening_status_must_be_in_progress(self) -> None:
         invalid = _response_function_stream()
