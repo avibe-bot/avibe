@@ -457,8 +457,10 @@ describe('ProcessingHealthBadge', () => {
     expect(render(<ProcessingHealthBadge row={watch({ processing_health: 'healthy' })} />)).toBe('');
   });
 
-  it('stays quiet before an event has produced a downstream Run', () => {
-    expect(render(<ProcessingHealthBadge row={watch({ processing_health: 'unknown' })} />)).toBe('');
+  it('surfaces an unreadable downstream verdict without inventing a count', () => {
+    const html = render(<ProcessingHealthBadge row={watch({ processing_health: 'unknown' })} />);
+    expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
+    expect(html).toContain('text-muted');
   });
 });
 

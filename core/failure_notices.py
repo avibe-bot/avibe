@@ -424,6 +424,21 @@ def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
     )
 
 
+def turn_fallback_owner_eligible(run: Any) -> bool:
+    """Whether a Run can own the fallback for one failed terminal Turn."""
+
+    if not isinstance(run, dict) or bool(run.get("cancel_requested")):
+        return False
+    status = str(run.get("status") or "").strip().lower()
+    return status not in {
+        "canceled",
+        "cancelled",
+        "succeeded",
+        "completed",
+        "success",
+    }
+
+
 def decide(
     *,
     run_id: str,

@@ -79,6 +79,48 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_run_attached_to_an_existing_turn_keeps_harness_failure_ownership(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform_specific["accepted_agent_run_ids"] = [
+            "run-attached-1"
+        ]
+        emissions = []
+
+        async def emit(context, message_type, text, **kwargs):
+            emissions.append((message_type, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.persisted_row = {"id": "msg-attached"}
+                return "msg-attached"
+            return None
+
+        auth = AsyncMock(return_value=False)
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(maybe_emit_auth_recovery_message=auth),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "stream disconnected",
+            request=request,
+        )
+
+        auth.assert_not_awaited()
+        self.assertEqual([message_type for message_type, _kwargs in emissions], ["notify", "result"])
+        self.assertEqual(
+            emissions[1][1]["output"].metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
     async def test_auth_recovery_owns_the_only_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(

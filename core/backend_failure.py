@@ -45,6 +45,12 @@ def _harness_run_identity(context: Any, request: Any) -> str:
         identity = str(payload.get("task_execution_id") or "").strip()
         if identity:
             return identity
+        accepted = payload.get("accepted_agent_run_ids")
+        if isinstance(accepted, list):
+            for value in accepted:
+                identity = str(value or "").strip()
+                if identity:
+                    return identity
     return ""
 
 

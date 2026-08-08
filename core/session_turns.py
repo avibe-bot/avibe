@@ -612,7 +612,15 @@ class SessionTurnManager:
         run_ids: set[str] | list[str],
         turn: dict[str, Any],
     ) -> None:
-        normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        turn_id = str(turn.get("id") or "").strip()
+        durable_ids = self.accepted_agent_run_ids_for_turn(turn_id) if turn_id else []
+        normalized = sorted(
+            {
+                str(run_id)
+                for run_id in [*run_ids, *durable_ids]
+                if str(run_id).strip()
+            }
+        )
         if not normalized:
             return
         service = (

@@ -145,6 +145,46 @@ class _StubController:
 
 
 class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_terminal_snapshot_elects_fallback_after_excluding_canceled_runs(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-fallback",
+                "accepted_agent_run_ids": ["run-a", "run-b"],
+            },
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-fallback",
+                    "delivered": False,
+                }
+            },
+        )
+        store = mock.Mock()
+        store.get_run.side_effect = lambda run_id: {
+            "run-a": {"id": "run-a", "status": "canceled"},
+            "run-b": {"id": "run-b", "status": "running"},
+        }.get(run_id)
+
+        with mock.patch(
+            "core.message_dispatcher.SQLiteBackgroundTaskStore",
+            return_value=store,
+        ):
+            enriched = dispatcher._output_with_turn_fallback_owner(context, output)
+
+        self.assertEqual(
+            enriched.metadata["turn_failure_notification"]["fallback_run_id"],
+            "run-b",
+        )
+        store.close.assert_called_once_with()
+
     async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
         controller = _StubController(platform="slack")
         controller.agent_service = type(

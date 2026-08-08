@@ -1055,15 +1055,19 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
 export const ProcessingHealthBadge: React.FC<{ row: HarnessWatch }> = ({ row }) => {
   const { t } = useTranslation();
   const health = definitionProcessingHealth(row);
-  if (health !== 'failing' && health !== 'degraded') return null;
+  if (health !== 'failing' && health !== 'degraded' && health !== 'unknown') return null;
   const count =
-    health === 'failing' ? row.processing_consecutive_failures || 0 : row.processing_recent_failures || 0;
+    health === 'unknown'
+      ? 0
+      : health === 'failing'
+        ? row.processing_consecutive_failures || 0
+        : row.processing_recent_failures || 0;
   return (
     <Badge
       variant="secondary"
       className={clsx(
         'shrink-0 font-mono text-[9px] uppercase',
-        health === 'failing' ? 'text-pink' : 'text-amber',
+        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
       )}
     >
       {t(`harness.processingHealth.${health}`)}

@@ -44,8 +44,9 @@ not create additional user-visible failures.
 For Watch definitions, `health` describes only the waiter. Downstream Agent Run
 history is exposed separately as `processing_health` with independent counters.
 Scheduled Tasks continue to use their existing execution health projection.
-An unobserved waiter remains `unknown`; absent downstream history stays quiet in
-the UI instead of being presented as a processing problem.
+An unobserved waiter remains `unknown`; absent downstream history is `healthy`.
+An `unknown` downstream verdict means the health projection itself could not be
+read and remains visible without a count instead of being presented as healthy.
 
 This is an additive projection change and requires no schema migration. Existing
 Run-to-definition and Run-to-Turn links remain intact.
@@ -55,17 +56,24 @@ Run-to-definition and Run-to-Turn links remain intact.
 A successful Watch followed by a failed Agent Run is described as event
 processing failure. It is not described as a Watch failure, and normal one-shot
 retirement is not presented as a consequence of the Agent failure.
+If the waiter itself failed, the fallback says that failure reporting failed and
+does not claim that an event was detected.
 
 ## Acceptance
 
 - `HFR-436`: Watch health remains healthy after a successful waiter while its
-  event processing health becomes failing.
+  event processing health becomes failing. Retry exit codes are healthy only
+  for `forever` Watches that can actually retry, and an unreadable processing
+  verdict remains visible as `unknown`.
 - `HFR-437`: one acknowledged Turn failure suppresses every linked Run notice.
 - `HFR-438`: a missing Turn notification produces exactly one fallback across
-  all linked Runs.
+  all linked Runs. Canceled Runs are excluded from ownership, and Runs accepted
+  after terminal settlement reuse the owner elected from all durable Turn
+  participants.
 - `HFR-439`: terminal Turn notification evidence reaches every linked Run in
   the same failed transition, or in the deferred terminal intent when an
-  Activity still owns the Run.
+  Activity still owns the Run. The fallback election is captured before the
+  immutable terminal Turn snapshot is written.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

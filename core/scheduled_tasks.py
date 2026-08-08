@@ -113,6 +113,9 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    WATCH_HOOK_OUTCOME_EVENT,
+    WATCH_HOOK_OUTCOME_METADATA_KEY,
+    WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     compute_next_run_at,
     notice_write_expectation,
     owed_notice_eligible,
@@ -6642,8 +6645,16 @@ class ScheduledTaskService:
                 name=name,
                 reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
             )
-        elif is_watch:
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_EVENT:
             headline = self._t("harness.notice.watchProcessingFailed", name=name)
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_WAITER_FAILURE:
+            headline = self._t("harness.notice.watchFailureReportFailed", name=name)
+        elif is_watch:
+            headline = self._t("harness.notice.watchFollowUpFailed", name=name)
         else:
             headline = self._t("harness.notice.failed", name=name)
         # COMMAND COPY, ORDINARY-FAILED LANE ONLY. A command definition's notice named
@@ -8708,10 +8719,20 @@ class ScheduledTaskService:
                     str(execution_id or "").strip()
                     for execution_id in execution_ids
                     if str(execution_id or "").strip()
+                    and failure_notices.turn_fallback_owner_eligible(
+                        store.get_run(str(execution_id or "").strip())
+                    )
                 }
             )
             if eligible_ids:
-                notification.setdefault("fallback_run_id", eligible_ids[0])
+                current_owner = str(notification.get("fallback_run_id") or "").strip()
+                if not (
+                    current_owner
+                    and failure_notices.turn_fallback_owner_eligible(
+                        store.get_run(current_owner)
+                    )
+                ):
+                    notification["fallback_run_id"] = eligible_ids[0]
             output_provenance["turn_failure_notification"] = notification
         output_id = str(output_provenance.get("output_id") or "").strip()
         if not output_id and output_provenance.get("sequence") is not None:

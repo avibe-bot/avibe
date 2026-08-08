@@ -1746,6 +1746,65 @@ def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
     assert "ci waiter" in body, f"the watch's own name must survive the lookup: {body}"
 
 
+@pytest.mark.parametrize(
+    ("outcome", "headline_key"),
+    [
+        ("event", "harness.notice.watchProcessingFailed"),
+        ("waiter_failure", "harness.notice.watchFailureReportFailed"),
+    ],
+)
+def test_watch_notice_copy_preserves_the_waiter_outcome(
+    tmp_path: Path,
+    outcome: str,
+    headline_key: str,
+) -> None:
+    """A failed reporting Turn cannot turn a waiter failure into an event."""
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    from storage.background import WATCH_HOOK_OUTCOME_METADATA_KEY
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-copy", name="CI waiter")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    run = requests.enqueue_hook_send(
+        session_key="slack::channel::C1",
+        prompt="report the Watch outcome",
+        run_type="watch",
+        definition_id="watch-copy",
+        metadata={WATCH_HOOK_OUTCOME_METADATA_KEY: outcome},
+    )
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(
+        claimed,
+        ok=False,
+        error="Agent report failed",
+        task_id="watch-copy",
+    )
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service.controller = SimpleNamespace(
+        platform_settings_managers={},
+        session_turn_gate=None,
+    )
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    body = service._failure_notice_body(
+        sqlite.get_run(run.id),
+        sqlite.owed_failure_notice(run.id),
+    )
+
+    assert i18n_t(headline_key, "en").split("{")[0] in body
+    if outcome == "waiter_failure":
+        assert "detected an event" not in body
+
+
 def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
     """The task-side twin of the retired-watch copy fix — FINISHED IS NOT PAUSED.
 
@@ -9993,7 +10052,15 @@ def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
     )
 
 
-def _settled_run(sqlite, definition_id: str, run_id: str, *, status: str, at: str) -> None:
+def _settled_run(
+    sqlite,
+    definition_id: str,
+    run_id: str,
+    *,
+    status: str,
+    at: str,
+    metadata: dict | None = None,
+) -> None:
     """One already-settled run of *definition_id*, stamped at *at*."""
 
     sqlite.enqueue_run(
@@ -10005,6 +10072,7 @@ def _settled_run(sqlite, definition_id: str, run_id: str, *, status: str, at: st
             "error": "boom" if status == "failed" else None,
             "created_at": at,
             "completed_at": at,
+            "metadata": metadata or {},
         }
     )
 
@@ -11138,6 +11206,11 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
     resume_command = "vibe watch resume"
 
     def _body(definition_id: str, **watch_fields) -> str:
+        from storage.background import (
+            WATCH_HOOK_OUTCOME_EVENT,
+            WATCH_HOOK_OUTCOME_METADATA_KEY,
+        )
+
         _watch(sqlite, definition_id, enabled=False, **watch_fields)
         _settled_run(
             sqlite,
@@ -11145,6 +11218,7 @@ def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
             f"run-{definition_id}",
             status="failed",
             at="2026-07-27T03:00:00+00:00",
+            metadata={WATCH_HOOK_OUTCOME_METADATA_KEY: WATCH_HOOK_OUTCOME_EVENT},
         )
         return service._failure_notice_body(
             sqlite.get_run(f"run-{definition_id}"),

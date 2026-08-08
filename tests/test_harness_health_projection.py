@@ -333,3 +333,43 @@ def test_watch_health_separates_waiter_from_event_processing(tmp_path, monkeypat
     assert projected["consecutive_failures"] == 0
     assert projected["processing_health"] == "failing"
     assert projected["processing_consecutive_failures"] == 2
+
+
+def test_once_watch_retry_exit_is_a_terminal_waiter_failure(tmp_path, monkeypatch) -> None:
+    """Retry codes are healthy only while a forever Watch can actually retry."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    watch_store = ManagedWatchStore()
+    watch = watch_store.add_watch(
+        name="one attempt",
+        session_key="slack::channel::C123",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    assert watch_store.mark_cycle_start(watch.id)
+    assert watch_store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="watch command exited with status 75",
+        disable=True,
+    )
+
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        projected = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+
+    assert projected is not None
+    assert projected["lifecycle_state"] == "finished"
+    assert projected["health"] == "failing"
+    assert projected["consecutive_failures"] == 1

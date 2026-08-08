@@ -3887,7 +3887,8 @@ scenarios:
     layer: contract
     backend: shared
     # A zero-exit waiter remains healthy even when the Agent Run created from its
-    # event fails. The downstream verdict is exposed as processing_health.
+    # event fails. The downstream verdict is exposed as processing_health; retry
+    # codes are healthy only while a forever waiter can actually retry.
     test: tests/test_harness_health_projection.py::test_watch_health_separates_waiter_from_event_processing
   - id: HFR-437
     name: one visible Turn failure suppresses every linked Run fallback
@@ -3906,6 +3907,8 @@ scenarios:
     backend: shared
     # If primary delivery is not acknowledged, Turn identity elects one fallback
     # across definitions and every other linked Run records the shared outcome.
+    # Canceled participants cannot own it, and late participants reuse the durable
+    # Turn-wide election instead of electing again from their subset.
     test: tests/test_harness_failure_visibility.py::test_hfr_438_missing_turn_notification_delivers_one_fallback
   - id: HFR-439
     name: Turn failure notification evidence reaches every linked Run settlement
@@ -3914,7 +3917,8 @@ scenarios:
     layer: contract
     backend: shared
     # Terminal settlement copies the Turn notification identity and delivery proof
-    # into each owed notice atomically with the failed Run transition. If an Activity
+    # into each owed notice atomically with the failed Run transition. The fallback
+    # owner is elected before the immutable Turn snapshot is stored. If an Activity
     # still owns the Run, the same evidence is first committed with its deferred
     # terminal intent and survives into the eventual transition.
     test: tests/test_scheduled_tasks.py::test_hfr_439_turn_failure_metadata_reaches_every_linked_run

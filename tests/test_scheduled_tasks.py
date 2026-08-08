@@ -6782,6 +6782,91 @@ def test_hfr_439_turn_failure_metadata_reaches_every_linked_run(
         assert notice["turn_fallback_run_id"] == expected_owner
 
 
+def test_turn_fallback_owner_excludes_a_canceled_participant(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A canceled Run keeps its audit state but cannot own the only fallback."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    requests = [
+        request_store.enqueue_agent_run(message=message, agent_name="codex")
+        for message in ("participant one", "participant two")
+    ]
+    for request in requests:
+        assert request_store.claim(request.id) is not None
+    canceled_id = min(request.id for request in requests)
+    assert request_store.cancel_run(canceled_id)
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    service.settle_agent_runs_from_terminal_turn(
+        [request.id for request in requests],
+        turn_id="turn-canceled-owner",
+        outcome="failed",
+        settled_by="terminal_result",
+        evidence_kind="terminal_result",
+        evidence={
+            "settles_run": True,
+            "terminal_error": "stream disconnected",
+            "output_provenance": {
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-canceled-owner",
+                    "delivered": False,
+                }
+            },
+        },
+    )
+
+    eligible_id = next(request.id for request in requests if request.id != canceled_id)
+    assert request_store.get_run(canceled_id)["status"] == "canceled"
+    notice = request_store.sqlite_backend.owed_failure_notice(eligible_id)
+    assert notice["turn_fallback_run_id"] == eligible_id
+
+
+def test_late_turn_settlement_reuses_all_durable_participants(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A late accepted Run cannot elect a second owner from only its subset."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    settle = Mock()
+    manager = SessionTurnManager(
+        SimpleNamespace(
+            scheduled_task_service=SimpleNamespace(
+                settle_agent_runs_from_terminal_turn=settle
+            )
+        )
+    )
+    manager.accepted_agent_run_ids_for_turn = lambda _turn_id: [
+        "run-initial",
+        "run-late",
+    ]
+    turn = {
+        "id": "turn-late-owner",
+        "terminal_outcome": "failed",
+        "settled_by": "terminal_result",
+        "terminal_evidence_kind": "terminal_result",
+        "terminal_evidence_json": json.dumps(
+            {
+                "settles_run": True,
+                "output_provenance": {
+                    "turn_failure_notification": {
+                        "failure_id": "turn:turn-late-owner",
+                        "fallback_run_id": "run-initial",
+                    }
+                },
+            }
+        ),
+    }
+
+    manager._settle_agent_run_ids_from_terminal_turn(["run-late"], turn)
+
+    settle.assert_called_once()
+    assert settle.call_args.args[0] == ["run-initial", "run-late"]
+
+
 def test_hfr_439_deferred_run_preserves_turn_failure_metadata(
     tmp_path: Path,
     monkeypatch,

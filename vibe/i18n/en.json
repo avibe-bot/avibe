@@ -92,6 +92,8 @@
     "notice": {
       "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
       "watchProcessingFailed": "[Avibe Harness] Watch \"{name}\" detected an event, but Agent processing failed.",
+      "watchFailureReportFailed": "[Avibe Harness] Watch \"{name}\" stopped because its waiter failed, but the Agent could not report that failure.",
+      "watchFollowUpFailed": "[Avibe Harness] Watch \"{name}\" follow-up Agent processing failed.",
       "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
       "commandLine": "Command: {command}",
       "error": "Error: {error}",

@@ -1463,6 +1463,14 @@ HEALTH_HEALTHY = "healthy"
 #: health signal that cannot be computed must not read as a clean bill.
 HEALTH_UNKNOWN = "unknown"
 
+#: Durable provenance for the Agent Run queued by one Watch cycle. The Watch
+#: definition owns waiter state while this value says which kind of follow-up the
+#: Run is processing, so a failed reporting Turn cannot rewrite a waiter failure as
+#: a detected event.
+WATCH_HOOK_OUTCOME_METADATA_KEY = "watch_hook_outcome"
+WATCH_HOOK_OUTCOME_EVENT = "event"
+WATCH_HOOK_OUTCOME_WAITER_FAILURE = "waiter_failure"
+
 #: The health window: the last N verdicts OR the last T hours, whichever is
 #: shorter. Both bounds live in the ``WHERE``/``LIMIT`` of one query rather than
 #: one of them in prose — bounded only by count, a definition that failed once and
@@ -6933,12 +6941,19 @@ class SQLiteBackgroundTaskStore:
                     or exit_code is not None
                     or str(row.get("last_error") or "").strip()
                 )
-                successful_exit_codes = {0, NO_EVENT_EXIT_CODE, *retry_codes}
+                retry_is_healthy = (
+                    row.get("mode") == "forever" and exit_code in retry_codes
+                )
+                successful_exit_codes = {0, NO_EVENT_EXIT_CODE}
                 waiter_failed = bool(
-                    (exit_code is not None and exit_code not in successful_exit_codes)
+                    (
+                        exit_code is not None
+                        and exit_code not in successful_exit_codes
+                        and not retry_is_healthy
+                    )
                     or (
                         str(row.get("last_error") or "").strip()
-                        and exit_code not in retry_codes
+                        and not retry_is_healthy
                         and exit_code != NO_EVENT_EXIT_CODE
                     )
                 )

@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
@@ -152,7 +153,7 @@ def _run_is_cancelled(run: Any) -> bool:
     if not isinstance(run, dict):
         return False
     status = str(run.get("status") or "").strip().lower()
-    return status in {"canceled", "cancelled"}
+    return bool(run.get("cancel_requested")) or status in {"canceled", "cancelled"}
 
 
 async def _stream_chunk(
@@ -1167,14 +1168,38 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
     ) -> None:
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        get_run = getattr(store, "get_run", None)
+        eligible_run_ids = (
+            [
+                run_id
+                for run_id in normalized_run_ids
+                if failure_notices.turn_fallback_owner_eligible(get_run(run_id))
+            ]
+            if callable(get_run)
+            else normalized_run_ids
+        )
         terminal_provenance = dict(provenance)
         notification = terminal_provenance.get("turn_failure_notification")
-        if isinstance(notification, dict) and run_ids:
+        if isinstance(notification, dict) and eligible_run_ids:
             notification = dict(notification)
-            notification.setdefault("fallback_run_id", min(run_ids))
+            current_owner = str(notification.get("fallback_run_id") or "").strip()
+            if not (
+                current_owner
+                and callable(get_run)
+                and failure_notices.turn_fallback_owner_eligible(
+                    get_run(current_owner)
+                )
+            ):
+                notification["fallback_run_id"] = min(eligible_run_ids)
             terminal_provenance["turn_failure_notification"] = notification
-        for run_id in run_ids:
-            get_run = getattr(store, "get_run", None)
+        for run_id in normalized_run_ids:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
@@ -1234,6 +1259,78 @@ class ConsolidatedMessageDispatcher:
                     run_id,
                     **record_kwargs,
                 )
+
+    def _terminal_agent_run_ids(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> list[str]:
+        run_ids: list[str] = []
+        for value in output_semantics.run_ids:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
+        explicit_run_id = str(output_semantics.run_id or "").strip()
+        if explicit_run_id and explicit_run_id not in run_ids:
+            run_ids.append(explicit_run_id)
+        explicit_run_ids = output_semantics.metadata.get("run_ids")
+        if isinstance(explicit_run_ids, list):
+            for value in explicit_run_ids:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+        if not run_ids:
+            run_ids = _owned_agent_run_ids(context.platform_specific or {})
+            for durable_run_id in self._durable_accepted_agent_run_ids(context):
+                if durable_run_id not in run_ids:
+                    run_ids.append(durable_run_id)
+        return run_ids
+
+    def _output_with_turn_fallback_owner(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> MessageOutput:
+        """Elect the fallback before writing the immutable terminal snapshot."""
+
+        notification = output_semantics.metadata.get("turn_failure_notification")
+        if not isinstance(notification, dict):
+            return output_semantics
+        run_ids = self._terminal_agent_run_ids(context, output_semantics)
+        if not run_ids:
+            return output_semantics
+        current_owner = str(notification.get("fallback_run_id") or "").strip()
+        store = None
+        try:
+            store = SQLiteBackgroundTaskStore()
+            eligible = [
+                run_id
+                for run_id in run_ids
+                if failure_notices.turn_fallback_owner_eligible(store.get_run(run_id))
+            ]
+            current_owner_eligible = bool(
+                current_owner
+                and failure_notices.turn_fallback_owner_eligible(
+                    store.get_run(current_owner)
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Failed to elect terminal Turn fallback owner",
+                exc_info=True,
+            )
+            return output_semantics
+        finally:
+            if store is not None:
+                store.close()
+        if not eligible:
+            return output_semantics
+        notification = dict(notification)
+        if not current_owner_eligible:
+            notification["fallback_run_id"] = min(eligible)
+        metadata = dict(output_semantics.metadata)
+        metadata["turn_failure_notification"] = notification
+        return replace(output_semantics, metadata=metadata)
 
     def _run_has_blocking_activity(self, run_id: str) -> bool:
         service = getattr(self.controller, "agent_service", None)
@@ -1389,28 +1486,9 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
     ) -> None:
-        payload = context.platform_specific or {}
         semantics = output_semantics or MessageOutput(completes_turn=True)
         require_confirmation = semantics.requires_delivery_for_run_settlement
-        run_ids: list[str] = []
-        for value in semantics.run_ids:
-            run_id = str(value or "").strip()
-            if run_id and run_id not in run_ids:
-                run_ids.append(run_id)
-        explicit_run_id = str(semantics.run_id or "").strip()
-        if explicit_run_id and explicit_run_id not in run_ids:
-            run_ids.append(explicit_run_id)
-        explicit_run_ids = semantics.metadata.get("run_ids")
-        if isinstance(explicit_run_ids, list):
-            for value in explicit_run_ids:
-                run_id = str(value or "").strip()
-                if run_id and run_id not in run_ids:
-                    run_ids.append(run_id)
-        if not run_ids:
-            run_ids = _owned_agent_run_ids(payload)
-            for durable_run_id in self._durable_accepted_agent_run_ids(context):
-                if durable_run_id not in run_ids:
-                    run_ids.append(durable_run_id)
+        run_ids = self._terminal_agent_run_ids(context, semantics)
         if not run_ids:
             return
         terminal_status = None
@@ -1896,6 +1974,11 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
+        if canonical_type == "result" and output_semantics.completes_turn:
+            output_semantics = self._output_with_turn_fallback_owner(
+                context,
+                output_semantics,
+            )
         activity_batch_incomplete = bool(
             output_semantics.requires_delivery_for_run_settlement
             and output_semantics.metadata.get("activity_batch_complete") is False
