@@ -976,10 +976,6 @@ export const ChatPage: React.FC = () => {
   // Every settled turn refreshes it because turn start may materialize inherited
   // model / effort even on an already-bound legacy session. A missed turn.end is
   // recovered by syncTurnState, which refreshes the row when it clears stale work.
-  const hasNativeRef = useRef(false);
-  useEffect(() => {
-    hasNativeRef.current = Boolean(session?.native_session_id);
-  }, [session]);
   // Read the global banner toggle once per mount (cached GET). Absent/failed →
   // default ON, so a transient prefs error never hides live background work.
   useEffect(() => {
@@ -1009,27 +1005,17 @@ export const ChatPage: React.FC = () => {
       // what the callers are trying to escape.
       const row = await api.getSession(id, { cache: false });
       setSession((prev) =>
-        isCurrent() &&
-        prev &&
-        prev.id === row.id &&
-        row.id === sessionIdRef.current
-          ? row
-          : prev,
+        isCurrent() && row.id === sessionIdRef.current ? row : prev,
       );
     } catch {
       // Best-effort: the next recovery point retries.
     }
   }, [api]);
-  const refreshSessionRowUntilNativeBound = useCallback(async () => {
-    if (hasNativeRef.current) return;
-    await refreshSessionRow();
-  }, [refreshSessionRow]);
-
   // ── Converging on a terminal archive this tab missed ────────────────────────
   //
   // A backgrounded / offline tab can miss the archive SSE for a session that
-  // already has a native_session_id, and refreshSessionRowUntilNativeBound then
-  // early-returns on every reconnect/focus — so a 409 ``session_archived`` from
+  // already has a native_session_id, and the recovery row read still needs to
+  // run on every reconnect/focus — so a 409 ``session_archived`` from
   // the FIRST write the user attempts is the only point at which this tab learns
   // the truth. Whichever write that is: sending, renaming, re-routing the agent,
   // forking a quote out, or any Show Page mutation. Converging per-verb is what
@@ -1344,11 +1330,17 @@ export const ChatPage: React.FC = () => {
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
+      const bootstrapIsCurrent = sessionRowRefreshGateRef.current.begin();
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Dropped if the user switched chats while this load was in flight.
       if (sessionId !== sessionIdRef.current) return;
-      sessionRowRefreshGateRef.current.invalidate();
-      setSession(bootstrap.session);
+      if (bootstrapIsCurrent()) {
+        setSession(bootstrap.session);
+      } else {
+        // A newer turn-end/activity read won the row race. Keep its route-bearing
+        // snapshot and repair a cold page if that read has not hydrated it yet.
+        void refreshSessionRow();
+      }
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
@@ -1393,7 +1385,7 @@ export const ChatPage: React.FC = () => {
       // its own loading state into a premature not-found / error view (Codex P2).
       if (sessionId === sessionIdRef.current) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -1590,7 +1582,7 @@ export const ChatPage: React.FC = () => {
         void reconcile();
         void refreshQueue();
         void syncTurnState({ quiet: true });
-        void refreshSessionRowUntilNativeBound();
+        void refreshSessionRow();
       },
       onConnectionState: (state) => {
         const connected = state === 'connected';
@@ -1603,7 +1595,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRow, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRow, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1618,6 +1610,7 @@ export const ChatPage: React.FC = () => {
       void reconcile();
       void refreshQueue();
       void syncTurnState({ quiet: true });
+      void refreshSessionRow();
     };
     document.addEventListener('visibilitychange', resync);
     window.addEventListener('online', resync);
@@ -1627,7 +1620,7 @@ export const ChatPage: React.FC = () => {
       window.removeEventListener('online', resync);
       window.removeEventListener('focus', resync);
     };
-  }, [sessionId, reconcile, refreshQueue, syncTurnState]);
+  }, [sessionId, reconcile, refreshQueue, syncTurnState, refreshSessionRow]);
 
   useEffect(() => {
     setRuntimeState((current) => ({ ...current, pending_input_count: queue.length }));
@@ -2240,9 +2233,10 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
+        void refreshSessionRow();
       }
     },
-    [api, session, t],
+    [api, session, t, refreshSessionRow],
   );
 
   // Session-level actions share the sidebar/mobile row model. The chat header
