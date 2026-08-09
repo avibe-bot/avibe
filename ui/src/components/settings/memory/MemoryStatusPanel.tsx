@@ -63,6 +63,10 @@ const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
   recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
 } as const;
 
+const HEALTH_STATUS_LABEL_KEYS = {
+  ok: 'memory.processingRecord.runtime.healthStatus.ok',
+} as const;
+
 const MEMORY_SOURCE_ERROR_REASONS = new Set([
   'memory_disabled',
   'memory_runtime_missing',
@@ -419,7 +423,9 @@ export const MemoryStatusPanel: React.FC<{
             ) : health ? (
               <>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={health.status === 'ok' ? 'success' : 'warning'}>{health.status}</Badge>
+                  <Badge variant={health.status === 'ok' ? 'success' : 'warning'}>
+                    {knownLabel(t, HEALTH_STATUS_LABEL_KEYS, health.status)}
+                  </Badge>
                   <span className="text-[11.5px] text-muted">
                     {t('memory.processingRecord.runtime.version')}: <code className="text-foreground">{health.version ?? '-'}</code>
                   </span>

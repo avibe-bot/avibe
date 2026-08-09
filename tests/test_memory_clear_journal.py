@@ -130,7 +130,7 @@ def test_clear_journal_happy_path_is_a_pure_durable_state_machine(tmp_path: Path
     assert operation.execution_token is None
     assert journal.get_open_operation() is None
     journal.assert_backup_allowed()
-    permit = journal.completed_snapshot_permit(operation.operation_id)
+    permit = journal.terminal_snapshot_permit(operation.operation_id)
     assert permit.snapshot_id == operation.operation_id
     assert permit.manifest_sha256 == _digest("manifest")
     assert len(permit.surface_digests) == 4
@@ -336,6 +336,8 @@ def test_abort_direction_survives_a_second_crash_and_requires_restore(tmp_path: 
         operator_ref="user:owner",
         expected_revision=recovery.revision,
     )
+    with pytest.raises(ClearTransitionError, match="only a terminal"):
+        journal.terminal_snapshot_permit(abort.operation_id)
     with pytest.raises(ClearTransitionError):
         assert abort.execution_token is not None
         journal.mark_aborted(
@@ -385,6 +387,11 @@ def test_abort_direction_survives_a_second_crash_and_requires_restore(tmp_path: 
     assert aborted.state == "aborted"
     assert aborted.resolution == "abort"
     assert aborted.closed_error == "memory_clear_failed"
+    permit = journal.terminal_snapshot_permit(aborted.operation_id)
+    assert permit.snapshot_id == aborted.operation_id
+    assert [item.snapshot_id for item in journal.terminal_snapshot_permits()] == [
+        aborted.operation_id
+    ]
     journal.assert_backup_allowed()
 
 

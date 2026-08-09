@@ -20,8 +20,8 @@ from typing import Iterator, Literal, Mapping, Sequence
 
 from core.memory.snapshot import (
     MemorySnapshot,
-    _CompletedSnapshotPermit,
-    _issue_completed_snapshot_permit,
+    _TerminalSnapshotPermit,
+    _issue_terminal_snapshot_permit,
     _issue_preparing_snapshot_discard_permit,
     _PreparingSnapshotDiscardPermit,
     _preparing_snapshot_discard_succeeded,
@@ -356,20 +356,25 @@ class MemoryClearJournal:
         if operation is not None:
             raise ClearBackupBlocked(operation.operation_id, operation.state)
 
-    def completed_snapshot_permit(self, operation_id: str) -> _CompletedSnapshotPermit:
-        """Issue snapshot-GC authority only for a fully completed clear."""
+    def terminal_snapshot_permit(self, operation_id: str) -> _TerminalSnapshotPermit:
+        """Issue snapshot-GC authority for a fully audited terminal clear."""
 
         operation = self._require_operation(_validated_operation_id(operation_id))
-        if operation.state != "completed":
-            raise ClearTransitionError("only a completed Memory clear may remove its snapshot")
+        required_surface_state = {
+            "completed": "deleted",
+            "aborted": "restored",
+        }.get(operation.state)
+        if required_surface_state is None:
+            raise ClearTransitionError("only a terminal Memory clear may remove its snapshot")
         if operation.snapshot_path is None or operation.manifest_sha256 is None:
-            raise ClearTransitionError("completed Memory clear snapshot metadata is missing")
+            raise ClearTransitionError("terminal Memory clear snapshot metadata is missing")
         surfaces = self.get_surfaces(operation.operation_id)
         if len(surfaces) != len(_SURFACE_NAMES) or any(
-            surface.state != "deleted" or surface.present is None for surface in surfaces
+            surface.state != required_surface_state or surface.present is None
+            for surface in surfaces
         ):
-            raise ClearTransitionError("completed Memory clear surface audit is incomplete")
-        return _issue_completed_snapshot_permit(
+            raise ClearTransitionError("terminal Memory clear surface audit is incomplete")
+        return _issue_terminal_snapshot_permit(
             snapshot_id=operation.operation_id,
             relative_path=operation.snapshot_path,
             manifest_sha256=operation.manifest_sha256,
@@ -378,22 +383,22 @@ class MemoryClearJournal:
             ),
         )
 
-    def completed_snapshot_permits(self) -> tuple[_CompletedSnapshotPermit, ...]:
-        """Return durable GC work left by every completed clear."""
+    def terminal_snapshot_permits(self) -> tuple[_TerminalSnapshotPermit, ...]:
+        """Return durable GC work left by every eligible terminal clear."""
 
         connection = self._connect()
         try:
             rows = connection.execute(
                 """
                 SELECT operation_id FROM clear_operation
-                WHERE state = 'completed'
+                WHERE state IN ('completed', 'aborted')
                 ORDER BY terminal_at, operation_id
                 """
             ).fetchall()
         finally:
             connection.close()
         return tuple(
-            self.completed_snapshot_permit(row["operation_id"])
+            self.terminal_snapshot_permit(row["operation_id"])
             for row in rows
         )
 

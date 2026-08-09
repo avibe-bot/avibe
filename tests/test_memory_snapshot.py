@@ -125,6 +125,54 @@ def _complete_clear_audit(
     )
 
 
+def _abort_clear_audit(
+    journal: MemoryClearJournal,
+    manager: MemorySnapshotManager,
+    operation_id: str,
+) -> None:
+    operation = journal.start(
+        operation_id=operation_id,
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    snapshot = manager.create(operation.operation_id)
+    assert operation.execution_token is not None
+    operation = journal.record_snapshot(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+        snapshot=snapshot,
+    )
+    assert operation.execution_token is not None
+    operation = journal.mark_prepared(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    recovery = journal.mark_boot_recovery_needed()
+    assert recovery is not None
+    operation = journal.claim_abort(
+        operation.operation_id,
+        operator_ref="user:owner",
+        expected_revision=recovery.revision,
+    )
+    for surface in journal.surfaces:
+        assert operation.execution_token is not None
+        operation = journal.record_surface_restored(
+            operation.operation_id,
+            surface.name,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+        )
+    assert operation.execution_token is not None
+    journal.mark_aborted(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+
+
 def test_snapshot_round_trip_covers_all_surfaces_and_wal(tmp_path: Path) -> None:
     home = tmp_path / "home"
     queue_connection = _build_all_surfaces(home)
@@ -164,16 +212,26 @@ def test_snapshot_round_trip_covers_all_surfaces_and_wal(tmp_path: Path) -> None
     with pytest.raises(TypeError):
         manager.verify("clear-01")  # type: ignore[call-arg]
 
-    manifest_path = manager.snapshot_path("clear-01") / "manifest.json"
+    manifest_path = manager.snapshot_path("clear-01") / "manifest.jsonl"
     manifest_bytes = manifest_path.read_bytes()
-    manifest = json.loads(manifest_bytes)
+    manifest = [json.loads(line) for line in manifest_bytes.splitlines()]
     assert str(home).encode() not in manifest_bytes
-    assert set(manifest) == {"schema_version", "entries"}
+    assert manifest[0] == {
+        "format": "avibe-memory-snapshot",
+        "record": "header",
+        "schema_version": 2,
+    }
+    entry_records = [record for record in manifest if record["record"] == "entry"]
     assert all(
         set(row) == {"path", "type", "mode", "size", "sha256", "tree_digest"}
-        for row in manifest["entries"]
+        for row in (record["entry"] for record in entry_records)
     )
-    assert all(not Path(row["path"]).is_absolute() for row in manifest["entries"])
+    assert all(
+        not Path(record["entry"]["path"]).is_absolute()
+        for record in entry_records
+    )
+    assert manifest[-1]["record"] == "footer"
+    assert manifest[-1]["entry_count"] == len(entry_records)
     assert stat.S_IMODE(manager.snapshot_path("clear-01").stat().st_mode) == 0o700
     assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
 
@@ -245,6 +303,139 @@ def test_snapshot_restore_relocates_and_restores_missing_as_absent(tmp_path: Pat
     assert not (relocated_home / "memory/call-log/call-log.db").exists()
     assert not (relocated_home / "memory/attachments").exists()
     assert source_home / "state/memory/memory.sqlite" != relocated_home / "state/memory/memory.sqlite"
+
+
+def test_streaming_manifest_crosses_batches_and_restores_exact_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    expected = {
+        f"memory/everos-root/profiles/{index:02d}.json": f"profile-{index}".encode()
+        for index in range(7)
+    }
+    expected.update(
+        {
+            "memory/attachments/bundles/a/00.txt": b"attachment-a",
+            "memory/attachments/bundles/b/00.txt": b"attachment-b",
+        }
+    )
+    for relative, payload in expected.items():
+        _private_file(home / relative, payload, home)
+    _private_directory(home / "memory/everos-root/episodes/empty", home)
+    monkeypatch.setattr(snapshot_module, "_MANIFEST_BATCH_SIZE", 2)
+
+    manager = MemorySnapshotManager(home)
+    snapshot = manager.create("many-entries")
+    assert len(snapshot.entries) > snapshot_module._MANIFEST_BATCH_SIZE * 4
+    assert manager.verify(
+        snapshot.snapshot_id,
+        expected_manifest_sha256=snapshot.manifest_sha256,
+        expected_surface_digests=snapshot.surface_digests(),
+    ) == snapshot
+
+    shutil.rmtree(home / "memory/everos-root")
+    shutil.rmtree(home / "memory/attachments")
+    _private_file(home / "memory/everos-root/unexpected.txt", b"unexpected", home)
+    manager.restore(
+        snapshot.snapshot_id,
+        expected_manifest_sha256=snapshot.manifest_sha256,
+        expected_surface_digests=snapshot.surface_digests(),
+    )
+
+    for relative, payload in expected.items():
+        assert (home / relative).read_bytes() == payload
+    assert (home / "memory/everos-root/episodes/empty").is_dir()
+    assert not (home / "memory/everos-root/unexpected.txt").exists()
+
+
+def test_streaming_manifest_round_trips_beyond_old_entry_and_size_limits(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _private_directory(tmp_path / "snapshot", tmp_path) / "manifest.jsonl"
+    writer = snapshot_module._ManifestWriter(manifest_path)
+    try:
+        for index in range(100_001):
+            writer.add(
+                snapshot_module.SnapshotEntry(
+                    path=f"memory/everos-root/items/{index:06d}.json",
+                    type="file",
+                    mode=0o600,
+                    size=index,
+                    sha256="a" * 64,
+                    tree_digest=None,
+                )
+            )
+        writer.finish()
+    finally:
+        writer.close()
+
+    assert manifest_path.stat().st_size > 8 * 1024 * 1024
+    entries, digest = snapshot_module._read_manifest(manifest_path)
+    assert len(entries) == 100_001
+    assert entries[0].path == "memory/everos-root/items/000000.json"
+    assert entries[-1].path == "memory/everos-root/items/100000.json"
+    assert digest == snapshot_module._file_sha256(manifest_path)
+
+
+def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path) -> None:
+    manifest_path = _private_directory(tmp_path / "snapshot", tmp_path) / "manifest.jsonl"
+    relative_path = "memory/everos-root/" + "/".join(["\u754c" * 200] * 55)
+    writer = snapshot_module._ManifestWriter(manifest_path)
+    try:
+        writer.add(
+            snapshot_module.SnapshotEntry(
+                path=relative_path,
+                type="file",
+                mode=0o600,
+                size=1,
+                sha256="a" * 64,
+                tree_digest=None,
+            )
+        )
+        writer.finish()
+    finally:
+        writer.close()
+
+    lines = manifest_path.read_bytes().splitlines(keepends=True)
+    assert len(lines[1]) > 64 * 1024
+    assert len(lines[1]) <= snapshot_module._MAX_MANIFEST_LINE_BYTES
+    entries, _digest = snapshot_module._read_manifest(manifest_path)
+    assert entries[0].path == relative_path
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "truncated", "appended", "symlink"])
+def test_streaming_manifest_damage_fails_closed(tmp_path: Path, damage: str) -> None:
+    home = tmp_path / "home"
+    _private_file(home / "memory/everos-root/profile.json", b"profile", home)
+    manager = MemorySnapshotManager(home)
+    snapshot = manager.create(f"manifest-{damage}")
+    manifest_path = manager.snapshot_path(snapshot.snapshot_id) / "manifest.jsonl"
+    lines = manifest_path.read_bytes().splitlines(keepends=True)
+    if damage == "corrupt":
+        record = json.loads(lines[1])
+        record["entry"]["size"] += 1
+        lines[1] = (
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+            + b"\n"
+        )
+        manifest_path.write_bytes(b"".join(lines))
+    elif damage == "truncated":
+        manifest_path.write_bytes(b"".join(lines[:-1]))
+    elif damage == "appended":
+        manifest_path.write_bytes(b"".join(lines) + lines[1])
+    else:
+        target = manifest_path.with_name("manifest-real.jsonl")
+        manifest_path.replace(target)
+        manifest_path.symlink_to(target.name)
+    manifest_path.chmod(0o600)
+
+    with pytest.raises(MemorySnapshotVerificationError):
+        manager.verify(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+        )
 
 
 def test_ordinary_backup_includes_clear_audit_and_blocks_on_open_clear(
@@ -462,6 +653,13 @@ def test_create_retry_reclaims_stage_left_by_process_death(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
+    for index in range(6):
+        _private_file(
+            home / f"memory/everos-root/items/{index}.json",
+            f"item-{index}".encode(),
+            home,
+        )
+    monkeypatch.setattr(snapshot_module, "_MANIFEST_BATCH_SIZE", 2)
     manager = MemorySnapshotManager(home)
     real_replace = snapshot_module.os.replace
 
@@ -481,6 +679,7 @@ def test_create_retry_reclaims_stage_left_by_process_death(
     snapshot = manager.create("stage-crash")
 
     assert snapshot.snapshot_id == "stage-crash"
+    assert len(snapshot.entries) > snapshot_module._MANIFEST_BATCH_SIZE
     assert not list(manager.snapshot_root.glob(".stage-crash*.tmp"))
 
 
@@ -533,7 +732,7 @@ def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
         expected_revision=operation.revision,
         execution_token=operation.execution_token,
     )
-    permit = journal.completed_snapshot_permit(operation.operation_id)
+    permit = journal.terminal_snapshot_permit(operation.operation_id)
     outside = tmp_path / "outside"
     outside.mkdir()
     victim = outside / "victim.txt"
@@ -582,7 +781,7 @@ def test_only_completed_journal_operation_can_authorize_snapshot_removal(tmp_pat
         snapshot=snapshot,
     )
     with pytest.raises(ClearTransitionError):
-        journal.completed_snapshot_permit(operation.operation_id)
+        journal.terminal_snapshot_permit(operation.operation_id)
     assert operation.execution_token is not None
     operation = journal.mark_prepared(
         operation.operation_id,
@@ -610,10 +809,10 @@ def test_only_completed_journal_operation_can_authorize_snapshot_removal(tmp_pat
         execution_token=operation.execution_token,
     )
 
-    permit = journal.completed_snapshot_permit(operation.operation_id)
+    permit = journal.terminal_snapshot_permit(operation.operation_id)
     snapshot_path = manager.snapshot_path(operation.operation_id)
     tombstone = manager.snapshot_root / f".{operation.operation_id}.gc"
-    manifest_path = snapshot_path / "manifest.json"
+    manifest_path = snapshot_path / "manifest.jsonl"
     manifest = manifest_path.read_bytes()
     manifest_path.write_bytes(b"corrupt")
     with pytest.raises(MemorySnapshotVerificationError):
@@ -638,7 +837,7 @@ def test_completed_snapshot_removal_retries_a_partially_deleted_tombstone(
     manager = MemorySnapshotManager(home)
     _complete_clear_audit(journal, manager, "remove-retry")
     queue_connection.close()
-    permit = journal.completed_snapshot_permit("remove-retry")
+    permit = journal.terminal_snapshot_permit("remove-retry")
     snapshot_path = manager.snapshot_path(permit.snapshot_id)
     tombstone = manager.snapshot_root / f".{permit.snapshot_id}.gc"
     real_unlink = snapshot_module.os.unlink
@@ -664,6 +863,24 @@ def test_completed_snapshot_removal_retries_a_partially_deleted_tombstone(
 
     assert not tombstone.exists()
     assert not snapshot_path.exists()
+
+
+def test_restored_aborted_journal_operation_authorizes_snapshot_removal(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    queue_connection = _build_all_surfaces(home)
+    journal = MemoryClearJournal(home)
+    manager = MemorySnapshotManager(home)
+    _abort_clear_audit(journal, manager, "remove-aborted")
+    queue_connection.close()
+
+    permit = journal.terminal_snapshot_permit("remove-aborted")
+    snapshot_path = manager.snapshot_path(permit.snapshot_id)
+    manager.remove(permit)
+
+    assert not snapshot_path.exists()
+    manager.remove(permit)
 
 
 def test_preparing_journal_discards_snapshot_published_before_record_and_rebuilds(

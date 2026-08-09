@@ -20,7 +20,13 @@ from core.memory.everos import (
     MemoryProviderFailure,
     MemoryProviderSystemFailure,
 )
-from core.memory.observations import AddAck, AddRejected, FlushRetryable, FlushSucceeded
+from core.memory.observations import (
+    AddAck,
+    AddRejected,
+    FlushRetryable,
+    FlushSucceeded,
+    FlushUnknown,
+)
 from core.memory.store import MemoryStore, MessageFailure, QueueRow
 from core.memory.types import CaptureAttachment, ProviderSessionRef
 from core.memory.worker import MemoryWorker
@@ -409,6 +415,67 @@ def test_stale_flush_settlement_cannot_clear_newer_generation(tmp_path: Path) ->
     ).settled
     state = store.get_session_flush_state(row.provider_session_ref)
     assert state is not None and state.open_generation == 2 and state.state == "idle"
+
+
+def test_stale_flush_finalization_does_not_open_processing_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        current = datetime(2026, 1, 1, tzinfo=UTC)
+        row = _enqueue(store, "stale-finalizer")
+        claimed = store.claim_due(
+            lease_owner="worker",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+        assert store.settle_add_ack(
+            claimed,
+            AddAck("add", "accumulated"),
+            lease_owner="worker",
+            now=current,
+            idle_timeout=timedelta(0),
+        ).settled
+        lease = store.acquire_flush(
+            now="2026-01-01T00:00:00.000Z",
+            provider_session_ref=row.provider_session_ref,
+        )
+        assert lease is not None
+        assert store.mark_flush_submission_started(
+            lease,
+            now="2026-01-01T00:00:01.000Z",
+        )
+        assert store.settle_flush(
+            lease,
+            FlushSucceeded("first", "extracted"),
+            now="2026-01-01T00:00:02.000Z",
+        ).settled
+
+        fault_opens = 0
+        original_open = store.open_processing_fault
+
+        def count_open(*, now: str) -> bool:
+            nonlocal fault_opens
+            fault_opens += 1
+            return original_open(now=now)
+
+        monkeypatch.setattr(store, "open_processing_fault", count_open)
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=FakeMemoryProvider(),
+            enabled=lambda: True,
+        )
+        await coordinator._finalize_flush_outcome(
+            lease,
+            FlushUnknown(reason="transport"),
+        )
+
+        assert fault_opens == 0
+        meta = store.get_meta()
+        assert meta is not None and meta.processing_fault_since is None
+
+    asyncio.run(run())
 
 
 def test_boot_recovery_never_replays_submitted_flush(tmp_path: Path) -> None:
@@ -852,6 +919,378 @@ def test_cancelled_flush_before_submission_coroutine_entry_remains_retryable(
     asyncio.run(run())
 
 
+def test_cancelled_flush_after_provider_entry_opens_one_fault_and_later_recovers(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        flush_entered = asyncio.Event()
+        events: list[tuple[str, str | None, str, int]] = []
+
+        class Provider(FakeMemoryProvider):
+            async def flush(self, session_ref):
+                self.flushes.append(session_ref)
+                if session_ref == cancelled.provider_session_ref:
+                    flush_entered.set()
+                    await asyncio.Event().wait()
+                return FlushSucceeded("flush-recovery", "extracted")
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        cancelled = _enqueue(store, "cancelled-flush", session="cancelled-flush")
+        recovery = _enqueue(store, "recovery-flush", session="recovery-flush")
+        assert await worker.drain(max_rows=2) == 2
+
+        flush_call = asyncio.create_task(
+            coordinator.final_flush(cancelled.provider_session_ref, deadline_seconds=5)
+        )
+        await asyncio.wait_for(flush_entered.wait(), timeout=1)
+        flush_task = coordinator._flush_tasks[cancelled.provider_session_ref.serialize()]
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_call
+
+        state = store.get_session_flush_state(cancelled.provider_session_ref)
+        assert state is not None and state.state == "manual_required"
+        failures = store.failure_log()
+        assert len(failures) == 1
+        assert (failures[0].operation, failures[0].state) == (
+            "flush",
+            "manual_required",
+        )
+        opened = store.get_meta()
+        assert opened is not None and opened.processing_alert_active is True
+        assert [event[:2] for event in events] == [("fault", "engine")]
+
+        recovered = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await recovered.recover(lease_owner="next-boot")
+        assert [event[:2] for event in events] == [("fault", "engine")]
+
+        assert await recovered.final_flush(
+            recovery.provider_session_ref,
+            deadline_seconds=1,
+        )
+        closed = store.get_meta()
+        assert closed is not None and closed.processing_fault_since is None
+        assert [event[:2] for event in events] == [
+            ("fault", "engine"),
+            ("recovered", None),
+        ]
+
+    asyncio.run(run())
+
+
+def test_shutdown_bounds_post_entry_flush_classification_and_boot_recovers(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        flush_entered = asyncio.Event()
+        health_entered = asyncio.Event()
+        health_finished = asyncio.Event()
+        release_health = asyncio.Event()
+        events: list[tuple[str, str | None, str, int]] = []
+        health_calls = 0
+
+        class Provider(FakeMemoryProvider):
+            async def flush(self, session_ref):
+                self.flushes.append(session_ref)
+                flush_entered.set()
+                await asyncio.Event().wait()
+
+            async def processing_healthy(self) -> bool:
+                nonlocal health_calls
+                health_calls += 1
+                if health_calls == 1:
+                    health_entered.set()
+                    try:
+                        await release_health.wait()
+                    finally:
+                        health_finished.set()
+                return True
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        row = _enqueue(store, "shutdown-finalizer")
+        assert await worker.drain_once() == 1
+        assert await coordinator.run_due() == 0
+        flush_task = coordinator._schedule(row.provider_session_ref, force=True)
+        assert flush_task is not None
+        await asyncio.wait_for(flush_entered.wait(), timeout=1)
+
+        started = asyncio.get_running_loop().time()
+        await coordinator.prepare_shutdown(timeout_seconds=0.01)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 0.2
+        assert health_entered.is_set()
+        assert health_finished.is_set()
+        assert flush_task.cancelled()
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None and state.state == "manual_required"
+        pending_fault = store.get_meta()
+        assert pending_fault is not None
+        assert pending_fault.processing_fault_since is not None
+        assert pending_fault.processing_fault_kind is None
+        assert pending_fault.processing_alert_active is False
+        assert events == []
+
+        release_health.set()
+        completed_failures = store.failure_log()
+        completed_meta = store.get_meta()
+        await asyncio.sleep(0)
+        assert events == []
+        assert store.failure_log() == completed_failures
+        assert store.get_meta() == completed_meta
+
+        recovered = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await recovered.recover(lease_owner="next-boot")
+        assert [event[:2] for event in events] == [("fault", "engine")]
+        recovered_meta = store.get_meta()
+        assert recovered_meta is not None
+        assert recovered_meta.processing_fault_kind == "engine"
+        assert recovered_meta.processing_alert_active is True
+
+    asyncio.run(run())
+
+
+def test_shutdown_drains_local_flush_commit_then_boot_alerts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        flush_entered = asyncio.Event()
+        settle_entered = threading.Event()
+        release_settle = threading.Event()
+        events: list[tuple[str, str | None, str, int]] = []
+        health_calls = 0
+
+        class Provider(FakeMemoryProvider):
+            async def flush(self, session_ref):
+                self.flushes.append(session_ref)
+                flush_entered.set()
+                await asyncio.Event().wait()
+
+            async def processing_healthy(self) -> bool:
+                nonlocal health_calls
+                health_calls += 1
+                return True
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        original_settle = store.settle_flush
+
+        def blocking_settle(lease, result, *, now: str):
+            settle_entered.set()
+            release_settle.wait(timeout=2)
+            return original_settle(lease, result, now=now)
+
+        monkeypatch.setattr(store, "settle_flush", blocking_settle)
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        row = _enqueue(store, "shutdown-local-commit")
+        assert await worker.drain_once() == 1
+        flush_task = coordinator._schedule(row.provider_session_ref, force=True)
+        assert flush_task is not None
+        await asyncio.wait_for(flush_entered.wait(), timeout=1)
+
+        shutdown = asyncio.create_task(
+            coordinator.prepare_shutdown(timeout_seconds=0.01)
+        )
+        assert await asyncio.to_thread(settle_entered.wait, 1)
+
+        async def wait_for_second_cancel() -> None:
+            while flush_task.cancelling() < 2:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_second_cancel(), timeout=1)
+        assert not shutdown.done()
+        release_settle.set()
+        await asyncio.wait_for(shutdown, timeout=1)
+
+        assert flush_task.cancelled()
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None and state.state == "manual_required"
+        pending_fault = store.get_meta()
+        assert pending_fault is not None
+        assert pending_fault.processing_fault_since is not None
+        assert pending_fault.processing_fault_kind is None
+        assert pending_fault.processing_alert_active is False
+        assert health_calls == 0
+        assert events == []
+
+        recovered = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await recovered.recover(lease_owner="next-boot")
+        assert health_calls == 1
+        assert [event[:2] for event in events] == [("fault", "engine")]
+
+    asyncio.run(run())
+
+
+def test_shutdown_local_flush_phase_does_not_wait_for_classification_lock(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        flush_entered = asyncio.Event()
+        old_health_entered = asyncio.Event()
+        release_old_health = asyncio.Event()
+        events: list[tuple[str, str | None, str, int]] = []
+        health_calls = 0
+
+        class Provider(FakeMemoryProvider):
+            async def flush(self, session_ref):
+                self.flushes.append(session_ref)
+                flush_entered.set()
+                await asyncio.Event().wait()
+
+            async def processing_healthy(self) -> bool:
+                nonlocal health_calls
+                health_calls += 1
+                if health_calls == 1:
+                    old_health_entered.set()
+                    await release_old_health.wait()
+                return True
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        row = _enqueue(store, "shutdown-lock-boundary")
+        assert await worker.drain_once() == 1
+
+        old_classification = asyncio.create_task(coordinator._open_processing_fault())
+        await asyncio.wait_for(old_health_entered.wait(), timeout=1)
+        flush_task = coordinator._schedule(row.provider_session_ref, force=True)
+        assert flush_task is not None
+        await asyncio.wait_for(flush_entered.wait(), timeout=1)
+
+        started = asyncio.get_running_loop().time()
+        await coordinator.prepare_shutdown(timeout_seconds=0.01)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 0.2
+        assert not release_old_health.is_set()
+        assert not old_classification.done()
+        assert flush_task.cancelled()
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None and state.state == "manual_required"
+        pending_fault = store.get_meta()
+        assert pending_fault is not None
+        assert pending_fault.processing_fault_since is not None
+        assert pending_fault.processing_fault_kind is None
+        assert pending_fault.processing_alert_active is False
+        assert events == []
+
+        old_classification.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old_classification
+        assert events == []
+
+        recovered = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await recovered.recover(lease_owner="next-boot")
+        await recovered.recover(lease_owner="same-boot")
+        assert health_calls == 2
+        assert [event[:2] for event in events] == [("fault", "engine")]
+
+    asyncio.run(run())
+
+
 def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -925,6 +1364,78 @@ def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path
         assert [capture.text for capture in provider.captures] == [
             "payload-first-add",
             "payload-waiting-add",
+        ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fenced", [False, True], ids=["ordinary", "fenced"])
+def test_claim_revalidation_error_returns_exact_claim_and_retry_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fenced: bool,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        row = _enqueue(store, "claim-revalidation", session=f"fenced-{fenced}")
+        original_claim_is_current = store.claim_is_current
+        calls = 0
+
+        def fail_once(claimed: QueueRow, *, lease_owner: str) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("transient store read failure")
+            return original_claim_is_current(claimed, lease_owner=lease_owner)
+
+        monkeypatch.setattr(store, "claim_is_current", fail_once)
+        if fenced:
+            assert not await coordinator.final_flush(
+                row.provider_session_ref,
+                deadline_seconds=1,
+            )
+            state = store.get_session_flush_state(row.provider_session_ref)
+            assert state is not None and state.state == "due"
+        else:
+            claimed = store.claim_due(
+                lease_owner="ordinary-worker",
+                now="2026-01-01T00:00:00.000Z",
+            )
+            assert claimed is not None
+            assert not await coordinator.deliver(
+                claimed,
+                lease_owner="ordinary-worker",
+            )
+
+        queued = store.list_queue_rows()[0]
+        assert (queued.state, queued.attempts) == ("pending", 0)
+        assert provider.captures == []
+        assert store.failure_log() == ()
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None
+        assert state.state == ("due" if fenced else "idle")
+
+        if fenced:
+            assert await coordinator.final_flush(
+                row.provider_session_ref,
+                deadline_seconds=1,
+            )
+            assert provider.flushes == [row.provider_session_ref]
+        else:
+            retry = store.claim_due(
+                lease_owner="retry-worker",
+                now="2026-01-01T00:00:01.000Z",
+            )
+            assert retry is not None
+            assert await coordinator.deliver(retry, lease_owner="retry-worker")
+        assert [capture.text for capture in provider.captures] == [
+            "payload-claim-revalidation"
         ]
 
     asyncio.run(run())

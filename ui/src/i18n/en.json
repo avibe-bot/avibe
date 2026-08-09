@@ -3650,6 +3650,9 @@
         "title": "Runtime and capabilities",
         "loading": "Reading runtime health…",
         "unavailable": "No runtime health snapshot is available.",
+        "healthStatus": {
+          "ok": "Healthy"
+        },
         "version": "Version",
         "capabilities": "Capabilities",
         "noCapabilities": "No capabilities were reported.",

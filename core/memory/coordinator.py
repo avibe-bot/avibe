@@ -177,7 +177,7 @@ class SessionFlushCoordinator:
                     submission=submission,
                 )
         except asyncio.CancelledError:
-            await self._return_cancelled_unsubmitted(
+            await self._return_unsubmitted_claim(
                 row,
                 lease_owner=lease_owner,
                 submission=submission,
@@ -327,7 +327,7 @@ class SessionFlushCoordinator:
                         submission=submission,
                     )
                 except asyncio.CancelledError:
-                    await self._return_cancelled_unsubmitted(
+                    await self._return_unsubmitted_claim(
                         row,
                         lease_owner=lease.fence_token,
                         submission=submission,
@@ -394,21 +394,15 @@ class SessionFlushCoordinator:
                         result = FlushUnknown(reason="transport")
                 except asyncio.CancelledError:
                     if submission.provider_entered:
-                        await asyncio.shield(
-                            self._store_call(
-                                self._store.settle_flush,
-                                lease,
-                                FlushUnknown(reason="transport"),
-                                now=_iso(self._current_time()),
-                            )
+                        await self._finalize_flush_outcome(
+                            lease,
+                            FlushUnknown(reason="transport"),
                         )
                     else:
-                        await asyncio.shield(
-                            self._store_call(
-                                self._store.return_unsubmitted_flush,
-                                lease,
-                                now=_iso(self._current_time()),
-                            )
+                        await self._store_call(
+                            self._store.return_unsubmitted_flush,
+                            lease,
+                            now=_iso(self._current_time()),
                         )
                     raise
 
@@ -419,18 +413,7 @@ class SessionFlushCoordinator:
                     now=self._current_time(),
                 )
             else:
-                await self._store_call(
-                    self._store.settle_flush,
-                    lease,
-                    result,
-                    now=_iso(self._current_time()),
-                )
-            if isinstance(result, FlushSucceeded):
-                await self._close_processing_fault()
-            elif isinstance(result, FlushUnknown) or (
-                isinstance(result, FlushRejected) and result.server_fault
-            ):
-                await self._open_processing_fault()
+                await self._finalize_flush_outcome(lease, result)
 
     async def _deliver_locked(
         self,
@@ -506,11 +489,20 @@ class SessionFlushCoordinator:
         )
         try:
             async with self._write_slots:
-                if not await self._store_call(
-                    self._store.claim_is_current,
-                    row,
-                    lease_owner=lease_owner,
-                ):
+                try:
+                    claim_is_current = await self._store_call(
+                        self._store.claim_is_current,
+                        row,
+                        lease_owner=lease_owner,
+                    )
+                except Exception:
+                    await self._return_unsubmitted_claim(
+                        row,
+                        lease_owner=lease_owner,
+                        submission=submission,
+                    )
+                    return False
+                if not claim_is_current:
                     return False
                 ack = await asyncio.wait_for(
                     _submit_provider_write(
@@ -589,7 +581,69 @@ class SessionFlushCoordinator:
             await self._close_processing_fault()
         return settled.settled
 
-    async def _return_cancelled_unsubmitted(
+    async def _finalize_flush_outcome(
+        self,
+        lease: FlushLease,
+        result: FlushSucceeded | FlushRejected | FlushUnknown,
+    ) -> None:
+        (settled, fault_at), cancellation = await self._drain_local_flush_outcome(
+            lease,
+            result,
+        )
+        if cancellation is not None:
+            raise cancellation
+        if not settled:
+            return
+        if isinstance(result, FlushSucceeded):
+            await self._close_processing_fault()
+        elif fault_at is not None:
+            await self._classify_processing_fault(fault_at)
+
+    async def _drain_local_flush_outcome(
+        self,
+        lease: FlushLease,
+        result: FlushSucceeded | FlushRejected | FlushUnknown,
+    ) -> tuple[tuple[bool, str | None], asyncio.CancelledError | None]:
+        """Finish local commits, deferring cancellation before remote classification."""
+
+        local_phase = asyncio.create_task(
+            self._persist_local_flush_outcome(lease, result)
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not local_phase.done():
+            try:
+                await asyncio.shield(local_phase)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        return local_phase.result(), cancellation
+
+    async def _persist_local_flush_outcome(
+        self,
+        lease: FlushLease,
+        result: FlushSucceeded | FlushRejected | FlushUnknown,
+    ) -> tuple[bool, str | None]:
+        """Persist the exact outcome and its fault edge under the same local phase."""
+
+        settled = await self._store_call(
+            self._store.settle_flush,
+            lease,
+            result,
+            now=_iso(self._current_time()),
+        )
+        if not settled.settled:
+            return False, None
+        if isinstance(result, FlushUnknown) or (
+            isinstance(result, FlushRejected) and result.server_fault
+        ):
+            occurred_at = _iso(self._current_time())
+            await self._store_call(
+                self._store.open_processing_fault,
+                now=occurred_at,
+            )
+            return True, occurred_at
+        return True, None
+
+    async def _return_unsubmitted_claim(
         self,
         row: QueueRow,
         *,

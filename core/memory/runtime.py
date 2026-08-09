@@ -147,7 +147,7 @@ class MemoryRuntime:
                 operation_guard=self._clear_journal.assert_backup_allowed,
             )
             self._clear_journal.mark_boot_recovery_needed()
-            self._reconcile_completed_clear_snapshots()
+            self._reconcile_terminal_clear_snapshots()
         except Exception as exc:
             self._clear_journal_error = exc
             logger.exception("Memory clear journal initialization failed; maintenance is fenced")
@@ -416,7 +416,7 @@ class MemoryRuntime:
             self.module._worker.pause_claims()
             return {"ok": False, "error": "memory_clear_failed"}
 
-        await self._run_maintenance_io(self._reconcile_completed_clear_snapshots)
+        await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -1062,16 +1062,11 @@ class MemoryRuntime:
                         operation_id=operation_id
                     )
                     if recovered is not None and recovered.state == "aborted":
-                        await self._resume_after_clear()
+                        await self._finish_aborted_clear(recovered)
                     if isinstance(error, asyncio.CancelledError):
                         raise
                     return self._clear_blocked_payload()
-                await self._resume_after_clear()
-                return {
-                    "status": "aborted",
-                    "operation_id": operation.operation_id,
-                    "epoch": operation.pre_epoch,
-                }
+                return await self._finish_aborted_clear(operation)
 
     async def _prepare_clear(self, operation: ClearOperation) -> ClearOperation:
         journal = self._require_clear_journal()
@@ -1251,7 +1246,7 @@ class MemoryRuntime:
 
     async def _finish_clear(self, operation: ClearOperation) -> dict[str, Any]:
         try:
-            await self._run_maintenance_io(self._reconcile_completed_clear_snapshots)
+            await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
         finally:
             await self._resume_after_clear()
         return {
@@ -1260,17 +1255,28 @@ class MemoryRuntime:
             "epoch": operation.target_epoch,
         }
 
-    def _reconcile_completed_clear_snapshots(self) -> None:
-        """Retry GC whose durable completion preceded snapshot removal."""
+    async def _finish_aborted_clear(self, operation: ClearOperation) -> dict[str, Any]:
+        try:
+            await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
+        finally:
+            await self._resume_after_clear()
+        return {
+            "status": "aborted",
+            "operation_id": operation.operation_id,
+            "epoch": operation.pre_epoch,
+        }
+
+    def _reconcile_terminal_clear_snapshots(self) -> None:
+        """Retry GC whose durable terminal transition preceded snapshot removal."""
 
         journal = self._require_clear_journal()
         manager = self._require_snapshot_manager()
-        for permit in journal.completed_snapshot_permits():
+        for permit in journal.terminal_snapshot_permits():
             try:
                 manager.remove(permit)
             except Exception:
                 logger.warning(
-                    "Completed Memory clear snapshot %s could not be removed",
+                    "Terminal Memory clear snapshot %s could not be removed",
                     permit.snapshot_id,
                     exc_info=True,
                 )

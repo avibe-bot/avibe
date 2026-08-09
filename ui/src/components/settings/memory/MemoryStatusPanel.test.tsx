@@ -75,10 +75,25 @@ describe('MemoryStatusPanel', () => {
     render(<MemoryStatusPanel {...baseProps} />);
 
     expect(screen.getByText('1.2.3')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.runtime.healthStatus.ok')).toBeTruthy();
     expect(screen.getByText('unhealthy')).toBeTruthy();
     expect(screen.getByText('memory.processingRecord.sourceState.stale')).toBeTruthy();
     expect(screen.getByText('memory.processingRecord.sourceState.unavailable')).toBeTruthy();
     expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
+  });
+
+  it('preserves a future runtime health status as diagnostic fallback text', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={{
+          ...STATUS,
+          health: { ...STATUS.health!, status: 'future_health_state' },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('future_health_state')).toBeTruthy();
   });
 
   it('localizes closed runtime fact labels and enum values while preserving diagnostics', () => {

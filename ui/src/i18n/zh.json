@@ -3650,6 +3650,9 @@
         "title": "运行时与能力",
         "loading": "正在读取运行时健康状态…",
         "unavailable": "当前没有可用的运行时健康快照。",
+        "healthStatus": {
+          "ok": "正常"
+        },
         "version": "版本",
         "capabilities": "能力",
         "noCapabilities": "运行时未报告能力。",

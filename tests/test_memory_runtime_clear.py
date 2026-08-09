@@ -318,6 +318,10 @@ async def test_abort_restores_all_surfaces_after_destructive_work(
     assert restored_meta.clear_in_progress is False
     assert len(runtime._store.list_queue_rows()) == 1
     assert runtime._clear_journal.get_open_operation() is None
+    operation = runtime._clear_journal.get_operation(recovery.operation_id)
+    assert operation is not None and operation.state == "aborted"
+    assert runtime._snapshot_manager is not None
+    assert not runtime._snapshot_manager.snapshot_path(recovery.operation_id).exists()
     await runtime.close()
 
 
@@ -353,6 +357,71 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
     monkeypatch.setattr(manager, "remove", fail_removal)
     completed_before_restart = await runtime.clear(operator_ref="user:owner")
     restart_snapshot_path = manager.snapshot_path(completed_before_restart["operation_id"])
+    assert restart_snapshot_path.is_dir()
+    await runtime.close()
+
+    restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    assert not restart_snapshot_path.exists()
+    assert restarted._clear_journal is not None
+    assert restarted._clear_journal.get_open_operation() is None
+    await restarted.close()
+
+
+async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    journal = runtime._clear_journal
+    manager = runtime._snapshot_manager
+    assert journal is not None
+    assert manager is not None
+    original_delete = runtime._delete_clear_surface
+    original_remove = manager.remove
+    removal_attempts: list[str] = []
+
+    async def interrupt_provider(surface, *, target_epoch):
+        if surface.surface == "provider":
+            raise OSError("injected provider delete failure")
+        await original_delete(surface, target_epoch=target_epoch)
+
+    def fail_removal(permit) -> None:
+        if manager.snapshot_path(permit.snapshot_id).exists():
+            removal_attempts.append(permit.snapshot_id)
+            raise OSError("injected snapshot removal failure")
+        original_remove(permit)
+
+    async def abort_after_interrupted_clear() -> dict:
+        monkeypatch.setattr(runtime, "_delete_clear_surface", interrupt_provider)
+        failed = await runtime.clear(operator_ref="user:owner")
+        recovery = journal.get_open_operation()
+        assert failed["status"] == "failed"
+        assert recovery is not None
+        monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
+        return await runtime.abort_clear(
+            recovery.operation_id,
+            operator_ref="user:owner",
+        )
+
+    monkeypatch.setattr(manager, "remove", fail_removal)
+    aborted = await abort_after_interrupted_clear()
+    snapshot_path = manager.snapshot_path(aborted["operation_id"])
+
+    assert aborted["status"] == "aborted"
+    assert removal_attempts == [aborted["operation_id"]]
+    assert snapshot_path.is_dir()
+    terminal = journal.get_operation(aborted["operation_id"])
+    assert terminal is not None and terminal.state == "aborted"
+
+    monkeypatch.setattr(manager, "remove", original_remove)
+    assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
+    assert not snapshot_path.exists()
+
+    monkeypatch.setattr(manager, "remove", fail_removal)
+    aborted_before_restart = await abort_after_interrupted_clear()
+    restart_snapshot_path = manager.snapshot_path(aborted_before_restart["operation_id"])
     assert restart_snapshot_path.is_dir()
     await runtime.close()
 

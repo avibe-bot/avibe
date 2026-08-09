@@ -17,21 +17,23 @@ import stat
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Protocol, Sequence
 
 
 SnapshotSurfaceKind = Literal["sqlite", "tree"]
 SnapshotEntryType = Literal["sqlite", "tree", "directory", "file", "missing"]
 
-_SCHEMA_VERSION = 1
-_MANIFEST_FILENAME = "manifest.json"
+_SCHEMA_VERSION = 2
+_MANIFEST_FILENAME = "manifest.jsonl"
 _PAYLOAD_DIRNAME = "payload"
-_MAX_MANIFEST_BYTES = 8 * 1024 * 1024
-_MAX_ENTRIES = 100_000
+_MANIFEST_BATCH_SIZE = 1_000
+# Covers the worst-case JSON escaping of a Windows extended-length path. The
+# bound applies to one malformed record, never to total manifest bytes or rows.
+_MAX_MANIFEST_LINE_BYTES = 256 * 1024
 _COPY_CHUNK_BYTES = 1024 * 1024
 _SNAPSHOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-_COMPLETED_PERMIT_AUTHORITY = object()
+_TERMINAL_PERMIT_AUTHORITY = object()
 _PREPARING_DISCARD_PERMIT_AUTHORITY = object()
 _ACTIVE_PREPARING_DISCARD_LEASES: set[object] = set()
 _SUCCEEDED_PREPARING_DISCARD_LEASES: set[object] = set()
@@ -58,7 +60,7 @@ class MemorySnapshotUnsafePathError(MemorySnapshotError):
 
 
 class MemorySnapshotVerificationError(MemorySnapshotError):
-    """A snapshot did not match its bounded manifest."""
+    """A snapshot did not match its authenticated manifest."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,8 +148,8 @@ class MemorySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class _CompletedSnapshotPermit:
-    """Journal-issued capability for garbage-collecting a completed snapshot."""
+class _TerminalSnapshotPermit:
+    """Journal-issued capability for garbage-collecting a terminal snapshot."""
 
     snapshot_id: str
     relative_path: str
@@ -156,8 +158,8 @@ class _CompletedSnapshotPermit:
     _authority: object
 
     def __post_init__(self) -> None:
-        if self._authority is not _COMPLETED_PERMIT_AUTHORITY:
-            raise TypeError("completed Memory snapshot permits are journal-issued")
+        if self._authority is not _TERMINAL_PERMIT_AUTHORITY:
+            raise TypeError("terminal Memory snapshot permits are journal-issued")
         _validated_snapshot_id(self.snapshot_id)
         object.__setattr__(self, "relative_path", _validated_relative_path(self.relative_path))
         _validated_sha256(self.manifest_sha256)
@@ -166,25 +168,25 @@ class _CompletedSnapshotPermit:
             canonical = _validated_relative_path(path)
             normalized.append((canonical, None if digest is None else _validated_sha256(digest)))
         if len({path for path, _digest in normalized}) != len(normalized):
-            raise ValueError("completed Memory snapshot permit has duplicate surfaces")
+            raise ValueError("terminal Memory snapshot permit has duplicate surfaces")
         object.__setattr__(self, "surface_digests", tuple(normalized))
 
 
-def _issue_completed_snapshot_permit(
+def _issue_terminal_snapshot_permit(
     *,
     snapshot_id: str,
     relative_path: str,
     manifest_sha256: str,
     surface_digests: tuple[tuple[str, str | None], ...],
-) -> _CompletedSnapshotPermit:
-    """Issue the opaque capability used by the completed journal path."""
+) -> _TerminalSnapshotPermit:
+    """Issue the opaque capability used by an eligible terminal journal row."""
 
-    return _CompletedSnapshotPermit(
+    return _TerminalSnapshotPermit(
         snapshot_id=snapshot_id,
         relative_path=relative_path,
         manifest_sha256=manifest_sha256,
         surface_digests=surface_digests,
-        _authority=_COMPLETED_PERMIT_AUTHORITY,
+        _authority=_TERMINAL_PERMIT_AUTHORITY,
     )
 
 
@@ -241,6 +243,76 @@ class _RestorePlan:
     staged: Path | None
     backups: list[_RestoreBackup]
     installed: bool = False
+
+
+class _DigestWriter(Protocol):
+    def update(self, value: bytes, /) -> None: ...
+
+    def hexdigest(self) -> str: ...
+
+
+class _ManifestWriter:
+    """Write an authenticated manifest without retaining the full tree."""
+
+    def __init__(self, path: Path) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        self._descriptor = os.open(path, flags, 0o600)
+        self._path = path
+        self._buffer: list[bytes] = []
+        self._entries_digest = hashlib.sha256()
+        self._entry_count = 0
+        self._finished = False
+        try:
+            header = _json_line(
+                {
+                    "format": "avibe-memory-snapshot",
+                    "record": "header",
+                    "schema_version": _SCHEMA_VERSION,
+                }
+            )
+            _write_all(self._descriptor, header)
+        except BaseException:
+            os.close(self._descriptor)
+            raise
+
+    def add(self, entry: SnapshotEntry) -> None:
+        if self._finished:
+            raise RuntimeError("Memory snapshot manifest is already finished")
+        record = _json_line({"entry": entry.payload(), "record": "entry"})
+        if len(record) > _MAX_MANIFEST_LINE_BYTES:
+            raise MemorySnapshotError("Memory snapshot manifest entry is too large")
+        self._entries_digest.update(record)
+        self._buffer.append(record)
+        self._entry_count += 1
+        if len(self._buffer) >= _manifest_batch_size():
+            self._flush()
+
+    def finish(self) -> None:
+        if self._finished:
+            return
+        self._flush()
+        footer = _json_line(
+            {
+                "entries_sha256": self._entries_digest.hexdigest(),
+                "entry_count": self._entry_count,
+                "record": "footer",
+            }
+        )
+        _write_all(self._descriptor, footer)
+        os.fchmod(self._descriptor, 0o600)
+        os.fsync(self._descriptor)
+        self._finished = True
+
+    def close(self) -> None:
+        os.close(self._descriptor)
+        if self._finished:
+            _fsync_directory(self._path.parent)
+
+    def _flush(self) -> None:
+        if not self._buffer:
+            return
+        _write_all(self._descriptor, b"".join(self._buffer))
+        self._buffer.clear()
 
 
 class MemorySnapshotManager:
@@ -329,20 +401,18 @@ class MemorySnapshotManager:
         try:
             _mkdir_private(stage)
             _mkdir_private(payload_root)
-            entries: list[SnapshotEntry] = []
-            for surface in self._surfaces:
-                source = self._effective_home / surface.path
-                destination = payload_root / surface.path
-                if surface.kind == "sqlite":
-                    entries.append(self._snapshot_sqlite(surface, source, destination))
-                else:
-                    entries.extend(self._snapshot_tree(surface, source, destination))
-                if len(entries) > _MAX_ENTRIES:
-                    raise MemorySnapshotError("Memory snapshot contains too many entries")
-
-            entries = _with_tree_digests(entries)
-            manifest_bytes = _manifest_bytes(entries)
-            _write_private_file(stage / _MANIFEST_FILENAME, manifest_bytes, mode=0o600)
+            manifest = _ManifestWriter(stage / _MANIFEST_FILENAME)
+            try:
+                for surface in self._surfaces:
+                    source = self._effective_home / surface.path
+                    destination = payload_root / surface.path
+                    if surface.kind == "sqlite":
+                        manifest.add(self._snapshot_sqlite(surface, source, destination))
+                    else:
+                        self._snapshot_tree(surface, source, destination, manifest)
+                manifest.finish()
+            finally:
+                manifest.close()
             _fsync_directory(payload_root)
             _fsync_directory(stage)
             self._verify_directory(identifier, stage)
@@ -482,14 +552,14 @@ class MemorySnapshotManager:
         if self._operation_guard is not None:
             self._operation_guard()
 
-    def remove(self, permit: _CompletedSnapshotPermit) -> None:
-        """Remove only a snapshot authorized by a completed journal row."""
+    def remove(self, permit: _TerminalSnapshotPermit) -> None:
+        """Remove only a snapshot authorized by an eligible terminal journal row."""
 
         if (
-            not isinstance(permit, _CompletedSnapshotPermit)
-            or permit._authority is not _COMPLETED_PERMIT_AUTHORITY
+            not isinstance(permit, _TerminalSnapshotPermit)
+            or permit._authority is not _TERMINAL_PERMIT_AUTHORITY
         ):
-            raise TypeError("Memory snapshot removal requires a completed journal permit")
+            raise TypeError("Memory snapshot removal requires a terminal journal permit")
         directory = self.snapshot_path(permit.snapshot_id)
         tombstone = self._snapshot_root / f".{permit.snapshot_id}.gc"
         expected_relative = (PurePosixPath(self._snapshot_root_relative) / permit.snapshot_id).as_posix()
@@ -616,14 +686,20 @@ class MemorySnapshotManager:
         surface: SnapshotSurface,
         source: Path,
         destination: Path,
-    ) -> list[SnapshotEntry]:
+        manifest: _ManifestWriter,
+    ) -> SnapshotEntry:
         info = _managed_source_info(self._effective_home, source)
         if info is None:
-            return [_missing_entry(surface.path)]
+            entry = _missing_entry(surface.path)
+            manifest.add(entry)
+            return entry
         _require_directory_private(info, "Memory tree surface")
         _ensure_private_directory(self._effective_home, destination.parent)
         _mkdir_private(destination)
-        rows: list[SnapshotEntry] = [
+        entry = self._copy_tree_children(
+            source,
+            destination,
+            PurePosixPath(surface.path),
             SnapshotEntry(
                 path=surface.path,
                 type="tree",
@@ -631,20 +707,22 @@ class MemorySnapshotManager:
                 size=0,
                 sha256=None,
                 tree_digest=None,
-            )
-        ]
-        self._copy_tree_children(source, destination, PurePosixPath(surface.path), rows)
+            ),
+            manifest,
+        )
         os.chmod(destination, stat.S_IMODE(info.st_mode))
         _fsync_directory(destination)
-        return rows
+        manifest.add(entry)
+        return entry
 
     def _copy_tree_children(
         self,
         source: Path,
         destination: Path,
         relative: PurePosixPath,
-        rows: list[SnapshotEntry],
-    ) -> None:
+        directory_entry: SnapshotEntry,
+        manifest: _ManifestWriter,
+    ) -> SnapshotEntry:
         before = os.lstat(source)
         _require_directory_private(before, "Memory tree directory")
         try:
@@ -653,6 +731,7 @@ class MemorySnapshotManager:
             raise MemorySnapshotError("Memory tree surface could not be read") from error
         with iterator:
             children = sorted(iterator, key=lambda item: item.name)
+        digest = _tree_digest(directory_entry)
         for child in children:
             source_child = Path(child.path)
             destination_child = destination / child.name
@@ -664,7 +743,10 @@ class MemorySnapshotManager:
             if stat.S_ISDIR(info.st_mode):
                 _require_directory_private(info, "Memory tree directory")
                 _mkdir_private(destination_child)
-                rows.append(
+                entry = self._copy_tree_children(
+                    source_child,
+                    destination_child,
+                    child_relative,
                     SnapshotEntry(
                         path=path_text,
                         type="directory",
@@ -672,30 +754,32 @@ class MemorySnapshotManager:
                         size=0,
                         sha256=None,
                         tree_digest=None,
-                    )
+                    ),
+                    manifest,
                 )
-                self._copy_tree_children(source_child, destination_child, child_relative, rows)
                 os.chmod(destination_child, stat.S_IMODE(info.st_mode))
                 _fsync_directory(destination_child)
+                manifest.add(entry)
+                _update_tree_digest(digest, entry)
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise MemorySnapshotUnsafePathError("Memory snapshot refuses special files")
             _require_regular_private(info, "Memory tree file")
-            size, digest = _copy_regular_file(
+            size, file_digest = _copy_regular_file(
                 source_child,
                 destination_child,
                 mode=stat.S_IMODE(info.st_mode),
             )
-            rows.append(
-                SnapshotEntry(
-                    path=path_text,
-                    type="file",
-                    mode=stat.S_IMODE(info.st_mode),
-                    size=size,
-                    sha256=digest,
-                    tree_digest=None,
-                )
+            entry = SnapshotEntry(
+                path=path_text,
+                type="file",
+                mode=stat.S_IMODE(info.st_mode),
+                size=size,
+                sha256=file_digest,
+                tree_digest=None,
             )
+            manifest.add(entry)
+            _update_tree_digest(digest, entry)
         after = os.lstat(source)
         stable = (
             before.st_dev,
@@ -710,6 +794,7 @@ class MemorySnapshotManager:
         )
         if not stable:
             raise MemorySnapshotError("Memory tree directory changed during snapshot")
+        return replace(directory_entry, tree_digest=digest.hexdigest())
 
     def _verify_directory(self, snapshot_id: str, directory: Path) -> MemorySnapshot:
         try:
@@ -720,8 +805,7 @@ class MemorySnapshotManager:
             raise MemorySnapshotVerificationError("Memory snapshot is missing")
         _require_directory_private(directory_info, "Memory snapshot directory")
         manifest_path = directory / _MANIFEST_FILENAME
-        manifest_bytes = _read_private_bounded_file(manifest_path, _MAX_MANIFEST_BYTES)
-        entries = _parse_manifest(manifest_bytes)
+        entries, manifest_sha256 = _read_manifest(manifest_path)
         self._validate_manifest_surfaces(entries)
         payload_root = directory / _PAYLOAD_DIRNAME
         try:
@@ -743,7 +827,7 @@ class MemorySnapshotManager:
         return MemorySnapshot(
             snapshot_id=snapshot_id,
             relative_path=(PurePosixPath(self._snapshot_root_relative) / snapshot_id).as_posix(),
-            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            manifest_sha256=manifest_sha256,
             entries=entries,
             surface_receipts=receipts,
         )
@@ -1068,100 +1152,158 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         view = view[written:]
 
 
-def _write_private_file(path: Path, payload: bytes, *, mode: int) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        _write_all(descriptor, payload)
-        os.fchmod(descriptor, mode)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    _fsync_directory(path.parent)
-
-
-def _read_private_bounded_file(path: Path, limit: int) -> bytes:
+def _read_manifest(path: Path) -> tuple[tuple[SnapshotEntry, ...], str]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
     try:
-        info = os.fstat(descriptor)
-        _require_regular_private(info, "Memory snapshot manifest")
-        if info.st_size > limit:
-            raise MemorySnapshotVerificationError("Memory snapshot manifest is too large")
-        chunks: list[bytes] = []
-        remaining = limit + 1
-        while remaining:
-            chunk = os.read(descriptor, min(_COPY_CHUNK_BYTES, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
-        if len(payload) > limit:
-            raise MemorySnapshotVerificationError("Memory snapshot manifest is too large")
-        return payload
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise MemorySnapshotVerificationError(
+            "Memory snapshot manifest cannot be opened safely"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        _require_regular_private(before, "Memory snapshot manifest")
+        manifest_digest = hashlib.sha256()
+        entries_digest = hashlib.sha256()
+        entries: list[SnapshotEntry] = []
+        footer_seen = False
+        line_number = 0
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            while True:
+                line = stream.readline(_MAX_MANIFEST_LINE_BYTES + 1)
+                if not line:
+                    break
+                line_number += 1
+                if len(line) > _MAX_MANIFEST_LINE_BYTES or not line.endswith(b"\n"):
+                    raise MemorySnapshotVerificationError(
+                        "Memory snapshot manifest record is invalid"
+                    )
+                manifest_digest.update(line)
+                try:
+                    record = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise MemorySnapshotVerificationError(
+                        "Memory snapshot manifest is invalid"
+                    ) from error
+                if line_number == 1:
+                    if record != {
+                        "format": "avibe-memory-snapshot",
+                        "record": "header",
+                        "schema_version": _SCHEMA_VERSION,
+                    }:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot manifest version is unsupported"
+                        )
+                    continue
+                if footer_seen or not isinstance(record, dict):
+                    raise MemorySnapshotVerificationError(
+                        "Memory snapshot manifest shape is invalid"
+                    )
+                if record.get("record") == "entry":
+                    if set(record) != {"entry", "record"}:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot manifest entry is invalid"
+                        )
+                    entries.append(_parse_manifest_entry(record["entry"]))
+                    entries_digest.update(line)
+                    continue
+                if record.get("record") == "footer":
+                    if set(record) != {"entries_sha256", "entry_count", "record"}:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot manifest footer is invalid"
+                        )
+                    entry_count = record["entry_count"]
+                    expected_digest = record["entries_sha256"]
+                    if (
+                        not isinstance(entry_count, int)
+                        or isinstance(entry_count, bool)
+                        or entry_count < 0
+                        or not isinstance(expected_digest, str)
+                        or _SHA256_RE.fullmatch(expected_digest) is None
+                        or entry_count != len(entries)
+                        or expected_digest != entries_digest.hexdigest()
+                    ):
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot manifest footer is invalid"
+                        )
+                    footer_seen = True
+                    continue
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot manifest record is invalid"
+                )
+        after = os.fstat(descriptor)
+        stable = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if not stable:
+            raise MemorySnapshotVerificationError("Memory snapshot manifest changed during read")
+        if line_number == 0 or not footer_seen:
+            raise MemorySnapshotVerificationError("Memory snapshot manifest is incomplete")
+        return tuple(entries), manifest_digest.hexdigest()
+    except OSError as error:
+        raise MemorySnapshotVerificationError("Memory snapshot manifest cannot be read") from error
     finally:
         os.close(descriptor)
 
 
-def _manifest_bytes(entries: Sequence[SnapshotEntry]) -> bytes:
-    payload = {
-        "schema_version": _SCHEMA_VERSION,
-        "entries": [entry.payload() for entry in sorted(entries, key=lambda value: value.path)],
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > _MAX_MANIFEST_BYTES:
-        raise MemorySnapshotError("Memory snapshot manifest is too large")
-    return encoded
+def _json_line(payload: Mapping[str, object]) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
 
 
-def _parse_manifest(payload: bytes) -> tuple[SnapshotEntry, ...]:
-    try:
-        value = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise MemorySnapshotVerificationError("Memory snapshot manifest is invalid") from error
-    if not isinstance(value, dict) or set(value) != {"schema_version", "entries"}:
-        raise MemorySnapshotVerificationError("Memory snapshot manifest shape is invalid")
-    if value["schema_version"] != _SCHEMA_VERSION or not isinstance(value["entries"], list):
-        raise MemorySnapshotVerificationError("Memory snapshot manifest version is unsupported")
-    if len(value["entries"]) > _MAX_ENTRIES:
-        raise MemorySnapshotVerificationError("Memory snapshot manifest has too many entries")
-    rows: list[SnapshotEntry] = []
+def _manifest_batch_size() -> int:
+    if (
+        not isinstance(_MANIFEST_BATCH_SIZE, int)
+        or isinstance(_MANIFEST_BATCH_SIZE, bool)
+        or _MANIFEST_BATCH_SIZE <= 0
+    ):
+        raise MemorySnapshotError("Memory snapshot manifest batch size is invalid")
+    return _MANIFEST_BATCH_SIZE
+
+
+def _parse_manifest_entry(raw: object) -> SnapshotEntry:
     expected_keys = {"path", "type", "mode", "size", "sha256", "tree_digest"}
-    for raw in value["entries"]:
-        if not isinstance(raw, dict) or set(raw) != expected_keys:
-            raise MemorySnapshotVerificationError("Memory snapshot manifest entry is invalid")
-        try:
-            path = _validated_relative_path(raw["path"])
-        except (TypeError, ValueError) as error:
-            raise MemorySnapshotVerificationError("Memory snapshot path is invalid") from error
-        entry_type = raw["type"]
-        mode = raw["mode"]
-        size = raw["size"]
-        digest = raw["sha256"]
-        tree_digest = raw["tree_digest"]
-        if entry_type not in {"sqlite", "tree", "directory", "file", "missing"}:
-            raise MemorySnapshotVerificationError("Memory snapshot entry type is invalid")
-        if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o777:
-            raise MemorySnapshotVerificationError("Memory snapshot entry mode is invalid")
-        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-            raise MemorySnapshotVerificationError("Memory snapshot entry size is invalid")
-        if digest is not None and (not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None):
-            raise MemorySnapshotVerificationError("Memory snapshot file digest is invalid")
-        if tree_digest is not None and (
-            not isinstance(tree_digest, str) or _SHA256_RE.fullmatch(tree_digest) is None
-        ):
-            raise MemorySnapshotVerificationError("Memory snapshot tree digest is invalid")
-        if entry_type in {"sqlite", "file"}:
-            if digest is None or tree_digest is not None or mode & 0o077:
-                raise MemorySnapshotVerificationError("Memory snapshot file metadata is invalid")
-        elif entry_type in {"tree", "directory"}:
-            if digest is not None or tree_digest is None or size != 0 or mode & 0o077:
-                raise MemorySnapshotVerificationError("Memory snapshot directory metadata is invalid")
-        elif any((mode, size, digest is not None, tree_digest is not None)):
-            raise MemorySnapshotVerificationError("Missing Memory surface metadata is invalid")
-        rows.append(SnapshotEntry(path, entry_type, mode, size, digest, tree_digest))
-    return tuple(rows)
+    if not isinstance(raw, dict) or set(raw) != expected_keys:
+        raise MemorySnapshotVerificationError("Memory snapshot manifest entry is invalid")
+    try:
+        path = _validated_relative_path(raw["path"])
+    except (TypeError, ValueError) as error:
+        raise MemorySnapshotVerificationError("Memory snapshot path is invalid") from error
+    entry_type = raw["type"]
+    mode = raw["mode"]
+    size = raw["size"]
+    digest = raw["sha256"]
+    tree_digest = raw["tree_digest"]
+    if entry_type not in {"sqlite", "tree", "directory", "file", "missing"}:
+        raise MemorySnapshotVerificationError("Memory snapshot entry type is invalid")
+    if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o777:
+        raise MemorySnapshotVerificationError("Memory snapshot entry mode is invalid")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise MemorySnapshotVerificationError("Memory snapshot entry size is invalid")
+    if digest is not None and (
+        not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
+    ):
+        raise MemorySnapshotVerificationError("Memory snapshot file digest is invalid")
+    if tree_digest is not None and (
+        not isinstance(tree_digest, str) or _SHA256_RE.fullmatch(tree_digest) is None
+    ):
+        raise MemorySnapshotVerificationError("Memory snapshot tree digest is invalid")
+    if entry_type in {"sqlite", "file"}:
+        if digest is None or tree_digest is not None or mode & 0o077:
+            raise MemorySnapshotVerificationError("Memory snapshot file metadata is invalid")
+    elif entry_type in {"tree", "directory"}:
+        if digest is not None or tree_digest is None or size != 0 or mode & 0o077:
+            raise MemorySnapshotVerificationError("Memory snapshot directory metadata is invalid")
+    elif any((mode, size, digest is not None, tree_digest is not None)):
+        raise MemorySnapshotVerificationError("Missing Memory surface metadata is invalid")
+    return SnapshotEntry(path, entry_type, mode, size, digest, tree_digest)
 
 
 def _with_tree_digests(entries: Sequence[SnapshotEntry]) -> list[SnapshotEntry]:
@@ -1177,18 +1319,36 @@ def _with_tree_digests(entries: Sequence[SnapshotEntry]) -> list[SnapshotEntry]:
         reverse=True,
     )
     for directory in directories:
-        digest = hashlib.sha256()
-        digest.update(f"path={directory.path}\ntype={directory.type}\n".encode("utf-8"))
-        digest.update(f"mode={directory.mode:o}\n".encode("ascii"))
-        for child_path in sorted(children.get(directory.path, [])):
-            child = result[child_path]
-            child_digest = child.sha256 or child.tree_digest or ""
-            name = PurePosixPath(child.path).name
-            digest.update(
-                f"{name}\0{child.type}\0{child.mode:o}\0{child.size}\0{child_digest}\n".encode("utf-8")
-            )
-        result[directory.path] = replace(directory, tree_digest=digest.hexdigest())
+        direct_children = [result[path] for path in children.get(directory.path, [])]
+        result[directory.path] = _with_tree_digest(directory, direct_children)
     return [result[entry.path] for entry in entries]
+
+
+def _with_tree_digest(
+    directory: SnapshotEntry,
+    children: Sequence[SnapshotEntry],
+) -> SnapshotEntry:
+    digest = _tree_digest(directory)
+    for child in sorted(children, key=lambda entry: entry.path):
+        _update_tree_digest(digest, child)
+    return replace(directory, tree_digest=digest.hexdigest())
+
+
+def _tree_digest(directory: SnapshotEntry) -> _DigestWriter:
+    digest = hashlib.sha256()
+    digest.update(f"path={directory.path}\ntype={directory.type}\n".encode("utf-8"))
+    digest.update(f"mode={directory.mode:o}\n".encode("ascii"))
+    return digest
+
+
+def _update_tree_digest(digest: _DigestWriter, child: SnapshotEntry) -> None:
+    child_digest = child.sha256 or child.tree_digest or ""
+    name = PurePosixPath(child.path).name
+    digest.update(
+        f"{name}\0{child.type}\0{child.mode:o}\0{child.size}\0{child_digest}\n".encode(
+            "utf-8"
+        )
+    )
 
 
 def _payload_paths(payload_root: Path) -> set[str]:
