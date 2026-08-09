@@ -11,13 +11,16 @@ import os
 import re
 import secrets
 import sqlite3
-import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterator, Literal, Mapping, Sequence
 
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    PrivateSqliteDatabase,
+)
 from core.memory.snapshot import (
     MemorySnapshot,
     _TerminalSnapshotPermit,
@@ -175,6 +178,7 @@ class MemoryClearJournal:
         else:
             relative = _validated_relative_path(database_value.as_posix())
             self._database_path = self._effective_home / relative
+        self._database = PrivateSqliteDatabase(self._effective_home, self._database_path)
         self._surfaces = tuple(surfaces)
         self._validate_surfaces()
         self._initialize()
@@ -1083,8 +1087,12 @@ class MemoryClearJournal:
         return self._require_operation(identifier)
 
     def _initialize(self) -> None:
-        _ensure_private_parent(self._effective_home, self._database_path.parent)
-        _prepare_database_path(self._database_path)
+        try:
+            self._database.prepare()
+        except ConfinedFilesystemError as error:
+            raise MemoryClearJournalError(
+                "Memory clear journal could not be prepared safely"
+            ) from error
         connection = self._connect()
         try:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -1111,24 +1119,13 @@ class MemoryClearJournal:
             raise MemoryClearJournalError("Memory clear journal could not be initialized") from error
         finally:
             connection.close()
-            self._harden_database_files()
-            _fsync_directory(self._database_path.parent)
+            self._harden_database_files(sync_parent=True)
 
     def _connect(self) -> sqlite3.Connection:
-        _require_private_database(self._database_path)
-        for path in _database_sidecars(self._database_path):
-            try:
-                info = os.lstat(path)
-            except FileNotFoundError:
-                continue
-            _require_private_regular(info, "Memory clear journal sidecar")
-        connection = sqlite3.connect(self._database_path, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
+        try:
+            return self._database.connect()
+        except ConfinedFilesystemError as error:
+            raise MemoryClearJournalError("Memory clear journal is unsafe") from error
 
     def _validate_surfaces(self) -> None:
         if len(self._surfaces) != len(_SURFACE_NAMES):
@@ -1403,17 +1400,13 @@ class MemoryClearJournal:
             ),
         )
 
-    def _harden_database_files(self) -> None:
-        for path in (
-            self._database_path,
-            *_database_sidecars(self._database_path),
-        ):
-            try:
-                info = os.lstat(path)
-            except FileNotFoundError:
-                continue
-            _require_private_regular(info, "Memory clear journal file", require_mode=False)
-            os.chmod(path, 0o600)
+    def _harden_database_files(self, *, sync_parent: bool = False) -> None:
+        try:
+            self._database.harden(sync_parent=sync_parent)
+        except ConfinedFilesystemError as error:
+            raise MemoryClearJournalError(
+                "Memory clear journal files could not be hardened safely"
+            ) from error
 
 
 def _schema_sql() -> str:
@@ -1696,96 +1689,6 @@ def _relative_to_home(path: Path, home: Path) -> Path:
         return path.relative_to(home)
     except ValueError as error:
         raise ValueError("Memory clear journal must stay within effective home") from error
-
-
-def _ensure_private_parent(home: Path, directory: Path) -> None:
-    relative = _relative_to_home(directory, home)
-    if not home.exists():
-        home.mkdir(parents=True, mode=0o700)
-    _require_directory(os.lstat(home), "effective Memory home")
-    os.chmod(home, 0o700)
-    _fsync_directory(home)
-    current = home
-    for component in relative.parts:
-        current /= component
-        try:
-            info = os.lstat(current)
-        except FileNotFoundError:
-            os.mkdir(current, mode=0o700)
-            _fsync_directory(current.parent)
-            info = os.lstat(current)
-        _require_directory(info, "Memory clear journal directory")
-        os.chmod(current, 0o700)
-        _fsync_directory(current)
-        if stat.S_IMODE(os.lstat(current).st_mode) != 0o700:
-            raise MemoryClearJournalError("Memory clear journal directory is not private")
-
-
-def _prepare_database_path(path: Path) -> None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags, 0o600)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.chmod(path, 0o600)
-        _fsync_directory(path.parent)
-        return
-    _require_private_regular(info, "Memory clear journal")
-
-
-def _require_private_database(path: Path) -> None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError as error:
-        raise MemoryClearJournalError("Memory clear journal is missing") from error
-    _require_private_regular(info, "Memory clear journal")
-
-
-def _database_sidecars(path: Path) -> tuple[Path, Path, Path]:
-    return (
-        path.with_name(f"{path.name}-wal"),
-        path.with_name(f"{path.name}-shm"),
-        path.with_name(f"{path.name}-journal"),
-    )
-
-
-def _require_private_regular(
-    info: os.stat_result,
-    label: str,
-    *,
-    require_mode: bool = True,
-) -> None:
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise MemoryClearJournalError(f"{label} is not a safe regular file")
-    _require_owned(info, label)
-    if info.st_nlink != 1:
-        raise MemoryClearJournalError(f"{label} has multiple hard links")
-    if require_mode and stat.S_IMODE(info.st_mode) & 0o077:
-        raise MemoryClearJournalError(f"{label} is not private")
-
-
-def _require_owned(info: os.stat_result, label: str) -> None:
-    if hasattr(os, "getuid") and info.st_uid != os.getuid():
-        raise MemoryClearJournalError(f"{label} is not owned by the current user")
-
-
-def _require_directory(info: os.stat_result, label: str) -> None:
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise MemoryClearJournalError(f"{label} is not a safe directory")
-    _require_owned(info, label)
-
-
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _utc_now() -> str:
