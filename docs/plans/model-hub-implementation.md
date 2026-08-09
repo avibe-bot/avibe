@@ -119,9 +119,16 @@ that reconciliation may change content but is not expected to change file owners
 | **I1 contracts and config core** *(tentative)* | codex | All files under `docs/plans/model-hub-contracts/`; `config/v2_config.py`; `core/controller.py`; `core/handlers/model_hub/adapter.py` and the byte-identical contract interface; `core/handlers/model_hub/{service,resolver,classification,errors,provenance,rpc,request,events}.py`; `modules/agents/model_hub.py`; `vibe/{ui_server,model_hub_client}.py`; `tests/test_model_hub_config.py`; `tests/test_model_hub_api.py`; `tests/test_model_hub_resolution.py`; `tests/test_model_hub_injection.py`; `tests/test_controller_model_hub_gate.py`; `tests/test_model_hub_l3.py` through the same-tested-head contract transition. `tests/test_multi_platform_runtime.py` and `tests/test_claude_cli_path.py` are read-only dependency checks: I1 repairs breakage caused by removed resolver symbols but does not refactor them. Owns the §8 final contracts, same-tested-head closure, §4.3 configured-chain executor, serializers, API envelopes, shared validation, and the default-off release gate while I1 is active | K1. **Merges first** |
 | **I2 runtime transport** *(tentative)* | codex | `core/handlers/model_hub/turn_gateway.py`; `vibe/model_hub_runtime/{config,client,state,adapter}.py`; `tests/test_model_hub_runtime.py`; after I1 merges, `tests/test_model_hub_l3.py` transfers wholly to I2 for runtime behavior | I1 |
 | **I3 subscription custody and native import** *(tentative)* | codex | `core/handlers/model_hub/{oauth,native_oauth,revocations,migration}.py`; `tests/test_model_hub_oauth.py`; `tests/scenarios/model_hub/test_model_hub_migration_scenarios.py`; `tests/scenarios/auth_setup/catalog.yaml`; `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`. The migration scenario and complete auth-setup catalog/test loop are the sole carve-outs from I5's scenario tree | I1 |
-| **I4 Sources / Gateway UI** *(tentative)* | claude | `ui/src/components/settings/models/**`; `ui/src/i18n/*.json`; `vibe/i18n/*.json`; UI tests. Both i18n trees are I4-exclusive | I1's API envelopes + the UI-spec PR |
-| **I5 scenario validation** *(tentative)* | either | `tests/scenarios/model_hub/**` except I3's native-import scenario; `tests/scenario_harness/**` | I1–I4 |
+| **I4 Sources / Gateway UI** *(tentative)* | codex | `ui/src/components/settings/models/**`; `ui/src/i18n/*.json`; `vibe/i18n/*.json`; UI tests. Both i18n trees are I4-exclusive | I1's API envelopes + the UI-spec PR |
+| **I5 scenario validation** *(tentative)* | codex | `tests/scenarios/model_hub/**` except I3's native-import scenario; `tests/scenario_harness/**` | I1–I4 |
 | **I6 release-gate removal** *(tentative)* | codex | After I5 merges, exclusive ownership transfers from I1 for `is_model_hub_enabled()` and every call site, `_init_model_hub()`, `core/controller.py`, and `tests/test_controller_model_hub_gate.py`. Delete the gate function rather than leaving a constant-true shell; invert the gate test so the final default state always constructs the v3 aggregate | I5 merged and all Model Hub scenarios green |
+
+**Executor ruling (owner, 2026-08-09).** Every new I1–I6 implementation lane uses
+`codex`, including frontend work. Visual-fidelity risk is closed by process rather than
+by changing executor: `design.pen` is the pixel-level authority, and a separate Codex
+acceptance thread compares the built UI against its design frames. Already-dispatched
+Claude lanes complete their current specification work; subsequent implementation uses
+the table above.
 
 **Merge order:** K1 first for product authority; K2 remains independent evidence. I1
 must merge before I2–I5. I2 and I3 may then proceed in parallel under the exclusive
@@ -975,6 +982,61 @@ the implementing lane receives the evidence rather than a paraphrase.
 > discovery timestamp on every successful unchanged refresh and contradicts the
 > separate `last_discovered_at` field that records inventory freshness; copy
 > `existing.discovered_at` for retained IDs and stamp only newly discovered entries.
+
+#### Sealed current-consumer findings — reviewed head `f57f6f2b1f`
+
+This is the second reviewed head on the same prelaunch-consumer root-cause class, so the
+review-loop circuit breaker remains open: K1 records the complete inventory and does not
+patch I1/I2/I3/I4 implementation. Every finding is valid implementation evidence against
+the final contract and remains release-blocking under the default-off gate.
+
+| Review thread | AC / disposition | Landing point | Responsible lane |
+| --- | --- | --- | --- |
+| `3742889356` | AC-19; valid prelaunch producer/consumer vocabulary gap | `_source_eligibility`, final TypeScript union, and both locale objects | I1 + I4 |
+| `3742889357` | AC-26; valid prelaunch inventory-edit gap | Existing-model display-name edit payload and Models API/UI test | I4 |
+| `3742889359` | AC-22 / FC-13; valid prelaunch import-result gap | `migration_apply`, RPC/result type, and native-import UI flow | I1 + I3 + I4 |
+| `3742889361` | AC-26; valid prelaunch invocation gap | Exact-model effort membership in the shared service/runtime invocation path | I1 + I2 |
+
+> **Keep emitted eligibility keys in the UI vocabulary**
+>
+> When a Claude or Codex subscription Source is projected for the OpenCode agent,
+> `_source_eligibility` still emits `models.eligibility.opencode_api_key_only`
+> (`core/handlers/model_hub/service.py:1903-1904`), even though this change removes that
+> value from the TypeScript union and both locale files. The resulting `/agents` payload
+> violates the newly closed vocabulary and the UI can display an untranslated key.
+> Fresh implementation evidence beyond the earlier documentation finding is that the
+> live service producer was not migrated; map this case to the retained reason or update
+> the producer together with the vocabulary.
+
+> **Preserve reasoning capabilities during display-name edits**
+>
+> When an existing manual model has a non-empty `reasoning_efforts` list, opening its
+> current edit dialog submits `reasoning_efforts: []`; `add_custom_model` treats that
+> existing entry as an update and assigns the submitted list at
+> `core/handlers/model_hub/service.py:2321-2325`. Thus changing only the display name
+> silently erases the persisted capabilities. Fresh evidence beyond the earlier
+> unreachable-editor comment is this destructive existing-entry upsert path; submit the
+> current list or use a mutation that does not replace capabilities.
+
+> **Return the contracted migration placement results**
+>
+> When native-config import succeeds, this v5 route now promises `added_to`, but
+> `ModelHubService.migration_apply` still returns only `{applied, sources}`
+> (`core/handlers/model_hub/service.py:3166-3176`), and the frontend
+> `MigrationApplyResult` likewise has no placement field. A client following the final
+> contract therefore cannot receive or display the exact Route positions created by the
+> import. Update the service, RPC/UI type, and import flow together, or remove this field
+> from the authoritative response contract.
+
+> **Enforce per-model reasoning capabilities before invocation**
+>
+> When a turn requests a reasoning effort that is absent from this newly persisted list,
+> the value is never consulted: the only later engine call forwards the original request
+> unchanged at `core/handlers/model_hub/service.py:3271-3282`. Consequently an
+> unsupported effort reaches the upstream instead of being replaced with `null`,
+> producing the terminal parameter failures the v5 execution contract is intended to
+> prevent. Apply the exact-model capability check in the shared invocation path so
+> Claude, Codex, and OpenCode inherit the same behavior.
 
 After I1 lands, `model-hub-contracts/**` is read-only to I2–I5. An implementation-proven
 mismatch is reported to the orchestrator for a targeted decision; the discovering lane
