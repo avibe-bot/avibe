@@ -2,11 +2,10 @@
  * Parent-measured visibility attestation of the sandbox iframe (protocol v2 §6.6 addendum / §13).
  *
  * The parent owns the sandbox iframe, so only it can measure the element from the embedder document;
- * the sandbox cannot observe its own frame from inside a cross-origin context. This module is the
- * single place the wire shape is built, so its field names + nesting can be frozen by a unit test —
- * they must match the sandbox's `parseParentConfirmSurface` contract exactly (`frame.*` plus a
- * top-level `sampledAt`). A mismatch here is the contract-shape gap that surfaced as
- * "parent frame visibility is not attested".
+ * the sandbox cannot observe its own frame from inside a cross-origin context. This module keeps the
+ * geometry/observer attestation shape in one place. It intentionally does not send a parent hit-test
+ * claim: a compromised embedder can manufacture that boolean, and high-risk authorization now runs
+ * in a top-level sandbox confirmation window instead.
  */
 export type VaultConfirmSurface = {
   frame: {
@@ -14,7 +13,6 @@ export type VaultConfirmSurface = {
     frameHeight: number;
     intersectionRatio: number;
     visibleByIntersectionObserver: boolean;
-    visibleByHitTest: boolean;
     opacity: number;
     pointerEvents: boolean;
   };
@@ -27,7 +25,6 @@ export type VaultConfirmSurfaceMeasurement = {
   frameHeight: number;
   intersectionRatio: number;
   visibleByIntersectionObserver: boolean;
-  visibleByHitTest: boolean;
   /** Computed `opacity` — a CSS string ("1") or a number; anything non-numeric collapses to 0. */
   opacity: string | number;
   /** Computed `pointer-events` — anything other than "none" (or a `true` boolean) is interactive. */
@@ -36,10 +33,10 @@ export type VaultConfirmSurfaceMeasurement = {
 };
 
 /**
- * Shape raw parent-side measurements into the exact attestation object the sandbox accepts. Pure and
+ * Shape raw parent-side measurements into the attestation object understood by the sandbox. Pure and
  * honest: it never invents values — a hidden, occluded, or degenerate measurement yields failing
- * numbers (e.g. opacity 0, pointerEvents false, zero size) and the sandbox's geometry gate rejects
- * it. Fail-closed: a non-numeric opacity becomes 0 rather than silently passing.
+ * numbers (e.g. opacity 0, pointerEvents false, zero size). Fail-closed: a non-numeric opacity
+ * becomes 0 rather than silently passing.
  */
 export function buildVaultConfirmSurface(measurement: VaultConfirmSurfaceMeasurement): VaultConfirmSurface {
   const opacity =
@@ -52,7 +49,6 @@ export function buildVaultConfirmSurface(measurement: VaultConfirmSurfaceMeasure
       frameHeight: measurement.frameHeight,
       intersectionRatio: measurement.intersectionRatio,
       visibleByIntersectionObserver: measurement.visibleByIntersectionObserver,
-      visibleByHitTest: measurement.visibleByHitTest,
       opacity: Number.isFinite(opacity) ? opacity : 0,
       pointerEvents,
     },

@@ -26,11 +26,9 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 // Ops that may raise an in-sandbox card (confirm / passkey / plaintext display) can sit open for
 // as long as the user takes to act, so they get the long ceremony timeout regardless of tier.
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
-// Cadence for refreshing the parent surface attestation while a confirm card is up (protocol v2
-// §6.6 addendum / §13). The sandbox fail-closes an embedded R2/R3 confirm unless the parent freshly
-// attests the sandbox iframe's on-screen geometry — it cannot observe its own iframe element from a
-// cross-origin frame. The sandbox rejects attestations older than 60 s, so we refresh well under
-// that cap while the ceremony is pending.
+// Cadence for refreshing the parent surface attestation while an embedded card is up. This remains
+// useful for compatibility and diagnostics, but high-risk authorization itself is completed in a
+// top-level sandbox window and does not trust parent hit-test claims.
 const SURFACE_REFRESH_INTERVAL_MS = 10_000;
 
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | 'handshake';
@@ -309,24 +307,6 @@ function observeElementVisibility(target: Element): Promise<{ ratio: number; vis
   });
 }
 
-// IntersectionObserver v2 is intentionally conservative: browser/automation extension layers can
-// make `isVisible` false even when the page itself has no covering element. Keep that signal, but
-// supplement it with synchronous page hit-testing so the sandbox can distinguish that case from a
-// real DOM overlay. Sampling the interior 3x3 grid also catches partial clickjacking overlays; every
-// point must resolve to the target (or one of its descendants).
-function elementVisibleByHitTest(target: Element): boolean {
-  if (typeof document.elementFromPoint !== 'function' || typeof target.getBoundingClientRect !== 'function') return false;
-  const rect = target.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return false;
-  const offsets = [0.1, 0.5, 0.9];
-  return offsets.every((xOffset) =>
-    offsets.every((yOffset) => {
-      const topmost = document.elementFromPoint(rect.left + rect.width * xOffset, rect.top + rect.height * yOffset);
-      return topmost === target || (topmost !== null && target.contains(topmost));
-    }),
-  );
-}
-
 export class VaultSandboxClient {
   private iframe: HTMLIFrameElement;
   private backdrop: HTMLDivElement | null = null;
@@ -334,9 +314,9 @@ export class VaultSandboxClient {
   private readyPromise: Promise<ReadyMessage>;
   private handshaken = false;
   private modalVisible = false;
-  // Ids of in-flight interactive (R2/R3) requests whose confirm card the sandbox gates on a fresh
-  // parent surface attestation. While the modal is up each one's attestation is refreshed on an
-  // interval; an id is dropped when its request settles (reply, timeout, or teardown).
+  // Ids of in-flight interactive requests whose launcher card keeps the iframe expanded. While the
+  // modal is up, optional geometry evidence is refreshed; final high-risk authorization happens in
+  // the top-level sandbox window and never trusts a parent hit-test claim.
   private interactiveRequests = new Set<string>();
   private surfaceRefreshTimer: number | null = null;
 
@@ -438,11 +418,9 @@ export class VaultSandboxClient {
   }
 
   /**
-   * Measure the sandbox iframe in the parent (embedder) document and package it as the attestation
-   * the sandbox's confirm-surface gate expects (protocol v2 §6.6 / §13): `getBoundingClientRect()`
-   * for size, an IntersectionObserver reading for visibility, computed `opacity` and `pointer-events`,
-   * and `sampledAt = Date.now()`. Measured honestly — a hidden or occluded iframe yields failing
-   * numbers and the sandbox still fail-closes; the values are never faked to pass the gate.
+   * Measure the sandbox iframe in the parent (embedder) document and package geometry/observer
+   * evidence for compatibility and diagnostics. No parent hit-test claim is sent because the
+   * embedder is not a trusted security authority for the final authorization.
    */
   private async measureSurface(): Promise<VaultConfirmSurface | null> {
     if (typeof window === 'undefined' || !this.iframe.isConnected) return null;
@@ -454,7 +432,6 @@ export class VaultSandboxClient {
       frameHeight: rect.height,
       intersectionRatio: observed.ratio,
       visibleByIntersectionObserver: observed.visible,
-      visibleByHitTest: elementVisibleByHitTest(this.iframe),
       opacity: style.opacity,
       pointerEvents: style.pointerEvents,
       sampledAt: Date.now(),
@@ -614,14 +591,9 @@ export class VaultSandboxClient {
   ): Promise<T> {
     await this.readyPromise;
     const id = randomId();
-    // Interactive (R2/R3) ops carry a parent surface attestation and get it refreshed while their
-    // confirm card is up (protocol v2 §6.6). Expand before sending the RPC: otherwise the sandbox
-    // can start its fail-closed IntersectionObserver gate while the iframe is still the hidden
-    // 0x0 worker, before its asynchronous `ui.show` event reaches the parent. The `surface` field
-    // rides as a top-level sibling of `op`/`payload`. Only
-    // `approveRelease`/`sign`/`reveal` are interactive here: those are the ops whose sandbox handler
-    // runs the confirm-surface gate (§13). `setup`/`unlock` are WebAuthn/PRF ceremonies, not in-
-    // sandbox confirm clicks, so their handlers never assert a parent surface and none is sent.
+    // Interactive ops expand the iframe before sending so the launcher card is visible before the
+    // request reaches the sandbox. The final authorization is completed in a top-level window;
+    // the optional surface evidence remains a compatibility field, never a security decision.
     let surface: VaultConfirmSurface | null = null;
     try {
       if (options.interactive) {

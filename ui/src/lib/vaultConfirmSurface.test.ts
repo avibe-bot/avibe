@@ -8,7 +8,6 @@ const visible: VaultConfirmSurfaceMeasurement = {
   frameHeight: 640,
   intersectionRatio: 1,
   visibleByIntersectionObserver: true,
-  visibleByHitTest: true,
   opacity: '1',
   pointerEvents: 'auto',
   sampledAt: 1_700_000_000_000,
@@ -26,7 +25,6 @@ describe('buildVaultConfirmSurface (protocol v2 §6.6 / §13 wire shape)', () =>
       'intersectionRatio',
       'opacity',
       'pointerEvents',
-      'visibleByHitTest',
       'visibleByIntersectionObserver',
     ]);
     expect(surface).toEqual({
@@ -35,7 +33,6 @@ describe('buildVaultConfirmSurface (protocol v2 §6.6 / §13 wire shape)', () =>
         frameHeight: 640,
         intersectionRatio: 1,
         visibleByIntersectionObserver: true,
-        visibleByHitTest: true,
         opacity: 1,
         pointerEvents: true,
       },
@@ -62,7 +59,6 @@ describe('buildVaultConfirmSurface (protocol v2 §6.6 / §13 wire shape)', () =>
       frameHeight: 0,
       intersectionRatio: 0,
       visibleByIntersectionObserver: false,
-      visibleByHitTest: false,
       opacity: '1',
       pointerEvents: 'none',
       sampledAt: 1_700_000_000_000,
@@ -71,7 +67,6 @@ describe('buildVaultConfirmSurface (protocol v2 §6.6 / §13 wire shape)', () =>
     expect(headless.frame.frameHeight).toBe(0);
     expect(headless.frame.intersectionRatio).toBe(0);
     expect(headless.frame.visibleByIntersectionObserver).toBe(false);
-    expect(headless.frame.visibleByHitTest).toBe(false);
     expect(headless.frame.pointerEvents).toBe(false);
   });
 });

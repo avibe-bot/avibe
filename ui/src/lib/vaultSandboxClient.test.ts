@@ -11,7 +11,6 @@ const visibleSurface: VaultConfirmSurface = {
     frameHeight: 640,
     intersectionRatio: 1,
     visibleByIntersectionObserver: true,
-    visibleByHitTest: true,
     opacity: 1,
     pointerEvents: true,
   },
@@ -50,7 +49,7 @@ afterEach(() => {
 });
 
 describe('VaultSandboxClient interactive request surface', () => {
-  it('attests a fully hit-tested frame when browser visibility tracking is conservatively false', async () => {
+  it('attests the expanded frame geometry and observer visibility', async () => {
     const iframe = document.createElement('iframe');
     document.body.appendChild(iframe);
     vi.spyOn(iframe, 'getBoundingClientRect').mockReturnValue({
@@ -64,11 +63,6 @@ describe('VaultSandboxClient interactive request surface', () => {
       height: 640,
       toJSON: () => ({}),
     } as DOMRect);
-    const hitTest = vi.fn((): Element | null => iframe);
-    Object.defineProperty(document, 'elementFromPoint', {
-      configurable: true,
-      value: hitTest,
-    });
     vi.stubGlobal(
       'IntersectionObserver',
       class {
@@ -92,14 +86,7 @@ describe('VaultSandboxClient interactive request surface', () => {
       frameHeight: 640,
       intersectionRatio: 1,
       visibleByIntersectionObserver: false,
-      visibleByHitTest: true,
     });
-    expect(hitTest).toHaveBeenCalledTimes(9);
-
-    const overlay = document.createElement('div');
-    hitTest.mockReturnValue(overlay);
-    const occluded = await client.measureSurface();
-    expect(occluded?.frame.visibleByHitTest).toBe(false);
   });
 
   it('expands the iframe before measuring and sending an interactive RPC', async () => {
