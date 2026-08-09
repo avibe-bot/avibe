@@ -197,8 +197,11 @@ than in a moving one.
 | G-3 | 06 model inventory | a way to retire a *discovered* model from a source's inventory, **and a place to remember that it was retired** | the ruled delete route removes a manual entry only; no other inventory-shrink route is user-initiated, and `source.schema.json`'s `models` carries no per-model retained flag |
 | G-9 | 03 order save that drops sources | the guarded-change response for the whole-order `PUT` | `api.md`'s `PUT /api/models/agents/<backend>/sources` takes `{order: string[]}` and returns `{agent: AgentSupply}` — the success echo and nothing else, with no `force` in the body and no `409` branch. The gap narrowed at `ceace07f` but did not close: the shared refusal envelope `{error, would_remove_hops, would_interrupt}` is now contracted, and the route-chain `PUT /api/models/agents/<backend>/chain` uses it, so the field this frame needs exists and is spelled as `model-hub.md`'s matrix spells it. What is still missing is only its application to the order save. §1.3's Guard-refused row states the surface anyway, as a `[contract-gap]` and not as a requirement |
 | G-10 | 01 shell pill, install in flight | a server-side install state, and the route that enters it | `runtime-dependency.schema.json` v5's `status.health` runs `ok · degraded · down · not_started · not_installed` with nothing between the last two, and `api.md` contracts exactly two runtime routes — `GET /api/models/runtime/status` and `POST /api/models/runtime/start` — with no install route at all. So *installing* exists on the client and nowhere else, and a reload during one reads back as `not_installed`. §0.8's Installing and Install failed rows are the client-side states that gap forces, and they are marked as such |
-| G-11 | 09 direct-only home, zero backends | an installation flag per agent backend, and the payload that carries it | `AgentSupply` (`agent-supply.schema.json`) carries fourteen properties — `backend`, `mode`, `menu_kind`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `mappings`, `menu`, `model_supply`, `named_agents`, `builtin_models`, `standard_vendors` — and not one of them reports whether the CLI is present. `service.list_agents` builds its array from the literal tuple `("claude", "codex", "opencode")`, so the payload is length 3 unconditionally and the zero-backend state cannot be produced from it |
+| G-11 | 09 direct-only home, zero backends | an installation flag per agent backend, and the payload that carries it | No property of `AgentSupply` (`agent-supply.schema.json`) reports whether a backend's CLI is present, and `core/handlers/model_hub/service.py:list_agents` builds its array from a literal three-backend tuple, so the payload is length 3 unconditionally and the zero-backend state cannot be produced from it |
 | G-12 | 01 upstream card and 06 header, `needs_action` | the control that replaces a dead credential, on either surface | §1.1 sends repair to 06 and §1.6 sends it back to 01, and no frame draws it. `api.md` contracts a credential-replacement route with the guarded envelope, so the behaviour exists and only its affordance is missing. Both sections now state the absence instead of pointing at each other |
+| G-13 | 03 order drawer, chains that already exist | an action that re-applies the current order to chains built before it, and the route behind it | `api.md` contracts `PUT /api/models/agents/<backend>/sources` for the order itself and `PUT /api/models/agents/<backend>/chain` for one model's hops; nothing bulk-rewrites stored chains, and `model-hub.md`'s `placement-v1` runs "only during Add Source". So the order genuinely cannot reach an existing chain, and §1.3 says that rather than implying the drawer keeps chains in sync |
+| G-14 | 08 adopt-gateway confirm, `effects.1` | the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source | `core/handlers/model_hub/service.py:set_agent_mode` (`ceace07f:2197`) validates the mode, assigns `agent.mode`, saves, and returns the payload — it creates no Source, writes no order, and has no other caller that does. The promise is a product decision and stays, because a switch that silently drops the user's working login is not a switch anybody would accept; what is missing is the code that keeps it |
+| G-15 | 06 source detail, a source's own name and Base URL | any affordance that edits them | `api.md` contracts `PATCH /api/models/sources/<id>` with `{display_name?, base_url?}`, and no frame draws a control that sends it: 06's inventory edits model rows only, and 05 sets both fields at creation and never again. So the route is named in §1.5 as evidence of what it *cannot* carry, never as a call this spec places on a screen |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -562,10 +565,10 @@ as everywhere else in this document.
 | §1.1 | Ready | Sources + per-backend supply both loaded | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable | — | Payload arrives → Ready |
-| §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry`, `legend.unavailable` | `retry_at` passes → the state the source held before |
+| §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock |
 | §1.1 | Per-source `needs_action` | Credential dead `[spec §4.5]` | F5 | `upstream.state.needsAction` | The credential is re-validated → the state the source held before. The card is one tap to 06; **replacing the credential is drawn on no frame** `[contract-gap]` G-12 |
 | §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `upstream.state.error` | The source leaves `error`; the card is one tap to 06 |
-| §1.1 | Group waiting | Every member of that backend's chain is cooling and none is retry-ready `[contract]` | F5 — time alone resolves it | `gateway.group.status.waiting` | A member's `retry_at` passes → Ready or Takeover active |
+| §1.1 | Group waiting | Every member of that backend's chain is cooling and none is retry-ready `[contract]` | F5 — time alone resolves it | `gateway.group.status.waiting` | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the reported state and never the elapsed time |
 | §1.1 | Group interrupted | The native CLI that backend depends on is unavailable **in this process** `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it is a different word from 等待重试 |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
@@ -594,12 +597,13 @@ as everywhere else in this document.
 | §1.5 | ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ④ | Pick a hint + 重试, still as a pull → identified: report the inventory inline in ①, persisting nothing; still undetermined: back to ④′ |
 | §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | The probe proved the protocol with a real response, **and** the model fetch came back unusable | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.inventory.reason.rateLimited`, `addKey.inventory.reason.transport`, `addKey.addAnyway` | 重试 → re-run **the fetch only**; 仍要添加 → persist with the proved protocol and an empty inventory, close into 06 |
 | §1.5 | ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ⑤ | 重试 → re-run the fetch as a pull |
-| §1.5 | Credential-invalid | An auth failure is one of ③'s three causes | F1 | as ③ | As ③ |
-| §1.5 | Engine unavailable `[derived]` | The gateway is not running | F1 | `addKey.fail.engineDown` | 添加 is blocked and the form keeps every value it holds |
+| §1.5 | ⑥ Engine unavailable, **Add origin** `[derived]` | The gateway is not running when 添加 is pressed | F1 | `addKey.fail.engineDown` | 添加 is blocked and the form keeps every value it holds; the engine recovers → ① with everything still typed |
+| §1.5 | ⑥′ Engine unavailable, **Pull origin** `[derived]` | The gateway is not running when 拉取型号 is pressed | F1 | as ⑥ | 拉取型号 is blocked the same way. Nothing was going to be persisted either way, so the recovery is the same: → ① with everything still typed |
 | §1.6 | Ready | Source detail loaded | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry |
 | §1.6 | Empty (no models) | Discovery returned nothing and nothing was added by hand | F5 | `sourceDetail.empty` | Manual add, or a successful refetch |
 | §1.6 | Never fetched | No successful discovery has ever completed for this source `[contract]` | F5 | `sourceDetail.emptyNeverFetched` | A successful 重新拉取 → Ready |
-| §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<id>/refresh` | F2 → Error (refetch failed) | `sourceDetail.action.refetch` | New list arrives → Ready, diffed |
+| §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Error (refetch failed) | `sourceDetail.action.refetch` | New list arrives → Ready, diffed; a refusal → Refetch refused |
+| §1.6 | Refetch refused | The refresh came back refused, naming the hops a shorter inventory would remove | F3 — `Qp6FI`, the same confirm this page already starts for a removal | `guard.title.refetch`, `guard.subtitle.refetch`, `guard.confirm.refetch`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要拉取 re-sends the same `POST` with `force` → Refetching; 取消 → Ready, the previous list kept |
 | §1.6 | Error (refetch failed) | The refetch was rejected | F2 lands here — the **previous list is kept** | `sourceDetail.status.error`, `sourceDetail.fail.refetch` | The bar carries the failure; 重新拉取 stays enabled → Refetching |
 | §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter → Tier commit; blur / Escape → Ready, discarding the uncommitted chip |
 | §1.6 | Tier commit | Enter committed a tier — `PATCH /api/models/sources/<source_id>/models/<model_id>` | F1, on the row: the chip stays in the input, the row states the failure and offers 重试 | `sourceDetail.fail.tier`, `sourceDetail.retry` | Success → the chip lands on the row, still in Tiers editing |
@@ -832,10 +836,10 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   not blank the source inventory, which loaded fine.
 
 **The run pill is a total rendering of `health`, and the states above are how it gets
-there** `[contract]`. `runtime-dependency.schema.json` enumerates five values; each has
-exactly one pill, and there is no sixth:
+there** `[contract]`. Every value `runtime-dependency.schema.json` admits for it has
+exactly one pill, and no pill is drawn for anything else:
 
-| `health` | State | Pill | Treatment | Activation |
+| `RuntimeDependency.status.health` `[contract]` | State | Pill | Treatment | Activation |
 | --- | --- | --- | --- | --- |
 | `ok` | Ready | `shell.running` | idle | none |
 | `degraded` | Impaired | `shell.degraded` | error | none |
@@ -993,13 +997,21 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `legend.takeover` | 接管中 · 临时改走 | Taken over · temporarily rerouted |
 | `legend.unavailable` | 暂不可用 · 供给已暂停 | Unavailable · supply paused |
 
-**The group subtitle is a total rendering of `supply_status`, and Direct mode has no
-status word** `[contract]`. `agent-supply.schema.json` enumerates
-`ok / degraded / waiting / interrupted / null`, and `null` is what Direct mode produces —
-there is no arbitration to report when nothing is being arbitrated. This section owns the
-mapping; §1.1, §1.7 and §1.9 render it and state no mapping of their own:
+**The group subtitle is a total rendering of the backend's own supply status, and Direct
+mode has no status word** `[contract]`. `agent-supply.schema.json` declares this name
+twice, and the group header renders the outer one — the backend's rollup for the model it
+is pinned to. `null` is what Direct mode produces: there is no arbitration to report when
+nothing is being arbitrated.
 
-| `supply_status` | Subtitle | Key |
+A named Agent's row renders the other one, `AgentSupply.named_agents[].supply_status`,
+which is that Agent's own rollup for its own explicit model. The two are computed from
+different inputs and hold independently — an Agent pinned to a model no source can serve
+reads `interrupted` inside a backend whose own rollup is `ok` — so a row that renders the
+group's word beside an Agent's name is right only until the first Agent that disagrees
+with its backend. This section owns the mapping; §1.1, §1.7 and §1.9 render it, at
+whichever of the two grains they are drawing, and state no mapping of their own:
+
+| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |
 | --- | --- | --- |
 | `null` (Direct mode) | 直连 | `gateway.group.subtitle.direct` + `gateway.group.mode.direct` |
 | `ok` | 网关 · 正常 | `gateway.group.subtitle.gateway` + `gateway.group.status.ok` |
@@ -1330,8 +1342,17 @@ section's.
 ### 1.3 Frame 03 `qZhJ3` — Source-order drawer (per backend)
 
 **The question it answers:** *for one backend, when several sources could serve the
-same model, who goes first?* One ordered list, scoped to one backend, governing every
-model on it that has not been individually overridden.
+same model, who goes first?* One ordered list, scoped to one backend, deciding where a
+newly added source lands in the chains built from that moment on.
+
+**It governs placement, not execution** `[spec]` S-1. A chain is stored configuration
+executed exactly as stored, and this order is read at one moment only: when a source is
+added. Reordering the list therefore leaves every existing chain untouched — including
+the chains that were built from an earlier state of this very list — and that is the
+property that makes the list safe to edit. Bringing chains that already exist back in
+line with the current order is a thing a user may well want, and it can only ever be an
+explicit action taken on those chains; no frame draws one and no route carries it
+`[contract-gap]` G-13.
 
 The scope in that sentence is the whole point of the frame, and it is what the frame
 used to get wrong. An earlier version drew one product-global order with native
@@ -1413,9 +1434,11 @@ button, the other a gesture — and the gesture is the direction with no keyboar
 equivalent that produces the same result.
 
 **Shortening the order is a guarded change, and it reuses the one confirmation this
-product has** `[contract-gap]` G-9. The drawer saves the whole order in one request
-(§4.6's `{hops:[...]}` `PUT`), so a save that drops sources is not a different kind of
-change from any other that would remove hops: it is refused, the refusal names what
+product has** `[contract-gap]` G-9. The drawer saves the whole order in one request —
+`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`, the
+the route this frame owns — so a save
+that drops sources is not a different kind of change from any other that would remove
+hops: it is refused, the refusal names what
 would be lost, and it is completed by re-sending with `force`. `model-hub.md`'s
 guarded-change matrix is the authority for that shape and the owner has frozen its field
 names as written; `api.md` contracts only this route's success echo, which is why the row
@@ -1940,9 +1963,10 @@ frame drew previously — 「选一种才会保存 · 之后可在来源详情�
 was changeable later. At `ca45aeb6`, AC-27 says the opposite: after Save the stored
 protocol is preserved byte-for-byte through retest, discovery, refresh, credential and
 Base-URL replacement and restart, and 「changing protocol requires a new Source」; FC-12
-`api.md` freezes the source PATCH body as exactly `{display_name?, base_url?}` —
-「Metadata only.」 — with no protocol field. The rebuilt string ends 「保存后不可更改」 — the frame moved onto the
-contract's side. **E-2 is closed, and this string is now its whole surface.** The other
+`PATCH /api/models/sources/<source_id>` `[contract]` `[contract-gap]` G-15 carries
+metadata only and has no protocol field at all, so there is no request that could
+change one. The rebuilt string
+ends 「保存后不可更改」 — the frame moved onto the contract's side. **E-2 is closed, and this string is now its whole surface.** The other
 half of that conflict was an instruction to put a protocol-edit entry point on frame
 06's interface badge; the ruling deleted the badge instead, so there is no longer a
 place in the product where a stored protocol is displayed as changeable, and §1.6
@@ -1965,6 +1989,16 @@ whether the user typed it or left the field empty. A fallback that depends on
 information the payload does not carry is a fallback that will eventually lie — the
 same principle as D-3. The user sees the host in the name field as soon as it is
 filled, so the value they get is the value they were shown.
+
+A host can be longer than `display_name` accepts — `source.schema.json` bounds the
+field and owns the number — so the fill is **truncated from the left with a leading
+ellipsis, keeping the tail**, and the truncated value is what lands in the field before
+the request goes out. Keeping the tail keeps the registrable domain, which is the part
+that says whose source this is; a long host is nearly always long in its subdomains. The
+alternative — letting the client send the untruncated host and the server reject it —
+would turn a name the user never typed into a validation error they cannot act on. The
+rule holds for the user-typed case too: the field is bounded at input, so no path can
+compose a name the contract will not take.
 
 ---
 
@@ -2093,6 +2127,9 @@ names for what is about to happen.**
 | `title.removeModel` | 从 {{host}} 移除 {{model}} | Remove {{model}} from {{host}} |
 | `subtitle.removeModel` | 这个型号会从这个来源的清单里消失 | This model disappears from this source's inventory |
 | `confirm.removeModel` | 仍要移除 | Remove anyway |
+| `title.refetch` | 重新拉取 {{host}} 的型号 | Refetch models from {{host}} |
+| `subtitle.refetch` | 这次拉取会让部分型号从这个来源的清单里消失 | This refetch drops models from this source's inventory |
+| `confirm.refetch` | 仍要拉取 | Refetch anyway |
 | `title.saveOrder` | 保存 {{backend}} 的来源顺序 | Save the source order for {{backend}} |
 | `subtitle.saveOrder` | 移出的来源会从这个后端的所有路由链里消失 | Sources taken out disappear from every routing chain on this backend |
 | `confirm.saveOrder` | 仍要保存 | Save anyway |
@@ -2127,7 +2164,7 @@ user their key is fine on the one screen they opened to fix it. So the dot and t
 both derive from the source's state, in the vocabulary D-21 already fixes for state
 text:
 
-| `state.status` `[contract]` | Ink | Key |
+| `Source.state.status` `[contract]` | Ink | Key |
 | --- | --- | --- |
 | `active`, and some backend adopts it | `$--mint` | `sourceDetail.status.inUse` |
 | `active`, adopted by nothing | `$--muted` | `upstream.state.standby` |
@@ -2136,8 +2173,7 @@ text:
 | `needs_action` | `#FF6B6B` | `sourceDetail.status.credentialInvalid` `[derived]` |
 | `error` | `#FF6B6B` | `sourceDetail.status.error` `[derived]` |
 
-`source.schema.json` enumerates exactly those five values, and the split of `active` is
-the one place this bar reads a second field: 使用中 claims a backend is taking models
+The split of `active` is the one place this bar reads a second field: 使用中 claims a backend is taking models
 right now, which is `adopted_by` (§1.0), not a source state. A source can be perfectly
 healthy and supply nothing, and saying 使用中 there would be the same lie as saying it
 about a dead credential, in the flattering direction. `standby` and unadopted `active`
@@ -2336,8 +2372,8 @@ behind it. Both are gone, and the frame no longer draws either. The ruling took 
 subtractive branch of the conflict: the stored shape at `ca45aeb6` carries no
 manual/automatic provenance marker (AC-27), so a badge conditioned on 「由你指定」 has
 nothing to render *from*; and 「changing protocol requires a new Source」, so an edit
-affordance would advertise an operation the API cannot perform — the source PATCH body
-is exactly `{display_name?, base_url?}`, 「Metadata only.」 `[contract]` `api.md`.
+affordance would advertise an operation the API cannot perform: `PATCH
+/api/models/sources/<source_id>` `[contract]` has no protocol field to send it in.
 
 What replaced both is one clause in the footnote: 「接口类型在添加时认出并固定,页面上
 不显示、也不能改。」 That is a better outcome than either half of the original design,
@@ -2532,9 +2568,12 @@ called 模型网关 — which tells a user the tab is the page. D-29 states the 
 
 **The backend tiles are neutral here, and that is a semantic statement** `[frame]`. On
 01/03 each backend's identity tile carries its brand ink (cyan, mint, violet — §2 D-20).
-On 09 all three are `#FFFFFF0A` with a muted glyph. Nothing is supplying anything yet,
-so there is no relation for a colour to describe, and colouring the tiles would spend
-the page's only semantic inks on decoration before the user has learned what they mean.
+On 09 all three are `#FFFFFF0A` with a muted glyph. **All three, together** — that is
+what makes it a page decision and not a per-backend one, and D-20 depends on the
+difference: a tile that muted for *this* backend and not that one would be reporting a
+state, which is the one thing an identity tile may never do. 09 draws no supply
+relations at all, and colouring its tiles would spend the page's only semantic inks on
+decoration before the user has learned what they mean.
 
 **Element inventory**
 
@@ -2681,7 +2720,7 @@ a way out.
 | `title` | 把 {{backend}} 切换到网关 | Switch {{backend}} to the gateway |
 | `subtitle` | 只影响 {{backend}},其余后端保持直连 | Affects {{backend}} only; the other backends stay direct |
 | `section.effects` | 会发生什么 | What will happen |
-| `effects.1` | 你现在的 {{vendor}} 登录成为第一个来源,继续优先使用 | Your current {{vendor}} login becomes the first source and keeps priority |
+| `effects.1` `[contract-gap]` G-14 | 你现在的 {{vendor}} 登录成为第一个来源,继续优先使用 | Your current {{vendor}} login becomes the first source and keeps priority |
 | `effects.2` | 等你添加了别的来源,这个登录用满时会自动换过去 | Once you add other sources, it moves to them when this login is exhausted |
 | `effects.1.opencode` `[derived]` | OpenCode 自己的模型配置原样保留,这次切换不改动它 | OpenCode's own model configuration is kept as it is; this switch does not change it |
 | `effects.2.opencode` `[derived]` | 它的型号从此由这一页上的来源供给;还没有来源时,先添加一个 | Its models are supplied from the sources on this page; if there are none yet, add one first |
@@ -2845,14 +2884,18 @@ instead (§1.6, E-2), and the reasoning it replaced that with is better: the hin
 never a decision the user can revisit, so making it findable buys nothing and teaches
 everyone else that protocols are their problem.
 
-**D-9 — Chains are derived, not hand-wired, and the order they derive from belongs to
-one backend.** One order per gateway-mode backend, plus a per-model override. E-1 is
-closed in favour of the behaviour spec (§0.6) and frame 03 was rebuilt accordingly.
-*Why:* N sources × M models of manual wiring is a configuration surface nobody can
-hold in their head, and the order is the only part users actually have an opinion
-about. Per-backend rather than global because eligibility already differs per backend:
-a global list would have to render entries that cannot apply, and a user cannot form an
-opinion about an ordering whose members are conditional.
+**D-9 — The source order is a placement default that belongs to one backend, and it is
+never read at runtime.** One order per gateway-mode backend. It decides where a source
+lands in the chains built from the moment it is saved; execution reads the stored chain
+and nothing else (S-1), and no later state of this list reaches a chain that already
+exists unless the user acts on that chain.
+*Why:* N sources × M models of hand-wiring is a configuration surface nobody can hold in
+their head, so the order carries the default and the chain carries the decision. Keeping
+the two apart is what lets a user edit either one without wondering what the other did
+behind them: a reordered list that silently rewrote live chains would make every edit a
+change of unknown blast radius. Per-backend rather than global because eligibility
+already differs per backend: a global list would have to render entries that cannot
+apply, and a user cannot form an opinion about an ordering whose members are conditional.
 
 **D-9a — A backend in 直连 mode exposes no order surface at all.** No 来源顺序 button
 on its group head, and the drawer is unreachable for it.
@@ -2958,8 +3001,11 @@ only in pills, wires, dots and state text.
 *Why:* OpenCode's tile is violet while its state is 网关 · 正常, so reading tiles as
 semantic would report a takeover that is not happening. Two ink systems can share a
 palette as long as one glance separates them — here, a filled rounded square containing
-a glyph is never a status. Frame 09 is the check: with nothing yet supplying anything,
-all three tiles go neutral, because there is no relation for a colour to describe.
+a glyph is never a status. Frame 09 mutes all three tiles, and *all three* is what keeps
+the rule intact rather than breaking it: a page may decide it draws no brand ink, and
+09 does, but muting one backend's tile and not another's would make the tile a status
+after all. Per-backend, mode changes nothing — Claude Code is direct on 01 and its tile
+is cyan there.
 
 **D-21 — The state-text layer and the wire layer are separate vocabularies, and a colour
 means different things in each.** Wires: cyan = 原生, mint = 网关供给, violet =
@@ -3054,12 +3100,11 @@ own question decides which one is true for it.
 
 *This decision was re-derived at `ca45aeb6`, and the field it originally named is gone.*
 It used to read 「a backend-order surface reads `order_enrolled_by`」, with a divergence
-argued from enrolment-without-adoption. S-1 deletes enrolment: `order_enrolled_by` and
-Source order are both in the contract's explicit absence list now, so the old sentence
-named a field no implementation can read. The decision survives because what it actually
-governs is *which projection answers which question*, and both projections still exist
-under new names — but it survives as a re-derivation, not as a citation that quietly kept
-pointing at a deleted field. Worth recording, because nothing in the review flagged it:
+argued from enrolment-without-adoption. S-1 deletes enrolment, and `order_enrolled_by`
+goes with it, so the old sentence named a field no implementation can read. The decision
+survives because what it actually governs is *which projection answers which question*,
+and both projections still exist — the stored chain and `adopted_by` — but it survives as
+a re-derivation, not as a citation that quietly kept pointing at a deleted field. Worth recording, because nothing in the review flagged it:
 a citation to a deleted name reads exactly like a citation to a live one.
 
 **D-29 — The page is 「模型」, the module is 「来源与网关」, and 「模型网关」 is never

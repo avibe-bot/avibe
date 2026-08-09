@@ -342,6 +342,64 @@ def test_model_hub_ui_state_completeness_is_generated_from_live_files():
             "| — |",
             "C",
         ),
+        # The substring comparison this gate used to do answered yes for every
+        # prefix, so a register row could drift onto a route that does not exist
+        # and still vouch for the real one. Exact tokens are what closes it.
+        (
+            "register row drifts onto a longer route",
+            "F4 — `POST /api/models/oauth/cancel` is issued as the dialog",
+            "F4 — `POST /api/models/oauth/cancellation` is issued as the dialog",
+            "A",
+        ),
+        # A route the spec names that the contract does not have. This is the
+        # class the round-10 review found by hand, six times.
+        (
+            "route literal drifts off api.md",
+            "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
+            "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}`",
+            "E",
+        ),
+        # The same sentence, right route and wrong body: `{hops}` belongs to the
+        # per-model chain save, and sending it here was a real finding.
+        (
+            "body key belongs to another route",
+            "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
+            "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}`",
+            "E",
+        ),
+        # A total rendering of a contracted vocabulary that quietly drops a row.
+        # The author cannot see the schema while writing the table, so nothing
+        # but a set comparison catches this.
+        (
+            "mapping table drops a contracted value",
+            "| `waiting` | 网关 · 等待重试 |",
+            "| `wating` | 网关 · 等待重试 |",
+            "E",
+        ),
+        # The same table, no longer saying which of two same-named declarations
+        # it renders. `supply_status` exists per backend and per named Agent,
+        # and reading one as the other was the substitution round 10 opened on.
+        (
+            "mapping table stops naming which declaration it renders",
+            "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
+            "| `supply_status` `[contract]` | Subtitle | Key |",
+            "E",
+        ),
+        # A repo symbol cited as evidence that no longer exists at that path.
+        ("cited symbol no longer exists", "service.py:list_agents", "service.py:list_agent_rows", "E"),
+        # A section that answers its other failures for both origins, with one
+        # failure left written once — the reader cannot tell whether pulling
+        # from a stopped engine fails the way adding does.
+        ("origin half deleted", "| ⑥′ Engine unavailable", "| ⑥″ Engine unavailable", "C"),
+        # `[contract-gap]` is also the marker that tells a checker to stop
+        # asking. Pointed at a number no §0.5 row defines, it must silence
+        # nothing at all.
+        (
+            "gap marker cites an unregistered number",
+            "`[contract]` `[contract-gap]` G-15 carries",
+            "`[contract]` `[contract-gap]` G-99 carries",
+            "A",
+        ),
     ],
 )
 def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, label, before, after, expect):
@@ -360,6 +418,38 @@ def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, label,
 
     assert not result["ok"], f"{label}: the gate did not notice"
     assert expect in {f["class"] for f in result["findings"]}, (label, result["findings"])
+
+
+def test_model_hub_ui_gate_target_zero_classes_prove_their_own_zero():
+    """A class whose right answer is 0 cannot read 0 as evidence of anything.
+
+    Every other inventory gets a free liveness signal: empty means the extractor
+    broke. The restatement classes give that up by design — the document is
+    meant to hold none of them — so they carry fixtures instead, one that must
+    still be caught and one that must still pass. This asserts the gate refuses
+    to report a self-tested zero when the arm behind it has stopped working.
+    """
+    from scripts.check_model_hub_ui_states import ROOT, TARGET_ZERO, load_authorities, self_test
+
+    assert TARGET_ZERO, "a target-zero class list nobody populates tests nothing"
+    assert not self_test(load_authorities(ROOT), ROOT)
+
+    result = check_model_hub_ui_states(Path.cwd())
+    assert not result["broken_arms"], result["broken_arms"]
+    for name in TARGET_ZERO:
+        assert result["input_scale"][name] == 0, (name, result["input_scale"][name])
+
+
+def test_model_hub_ui_gate_reads_a_symbolic_revision():
+    """The gate has to be runnable against the head under review, by name.
+
+    Deciding path-or-revision by spelling meant `HEAD`, a branch and a tag were
+    all read as paths and died on a missing-file error — which reads as *the
+    document moved* when what happened is *the revision was never resolved*.
+    """
+    result = check_model_hub_ui_states("HEAD")
+    assert result["input_mode"] == "same_run_git_rev"
+    assert result["input_scale"]["register rows"] > 50
 
 
 def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
