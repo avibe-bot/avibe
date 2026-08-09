@@ -323,11 +323,12 @@ def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
         "/show/ses123/",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.headers["Location"] == "/auth/login?next=%2Fshow%2Fses123%2F"
 
 
 def test_private_show_page_serves_locally(monkeypatch, tmp_path):
@@ -366,11 +367,12 @@ def test_public_show_page_still_requires_remote_login(monkeypatch, tmp_path):
         "/show/ses123/",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.headers["Location"] == "/auth/login?next=%2Fshow%2Fses123%2F"
 
 
 def test_offline_show_page_not_served_by_authed_route(monkeypatch, tmp_path):

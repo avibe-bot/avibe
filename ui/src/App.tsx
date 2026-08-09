@@ -652,6 +652,10 @@ const router = createBrowserRouter(
         <Route path="/remote-access" element={<Navigate to="/admin/remote-access" replace />} />
         <Route path="/doctor" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/doctor/logs" element={<Navigate to="/admin/logs" replace />} />
+        {/* The server intentionally serves the SPA shell for every extensionless
+            path. Keep stale bookmarks and retired push targets inside AuthGuard,
+            then recover authenticated/local clients to the workbench root. */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Route>,
   ),

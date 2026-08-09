@@ -141,6 +141,13 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_startup_cleanup_failure_emits_reset_path
+  - id: AUTH-SETUP-209
+    name: Remote Web cold launch keeps OAuth single-owned and completes one bounded retry
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_web_oauth_cold_launch_retry_is_single_owner
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
