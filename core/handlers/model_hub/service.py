@@ -20,6 +20,7 @@ from config.v2_config import (
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
+    model_hub_fixed_menu_ids,
     ModelHubMenuConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -32,7 +33,6 @@ from config.v2_config import (
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
-from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
 from .adapter import (
     EngineAdapter,
@@ -324,8 +324,7 @@ def _builtin_model_ids(backend: str) -> tuple[str, ...]:
     (_native_model_ids) and the agents endpoint's read-only builtin_models
     projection (agent-supply.schema.json v1.2), so the two never diverge.
     """
-    catalog = load_bundled_catalog()
-    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+    return model_hub_fixed_menu_ids(backend)
 
 
 def _native_model_ids(vendor: str) -> tuple[str, ...]:
@@ -436,17 +435,39 @@ async def _provision_transient_credential_with_cancellation_ownership(
     )
     try:
         return await asyncio.shield(provision_task)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancelled:
         # The shield leaves provisioning alive; wait for its ref before settling
         # cancellation so the transient material can be journaled and revoked.
-        transient_ref = await asyncio.shield(provision_task)
-        try:
-            await asyncio.shield(
-                service._rollback_credential("observation", transient_ref)
-            )
-        except BaseException:
-            logger.warning("Transient Model Hub observation cleanup did not settle")
-        raise
+        while True:
+            try:
+                transient_ref = await asyncio.shield(provision_task)
+                break
+            except asyncio.CancelledError:
+                continue
+        await _rollback_credential_before_settling(service, "observation", transient_ref)
+        raise cancelled
+
+
+async def _rollback_credential_before_settling(
+    service: "ModelHubService",
+    source_id: str,
+    credential_ref: str,
+) -> bool:
+    """Finish transient cleanup before propagating a cancellation."""
+
+    rollback_task = asyncio.create_task(
+        service._rollback_credential(source_id, credential_ref)
+    )
+    try:
+        return await asyncio.shield(rollback_task)
+    except asyncio.CancelledError as cancelled:
+        while True:
+            try:
+                await asyncio.shield(rollback_task)
+                break
+            except asyncio.CancelledError:
+                continue
+        raise cancelled
 
 
 def _binding(source: ModelHubSourceConfig) -> SourceBinding:
@@ -946,14 +967,11 @@ class ModelHubService:
                 )
             return self._validate_observation(observation)
         finally:
-            try:
-                await asyncio.shield(
-                    self._rollback_credential("observation", transient_ref)
-                )
-            except BaseException:
-                # _rollback_credential journals before revoke. A cancellation
-                # raised by the adapter therefore remains recoverable on demand.
-                logger.warning("Transient Model Hub observation cleanup did not settle")
+            await _rollback_credential_before_settling(
+                self,
+                "observation",
+                transient_ref,
+            )
 
     async def observe_source(self, payload: object) -> dict:
         if not isinstance(payload, dict):
@@ -2202,6 +2220,8 @@ class ModelHubService:
         else:
             for model_id in _builtin_model_ids(backend):
                 add(model_id)
+        for model_id in agent.routes:
+            add(model_id)
         return protected
 
     def _would_interrupt(
@@ -2497,20 +2517,33 @@ class ModelHubService:
                 ):
                     raise ModelHubError("mapping_target_unavailable", status=409)
             removed_hops = [
-                {"source_id": hop.source_id, "model_id": hop.model_id}
+                {
+                    "backend": backend,
+                    "menu_model": model_id,
+                    "source_id": hop.source_id,
+                    "model_id": hop.model_id,
+                }
                 for hop in old_route.hops
                 if (hop.source_id, hop.model_id)
                 not in {(item.source_id, item.model_id) for item in route.hops}
             ]
             agent.routes[model_id] = route
-            interrupted = self._would_interrupt(
-                config,
-                newly_empty_routes=(
-                    frozenset({(backend, model_id)})
-                    if old_route.hops and not route.hops
-                    else frozenset()
-                ),
-            )
+            previous_interruptions = {
+                (item["backend"], item["model_id"])
+                for item in self._would_interrupt(previous)
+            }
+            interrupted = [
+                item
+                for item in self._would_interrupt(
+                    config,
+                    newly_empty_routes=(
+                        frozenset({(backend, model_id)})
+                        if old_route.hops and not route.hops
+                        else frozenset()
+                    ),
+                )
+                if (item["backend"], item["model_id"]) not in previous_interruptions
+            ]
             if interrupted and payload.get("force") is not True:
                 raise ModelHubError(
                     "source_last_supplier",
@@ -2520,7 +2553,7 @@ class ModelHubService:
                         "would_interrupt": interrupted,
                     },
                 )
-            await self._commit_synced(previous, config)
+            self._save_config(config)
             return {
                 "chain": self._agent_chain(config, backend, model_id),
                 "removed_hops": removed_hops,

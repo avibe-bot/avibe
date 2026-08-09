@@ -832,6 +832,7 @@ def test_recommended_order_is_backend_native_then_created_at_and_id():
     ]
     assert config.recommended_source_order("codex") == [
         wrong_vendor_subscription.id,
+        hub_subscription.id,
         legacy_a.id,
         legacy_b.id,
         newer.id,
@@ -839,12 +840,42 @@ def test_recommended_order_is_backend_native_then_created_at_and_id():
         same_time_b.id,
     ]
     assert config.recommended_source_order("opencode") == [
+        hub_subscription.id,
         legacy_a.id,
         legacy_b.id,
         newer.id,
         same_time_a.id,
         same_time_b.id,
     ]
+
+
+def test_persisted_hub_config_requires_explicit_complete_route_rows():
+    payload = ModelHubConfig().to_payload()
+
+    missing = json.loads(json.dumps(payload))
+    del missing["agents"]["claude"]["routes"]
+    with pytest.raises(ValueError, match="routes.*required"):
+        ModelHubConfig.from_payload(missing)
+
+    non_object = json.loads(json.dumps(payload))
+    non_object["agents"]["claude"]["routes"] = []
+    with pytest.raises(ValueError, match="routes.*object"):
+        ModelHubConfig.from_payload(non_object)
+
+    incomplete = json.loads(json.dumps(payload))
+    incomplete["agents"]["claude"]["routes"].pop("claude-opus-4-6")
+    with pytest.raises(ValueError, match="missing menu model"):
+        ModelHubConfig.from_payload(incomplete)
+
+    dynamic = json.loads(json.dumps(payload))
+    dynamic["agents"]["opencode"]["mode"] = "hub"
+    dynamic["agents"]["opencode"]["menu"] = {
+        "view": "featured",
+        "checked": ["custom/model"],
+    }
+    dynamic["agents"]["opencode"]["routes"] = {}
+    with pytest.raises(ValueError, match="missing menu model 'custom/model'"):
+        ModelHubConfig.from_payload(dynamic)
 
 
 @pytest.mark.parametrize(

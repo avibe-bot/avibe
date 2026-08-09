@@ -28,7 +28,7 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.events import BoundedEventLog
-from core.handlers.model_hub.resolver import resolve_model_hub_turn
+from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     ModelHubError,
@@ -69,6 +69,8 @@ class FakeAdapter:
         self.observed_protocol_orders: list[tuple[str, ...]] = []
         self.revoked: list[str] = []
         self.revoke_error = False
+        self.revoke_started: asyncio.Event | None = None
+        self.revoke_block: asyncio.Event | None = None
         self.provisioned: list[str] = []
         self.synced: list[tuple] = []
         self.discovery_started: asyncio.Event | None = None
@@ -109,6 +111,10 @@ class FakeAdapter:
     async def revoke_credential(self, credential_ref):
         if self.revoke_error:
             raise RuntimeError("injected revoke failure")
+        if self.revoke_started is not None:
+            self.revoke_started.set()
+        if self.revoke_block is not None:
+            await self.revoke_block.wait()
         self.revoked.append(credential_ref)
 
     async def sync_sources(self, bindings):
@@ -272,6 +278,41 @@ def test_runtime_opencode_resolution_never_repeats_bare_name_matching():
     assert bare.source is None
 
 
+def test_runtime_opencode_resolution_preserves_absent_selection():
+    source = _source("src_openv002", ("x",), vendor="custom")
+    config = _config([source], model="custom/x")
+    agent = config.agents["opencode"]
+    agent.menu = ModelHubMenuConfig(view="featured", checked=["custom/x"])
+    agent.routes["custom/x"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "x"),)
+    )
+
+    resolution = resolve_model_hub_turn(config, "opencode", "")
+
+    assert resolution.requested_model == ""
+    assert resolution.source is None
+
+
+def test_hub_subscription_is_cross_backend_eligible_and_origin_unrestricted():
+    source = _source(
+        "src_hubsub002",
+        ("shared-model",),
+        kind="subscription",
+        vendor="anthropic",
+        channel="hub",
+    )
+    config = _config([source], model="shared-model")
+    config.agents["codex"].routes["shared-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "shared-model"),)
+    )
+    config.agents["codex"].sources.order = [source.id]
+
+    assert all(ModelHubConfig.source_eligible_for_backend(source, backend) for backend in ("claude", "codex", "opencode"))
+    assert allowed_origins(source) == ("claude", "codex", "opencode")
+    resolution = resolve_model_hub_turn(config, "codex", "shared-model")
+    assert resolution.source is source
+
+
 def test_runtime_resolution_walks_persisted_route_order_only():
     first = _source("src_route001", ("requested",))
     second = _source("src_route002", ("requested",))
@@ -363,6 +404,71 @@ def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
     assert result["removed_hops"] == []
     assert isinstance(result["interrupted"], list)
     assert [item["source_id"] for item in result["chain"]["chain"]] == [second.id, first.id]
+    assert [hop.source_id for hop in store.load().agents["claude"].routes["requested"].hops] == [second.id, first.id]
+
+
+def test_set_agent_chain_reports_complete_removed_hops_without_syncing(tmp_path):
+    first = _source("src_chain006", ("requested",))
+    second = _source("src_chain007", ("requested",))
+    config = _config([first, second], model="requested")
+    service, _store, adapter = _service(tmp_path, config)
+
+    result = asyncio.run(
+        service.set_agent_chain(
+            "claude",
+            "requested",
+            {
+                "hops": [{"source_id": first.id, "model_id": "requested"}],
+                "force": True,
+            },
+        )
+    )
+
+    assert result["removed_hops"] == [
+        {
+            "backend": "claude",
+            "menu_model": "requested",
+            "source_id": second.id,
+            "model_id": "requested",
+        }
+    ]
+    assert adapter.synced == []
+
+
+def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
+    first = _source("src_chain008", ("requested",))
+    second = _source("src_chain009", ("requested",))
+    broken = _source(
+        "src_chain010",
+        ("other",),
+        status="cooldown",
+    )
+    broken.state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2099-01-01T00:00:00Z",
+        detail_key="models.source.cooldown.rate_limited",
+    )
+    config = _config([first, second, broken], model="requested")
+    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(broken.id, "other"),)
+    )
+    service, store, adapter = _service(tmp_path, config)
+
+    result = asyncio.run(
+        service.set_agent_chain(
+            "claude",
+            "requested",
+            {
+                "hops": [
+                    {"source_id": second.id, "model_id": "requested"},
+                    {"source_id": first.id, "model_id": "requested"},
+                ]
+            },
+        )
+    )
+
+    assert result["interrupted"] == []
+    assert adapter.synced == []
     assert [hop.source_id for hop in store.load().agents["claude"].routes["requested"].hops] == [second.id, first.id]
 
 
@@ -598,6 +704,37 @@ def test_unsaved_observation_cancellation_revokes_before_settling(tmp_path):
         )
         await adapter.discovery_started.wait()
         task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert store.load().sources == []
+    assert adapter.revoked == ["cred_00000001"]
+    assert service.revocations.list() == []
+
+
+def test_unsaved_observation_cancellation_during_cleanup_waits_then_raises(tmp_path):
+    adapter = FakeAdapter()
+    adapter.revoke_started = asyncio.Event()
+    adapter.revoke_block = asyncio.Event()
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    async def scenario():
+        task = asyncio.create_task(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Key",
+                    "key": "sk-test-cleanup-cancel",
+                }
+            )
+        )
+        await adapter.revoke_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        adapter.revoke_block.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 

@@ -278,10 +278,17 @@ def _refresh_fixture_routes(config: ModelHubConfig) -> None:
     by_id = {source.id: source for source in config.sources}
     for backend, agent in config.agents.items():
         agent.sources.order = config.recommended_source_order(backend)
-        agent.routes = {}
+        agent.routes = {
+            model_id: ModelHubRouteConfig()
+            for model_id in agent.routes
+        }
         for source_id in agent.sources.order:
             source = by_id[source_id]
             for model in source.models:
+                if agent.menu_kind == "open" and (
+                    agent.menu is None or model.id not in agent.menu.checked
+                ):
+                    continue
                 route = agent.routes.setdefault(model.id, ModelHubRouteConfig())
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, model.id))
 
@@ -1012,6 +1019,10 @@ def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):
     claude = store.config.agents["claude"]
     claude.sources.order = [source.id]
     claude.routes = {
+        **{
+            model_id: ModelHubRouteConfig()
+            for model_id in claude.routes
+        },
         "claude-opus-4-6": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),)),
         "claude-sonnet-4-6": ModelHubRouteConfig(),
     }

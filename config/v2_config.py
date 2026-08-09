@@ -116,6 +116,21 @@ DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
 MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
+
+
+def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
+    """Return the bundled fixed-menu ids used by persisted Hub routes."""
+
+    if backend not in {"claude", "codex"}:
+        return ()
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+
+    return tuple(
+        entry["id"]
+        for entry in backend_model_entries(backend, load_bundled_catalog())
+    )
+
+
 _MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -1043,7 +1058,12 @@ class ModelHubAgentSupplyConfig:
             return cls(backend="opencode", mode=mode, menu_kind="open", menu=ModelHubMenuConfig())
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
-        return cls(backend=backend, mode=mode, menu_kind="fixed")
+        return cls(
+            backend=backend,
+            mode=mode,
+            menu_kind="fixed",
+            routes={model_id: ModelHubRouteConfig() for model_id in model_hub_fixed_menu_ids(backend)},
+        )
 
     @classmethod
     def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
@@ -1063,7 +1083,7 @@ class ModelHubAgentSupplyConfig:
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
         if menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
-        routes_payload = payload.get("routes") or {}
+        routes_payload = payload.get("routes", {})
         if not isinstance(routes_payload, dict):
             raise ValueError("Config 'model_hub.agents.routes' must be an object")
         if any(not isinstance(model_id, str) or not model_id for model_id in routes_payload):
@@ -1120,8 +1140,10 @@ class ModelHubConfig:
     ) -> bool:
         if backend not in MODEL_HUB_BACKENDS:
             return False
+        if source.supply_channel == "hub":
+            return True
         if source.kind == "api_key":
-            return source.supply_channel == "hub"
+            return False
         expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
         return expected_backend == backend
 
@@ -1174,13 +1196,33 @@ class ModelHubConfig:
                 raise ValueError(
                     f"Config 'model_hub.sources' contains multiple native sources for '{backend}'"
                 )
-        agents = {
-            backend: ModelHubAgentSupplyConfig.from_payload(
-                agents_payload.get(backend) or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
+        agents = {}
+        for backend in MODEL_HUB_BACKENDS:
+            if backend not in agents_payload:
+                raw_agent = ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload()
+            else:
+                raw_agent = agents_payload[backend]
+                if not isinstance(raw_agent, dict):
+                    raise ValueError(f"Config 'model_hub.agents.{backend}' must be an object")
+                if "routes" not in raw_agent:
+                    raise ValueError(f"Config 'model_hub.agents.{backend}.routes' is required")
+            agents[backend] = ModelHubAgentSupplyConfig.from_payload(
+                raw_agent,
                 expected_backend=backend,
             )
-            for backend in MODEL_HUB_BACKENDS
-        }
+            expected_menu_ids = (
+                model_hub_fixed_menu_ids(backend)
+                if backend in {"claude", "codex"}
+                else tuple(agents[backend].menu.checked if agents[backend].menu else ())
+            )
+            missing_route = next(
+                (model_id for model_id in expected_menu_ids if model_id not in agents[backend].routes),
+                None,
+            )
+            if missing_route is not None:
+                raise ValueError(
+                    f"Config 'model_hub.agents.{backend}.routes' is missing menu model '{missing_route}'"
+                )
         config = cls(
             sources=sources,
             agents=agents,

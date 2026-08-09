@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
-from config.v2_config import ModelHubConfig, ModelHubSourceConfig
+from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, ModelHubSourceConfig
 
 
 BackendName = Literal["claude", "codex", "opencode"]
@@ -40,6 +40,8 @@ class ModelHubTurnResolution:
 def allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
     if source.kind == "api_key":
         return ()
+    if source.supply_channel == "hub":
+        return tuple(MODEL_HUB_BACKENDS)
     if source.vendor == "anthropic":
         return ("claude",)
     if source.vendor == "openai":
@@ -163,8 +165,6 @@ def resolve_model_hub_turn(
         checked = tuple(agent.menu.checked if agent.menu else ())
         if requested_model and requested_model not in checked:
             requested_model = ""
-        elif not requested_model and checked:
-            requested_model = checked[0]
         if not requested_model:
             return ModelHubTurnResolution(
                 backend=backend,
