@@ -26,7 +26,7 @@ from core.memory.maintenance import (
 )
 from core.memory.runtime import MemoryRuntime
 from core.memory.snapshot import MemorySnapshotManager
-from core.memory.store import AmbiguousAdd, Delivered
+from core.memory.store import AmbiguousAdd, Delivered, MemoryStore
 from core.memory.types import CaptureAccepted, CaptureRequest, CaptureSkipped
 
 
@@ -252,6 +252,63 @@ async def test_unavailable_store_still_projects_durable_clear_recovery(
         "state": "disabled",
     }
     assert _maintenance(runtime)._backup_stage_reconcile_task is None
+    await asyncio.sleep(0)
+    assert fence_entered is False
+    assert await runtime.maintenance_payload(operator_ref="user:owner") == before
+    await runtime.close()
+
+
+@pytest.mark.parametrize("failure_point", ("provider_root", "module"))
+async def test_supplied_store_attaches_only_after_module_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    operation = MemoryClearJournal(tmp_path).start(
+        operation_id=f"clear-before-{failure_point}-failure",
+        operator_ref="user:owner",
+        pre_epoch=4,
+        target_epoch=5,
+    )
+    store = MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite")
+    artifact = FakeMemoryArtifactManager()
+
+    def fail_initialization(*_args, **_kwargs):
+        raise OSError(f"injected {failure_point} initialization failure")
+
+    if failure_point == "provider_root":
+        monkeypatch.setattr(artifact, "set_provider_root", fail_initialization)
+    else:
+        monkeypatch.setattr("core.memory.runtime.MemoryModule", fail_initialization)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(),
+        store=store,
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    maintenance = _maintenance(runtime)
+    assert runtime.available is False
+    assert maintenance._store is None
+
+    fence_entered = False
+
+    @asynccontextmanager
+    async def observed_fence():
+        nonlocal fence_entered
+        fence_entered = True
+        yield
+
+    _replace_runtime_port(runtime, exclusive_fence=observed_fence)
+    before = await runtime.maintenance_payload(operator_ref="user:owner")
+    assert before["clear_recovery"]["operation_id"] == operation.operation_id
+
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert maintenance._backup_stage_reconcile_task is None
     await asyncio.sleep(0)
     assert fence_entered is False
     assert await runtime.maintenance_payload(operator_ref="user:owner") == before

@@ -219,7 +219,7 @@ class MemoryRuntime:
         self._last_health_snapshot: ProviderHealthSnapshot | None = None
         self._last_health_observed_at: str | None = None
         self._maintenance = MemoryMaintenance(
-            store,
+            None,
             effective_home=self._effective_home,
             runtime=self._maintenance_runtime_port(),
         )
