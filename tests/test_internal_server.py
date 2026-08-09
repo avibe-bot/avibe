@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import socket
 import sys
 import tempfile
@@ -234,7 +235,25 @@ def _build_controller_double(handler=None):
 
     controller = MagicMock()
     controller.message_handler = MagicMock()
-    controller.message_handler.handle_user_message = AsyncMock(side_effect=handler or (lambda ctx, text: None))
+    callback = handler or (lambda ctx, text: None)
+
+    async def _handle_user_message(ctx, text):
+        lifecycle_admission = (ctx.platform_specific or {}).pop(
+            session_turns.TURN_LIFECYCLE_ADMISSION_KEY,
+            None,
+        )
+        try:
+            result = callback(ctx, text)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        finally:
+            if lifecycle_admission is not None:
+                lifecycle_admission.release()
+
+    controller.message_handler.handle_user_message = AsyncMock(
+        side_effect=_handle_user_message,
+    )
 
     sinks: dict = {}
     controller.active_turn_sinks = sinks
