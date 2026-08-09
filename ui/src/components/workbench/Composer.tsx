@@ -17,9 +17,8 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
-  applyVoiceInsertion,
+  applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
-  voiceInsertionText,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import {
@@ -122,6 +121,7 @@ type VoiceRecordingSession = {
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
   insertion: VoiceInsertionSnapshot;
+  previewInsertion?: VoiceInsertionSnapshot;
   cleanupOutcome?: VoiceCleanupOutcome;
   cleanupElapsedMs?: number;
   realtime?: VoiceRealtimeSession;
@@ -414,7 +414,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [realtimePreview, setRealtimePreview] = useState('');
+  const [realtimeAnnouncement, setRealtimeAnnouncement] = useState('');
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
@@ -520,6 +520,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
+      if (recordingSessionRef.current) {
+        recordingSessionRef.current.previewInsertion = undefined;
+      }
       try {
         if (recordingStartRef.current) {
           recordingSessionRef.current?.abortController.abort();
@@ -539,7 +542,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
-    setRealtimePreview('');
+    setRealtimeAnnouncement('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
       sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
@@ -657,22 +660,80 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [useMentions]);
 
   const insertVoiceTranscript = useCallback((session: VoiceRecordingSession): boolean => {
-    // Insert the finalized transcript as one atomic replacement. Segment-level
-    // results never touch the draft while the user is still speaking.
+    // Replace the active preview (or the original captured range when realtime
+    // never produced one) with the finalized transcript as one draft edit.
     if (useMentions) {
-      return mentionRef.current?.replaceSelection(session.insertion, session.transcript ?? '') ?? false;
+      const inserted = mentionRef.current?.commitVoicePreview(
+        session.insertion,
+        session.transcript ?? '',
+      ) ?? false;
+      if (inserted) setRealtimeAnnouncement('');
+      return inserted;
     }
     const current = valueRef.current;
-    const insertion = voiceInsertionText(current, session.insertion, session.transcript ?? '');
-    const next = applyVoiceInsertion(current, session.insertion, session.transcript ?? '');
-    if (insertion === null || next === null) return false;
-    valueRef.current = next;
-    setValue(next);
-    onDraftChange?.(next);
-    const caret = session.insertion.start + insertion.length;
+    const result = applyVoiceInsertionWithSnapshot(
+      current,
+      session.previewInsertion ?? session.insertion,
+      session.transcript ?? '',
+      session.insertion,
+    );
+    if (result === null) return false;
+    session.previewInsertion = undefined;
+    valueRef.current = result.text;
+    setValue(result.text);
+    setRealtimeAnnouncement('');
+    onDraftChange?.(result.text);
+    const caret = session.insertion.start + result.insertion.length;
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
     return true;
   }, [onDraftChange, useMentions]);
+
+  const restoreRealtimePreview = useCallback((session: VoiceRecordingSession): void => {
+    setRealtimeAnnouncement('');
+    if (useMentions) {
+      mentionRef.current?.restoreVoicePreview();
+      return;
+    }
+    const preview = session.previewInsertion;
+    session.previewInsertion = undefined;
+    if (preview === undefined || valueRef.current !== preview.text) return;
+    valueRef.current = session.insertion.text;
+    setValue(session.insertion.text);
+  }, [useMentions]);
+
+  const showRealtimePreview = useCallback((
+    session: VoiceRecordingSession,
+    preview: string,
+  ): void => {
+    const normalized = preview.trim();
+    if (!normalized) {
+      restoreRealtimePreview(session);
+      return;
+    }
+    if (useMentions) {
+      if (mentionRef.current?.showVoicePreview(session.insertion, normalized)) {
+        setRealtimeAnnouncement(normalized);
+      }
+      return;
+    }
+    const current = valueRef.current;
+    const result = applyVoiceInsertionWithSnapshot(
+      current,
+      session.previewInsertion ?? session.insertion,
+      normalized,
+      session.insertion,
+    );
+    if (result === null) return;
+    session.previewInsertion = result.snapshot;
+    valueRef.current = result.text;
+    setValue(result.text);
+    setRealtimeAnnouncement(normalized);
+  }, [restoreRealtimePreview, useMentions]);
+
+  const retainSettledVoiceSession = useCallback((session: VoiceRecordingSession): void => {
+    restoreRealtimePreview(session);
+    setVoiceRetainedSession(session);
+  }, [restoreRealtimePreview]);
 
   const queueVoiceSegment = (
     session: VoiceRecordingSession,
@@ -723,11 +784,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
     if (session.status === 'ready' && session.transcript) {
       if (disabledRef.current) {
-        setVoiceRetainedSession(session);
+        retainSettledVoiceSession(session);
         return;
       }
       if (!insertVoiceTranscript(session)) {
-        setVoiceRetainedSession(session);
+        retainSettledVoiceSession(session);
         showToast(t('chat.compose.voiceDraftChanged'), 'error');
         return;
       }
@@ -737,10 +798,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'failed') {
-      setVoiceRetainedSession(session);
+      retainSettledVoiceSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
-  }, [insertVoiceTranscript, sessionId, showToast, t]);
+  }, [insertVoiceTranscript, retainSettledVoiceSession, sessionId, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
     const activeHere = !unmountedRef.current && sessionId === session.sessionId;
@@ -799,7 +860,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       await session.finalization;
       presentVoiceSession(session);
     } finally {
-      setRealtimePreview('');
       if (recordingSessionRef.current === session) recordingSessionRef.current = null;
       if (activeHere) {
         transcribingRef.current = false;
@@ -823,9 +883,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const discardVoiceSession = useCallback((session: VoiceRecordingSession) => {
     session.abortController.abort();
+    restoreRealtimePreview(session);
     deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
     setVoiceRetainedSession((current) => (current === session ? null : current));
-  }, []);
+  }, [restoreRealtimePreview]);
 
   const copyReadyVoiceTranscript = useCallback(async (session: VoiceRecordingSession) => {
     if (!session.transcript) return;
@@ -918,7 +979,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onPreview: (preview) => {
             if (recordingSessionRef.current !== session || unmountedRef.current) return;
             session.realtimeFirstPreviewAt ??= Date.now();
-            setRealtimePreview(`${preview.text}${preview.stash}`.trim());
+            showRealtimePreview(session, `${preview.text}${preview.stash}`.trim());
           },
           onError: () => {
             if (abortController.signal.aborted) return;
@@ -979,14 +1040,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           if (reason === 'abort') {
             session.abortController.abort();
             session.realtime?.abort();
-            setRealtimePreview('');
+            restoreRealtimePreview(session);
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
           if (!session.segments.length && session.captureError === undefined) {
             session.realtime?.abort();
-            setRealtimePreview('');
+            restoreRealtimePreview(session);
             reportVoiceFinalization(session, 'empty');
             if (!unmountedRef.current && sessionId === session.sessionId) {
               showToast(t('chat.compose.voiceEmpty'), 'error');
@@ -1041,7 +1102,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // threw. Release it so the mic does not stay on.
       startingSession?.abortController.abort();
       startingSession?.realtime?.abort();
-      setRealtimePreview('');
+      if (startingSession) restoreRealtimePreview(startingSession);
       if (recorderRef.current === startingPipeline) recorderRef.current = null;
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       clearRecordingTimers();
@@ -1212,15 +1273,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ))}
         </div>
       )}
-      {recording && realtimePreview && (
-        <div
-          className="truncate px-3 text-xs text-muted"
-          aria-live="polite"
-          aria-label={t('chat.compose.voicePreview')}
-        >
-          {realtimePreview}
-        </div>
-      )}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {realtimeAnnouncement
+          ? `${t('chat.compose.voicePreview')}: ${realtimeAnnouncement}`
+          : ''}
+      </div>
       <div
         className={cn(
           'flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
@@ -1367,7 +1424,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onPasteFiles={mediaEnabled && !disabled && !voiceDraftReadOnly
               ? (files) => void uploadFiles(files)
               : undefined}
-            onChange={(text, references, isDraftSeed) => {
+            onChange={(text, references, isDraftSeed, isVoicePreview) => {
               // The editor owns the text; keep the live copy in a ref (no
               // re-render) so a fast IME isn't interrupted mid-insert, and only
               // re-render when the empty/non-empty state actually flips (React
@@ -1379,7 +1436,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // is at best a redundant write, and under a stale-props remount it
               // would save the previous session's draft under this session id
               // (mirrors the plain-textarea path, whose seeding never saves).
-              if (!isDraftSeed) onDraftChange?.(text);
+              if (!isDraftSeed && !isVoicePreview) onDraftChange?.(text);
             }}
             onSubmit={submit}
           />
