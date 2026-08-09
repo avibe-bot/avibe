@@ -6,6 +6,7 @@ import { ArrowLeft, ExternalLink, MonitorX, PinOff } from 'lucide-react';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { appTabHref } from '../../apps/appLaunch';
 import { showPageAvatar, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 
@@ -108,6 +109,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const avatar = sessionId ? showPageAvatar(sessionId, title) : null;
   const label = title || t('apps.showPage.label');
   const missing = !sessionId || state === 'missing';
+  const externalHref = appTabHref({ appId: 'showpage', sessionId });
 
   return (
     <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-border bg-surface">
@@ -138,9 +140,9 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           </span>
         )}
         <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-foreground">{label}</span>
-        {state === 'ready' && (
+        {state === 'ready' && externalHref && (
           <a
-            href={showPagePrivatePath(sessionId)}
+            href={externalHref}
             target="_blank"
             rel="noopener noreferrer"
             aria-label={t('apps.window.openInNewTab')}

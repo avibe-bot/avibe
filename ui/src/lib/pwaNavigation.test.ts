@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { shouldBlockPwaLoopbackLink } from './pwaNavigation';
+import { internalPwaLinkTarget, shouldBlockPwaLoopbackLink } from './pwaNavigation';
 
 describe('PWA navigation', () => {
   const remotePage = 'https://alex-app.avibe.bot/chat/session-123';
@@ -32,5 +32,40 @@ describe('PWA navigation', () => {
         'http://127.0.0.1:5123/chat/session-123',
       ),
     ).toBe(false);
+  });
+});
+
+describe('internalPwaLinkTarget', () => {
+  const current = 'https://alex-app.avibe.bot/chat/session-123';
+
+  it('keeps private Show Pages inside the AppShell route', () => {
+    expect(internalPwaLinkTarget('/show/ses_123/', current)).toEqual({
+      path: '/apps/show/ses_123',
+      navigation: 'spa',
+    });
+    expect(internalPwaLinkTarget('https://alex-app.avibe.bot/show/a%20b%2Fc/', current)).toEqual({
+      path: '/apps/show/a%20b%2Fc',
+      navigation: 'spa',
+    });
+  });
+
+  it('keeps public Show Pages in context while preserving their server document', () => {
+    expect(internalPwaLinkTarget('/p/share_123/?theme=dark#chart', current)).toEqual({
+      path: '/p/share_123/?theme=dark#chart',
+      navigation: 'document',
+    });
+  });
+
+  it('keeps canonical app routes on the SPA path', () => {
+    expect(internalPwaLinkTarget('/chat/session-456?msg=latest#reply', current)).toEqual({
+      path: '/chat/session-456?msg=latest#reply',
+      navigation: 'spa',
+    });
+  });
+
+  it('leaves external and non-app resources to their existing handlers', () => {
+    expect(internalPwaLinkTarget('https://github.com/avibe-bot/avibe', current)).toBeNull();
+    expect(internalPwaLinkTarget('/api/files/download/report.pdf', current)).toBeNull();
+    expect(internalPwaLinkTarget('mailto:hello@example.com', current)).toBeNull();
   });
 });
