@@ -3,11 +3,75 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from core.caller_context import AVIBE_SESSION_ID_ENV
 from vibe import cli, internal_client
+
+
+_MEMORY_HELP_BY_LANGUAGE = {
+    "en": {
+        "top": ("Use local Memory through the running controller",),
+        "memory": (
+            "Show Memory status",
+            "Show the Memory profile",
+            "Search local Memory",
+            "Queue durable personal context",
+        ),
+        "status": ("Print machine-readable output",),
+        "profile": ("Print machine-readable output",),
+        "search": ("Search query", "Maximum results (1-20)", "Print machine-readable output"),
+        "remember": ("Text to remember (maximum 4,000 characters)", "Print machine-readable output"),
+    },
+    "zh": {
+        "top": ("通过运行中的控制器使用本地记忆",),
+        "memory": ("显示记忆状态", "显示记忆档案", "搜索本地记忆", "将长期个人信息加入队列"),
+        "status": ("输出机器可读格式",),
+        "profile": ("输出机器可读格式",),
+        "search": ("搜索内容", "最大结果数（1-20）", "输出机器可读格式"),
+        "remember": ("要记住的文本（最多 4,000 个字符）", "输出机器可读格式"),
+    },
+}
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("arguments,section", [(["--help"], "top"), (["memory", "--help"], "memory")])
+def test_memory_help_uses_configured_i18n(language, arguments, section, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: language)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as raised:
+        parser.parse_args(arguments)
+
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    for expected in _MEMORY_HELP_BY_LANGUAGE[language][section]:
+        assert expected in output
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("command", ["status", "profile", "search", "remember"])
+def test_memory_subcommand_help_uses_configured_i18n(language, command, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_memory_cli_language", lambda: language)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as raised:
+        parser.parse_args(["memory", command, "--help"])
+
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    for expected in _MEMORY_HELP_BY_LANGUAGE[language][command]:
+        assert expected in output
+
+
+def test_memory_help_copy_is_not_hardcoded_in_cli_module() -> None:
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+
+    for help_by_command in _MEMORY_HELP_BY_LANGUAGE["en"].values():
+        for text in help_by_command:
+            assert text not in source
 
 
 def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, capsys) -> None:

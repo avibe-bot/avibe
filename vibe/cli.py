@@ -59,7 +59,6 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
-from vibe.i18n import t as i18n_t
 from vibe.i18n import normalize_language, t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
@@ -13967,23 +13966,66 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
-    memory_parser = subparsers.add_parser("memory", help="Use local Memory through the running controller")
+    memory_help_language = _memory_cli_language()
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help=i18n_t("memory.cli.help.command", memory_help_language),
+    )
     memory_subparsers = memory_parser.add_subparsers(
         dest="memory_command",
         metavar="{status,profile,search,remember}",
     )
     memory_subparsers.required = True
-    memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
-    memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_profile_parser = memory_subparsers.add_parser("profile", help="Show the Memory profile")
-    memory_profile_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_search_parser = memory_subparsers.add_parser("search", help="Search local Memory")
-    memory_search_parser.add_argument("query", help="Search query")
-    memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
-    memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_remember_parser = memory_subparsers.add_parser("remember", help="Queue durable personal context")
-    memory_remember_parser.add_argument("text", help="Text to remember (maximum 4,000 characters)")
-    memory_remember_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_status_parser = memory_subparsers.add_parser(
+        "status",
+        help=i18n_t("memory.cli.help.status", memory_help_language),
+    )
+    memory_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_profile_parser = memory_subparsers.add_parser(
+        "profile",
+        help=i18n_t("memory.cli.help.profile", memory_help_language),
+    )
+    memory_profile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_search_parser = memory_subparsers.add_parser(
+        "search",
+        help=i18n_t("memory.cli.help.search", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "query",
+        help=i18n_t("memory.cli.help.query", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help=i18n_t("memory.cli.help.limit", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_remember_parser = memory_subparsers.add_parser(
+        "remember",
+        help=i18n_t("memory.cli.help.remember", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "text",
+        help=i18n_t("memory.cli.help.text", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",

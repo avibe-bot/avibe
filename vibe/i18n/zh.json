@@ -641,6 +641,17 @@
   },
   "memory": {
     "cli": {
+      "help": {
+        "command": "通过运行中的控制器使用本地记忆",
+        "status": "显示记忆状态",
+        "profile": "显示记忆档案",
+        "search": "搜索本地记忆",
+        "remember": "将长期个人信息加入队列",
+        "query": "搜索内容",
+        "limit": "最大结果数（1-20）",
+        "text": "要记住的文本（最多 4,000 个字符）",
+        "json": "输出机器可读格式"
+      },
       "error": "记忆 {operation} 失败：{code}",
       "status": "记忆来源：{state}",
       "provider": "EverOS {version}：{state}",

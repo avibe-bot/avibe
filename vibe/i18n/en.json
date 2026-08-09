@@ -641,6 +641,17 @@
   },
   "memory": {
     "cli": {
+      "help": {
+        "command": "Use local Memory through the running controller",
+        "status": "Show Memory status",
+        "profile": "Show the Memory profile",
+        "search": "Search local Memory",
+        "remember": "Queue durable personal context",
+        "query": "Search query",
+        "limit": "Maximum results (1-20)",
+        "text": "Text to remember (maximum 4,000 characters)",
+        "json": "Print machine-readable output"
+      },
       "error": "Memory {operation} failed: {code}",
       "status": "Memory source: {state}",
       "provider": "EverOS {version}: {state}",
