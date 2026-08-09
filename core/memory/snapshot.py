@@ -34,6 +34,7 @@ _MANIFEST_BATCH_SIZE = 1_000
 # legitimately exceed host whole-path limits.
 _MANIFEST_WRITE_BUFFER_BYTES = 256 * 1024
 _COPY_CHUNK_BYTES = 1024 * 1024
+_DIRECTORY_ORDER_INSERT_BATCH_SIZE = 256
 # Eviction only causes a path segment to be reopened; it never limits accepted
 # tree depth. Two simultaneous caches therefore stay well below common fd limits.
 _DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
@@ -266,8 +267,7 @@ class _TreeCopyFrame:
     entry_type: Literal["tree", "directory"]
     mode: int
     before: tuple[int, int, int, int]
-    child_names: list[str]
-    child_index: int
+    child_order: _DirectoryOrderCursor
     digest: _DigestWriter
 
 
@@ -275,16 +275,127 @@ class _TreeCopyFrame:
 class _DirectoryWalkFrame:
     node: _RelativeNode | None
     before: tuple[int, int, int, int]
-    child_names: list[str]
-    child_index: int = 0
+    child_order: _DirectoryOrderCursor
 
 
 @dataclass(slots=True)
 class _RemovalFrame:
     node: _RelativeNode
     before: tuple[int, int]
-    child_names: list[str]
-    child_index: int = 0
+    child_order: _DirectoryOrderCursor
+
+
+@dataclass(slots=True)
+class _DirectoryOrderCursor:
+    order_id: int
+    last_name: bytes | None = None
+    exhausted: bool = False
+
+
+class _SpilledDirectoryOrder:
+    """Deterministically order directory names without retaining their width."""
+
+    def __init__(self) -> None:
+        # The unnamed SQLite database is disk-backed and deleted on close. One
+        # index is shared by every active DFS frame, so wide and deep trees do
+        # not multiply database handles or in-memory filename collections.
+        self._connection = sqlite3.connect("")
+        self._next_order_id = 1
+        try:
+            self._connection.execute("PRAGMA temp_store=FILE")
+            self._connection.execute("PRAGMA cache_size=-512")
+            self._connection.execute("PRAGMA journal_mode=OFF")
+            self._connection.execute(
+                """
+                CREATE TABLE directory_name (
+                    order_id INTEGER NOT NULL,
+                    name BLOB NOT NULL,
+                    PRIMARY KEY (order_id, name)
+                ) WITHOUT ROWID
+                """
+            )
+        except BaseException:
+            self._connection.close()
+            raise
+
+    def __enter__(self) -> _SpilledDirectoryOrder:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def scan(
+        self,
+        descriptor: int,
+        *,
+        error_type: type[MemorySnapshotError],
+        message: str,
+        include: Callable[[str], bool] | None = None,
+    ) -> _DirectoryOrderCursor:
+        order_id = self._next_order_id
+        self._next_order_id += 1
+        rows: list[tuple[int, bytes]] = []
+        try:
+            with os.scandir(descriptor) as iterator:
+                for entry in iterator:
+                    if include is not None and not include(entry.name):
+                        continue
+                    rows.append((order_id, os.fsencode(entry.name)))
+                    if len(rows) >= _directory_order_insert_batch_size():
+                        self._insert(rows)
+                        rows.clear()
+            if rows:
+                self._insert(rows)
+        except (OSError, sqlite3.Error, UnicodeError) as error:
+            raise error_type(message) from error
+        return _DirectoryOrderCursor(order_id=order_id)
+
+    def next_name(
+        self,
+        cursor: _DirectoryOrderCursor,
+        *,
+        error_type: type[MemorySnapshotError],
+        message: str,
+    ) -> str | None:
+        if cursor.exhausted:
+            return None
+        try:
+            if cursor.last_name is None:
+                row = self._connection.execute(
+                    """
+                    SELECT name FROM directory_name
+                    WHERE order_id = ? ORDER BY name LIMIT 1
+                    """,
+                    (cursor.order_id,),
+                ).fetchone()
+            else:
+                row = self._connection.execute(
+                    """
+                    SELECT name FROM directory_name
+                    WHERE order_id = ? AND name > ? ORDER BY name LIMIT 1
+                    """,
+                    (cursor.order_id, cursor.last_name),
+                ).fetchone()
+            if row is not None:
+                cursor.last_name = bytes(row[0])
+                return os.fsdecode(cursor.last_name)
+            self._connection.execute(
+                "DELETE FROM directory_name WHERE order_id = ?",
+                (cursor.order_id,),
+            )
+            cursor.exhausted = True
+            return None
+        except sqlite3.Error as error:
+            raise error_type(message) from error
+
+    def _insert(self, rows: Sequence[tuple[int, bytes]]) -> None:
+        self._connection.executemany(
+            "INSERT INTO directory_name (order_id, name) VALUES (?, ?)",
+            rows,
+        )
 
 
 class _DirectoryDescriptorCache:
@@ -777,19 +888,24 @@ class MemorySnapshotManager:
         _require_directory_private(root_info, "Memory backup root")
         root_fd = _open_directory(self._snapshot_root, "Memory backup root")
         removed: list[str] = []
+        orders: _SpilledDirectoryOrder | None = None
         try:
-            try:
-                with os.scandir(root_fd) as iterator:
-                    names = sorted(
-                        entry.name
-                        for entry in iterator
-                        if _AUTOMATIC_BACKUP_STAGE_RE.fullmatch(entry.name) is not None
-                    )
-            except OSError as error:
-                raise MemorySnapshotUnsafePathError(
-                    "Memory backup root cannot be scanned safely"
-                ) from error
-            for name in names:
+            orders = _SpilledDirectoryOrder()
+            candidates = orders.scan(
+                root_fd,
+                error_type=MemorySnapshotUnsafePathError,
+                message="Memory backup root cannot be scanned safely",
+                include=lambda name: _AUTOMATIC_BACKUP_STAGE_RE.fullmatch(name)
+                is not None,
+            )
+            while True:
+                name = orders.next_name(
+                    candidates,
+                    error_type=MemorySnapshotUnsafePathError,
+                    message="Memory backup root cannot be scanned safely",
+                )
+                if name is None:
+                    break
                 try:
                     info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
                 except OSError as error:
@@ -811,6 +927,8 @@ class MemorySnapshotManager:
                 os.fsync(root_fd)
             return tuple(removed)
         finally:
+            if orders is not None:
+                orders.close()
             os.close(root_fd)
 
     def verify(
@@ -1096,11 +1214,14 @@ class MemorySnapshotManager:
         destination_root_fd = _open_directory(destination, "Memory snapshot destination")
         source_cache = _DirectoryDescriptorCache(source_root_fd)
         destination_cache = _DirectoryDescriptorCache(destination_root_fd)
+        orders: _SpilledDirectoryOrder | None = None
         try:
+            orders = _SpilledDirectoryOrder()
             root_mode = stat.S_IMODE(info.st_mode)
             stack = [
                 _tree_copy_frame(
                     source_cache,
+                    orders,
                     None,
                     base_path=surface.path,
                     entry_type="tree",
@@ -1111,9 +1232,12 @@ class MemorySnapshotManager:
             root_entry: SnapshotEntry | None = None
             while stack:
                 frame = stack[-1]
-                if frame.child_index < len(frame.child_names):
-                    child_name = frame.child_names[frame.child_index]
-                    frame.child_index += 1
+                child_name = orders.next_name(
+                    frame.child_order,
+                    error_type=MemorySnapshotError,
+                    message="Memory tree surface could not be read",
+                )
+                if child_name is not None:
                     child_node = _RelativeNode(frame.node, child_name)
                     source_parent_fd = source_cache.open(
                         frame.node,
@@ -1143,6 +1267,7 @@ class MemorySnapshotManager:
                             stack.append(
                                 _tree_copy_frame(
                                     source_cache,
+                                    orders,
                                     child_node,
                                     base_path=surface.path,
                                     entry_type="directory",
@@ -1213,6 +1338,8 @@ class MemorySnapshotManager:
             assert root_entry is not None
             return root_entry
         finally:
+            if orders is not None:
+                orders.close()
             destination_cache.close()
             source_cache.close()
             os.close(destination_root_fd)
@@ -1619,16 +1746,9 @@ def _directory_identity(info: os.stat_result) -> tuple[int, int, int, int]:
     return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns)
 
 
-def _directory_child_names(descriptor: int, message: str) -> list[str]:
-    try:
-        with os.scandir(descriptor) as iterator:
-            return sorted(entry.name for entry in iterator)
-    except OSError as error:
-        raise MemorySnapshotError(message) from error
-
-
 def _tree_copy_frame(
     source_cache: _DirectoryDescriptorCache,
+    orders: _SpilledDirectoryOrder,
     node: _RelativeNode | None,
     *,
     base_path: str,
@@ -1657,11 +1777,11 @@ def _tree_copy_frame(
             entry_type=entry_type,
             mode=mode,
             before=_directory_identity(opened),
-            child_names=_directory_child_names(
+            child_order=orders.scan(
                 descriptor,
-                "Memory tree surface could not be read",
+                error_type=MemorySnapshotError,
+                message="Memory tree surface could not be read",
             ),
-            child_index=0,
             digest=_tree_digest(entry),
         )
     finally:
@@ -1990,6 +2110,16 @@ def _manifest_batch_size() -> int:
     return _MANIFEST_BATCH_SIZE
 
 
+def _directory_order_insert_batch_size() -> int:
+    if (
+        not isinstance(_DIRECTORY_ORDER_INSERT_BATCH_SIZE, int)
+        or isinstance(_DIRECTORY_ORDER_INSERT_BATCH_SIZE, bool)
+        or _DIRECTORY_ORDER_INSERT_BATCH_SIZE <= 0
+    ):
+        raise MemorySnapshotError("Memory snapshot directory order batch size is invalid")
+    return _DIRECTORY_ORDER_INSERT_BATCH_SIZE
+
+
 def _parse_manifest_entry(raw: object) -> SnapshotEntry:
     expected_keys = {"path", "type", "mode", "size", "sha256", "tree_digest"}
     if not isinstance(raw, dict) or set(raw) != expected_keys:
@@ -2051,101 +2181,106 @@ def _verify_payload_paths(
     entries: _ManifestIndex,
 ) -> None:
     root_info = os.fstat(payload_root_fd)
-    stack = [
-        _DirectoryWalkFrame(
-            node=None,
-            before=_directory_identity(root_info),
-            child_names=_verification_child_names(payload_root_fd),
-        )
-    ]
-    while stack:
-        frame = stack[-1]
-        if frame.child_index >= len(frame.child_names):
-            stack.pop()
-            descriptor = cache.open(
+    orders = _SpilledDirectoryOrder()
+    try:
+        stack = [
+            _DirectoryWalkFrame(
+                node=None,
+                before=_directory_identity(root_info),
+                child_order=orders.scan(
+                    payload_root_fd,
+                    error_type=MemorySnapshotVerificationError,
+                    message="Memory snapshot payload cannot be read",
+                ),
+            )
+        ]
+        while stack:
+            frame = stack[-1]
+            child_name = orders.next_name(
+                frame.child_order,
+                error_type=MemorySnapshotVerificationError,
+                message="Memory snapshot payload cannot be read",
+            )
+            if child_name is None:
+                stack.pop()
+                descriptor = cache.open(
+                    frame.node,
+                    "Memory snapshot payload directory",
+                )
+                try:
+                    if _directory_identity(os.fstat(descriptor)) != frame.before:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot payload changed during verification"
+                        )
+                finally:
+                    os.close(descriptor)
+                continue
+
+            child_node = _RelativeNode(frame.node, child_name)
+            parent_fd = cache.open(
                 frame.node,
                 "Memory snapshot payload directory",
             )
             try:
-                if _directory_identity(os.fstat(descriptor)) != frame.before:
-                    raise MemorySnapshotVerificationError(
-                        "Memory snapshot payload changed during verification"
-                    )
-            finally:
-                os.close(descriptor)
-            continue
-
-        child_name = frame.child_names[frame.child_index]
-        frame.child_index += 1
-        child_node = _RelativeNode(frame.node, child_name)
-        parent_fd = cache.open(
-            frame.node,
-            "Memory snapshot payload directory",
-        )
-        try:
-            info = os.stat(
-                child_name,
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-        except OSError as error:
-            raise MemorySnapshotVerificationError(
-                "Memory snapshot payload cannot be read"
-            ) from error
-        finally:
-            os.close(parent_fd)
-        if stat.S_ISLNK(info.st_mode) or not (
-            stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
-        ):
-            raise MemorySnapshotVerificationError(
-                "Memory snapshot payload has an unsafe entry"
-            )
-        try:
-            if stat.S_ISREG(info.st_mode):
-                _require_regular_private(info, "Memory snapshot payload file")
-            else:
-                _require_directory_private(info, "Memory snapshot payload directory")
-        except MemorySnapshotUnsafePathError as error:
-            raise MemorySnapshotVerificationError(
-                "Memory snapshot payload has an unsafe entry"
-            ) from error
-        path_text = _validated_relative_path("/".join(_node_components(child_node)))
-        if entries.entry(path_text) is None and not (
-            stat.S_ISDIR(info.st_mode) and entries.has_descendant(path_text)
-        ):
-            raise MemorySnapshotVerificationError(
-                "Memory snapshot payload has unmanifested entries"
-            )
-        if stat.S_ISDIR(info.st_mode):
-            descriptor = cache.open(
-                child_node,
-                "Memory snapshot payload directory",
-            )
-            try:
-                opened = os.fstat(descriptor)
-                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                    raise MemorySnapshotVerificationError(
-                        "Memory snapshot payload changed during verification"
-                    )
-                stack.append(
-                    _DirectoryWalkFrame(
-                        node=child_node,
-                        before=_directory_identity(opened),
-                        child_names=_verification_child_names(descriptor),
-                    )
+                info = os.stat(
+                    child_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
                 )
+            except OSError as error:
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload cannot be read"
+                ) from error
             finally:
-                os.close(descriptor)
-
-
-def _verification_child_names(descriptor: int) -> list[str]:
-    try:
-        with os.scandir(descriptor) as iterator:
-            return sorted(entry.name for entry in iterator)
-    except OSError as error:
-        raise MemorySnapshotVerificationError(
-            "Memory snapshot payload cannot be read"
-        ) from error
+                os.close(parent_fd)
+            if stat.S_ISLNK(info.st_mode) or not (
+                stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+            ):
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload has an unsafe entry"
+                )
+            try:
+                if stat.S_ISREG(info.st_mode):
+                    _require_regular_private(info, "Memory snapshot payload file")
+                else:
+                    _require_directory_private(info, "Memory snapshot payload directory")
+            except MemorySnapshotUnsafePathError as error:
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload has an unsafe entry"
+                ) from error
+            path_text = _validated_relative_path("/".join(_node_components(child_node)))
+            if entries.entry(path_text) is None and not (
+                stat.S_ISDIR(info.st_mode) and entries.has_descendant(path_text)
+            ):
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload has unmanifested entries"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                descriptor = cache.open(
+                    child_node,
+                    "Memory snapshot payload directory",
+                )
+                try:
+                    opened = os.fstat(descriptor)
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot payload changed during verification"
+                        )
+                    stack.append(
+                        _DirectoryWalkFrame(
+                            node=child_node,
+                            before=_directory_identity(opened),
+                            child_order=orders.scan(
+                                descriptor,
+                                error_type=MemorySnapshotVerificationError,
+                                message="Memory snapshot payload cannot be read",
+                            ),
+                        )
+                    )
+                finally:
+                    os.close(descriptor)
+    finally:
+        orders.close()
 
 
 def _descendant_bounds(path: str) -> tuple[str, str]:
@@ -2294,7 +2429,10 @@ def _remove_entry_at(
 ) -> None:
     root_node = _RelativeNode(None, name)
     stack: list[_RemovalFrame | _RelativeNode] = [root_node]
-    with _DirectoryDescriptorCache(parent_fd, require_private=False) as cache:
+    with (
+        _DirectoryDescriptorCache(parent_fd, require_private=False) as cache,
+        _SpilledDirectoryOrder() as orders,
+    ):
         while stack:
             item = stack[-1]
             if isinstance(item, _RelativeNode):
@@ -2344,8 +2482,11 @@ def _remove_entry_at(
                             raise MemorySnapshotUnsafePathError(
                                 "Memory snapshot directory changed during removal"
                             )
-                        with os.scandir(child_fd) as entries:
-                            child_names = sorted(entry.name for entry in entries)
+                        child_order = orders.scan(
+                            child_fd,
+                            error_type=MemorySnapshotUnsafePathError,
+                            message="Memory snapshot directory cannot be scanned safely",
+                        )
                     finally:
                         os.close(child_fd)
                 finally:
@@ -2354,14 +2495,17 @@ def _remove_entry_at(
                     _RemovalFrame(
                         node=item,
                         before=(before.st_dev, before.st_ino),
-                        child_names=child_names,
+                        child_order=child_order,
                     )
                 )
                 continue
 
-            if item.child_index < len(item.child_names):
-                child_name = item.child_names[item.child_index]
-                item.child_index += 1
+            child_name = orders.next_name(
+                item.child_order,
+                error_type=MemorySnapshotUnsafePathError,
+                message="Memory snapshot directory cannot be scanned safely",
+            )
+            if child_name is not None:
                 stack.append(_RelativeNode(item.node, child_name))
                 continue
 

@@ -1200,6 +1200,57 @@ async def test_reconcile_schedules_auto_id_backup_stage_cleanup(
     await runtime.close()
 
 
+async def test_backup_stage_cleanup_waits_for_terminal_snapshot_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    journal = runtime._clear_journal
+    manager = runtime._backup_manager
+    assert journal is not None
+    assert manager is not None
+    terminal_entered = threading.Event()
+    terminal_release = threading.Event()
+    backup_entered = threading.Event()
+    original_permits = journal.terminal_snapshot_permits
+
+    def blocking_permits():
+        terminal_entered.set()
+        assert terminal_release.wait(2)
+        return original_permits()
+
+    def observe_backup_cleanup() -> tuple[str, ...]:
+        backup_entered.set()
+        return ()
+
+    monkeypatch.setattr(journal, "terminal_snapshot_permits", blocking_permits)
+    monkeypatch.setattr(
+        manager,
+        "reconcile_unpublished_backup_stages",
+        observe_backup_cleanup,
+    )
+
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert await asyncio.to_thread(terminal_entered.wait, 1)
+    await asyncio.sleep(0)
+    assert backup_entered.is_set() is False
+
+    terminal_release.set()
+    terminal_gc = runtime._terminal_snapshot_gc_task
+    backup_reconcile = runtime._backup_stage_reconcile_task
+    assert terminal_gc is not None
+    assert backup_reconcile is not None
+    await terminal_gc
+    await backup_reconcile
+
+    assert backup_entered.is_set() is True
+    await runtime.close()
+
+
 async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

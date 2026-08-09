@@ -215,6 +215,77 @@ def test_final_flush_upgrades_joined_due_flush_after_due_at_shifts(
     asyncio.run(run())
 
 
+def test_final_flush_repeats_for_capture_enqueued_during_forced_pass(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        first_flush_entered = asyncio.Event()
+        release_first_flush = asyncio.Event()
+        second_add_entered = asyncio.Event()
+        release_second_add = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                if capture.text == "payload-second-final-flush-generation":
+                    second_add_entered.set()
+                    await release_second_add.wait()
+                return AddAck(
+                    request_id=f"add-{capture.text}",
+                    status="accumulated",
+                )
+
+            async def flush(self, session_ref):
+                self.flushes.append(session_ref)
+                if len(self.flushes) == 1:
+                    first_flush_entered.set()
+                    await release_first_flush.wait()
+                return FlushSucceeded(f"flush-{len(self.flushes)}", "extracted")
+
+        provider = Provider()
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        first = _enqueue(store, "first-final-flush-generation")
+        assert await worker.drain_once() == 1
+
+        final_flush = asyncio.create_task(
+            worker.coordinator.final_flush(
+                first.provider_session_ref,
+                deadline_seconds=2,
+            )
+        )
+        await asyncio.wait_for(first_flush_entered.wait(), timeout=1)
+        second = _enqueue(store, "second-final-flush-generation")
+        assert second.generation == first.generation + 1
+        release_first_flush.set()
+
+        await asyncio.wait_for(second_add_entered.wait(), timeout=1)
+        assert not final_flush.done()
+        release_second_add.set()
+
+        assert await final_flush
+        assert len(provider.flushes) == 2
+        assert [capture.text for capture in provider.captures] == [
+            "payload-first-final-flush-generation",
+            "payload-second-final-flush-generation",
+        ]
+        state = store.get_session_flush_state(first.provider_session_ref)
+        assert state is not None
+        assert (state.state, state.unflushed_count) == ("idle", 0)
+        assert not [
+            row
+            for row in store.list_queue_rows()
+            if row.provider_session_ref == first.provider_session_ref
+            and row.state in {"pending", "processing"}
+        ]
+
+    asyncio.run(run())
+
+
 def test_extracted_add_is_a_natural_boundary_without_flush(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)

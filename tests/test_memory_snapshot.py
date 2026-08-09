@@ -380,6 +380,7 @@ def test_streaming_manifest_crosses_batches_and_restores_exact_tree(
         _private_file(home / relative, payload, home)
     _private_directory(home / "memory/everos-root/episodes/empty", home)
     monkeypatch.setattr(snapshot_module, "_MANIFEST_BATCH_SIZE", 2)
+    monkeypatch.setattr(snapshot_module, "_DIRECTORY_ORDER_INSERT_BATCH_SIZE", 2)
 
     manager = MemorySnapshotManager(home)
     snapshot = manager.create("many-entries")
@@ -612,6 +613,89 @@ def test_streaming_manifest_index_stays_memory_bounded_beyond_old_limits(
     # Retaining the old tuple plus dictionaries consumes tens of MiB here.
     # The indexed reader holds one JSON record and a fixed SQLite page cache.
     assert peak < 8 * 1024 * 1024
+    assert list(sqlite_temp.iterdir()) == []
+
+
+def test_spilled_directory_order_is_exact_and_memory_bounded_for_wide_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_count = 20_001
+    suffix = "x" * 180
+
+    class FakeEntry:
+        __slots__ = ("name",)
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class ReverseScandir:
+        def __init__(self) -> None:
+            self._next_index = entry_count - 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> FakeEntry:
+            if self._next_index < 0:
+                raise StopIteration
+            index = self._next_index
+            self._next_index -= 1
+            return FakeEntry(f"entry-{index:05d}-{suffix}")
+
+    sqlite_temp = _private_directory(tmp_path / "sqlite-temp", tmp_path)
+    monkeypatch.setenv("SQLITE_TMPDIR", str(sqlite_temp))
+    monkeypatch.setattr(snapshot_module.os, "scandir", lambda _descriptor: ReverseScandir())
+    monkeypatch.setattr(snapshot_module, "_DIRECTORY_ORDER_INSERT_BATCH_SIZE", 11)
+
+    connection: sqlite3.Connection | None = None
+    tracemalloc.start()
+    try:
+        with snapshot_module._SpilledDirectoryOrder() as orders:
+            connection = orders._connection
+            cursor = orders.scan(
+                -1,
+                error_type=MemorySnapshotUnsafePathError,
+                message="injected wide directory cannot be scanned",
+            )
+            for index in range(entry_count):
+                assert orders.next_name(
+                    cursor,
+                    error_type=MemorySnapshotUnsafePathError,
+                    message="injected wide directory cannot be scanned",
+                ) == f"entry-{index:05d}-{suffix}"
+            assert (
+                orders.next_name(
+                    cursor,
+                    error_type=MemorySnapshotUnsafePathError,
+                    message="injected wide directory cannot be scanned",
+                )
+                is None
+            )
+            assert (
+                orders.next_name(
+                    cursor,
+                    error_type=MemorySnapshotUnsafePathError,
+                    message="injected wide directory cannot be scanned",
+                )
+                is None
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Retaining and sorting these names requires more than 4 MiB. The spill
+    # index holds a fixed insertion batch, one name per DFS frame, and a fixed cache.
+    assert peak < 3 * 1024 * 1024
+    assert connection is not None
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
     assert list(sqlite_temp.iterdir()) == []
 
 

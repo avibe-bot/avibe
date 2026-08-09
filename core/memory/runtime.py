@@ -1570,6 +1570,11 @@ class MemoryRuntime:
     async def _run_backup_stage_reconcile(self) -> None:
         """Remove abandoned unpublished stages under the backup fence."""
 
+        # Both jobs reopen the clear journal, whose transient SQLite sidecars
+        # must not be inspected while the preceding terminal GC is settling.
+        terminal_gc = self._terminal_snapshot_gc_task
+        if terminal_gc is not None and terminal_gc is not asyncio.current_task():
+            await asyncio.shield(terminal_gc)
         journal = self._require_clear_journal()
         restore_journal = self._require_backup_restore_journal()
         manager = self._require_backup_manager()
@@ -2521,8 +2526,56 @@ class MemoryRuntime:
                 raise
             except Exception:
                 logger.warning("Memory drain activation failed; retrying recovery")
-                self.module._worker.begin_new_lease_activation()
+                await self._recover_failed_drain()
             await asyncio.sleep(1.0)
+
+    async def _recover_failed_drain(self) -> None:
+        """Quiesce detached session work before rotating the worker lease."""
+
+        worker = self.module._worker
+        while self._config.enabled:
+            try:
+                if await worker.pause_and_wait():
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Memory drain quiescence failed; retrying")
+            await asyncio.sleep(1.0)
+        else:
+            return
+
+        async with self._reconcile_lock:
+            if not self._config.enabled or self._maintenance_open():
+                return
+            # A concurrent reconcile may have resumed claims while this task
+            # waited for lifecycle ownership. Fence and join that newer work.
+            while self._config.enabled:
+                try:
+                    if await worker.pause_and_wait():
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Memory drain quiescence failed; retrying")
+                await asyncio.sleep(1.0)
+            else:
+                return
+
+            worker.begin_new_lease_activation()
+            while self._config.enabled:
+                try:
+                    # Claims remain paused, so this pass can only run boot recovery.
+                    await worker.drain()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Memory drain activation failed; retrying recovery")
+                    await asyncio.sleep(1.0)
+                    continue
+                if not self._maintenance_open():
+                    worker.resume_claims()
+                return
 
     def _data_exists(self) -> bool:
         """Return a conservative status projection of vector-bearing state."""

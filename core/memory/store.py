@@ -315,6 +315,10 @@ class MessageFailure:
 #: Every way a claimed row can leave the ``processing`` state.
 DeliveryOutcome = Delivered | AddRejected | AmbiguousAdd | SystemOutage | MessageFailure
 
+# One atomic store projection tells final-flush orchestration whether it is done,
+# can fence another generation, or has reached a state that requires recovery.
+FinalFlushDisposition = Literal["complete", "flush_required", "blocked"]
+
 
 @dataclass(frozen=True)
 class SettleResult:
@@ -1379,6 +1383,54 @@ class MemoryStore:
                 (provider_session_ref.serialize(),),
             ).fetchone()
         return _session_state_from_row(row) if row is not None else None
+
+    def final_flush_disposition(
+        self,
+        provider_session_ref: ProviderSessionRef,
+    ) -> FinalFlushDisposition:
+        """Project one session's queue and acknowledgement state atomically."""
+
+        serialized_ref = provider_session_ref.serialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                WITH authority AS (
+                    SELECT state, unflushed_count
+                    FROM memory_session_flush_state
+                    WHERE provider_session_ref = ?
+                ), queue AS (
+                    SELECT
+                        SUM(CASE WHEN state IN ('pending', 'processing') THEN 1 ELSE 0 END)
+                            AS pending_count,
+                        SUM(CASE WHEN state = 'manual_required' THEN 1 ELSE 0 END)
+                            AS manual_count
+                    FROM memory_capture_queue
+                    WHERE provider_session_ref = ?
+                )
+                SELECT
+                    (SELECT state FROM authority) AS authority_state,
+                    COALESCE((SELECT unflushed_count FROM authority), 0)
+                        AS unflushed_count,
+                    COALESCE(queue.pending_count, 0) AS pending_count,
+                    COALESCE(queue.manual_count, 0) AS manual_count
+                FROM queue
+                """,
+                (serialized_ref, serialized_ref),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Memory final-flush projection is missing")
+
+        state = row["authority_state"]
+        pending_count = int(row["pending_count"])
+        manual_count = int(row["manual_count"])
+        unflushed_count = int(row["unflushed_count"])
+        if state is None:
+            return "complete" if pending_count == 0 and manual_count == 0 else "blocked"
+        if state != "idle" or manual_count:
+            return "blocked"
+        if pending_count or unflushed_count:
+            return "flush_required"
+        return "complete"
 
     def acquire_flush(
         self,

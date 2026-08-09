@@ -224,45 +224,53 @@ class SessionFlushCoordinator:
         *,
         deadline_seconds: float = 5.0,
     ) -> bool:
-        """Fence and join a trusted explicit final flush for a bounded deadline."""
+        """Drain exact-session generations to an atomic quiescent point by deadline."""
 
         if self._paused or not self._enabled():
             return False
         task = self._schedule(provider_session_ref, force=True)
-        joined_existing = task is None
         if task is None:
             key = provider_session_ref.serialize()
             task = self._flush_tasks.get(key)
-        if task is None:
-            return True
         deadline = (
             asyncio.get_running_loop().time()
             + _positive_timeout(deadline_seconds)
         )
-        while task is not None:
+        while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return False
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(task),
-                    timeout=remaining,
-                )
-            except asyncio.TimeoutError:
+            if task is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    return False
+
+            disposition = await self._store_call(
+                self._store.final_flush_disposition,
+                provider_session_ref,
+            )
+            if disposition == "complete":
+                return True
+            if self._paused or not self._enabled():
                 return False
-            if not joined_existing:
-                break
-            joined_existing = False
+
+            key = provider_session_ref.serialize()
+            active = self._flush_tasks.get(key)
+            if active is not None and not active.done() and active is not task:
+                task = active
+                continue
+            if disposition == "blocked" or not self.add_claims_available():
+                return False
+
             task = self._schedule(provider_session_ref, force=True)
             if task is None:
-                task = self._flush_tasks.get(provider_session_ref.serialize())
-        state = await self._store_call(
-            self._store.get_session_flush_state,
-            provider_session_ref,
-        )
-        return state is None or (
-            state.state == "idle" and state.unflushed_count == 0
-        )
+                task = self._flush_tasks.get(key)
+            if task is None:
+                return False
 
     async def pause_and_wait(self, *, timeout_seconds: float = 5.0) -> bool:
         """Stop scheduling and wait a bounded time for current session operations."""

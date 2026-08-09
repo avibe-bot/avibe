@@ -17,6 +17,7 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,8 +36,10 @@ from core.memory.artifact import (
 from core.memory.clear_journal import MemoryClearJournal
 from core.memory.attachments import AttachmentPinStore, attachment_pin_root
 from core.memory.everos import (
+    AddAck,
     EverOSPort,
     FakeMemoryProvider,
+    FlushSucceeded,
     ProviderCapture,
     ProviderHealthSnapshot,
 )
@@ -136,6 +139,121 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     asyncio.run(run())
     assert drain_calls == 2
     assert runtime.module._worker._boot_id != initial_boot_id
+
+
+def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
+        effective_home=tmp_path,
+    )
+    store = runtime._store
+    assert store is not None
+    accepted = store.enqueue_request(
+        source_message_id="flush-before-transient-drain-failure",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="settle this flush exactly once",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+    claimed = store.claim_due(
+        lease_owner="setup",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert store.settle_add_ack(
+        claimed,
+        AddAck(request_id="setup-add", status="accumulated"),
+        lease_owner="setup",
+        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        idle_timeout=timedelta(0),
+    ).settled
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        flush_entered = threading.Event()
+        flush_finished = threading.Event()
+        release_flush = asyncio.Event()
+
+        class BlockingProvider(FakeMemoryProvider):
+            async def flush(self, session_ref: ProviderSessionRef):
+                self.flushes.append(session_ref)
+                flush_entered.set()
+                await release_flush.wait()
+                flush_finished.set()
+                return FlushSucceeded(request_id="exact-flush", status="extracted")
+
+        provider = BlockingProvider()
+        runtime._provider = provider
+        runtime.module._replace_provider(provider)
+        worker = runtime.module._worker
+        coordinator = worker.coordinator
+
+        original_claim_due = store.claim_due
+        claim_failures = 0
+
+        def fail_foreground_claim_once(*, lease_owner: str, now: str):
+            nonlocal claim_failures
+            claim_failures += 1
+            if claim_failures == 1:
+                assert flush_entered.wait(timeout=1.0)
+                raise OSError("transient foreground store failure")
+            return original_claim_due(lease_owner=lease_owner, now=now)
+
+        monkeypatch.setattr(store, "claim_due", fail_foreground_claim_once)
+
+        original_recovery = store.recover_after_boot
+        recovery_calls = 0
+        recovery_overlapped_flush: list[bool] = []
+
+        def observe_recovery(*, lease_owner: str, clock):
+            nonlocal recovery_calls
+            recovery_calls += 1
+            result = original_recovery(lease_owner=lease_owner, clock=clock)
+            if recovery_calls == 2:
+                recovery_overlapped_flush.append(not flush_finished.is_set())
+                runtime._config = replace(runtime._config, enabled=False)
+                loop.call_soon_threadsafe(release_flush.set)
+            return result
+
+        monkeypatch.setattr(store, "recover_after_boot", observe_recovery)
+
+        original_pause_and_wait = worker.pause_and_wait
+
+        async def release_during_quiesce(*, timeout_seconds: float = 30.0) -> bool:
+            release_flush.set()
+            return await original_pause_and_wait(timeout_seconds=timeout_seconds)
+
+        monkeypatch.setattr(worker, "pause_and_wait", release_during_quiesce)
+
+        async def no_wait(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
+        runtime._ensure_worker()
+        assert runtime._worker_task is not None
+        await asyncio.wait_for(runtime._worker_task, timeout=2.0)
+        assert await coordinator.pause_and_wait(timeout_seconds=1.0)
+
+        state = store.get_session_flush_state(accepted.row.provider_session_ref)
+        assert recovery_calls == 2
+        assert recovery_overlapped_flush == [False]
+        assert provider.flushes == [accepted.row.provider_session_ref]
+        assert state is not None
+        assert (state.state, state.unflushed_count) == ("idle", 0)
+        assert store.has_manual_required_fence() is False
+        await runtime.close()
+
+    asyncio.run(run())
 
 
 def _settings() -> EverOSProcessSettings:
