@@ -996,20 +996,28 @@ export const ChatPage: React.FC = () => {
   // can't stamp one chat's row onto the chat the user moved to. Best-effort by
   // contract: every caller must already be correct if the request never lands.
   const refreshSessionRow = useCallback(async () => {
-    const id = sessionIdRef.current;
-    if (!id) return;
-    const isCurrent = sessionRowRefreshGateRef.current.begin();
-    try {
-      // cache:false — an earlier refresh (page open / reconnect) may have
-      // cached a stale row; reusing it inside the read cache's TTL is exactly
-      // what the callers are trying to escape.
-      const row = await api.getSession(id, { cache: false });
-      setSession((prev) =>
-        isCurrent() && row.id === sessionIdRef.current ? row : prev,
-      );
-    } catch {
-      // Best-effort: the next recovery point retries.
-    }
+    const read = async (allowRetry: boolean): Promise<void> => {
+      const id = sessionIdRef.current;
+      if (!id) return;
+      const isCurrent = sessionRowRefreshGateRef.current.begin();
+      try {
+        // cache:false — an earlier refresh (page open / reconnect) may have
+        // cached a stale row; reusing it inside the read cache's TTL is exactly
+        // what the callers are trying to escape.
+        const row = await api.getSession(id, { cache: false });
+        setSession((prev) =>
+          isCurrent() && row.id === sessionIdRef.current ? row : prev,
+        );
+      } catch {
+        // If this was still the newest read, one bounded retry prevents a
+        // transient failure from discarding an older route-bearing response
+        // without turning a persistent outage into an unbounded loop.
+        if (allowRetry && isCurrent() && id === sessionIdRef.current) {
+          await read(false);
+        }
+      }
+    };
+    await read(true);
   }, [api]);
   // ── Converging on a terminal archive this tab missed ────────────────────────
   //
@@ -2257,6 +2265,7 @@ export const ChatPage: React.FC = () => {
     // The provider cache feeds the sidebar, not this page's own session copy. The
     // write resolves after an await, so only patch if we're still on that session.
     onSessionPatched: (changes, sessionId) => {
+      if (sessionId !== sessionIdRef.current) return;
       sessionRowRefreshGateRef.current.invalidate();
       setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev));
     },

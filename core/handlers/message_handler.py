@@ -450,6 +450,12 @@ class MessageHandler(BaseHandler):
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            materialized_agent_identity = bool(
+                vibe_agent
+                and isinstance(session_target, dict)
+                and not session_target.get("agent_id")
+                and not session_target.get("agent_name")
+            )
             # A session may pin a setting to NOTHING on purpose. The cascade above
             # cannot express that: every `or` reads NULL as "inherit", which is the
             # correct reading for the whole existing table and the WRONG one for a
@@ -479,7 +485,8 @@ class MessageHandler(BaseHandler):
                 and isinstance(session_target, dict)
                 and session_target.get("id")
                 and (
-                    (effective_model and not session_target.get("model"))
+                    materialized_agent_identity
+                    or (effective_model and not session_target.get("model"))
                     or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
                 )
             ):
@@ -488,6 +495,8 @@ class MessageHandler(BaseHandler):
                     try:
                         materialize(
                             str(session_target["id"]),
+                            agent_id=vibe_agent.id if materialized_agent_identity else None,
+                            agent_name=vibe_agent.name if materialized_agent_identity else None,
                             model=effective_model,
                             reasoning_effort=effective_reasoning_effort,
                             expected_route={

@@ -1116,6 +1116,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         sessions_store.materialize_agent_session_route.assert_called_once_with(
             "ses_wb",
+            agent_id="agent-default",
+            agent_name="default",
             model="gpt-5.4",
             reasoning_effort="high",
             expected_route={
@@ -1191,6 +1193,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         sessions_store.materialize_agent_session_route.assert_called_once_with(
             "ses_wb",
+            agent_id="agent-default",
+            agent_name="default",
             model=None,
             reasoning_effort="high",
             expected_route={

@@ -2194,6 +2194,55 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
         service.close()
 
 
+def test_materialize_agent_session_route_pins_resolved_agent_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses_identity",
+                agent_backend="",
+                agent_variant="default",
+                agent_name=None,
+                model=None,
+                reasoning_effort=None,
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={"created_via": "workbench"},
+            )
+
+        assert service.materialize_agent_session_route(
+            session_id,
+            agent_id="agent-default",
+            agent_name="default",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": None,
+                "agent_variant": "default",
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": [],
+            },
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_id"] == "agent-default"
+        assert row["agent_name"] == "default"
+        assert row["model"] == "gpt-5.4"
+        assert row["reasoning_effort"] == "high"
+    finally:
+        service.close()
+
+
 def test_materialize_agent_session_route_rejects_stale_agent_route(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)

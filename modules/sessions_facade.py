@@ -107,12 +107,16 @@ class SessionsFacade:
         self,
         agent_session_id: str,
         *,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         expected_route: dict[str, Any] | None = None,
     ) -> bool:
         return self.sessions_store.materialize_agent_session_route(
             agent_session_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
             model=model,
             reasoning_effort=reasoning_effort,
             expected_route=expected_route,

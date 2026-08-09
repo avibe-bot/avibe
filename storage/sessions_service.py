@@ -823,19 +823,21 @@ class SQLiteSessionsService:
         self,
         session_id: str,
         *,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         expected_route: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Pin the model / effort a turn is about to run with into EMPTY columns.
+        """Pin the resolved Agent identity and route into EMPTY columns.
 
         A session created on an inherited default carries NULLs (dispatch
-        resolves the live Agent default); the first turn pins the resolved
-        values — same lifecycle as the backend pin on native bind. Called at
-        dispatch time (turn START). The writer reservation serializes the marker
-        read with this write, while ``expected_route`` makes a stale turn a no-op
-        if the user has already changed any Agent, model, effort, or explicit-pin
-        part of the route.
+        resolves the live Agent default); the first turn pins the resolved Agent
+        identity, model, and effort — same lifecycle as the backend pin on native
+        bind. Called at dispatch time (turn START). The writer reservation
+        serializes the marker read with this write, while ``expected_route`` makes
+        a stale turn a no-op if the user has already changed any Agent, model,
+        effort, or explicit-pin part of the route.
         COALESCE keeps each setting fill-if-empty. Returns True when a row was
         updated.
 
@@ -864,6 +866,10 @@ class SQLiteSessionsService:
                 if pinned != expected_pinned:
                     return False
             values: dict[str, Any] = {}
+            if agent_id:
+                values["agent_id"] = func.coalesce(func.nullif(agent_sessions.c.agent_id, ""), agent_id)
+            if agent_name:
+                values["agent_name"] = func.coalesce(func.nullif(agent_sessions.c.agent_name, ""), agent_name)
             if model and "model" not in pinned:
                 values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
             if reasoning_effort and "reasoning_effort" not in pinned:
