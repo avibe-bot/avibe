@@ -1154,6 +1154,34 @@ def test_build_context_forwards_vault_callback_outcome_metadata() -> None:
     assert context.platform_specific["vault_request_status"] == "denied"
 
 
+def test_build_context_forwards_callback_source_session_id() -> None:
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")))
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-callback-source",
+            trigger_kind="agent_run",
+            metadata={
+                "source_kind": "callback",
+                "source_actor": "run-parent",
+                "source_session_id": "ses-source",
+            },
+        )
+    )
+
+    assert context.platform_specific["source_session_id"] == "ses-source"
+
+
 def test_build_context_carries_the_definition_name_for_display() -> None:
     """The prompt echo names what fired, so the label cannot be an opaque id."""
 
@@ -6697,6 +6725,7 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["source_kind"] == "callback"
     assert callback_run["parent_run_id"] == request.id
     assert callback_run["message"] == "complete delegated result"
+    assert callback_run["metadata"]["source_session_id"] == "target-session"
 
 
 def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
@@ -7738,6 +7767,7 @@ def test_agent_run_callbacks_only_terminal_status_after_partial_output(
     ]
     assert [run["message"] for run in callback_runs] == [expected_message]
     assert callback_runs[0]["source_actor"] == f"{request.id}:terminal:{terminal_status}"
+    assert callback_runs[0]["metadata"]["source_session_id"] == "target-session"
     assert original["callback_run_id"] == callback_runs[0]["id"]
 
 

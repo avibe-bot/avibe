@@ -1294,12 +1294,26 @@ class MessageHandler(BaseHandler):
         metadata_lines: list[str] = []
         if getattr(self.config, "include_time_info", True):
             metadata_lines.append(self._build_current_time_line())
+        source_session_id = self._source_session_id(context)
+        if source_session_id:
+            metadata_lines.append(f"From: #{self._sanitize_identity(source_session_id)}")
         if include_user_info and getattr(self.config, "include_user_info", True):
             metadata_lines.append(await self._build_user_info_line(context))
 
         if not metadata_lines:
             return message
         return "\n".join([*metadata_lines, message])
+
+    @staticmethod
+    def _source_session_id(context: MessageContext) -> str:
+        """Return the Agent Session that authored this Harness input, if known."""
+        payload = context.platform_specific or {}
+        source_session_id = str(payload.get("source_session_id") or "").strip()
+        if source_session_id:
+            return source_session_id
+        if str(payload.get("source_kind") or "").strip() == "agent":
+            return str(payload.get("source_actor") or "").strip()
+        return ""
 
     @staticmethod
     def _build_current_time_line(now: datetime | None = None) -> str:
