@@ -33,6 +33,7 @@ from core.memory.backup_restore_journal import (
     BackupRestoreOperation,
     MemoryBackupRestoreJournal,
 )
+from core.memory.blocking import run_blocking
 from core.memory.clear_journal import (
     ClearOperation,
     ClearSurface,
@@ -1158,15 +1159,7 @@ class MemoryRuntime:
         operation: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
         async with self.module._lifecycle_lock:
-            task = asyncio.create_task(asyncio.to_thread(operation))
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                try:
-                    await asyncio.shield(task)
-                except Exception:
-                    pass
-                raise
+            return await run_blocking(operation)
 
     async def create_backup(self, backup_id: str | None = None) -> MemorySnapshot:
         """Create one ordinary Memory backup under the full maintenance fence."""
@@ -1280,22 +1273,7 @@ class MemoryRuntime:
     ) -> _MaintenanceIOResult:
         """Keep the maintenance fence until a cancelled I/O thread settles."""
 
-        task = asyncio.create_task(asyncio.to_thread(operation))
-        cancellation: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as error:
-                cancellation = cancellation or error
-            except Exception:
-                break
-        if cancellation is not None:
-            try:
-                task.result()
-            except (Exception, asyncio.CancelledError):
-                pass
-            raise cancellation
-        return task.result()
+        return await run_blocking(operation)
 
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
         if not self.available:
@@ -2711,17 +2689,8 @@ class MemoryRuntime:
                 return True, await self._run_call_log_maintenance()
 
     async def _run_call_log_maintenance(self) -> str | None:
-        task = asyncio.create_task(
-            asyncio.to_thread(maintain_call_log, self._call_log_db_path)
-        )
         try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            try:
-                await asyncio.shield(task)
-            except Exception:
-                pass
-            raise
+            return await run_blocking(maintain_call_log, self._call_log_db_path)
         except Exception:
             return "writer_failures"
 

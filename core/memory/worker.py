@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from core.memory.attachments import AttachmentPinStore
+from core.memory.blocking import run_blocking
 from core.memory.coordinator import ProcessingEvent, SessionFlushCoordinator
 from core.memory.everos import MemoryProviderPort
 from core.memory.store import MemoryStore, QueueRow
@@ -177,20 +178,7 @@ class MemoryWorker:
         raise cancellation
 
     async def _store_call(self, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-        cancellation: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as error:
-                cancellation = cancellation or error
-        if cancellation is not None:
-            try:
-                task.result()
-            except (Exception, asyncio.CancelledError):
-                pass
-            raise cancellation
-        return task.result()
+        return await run_blocking(operation, *args, **kwargs)
 
 
 def _positive_timeout(value: float) -> float:
