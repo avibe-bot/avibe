@@ -1007,10 +1007,7 @@ class SessionTurnManager:
         decorator = getattr(handler, "_prepend_message_metadata", None)
         if not callable(decorator) or not inspect.iscoroutinefunction(decorator):
             return text
-        decorated = await decorator(context, text, include_user_info=False)
-        spec[SCHEDULED_DISPATCH_METADATA_APPLIED_KEY] = True
-        context.platform_specific = spec
-        return decorated
+        return await decorator(context, text, include_user_info=False)
 
     @staticmethod
     def _apply_delivery_binding_provenance(

@@ -1209,6 +1209,55 @@ def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -
     assert acks == [("slack", "slack-msg-99", "accepted", "steered")]
 
 
+@pytest.mark.anyio
+async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    context = _context()
+    deliveries = []
+    for index, text in enumerate(("first callback", "second callback")):
+        deliveries.append(
+            {
+                "id": f"delivery-{index}",
+                "dispatch_text": text,
+                "snapshot_json": json.dumps(
+                    delivery_store.message_snapshot(
+                        scope_id=None,
+                        session_id="ses_fsm",
+                        platform="avibe",
+                        author="harness",
+                        source="harness",
+                        message_type="harness",
+                        text=text,
+                        metadata={
+                            SCHEDULED_PROVENANCE_KEY: {
+                                "platform_specific": {
+                                    "task_trigger_kind": "agent_run",
+                                    "source_session_id": f"source-{index}",
+                                }
+                            }
+                        },
+                    )
+                ),
+            }
+        )
+
+    assert await manager.prepare_scheduled_dispatch(
+        context, "first callback", delivery=deliveries[0]
+    ) == "decorated: first callback"
+    assert await manager.prepare_scheduled_dispatch(
+        context, "second callback", delivery=deliveries[1]
+    ) == "decorated: second callback"
+    assert decorator.await_count == 2
+    assert [call.args[1] for call in decorator.await_args_list] == [
+        "first callback",
+        "second callback",
+    ]
+
+
 def test_workbench_delivery_reports_no_reaction_receipt(managers) -> None:
     """Only an IM input has a native message to react on."""
 
