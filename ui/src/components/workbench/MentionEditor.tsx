@@ -470,6 +470,7 @@ function BootstrapPlugin({
         text: string,
         tag?: string | string[],
         insertion: VoiceInsertionSnapshot = replacement,
+        keepEndVisible = false,
       ): VoiceInsertionSnapshot | null => {
         let inserted: VoiceInsertionSnapshot | null = null;
         editor.update(() => {
@@ -490,7 +491,14 @@ function BootstrapPlugin({
           $setSelection(selection);
           selection.insertText(result.insertion);
           inserted = result.snapshot;
-        }, tag ? { tag } : undefined);
+        }, {
+          tag,
+          onUpdate: () => {
+            if (!keepEndVisible || inserted === null || inserted.end !== inserted.text.length) return;
+            const root = editor.getRootElement();
+            if (root !== null) root.scrollTop = root.scrollHeight;
+          },
+        });
         return inserted;
       };
 
@@ -547,6 +555,7 @@ function BootstrapPlugin({
             text,
             [VOICE_PREVIEW_TAG, HISTORIC_TAG],
             snapshot,
+            true,
           );
           if (insertion === null) {
             voicePreviewRef.current = null;
@@ -562,6 +571,7 @@ function BootstrapPlugin({
             text,
             HISTORY_PUSH_TAG,
             snapshot,
+            true,
           );
           if (inserted !== null) voicePreviewRef.current = null;
           return inserted !== null;
