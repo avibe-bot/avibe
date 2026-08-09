@@ -7866,7 +7866,16 @@ def reconcile_startup_dependencies() -> dict:
             }
 
             if node_ok:
-                prepared = manager.prepare(force=False)
+                if status.get("installed"):
+                    # Status verification already found a usable runtime. Do not
+                    # re-enter a provider installer on every service startup.
+                    prepared = {"ok": True, "reason": None}
+                elif not getattr(manager, "auto_install", True):
+                    # Respect the documented opt-out. The explicit install action
+                    # remains available from the Dependencies page.
+                    prepared = {"ok": False, "reason": "runtime_auto_install_disabled"}
+                else:
+                    prepared = manager.prepare(force=False)
                 runtime_ok = bool(prepared.get("ok"))
                 result["show_runtime"] = {
                     "ok": runtime_ok,

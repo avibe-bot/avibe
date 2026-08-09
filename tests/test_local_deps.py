@@ -990,6 +990,7 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
     class _Mgr:
         def __init__(self):
             self.prepared = []
+            self.auto_install = True
 
         def status(self):
             return {
@@ -1014,6 +1015,64 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
     assert avault_calls == [False]
     assert manager.prepared == [False]
     assert out["node"]["status"] == "ready"
+    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
+
+
+def test_reconcile_startup_dependencies_respects_show_runtime_auto_install_opt_out(monkeypatch):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        auto_install = False
+
+        def status(self):
+            return {
+                "installed": False,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False):
+            raise AssertionError("startup reconcile must honor the auto-install opt-out")
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["show_runtime"] == {
+        "ok": False,
+        "status": "failed",
+        "reason": "runtime_auto_install_disabled",
+    }
+
+
+def test_reconcile_startup_dependencies_does_not_reinstall_ready_show_runtime(monkeypatch):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        auto_install = True
+
+        def status(self):
+            return {
+                "installed": True,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False):
+            raise AssertionError("ready runtime must not invoke its provider installer")
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    out = api.reconcile_startup_dependencies()
+
     assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
 
 

@@ -10,6 +10,9 @@ export const dependencyHasInstallAction = (
 export const dependencyIsStartupManaged = (dependency: Pick<DependencyItem, 'id'>): boolean =>
   STARTUP_MANAGED_DEPENDENCIES.has(dependency.id);
 
-export const dependenciesNeedAutomaticRefresh = (result: DependenciesResult): boolean =>
+export const dependenciesNeedAutomaticRefresh = (
+  result: DependenciesResult,
+  allowInitialRetry = false,
+): boolean =>
   Boolean(result.reconciling) ||
-  result.deps.some((dependency) => dependencyIsStartupManaged(dependency) && !dependency.installed);
+  (allowInitialRetry && result.deps.some((dependency) => dependencyIsStartupManaged(dependency) && !dependency.installed));

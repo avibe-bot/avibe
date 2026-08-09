@@ -35,14 +35,24 @@ describe('startup dependency refresh', () => {
     expect(dependencyIsStartupManaged({ id: 'memory-runtime' })).toBe(false);
   });
 
-  it('keeps polling until startup-managed dependencies settle', () => {
+  it('allows one initial retry when startup reconciliation has not acquired its lock yet', () => {
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [dependency('show-runtime', false)],
+      }, true),
+    ).toBe(true);
     expect(
       dependenciesNeedAutomaticRefresh({
         ok: true,
         reconciling: false,
         deps: [dependency('show-runtime', false)],
       }),
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  it('keeps polling while startup reconciliation is active', () => {
     expect(
       dependenciesNeedAutomaticRefresh({
         ok: true,

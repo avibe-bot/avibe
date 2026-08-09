@@ -41,7 +41,6 @@ import { errorMessage } from '@/lib/errorMessage';
 type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 
 const STARTUP_REFRESH_INTERVAL_MS = 1_500;
-const STARTUP_REFRESH_WINDOW_MS = 120_000;
 
 const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
@@ -83,15 +82,19 @@ export const SettingsDependenciesPage: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
-    const deadline = Date.now() + STARTUP_REFRESH_WINDOW_MS;
+    let allowInitialRetry = true;
 
     const pollUntilSettled = async () => {
       const result = await refresh();
-      if (
+      const shouldRetry =
         !cancelled &&
         result !== null &&
-        dependenciesNeedAutomaticRefresh(result) &&
-        Date.now() < deadline
+        dependenciesNeedAutomaticRefresh(result, allowInitialRetry);
+      // A single delayed retry catches the startup lock acquisition race. After
+      // that first response, only an active backend reconciliation can poll.
+      allowInitialRetry = false;
+      if (
+        shouldRetry
       ) {
         timer = window.setTimeout(() => void pollUntilSettled(), STARTUP_REFRESH_INTERVAL_MS);
       }
