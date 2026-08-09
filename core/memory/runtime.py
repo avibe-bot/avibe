@@ -797,6 +797,11 @@ class MemoryRuntime:
                 snapshot=None,
                 unavailable_reason="memory_disabled",
             )
+        if not self.available:
+            return RuntimeHealthObservation(
+                snapshot=None,
+                unavailable_reason="memory_sidecar_unavailable",
+            )
         maintenance_reason = self._maintenance_observation_reason()
         if maintenance_reason is not None:
             return RuntimeHealthObservation(
