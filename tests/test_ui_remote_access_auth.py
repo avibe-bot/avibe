@@ -1681,6 +1681,49 @@ def test_remote_show_page_icon_upload_is_blocked_before_filesystem_access(
 
 
 @pytest.mark.parametrize(
+    ("path", "json_body", "api_method"),
+    [
+        ("/api/show-pages/ses-local/rotate-share", {}, "rotate_show_page_share"),
+        (
+            "/api/show-pages/ses-local/share-id",
+            {"share_id": "remote-link"},
+            "set_show_page_share_id",
+        ),
+    ],
+)
+def test_remote_show_page_public_link_mutations_are_blocked_before_store_access(
+    monkeypatch,
+    tmp_path,
+    path,
+    json_body,
+    api_method,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def unexpected_show_page_write(*args, **kwargs):
+        raise AssertionError("remote public-link mutation reached the Show Page store")
+
+    monkeypatch.setattr(api, api_method, unexpected_show_page_write)
+    response = client.post(
+        path,
+        json=json_body,
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+@pytest.mark.parametrize(
     ("path", "local_only"),
     [
         ("/api/models/runtime/status", False),
@@ -1740,6 +1783,8 @@ def test_remote_agent_definition_mutations_are_blocked_before_api_calls(
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
+        ("GET", "/api/skills/check", None, "check_skills"),
+        ("GET", "/api/skills/find?q=memory", None, "find_skills"),
         ("POST", "/api/skills/preview", {"source": "./local-skill"}, "preview_skill_source"),
         ("POST", "/api/skills", {"source": "gh:owner/repo"}, "add_skill"),
         ("POST", "/api/skills/update", {"name": "demo"}, "update_skill"),
@@ -1747,7 +1792,7 @@ def test_remote_agent_definition_mutations_are_blocked_before_api_calls(
         ("DELETE", "/api/skills/demo", None, "remove_skill"),
     ],
 )
-def test_remote_skill_mutations_are_blocked_before_api_calls(
+def test_remote_skill_operations_are_blocked_before_api_calls(
     monkeypatch,
     tmp_path,
     method,
@@ -1784,6 +1829,8 @@ def test_remote_skill_mutations_are_blocked_before_api_calls(
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
+        ("POST", "/api/vault/requests/access", {"secret_name": "REMOTE_SECRET"}, "request_vault_access"),
+        ("POST", "/api/vault/requests/sign", {"secret_name": "REMOTE_SECRET"}, "request_vault_sign"),
         ("POST", "/api/vault/secrets", {"name": "REMOTE_SECRET"}, "create_vault_secret"),
         ("PATCH", "/api/vault/secrets/REMOTE_SECRET", {"description": "changed"}, "update_vault_secret"),
         ("DELETE", "/api/vault/secrets/REMOTE_SECRET", None, "delete_vault_secret"),
@@ -1829,12 +1876,13 @@ def test_remote_vault_mutations_are_blocked_before_api_calls(
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
+        ("GET", "/api/users", None, "get_users"),
         ("POST", "/api/users", {"platform": "slack", "users": {"U1": {"enabled": True}}}, "save_users"),
         ("POST", "/api/users/U1/admin", {"platform": "slack", "is_admin": True}, "toggle_admin"),
         ("DELETE", "/api/users/U1", None, "remove_user"),
     ],
 )
-def test_remote_im_user_mutations_are_blocked_before_api_calls(
+def test_remote_im_user_operations_are_blocked_before_api_calls(
     monkeypatch,
     tmp_path,
     method,

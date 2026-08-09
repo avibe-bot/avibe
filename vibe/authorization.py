@@ -362,6 +362,12 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("GET", r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|vmk)$"),
         ("GET", r"^/api/global-prompts$"),
         ("POST", r"^/api/show-pages/[^/]+/visibility$"),
+        ("POST", r"^/api/show-pages/[^/]+/(?:rotate-share|share-id)$"),
+        ("GET", r"^/api/skills/(?:check|find)$"),
+        ("HEAD", r"^/api/skills/(?:check|find)$"),
+        ("POST", r"^/api/vault/requests/(?:access|sign)$"),
+        ("GET", r"^/api/users$"),
+        ("HEAD", r"^/api/users$"),
     )
 )
 
@@ -393,7 +399,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"POST"}),
-            r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id)$",
+            r"^/api/show-pages/[^/]+/ensure$",
         ),
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
         (frozenset({"POST"}), r"^/api/dock/pins$"),
@@ -417,7 +423,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD"}),
             r"^/api/projects/[^/]+/agents-md$",
         ),
-        (frozenset({"GET", "HEAD"}), r"^/api/skills/(?:check|find)$"),
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/models/(?:sources|agents|events|runtime/status)$",
@@ -442,7 +447,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD"}),
             r"^/api/harness/counts$",
         ),
-        (frozenset({"GET", "HEAD"}), r"^/api/users$"),
     )
 )
 
