@@ -34,8 +34,8 @@ There is no 07: it was removed during the design pass and the remaining frames
 were deliberately **not** renumbered, so that every existing reference to "08"
 keeps pointing at the same picture.
 
-All nine frames are 1440×1100 Dark. Light and mobile variants are not drawn yet;
-§3 states which acceptance items therefore cannot be checked yet.
+All nine frames are 1440×1100 Dark. Light and mobile variants are not drawn yet, so
+every geometric statement in this file is a statement about Dark desktop until they are.
 
 **These frames do not draw a navigation path, and none may be inferred from them.**
 The nine frames were composed to make the model *legible* — the shell around them is
@@ -58,8 +58,9 @@ that a page with this title and these two tabs exists at this address.
    authority for the routing algorithm.** On any conflict, it wins and this file
    is the defect.
 2. `model-hub-implementation.md` §8 — the behaviour acceptance ledger
-   (AC-1…AC-31) and the `FC-01…FC-14` final-contract handoff. §3 below does not
-   duplicate, restate, or extend either.
+   (AC-1…AC-31) and the `FC-01…FC-14` final-contract handoff. **Acceptance has one
+   home, and it is that ledger.** This file states the properties the surface must
+   have, each at the place that owns the fact, and keeps no checklist of its own.
 3. `model-hub-contracts/` — the frozen wire shapes the two above are landed as.
 4. This file — layout, copy, state reachability, interaction feedback.
 5. `design.pen` — the pixels. Where this file and the frame disagree on a number,
@@ -137,13 +138,14 @@ written into §8 by this lane.
 ### 0.5 Contract-gap registry
 
 Every `[contract-gap]` in this file, in one place. A `[contract-gap]` statement
-describes the intended surface, and is **not** an acceptance requirement: no `UI-n`
-depends on one, and where a frame draws an affordance that sits on a gap, §3 says so
+describes the intended surface, and is **not** a requirement on the build: where a frame
+draws an affordance that sits on a gap, the section that owns that frame says so
 explicitly rather than quietly requiring it.
 
 | # | Surface | Missing | Verified absent at `ca45aeb6` |
 | --- | --- | --- | --- |
 | G-3 | 06 model inventory | a way to retire a *discovered* model from a source's inventory, **and a place to remember that it was retired** | `api.md`'s `DELETE /api/models/custom-models` 「removes only the named manual model」; no other inventory-shrink route is user-initiated, and `source.schema.json`'s `models` carries no per-model retained flag |
+| G-8 | 06 tier editing | a route that saves an edited reasoning-effort list, and the field it saves into | FC-12 requires `api.md` to contract 「all-inventory reasoning-list edits」 and FC-03 requires the model entry to carry `reasoning_efforts`; the frozen v2 artefacts carry neither — `api.md` has only `POST` / `DELETE /api/models/custom-models`, and `source.schema.json`'s model entry is `{id, provenance, display_name?, discovered_at?}` |
 
 **G-7 is closed by an owner ruling, and its number is not reused.** It asked for a
 marker that survives a reload on a model a chain still references but a *successful*
@@ -175,27 +177,36 @@ that has to outlive the next refresh. The two were named as one field earlier in
 document because they looked like one question; the ruling answers only the half that a
 projection could answer.
 
-**These two were filed as one missing field, and the ruling proved they were not.**
-The earlier framing was that G-3's second half and G-7 ask the same contract for the
-same thing from opposite directions — G-3 to remember that a discovered id *stays out*
-after the user retired it, G-7 to remember that a discovered id *stays in* after upstream
-dropped it — so one per-model user-intent record would answer both, while two boolean
-flags would make refresh semantics depend on write order. The reasoning about the flags
-still holds. The merge did not: G-7 turned out to be answerable without any per-model
-record at all, by stating the requirement where a *projection* could carry it, and that
-answer does nothing for G-3. Two gaps are the same gap only when one fix closes both —
-here one fix closed one, which means they were two the whole time and the merged entry
-was hiding it. Filed as one, G-3 would now read as closed by a ruling that never touched
-it.
+**G-3 and G-7 are one principle applied twice, not two independent decisions.** The
+principle: *a fact the system can project from what it already stores does not become a
+stored field, and a capability that would need a stored field nobody has asked for does
+not become a capability.* G-7 is the application that **kept** the capability — what had
+to be remembered, that a discovered id stays in after upstream dropped it, turned out to
+be projectable from the hop that already names it, so the requirement moved onto a
+projection and no per-model record was added. G-3 is the application that **drops** the
+capability: retiring a discovered id is projectable from nothing stored, so it would need
+a real per-model retention marker — and, with it, a rule for how that marker merges on
+refetch, a rule for who owns a conflict between the marker and the source's own answer,
+and a rule for what a chain hop naming a retired id resolves to. Three new rules for a
+capability no user has asked for. Deletion comes before optimisation, so the surface
+carries no retire control for discovered rows at all (§1.6), removal stays scoped to
+manual models, and G-3 stays a stated gap against the day the demand arrives.
 
-**G-3 has two halves, and the second one is the reason no `UI-n` may require the
-first.** A user-initiated retirement needs a route (half one) *and* a durable marker
-saying this discovered id stays retired (half two) — otherwise the next inventory
-refresh re-adds it and the control reads as broken rather than absent. The contract
-represents neither. §1.6 therefore describes the affordance and §3 checks only that
-the surface does not *claim* the capability; the retention half is handed to the AC
-ledger in §0.7. Requiring half one without half two is how a checklist starts
-certifying a control that cannot keep its promise.
+*The earlier framing was that these two were the same missing field seen from opposite
+sides* — G-3 to remember that a discovered id *stays out*, G-7 that it *stays in* — so
+one user-intent record would answer both, while two boolean flags would make refresh
+semantics depend on write order. The reasoning about the flags still holds; the merge did
+not. One fix closed one, which means they were two the whole time and the merged entry
+was hiding it. What they share is not a field. It is the rule for deciding whether to add
+one.
+
+**G-3's first half has no surface, and that is the decision rather than a deferral.** A
+user-initiated retirement needs a route (half one) *and* a durable marker saying this
+discovered id stays retired (half two) — otherwise the next inventory refresh re-adds it
+and the control reads as broken rather than absent. The contract represents neither, so
+this file specifies neither: §1.6 states that no surface claims the capability, and the
+retention half is handed to the AC ledger in §0.7. Specifying half one without half two
+is how a document starts promising a control that cannot keep its promise.
 
 G-3 is the one real gap left, additive, listed in §0.7 for routing into the AC ledger. It
 is not decided here. This lane owns the visible layer, and inventing a persistence model
@@ -369,7 +380,7 @@ see that the silence is deliberate:
   no per-model retained flag, and `DELETE /api/models/custom-models` 「removes only the
   named manual model」. So a user-initiated retirement of a *discovered* id has no
   representation that survives the next refresh. This is the second half of G-3, and it
-  is the reason §3 checks only that no surface claims the capability rather than
+  is the reason this file states only that no surface claims the capability, rather than
   requiring the control.
 
 The recommendation attached to it is a per-model user-intent record rather than a
@@ -400,7 +411,7 @@ One earlier item left the same way: takeover-count agreement across grains lande
 **AC-30**, which at `ca45aeb6` states takeover is 「a projection of visible configuration
 plus live runnability, not a stored sibling state」 and requires a fixture where a chain
 with no runnable hop renders 「no takeover badge, connector color, or other takeover
-visual semantics」. UI-32 cites it instead of standing on its own.
+visual semantics」, and this file cites that wording instead of restating it.
 
 ---
 
@@ -448,7 +459,7 @@ layout, not of the page. §1.8 states the condition.
 | Upstream module | Source inventory | `GET /api/models/sources` `[spec]` | rows: yes | Open 06 for that source |
 | Dispatch rail | That upstream feeds gateway | derived, decorative | no | — |
 | Gateway module | One group per backend, each with model rows | per-backend supply + chains `[spec]` | rows, collapse, 「来源顺序」, mode switch | Open 02 / expand / open 03 for **that backend** / open 10's confirm |
-| Legend | Colour → meaning | static, but see UI-10 | no | — |
+| Legend | Colour → meaning | static; kept in bijection with the inks the page draws | no | — |
 
 **Shared state machine**
 
@@ -511,22 +522,23 @@ drawn** `[derived]`. Required behaviour:
 - Unreachable: the run pill flips to 「网关未运行」 — the error treatment, because an
   engine that *was* running and stopped answering is a fault — and every derived
   column (current source, chain, takeover) renders `—`, **not** a stale last-known
-  value. See D-3 and UI-20: a surface that cannot prove a fact must say so.
+  value. See D-3: a surface that cannot prove a fact must say so.
   Recovery offers the same start action as Not started.
 - Partial: only the sub-tree that failed degrades. A failed supply payload must
   not blank the source inventory, which loaded fine.
 
 **Shared copy** — namespace `models.hub.shell.*` / `.upstream.*` / `.gateway.*` /
-`.legend.*`. Both `ui/src/i18n/zh.json` and `en.json` must carry every key (they
-are currently at exact parity, 3534 keys each; UI-11 keeps it that way).
+`.legend.*`. Both `ui/src/i18n/zh.json` and `en.json` must carry every key. The
+property is a set equality over the two files' key sets, checked by diffing them —
+never by comparing two counts, which agree in exactly the cases that matter least.
 
 **Count-bearing keys** `[derived]`. Every key interpolating `{{count}}` ships as an
 i18next plural family — `<key>_one` and `<key>_other` — in **both** locale files,
 never as a single bare key. Two consequences worth stating, because getting either
 wrong is invisible until a user hits `count = 1`:
 
-- English needs the distinction (`1 source`, not `1 sources`), and UI-14 tests
-  exactly `0 / 1 / 2`. A bare key cannot pass it.
+- English needs the distinction (`1 source`, not `1 sources`), and the rule has to
+  hold at `0`, `1` and `2` alike. A bare key cannot.
 - Chinese has no plural categories, so `zh` never selects `_one`. It still carries
   both variants, with identical values, so that locale parity stays a plain set
   equality. A parity rule with a per-language exemption list is a parity rule that
@@ -535,9 +547,10 @@ wrong is invisible until a user hits `count = 1`:
 The count-bearing keys in this file are `shell.allDirect`, `upstream.count`,
 `gateway.modelCount`, `gateway.collapse`, `chain.derived.hops`,
 `sourceDetail.summary` and `takeover.pill` — seven, all under `models.hub.*`; each
-appears below in its `_one` / `_other` form. This list is the right-hand side of
-UI-14, so adding a `{{count}}` key anywhere under `models.hub.*` without adding it
-here is what that item is built to catch.
+appears below in its `_one` / `_other` form. This list is one side of a set equality
+— the keys interpolating `{{count}}` and the keys shipping plural families are the same
+set — so adding a `{{count}}` key anywhere under `models.hub.*` without adding it here
+breaks that equality.
 
 | Key | 中文 | English |
 | --- | --- | --- |
@@ -640,8 +653,8 @@ the first `degraded`-without-reroute payload.
 01 draws three keys, 08 draws five; the two extra keys in 08 are exactly the two
 relations 08 adds (a takeover, and a source whose supply is paused). So a key renders
 **iff** the page currently draws at least one element in that relation — the legend can
-never explain an ink that is not on screen, and can never omit one that is. UI-4 checks
-the equality in both directions.
+never explain an ink that is not on screen, and can never omit one that is. The equality
+holds in both directions.
 
 **Semantic ink** `[frame]` — five inks. Meaning is assigned **per element role**, and
 the three roles below are pairwise disjoint, so every inked element has exactly one
@@ -689,7 +702,7 @@ request and the thing that broke it look alike. Earlier revisions of this table 
 **Rose is the fifth ink, and it was missing from this table while a frame was already
 drawing it.** 05's state ③ strip is `#FF6B6B14` / `#FF6B6B40` `[frame]` — measured, and
 recorded in §1.5's metrics since the rebuild — yet the table above listed four inks, so
-UI-9's partition was undefined on a drawn element. That is the same "partition with a
+the role partition was undefined on a drawn element. That is the same "partition with a
 hole" this section rejects one paragraph earlier, and it is worth naming rather than
 quietly patching: this table drifted because it was written once and then not
 re-derived, while §1.4 and §1.5 were measured again. Rose's **relation/status** meaning
@@ -709,7 +722,7 @@ Two asymmetries are deliberate and load-bearing:
 
 - **Cyan is exclusive in both roles.** It never inks a control, so cyan anywhere on
   the page means exactly one thing: **this supply comes from a `native_cli` hop**. That
-  is the single most consequential distinction on the surface — see D-6, D-21 and UI-8.
+  is the single most consequential distinction on the surface — see D-6 and D-21.
   Note the noun: cyan says 原生, a property of the hop, and says nothing about 直连,
   which is a property of the backend and renders only as the subtitle's mode word (E-4).
   A page can draw a cyan wire into a backend whose mode is 网关 — that is a native source
@@ -722,7 +735,7 @@ Two asymmetries are deliberate and load-bearing:
 
 The honest statement of the rule is therefore a partition, not a whitelist: mint
 inking a relation/status element **must** mean gateway supply, and mint inking a
-control element **must** mean active/selected/primary. UI-9 checks that partition.
+control element **must** mean active/selected/primary.
 
 **Identity ink is a fourth role, and it is why hue alone never decides meaning**
 `[frame]`. Each backend group header carries a 30×30 tile in a per-backend constant:
@@ -739,14 +752,15 @@ Identity ink is decidable from form factor without knowing the semantics: a fill
 5px dot, a status word, or a 20×2 legend swatch, at full alpha or `CC`. **No
 acceptance item may put an identity tile in a relation domain**, and every item that
 quantifies over a hue states this exclusion by citing this paragraph rather than
-restating it — UI-8 and UI-9 both do.
+restating it.
 
 One consequence is worth naming because a fixture depends on it. Claude Code's tile is
 cyan *and* Claude Code is native-direct in every frame that draws it, so no frame
 separates the two readings for cyan the way OpenCode separates them for violet. That
 D-20's tile stays cyan after Claude Code moves to the gateway is therefore an assertion
-of D-20, not an observation of any frame `[derived]`. UI-33's all-gateway fixture is
-the first artefact that will pin it, and UI-8 is written so that fixture can pass.
+of D-20, not an observation of any frame `[derived]`. An all-gateway fixture is the
+first artefact that will pin it, and the cyan rule above is written so that fixture can
+pass.
 
 ---
 
@@ -778,8 +792,8 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 the whole model in one line: a backend is either on the gateway or not. On the gateway
 it carries 来源顺序 + 切换到直连; in 直连 it carries 切换到网关 and **nothing else** —
 Claude Code's head has no order button, because a direct backend consults no source
-order and an editor there would edit a list nothing reads. D-9a states the rule and
-UI-33 checks it as a set equality over the three groups.
+order and an editor there would edit a list nothing reads. D-9a states the rule, and it
+is a set equality over the three groups.
 
 **Track metrics** `[frame]`: `cols` 1120×806, `gap 16`; upstream module 384 wide,
 rail 72, gateway module takes the rest. Everything inside those tracks is
@@ -822,7 +836,7 @@ Credential-invalid is the one worth stating precisely `[derived]`: a
 `needs_action` source **stays in the list, in place**, with its status line
 replaced by the cause and a one-tap repair action. It is not removed, not moved to
 the bottom, and not silently dropped from the chains that name it — a source you
-cannot see is a source you cannot fix. (UI-19.)
+cannot see is a source you cannot fix.
 
 **A backend with zero model rows is a different emptiness from a backend with no usable
 source, and they must not share a message** `[derived]`. 没有可用来源 says *this backend
@@ -836,8 +850,8 @@ only the row area differs.
 than an omission** `[derived]`. None of these nine frames draws the surface that edits a
 backend's model menu, so there is no add affordance on this list to keep enabled — and
 naming where that surface lives would be a navigation path, which §0.1 forbids this file
-to draw. UI-17 claims the message and the preserved shell here, and claims a live add
-affordance only for the two lists that actually draw one.
+to draw. The empty state claims the message and the preserved shell here, and claims a
+live add affordance only for the lists that actually draw one.
 
 **Extreme data**
 
@@ -874,8 +888,8 @@ appear where they always belonged.
 `visible = mustShow ++ take(ranked, N)`, which sorts only the collapsible remainder and
 concatenates — so every non-nominal row floats above every override, and the group stops
 reading as the backend's menu at exactly the moment something is wrong with it. Worse, it
-is a different order from the one UI-28 checks, and the disagreement was invisible because
-the two live in different sections. A concat is not an ordering rule; it is an ordering
+is a different order from the one §1.1's own collapse rule states, and the disagreement
+was invisible because the two live in different sections. A concat is not an ordering rule; it is an ordering
 rule someone forgot to write.
 
 **`N` is an additive nominal baseline, not a total row floor.** This is the one
@@ -913,7 +927,7 @@ Other limits `[derived]`:
 | Many sources (> 6) | Upstream module grows to the `cols` track height (806) and then `upContent` scrolls; the head and footer stay pinned. Group labels scroll with the content. |
 | Many backends (> 3) | `gwContent` scrolls; the rail line keeps spanning the visible track. |
 | Zero supply relations | The wire layer renders nothing — no placeholder path. |
-| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. (UI-30.) |
+| Wires | Generated from the supply-relation set, never hand-placed; the frame's four paths are an instance of that generator, not a fixed asset. |
 
 ---
 
@@ -977,7 +991,6 @@ derived 「3 跳」 is the muted neutral `#FFFFFF0A` / `$--muted`, user-set 「�
 the strong neutral `#FFFFFF14` / `$--foreground`. Nothing here is a second accent
 hue: the whole distinction is carried by one step of contrast, three times, which is
 why it reads as *authored versus derived* rather than as *important versus not*.
-(UI-37.)
 
 **The first hop's ↑ is the only disabled control in this dialog** `[frame]` — glyph
 `#FFFFFF33` against `$--foreground` on every other icon button, in the same 26×26
@@ -1079,7 +1092,7 @@ rather than deleted, because the resolution went against the drawing.
 such button** — Claude Code's head carries only 切换到网关 `[frame]`. This is not an
 omission to be tidied up: a direct backend uses its own login and consults no source
 order, so an order editor there would edit a list nothing reads. §2 D-9a states the
-rule; UI-33 checks it as a set equality.
+rule, and it is a set equality.
 
 **Geometry** `[frame]`
 
@@ -1130,9 +1143,29 @@ stop one of them from making the claim at all.
 | --- | --- | --- | --- |
 | Ordered rows | The order, ranked from 1 | drag, and fully by keyboard | Reorder |
 | Grip | Drag affordance | drag / Space | Grab and drop |
-| 排进来 | Add a held-out source to the order | yes | Append at the end, then focus the moved row `[derived]` |
+| 排进来 `MJZ2I` | Add a held-out source to the order | yes | Append at the end, then focus the moved row `[derived]` |
+| 移出 `A2Hz9O` / `FjqVJ` | Take an ordered source out of the order | yes | Move the row to the held-out section, then focus the moved row `[derived]` |
 | 取消 / 关闭 | Leave without saving | yes | Close, discarding uncommitted moves |
 | 保存顺序 | Commit | yes | Persist, close |
+
+**排进来 and 移出 are one control in two directions, and both are drawn** `[frame]`. The
+held-out row carries `MJZ2I`; each ordered row carries the same button reversed —
+`A2Hz9O` on `YXG4r`, `FjqVJ` on `m18t4` — in an identical treatment (`#FFFFFF0A`,
+`radius 8`, `$--border-strong`, `padding [9,12]`, `gap 6`, label Inter 11.5 / 700).
+Membership in this order is a two-way relation, so it gets one affordance with two
+labels rather than one affordance and one omission. A drawer whose only way *out* of the
+order was drag-and-drop would make the two directions unequal for no reason: one a
+button, the other a gesture — and the gesture is the direction with no keyboard
+equivalent that produces the same result.
+
+**Shortening the order is a guarded change, and it reuses the one confirmation this
+product has** `[contract]`. The drawer saves the whole order in one request (§4.6's
+`{hops:[...]}` `PUT`), so a save that drops sources is not a different kind of change
+from any other that would remove hops: it comes back `409 {error, would_remove_hops,
+would_interrupt}` and is completed by re-sending with `force`. The surface that renders
+that envelope is already drawn, once, in §1.6 — this drawer starts no second one, and
+保存顺序 is not disabled to avoid the case. Two confirmation surfaces for one envelope is
+how the two begin disagreeing about what `would_interrupt` means.
 
 **There is no mode, and the drawer has no ownership state** `[frame]` `[spec]`. Every
 element on this surface is either part of one stored order or an action that edits it:
@@ -1163,8 +1196,8 @@ landed*, which belongs to the end of the add flow, not to a drawer opened later.
 **The held-out section is not an exclusion list.** Its label reads 「未排入这条顺序」
 `[frame]`. A source outside this backend's order is still a source: it may sit in another
 backend's order, and a chain elsewhere can name it. The earlier design read this section
-as 「不参与排序」, which said something much stronger and false. UI-34 checks that the two
-sections partition the eligible sources exactly.
+as 「不参与排序」, which said something much stronger and false. The two sections
+partition the eligible sources exactly: no source is in both, and none is in neither.
 
 **Keyboard operation** `[derived]`. Drag-and-drop is the drawn affordance; it is not the
 specified one, because a reorder surface that only accepts a pointer is unusable by
@@ -1176,13 +1209,13 @@ the resolver reads. Required bindings, on a focused row:
 | `Space` | Grab the row, or drop a grabbed row at its current position |
 | `↑` / `↓` | Grabbed: move the row one position. Not grabbed: move focus between rows |
 | `Escape` | Grabbed: cancel the grab and restore the pre-grab order. Not grabbed: close the drawer |
-| `Enter` | On 排进来: append that source to the order and move focus onto the moved row |
+| `Enter` | On 排进来 / 移出: move that source between the two sections and put focus on the moved row |
 
 Ordinals renumber contiguously from 1 after every move, grabbed state is announced
 (`aria-grabbed` plus a live-region message naming the new position), and the order a
 keyboard produces is byte-identical to the one a drag produces — they must write the
-same value through the same commit path, not two paths that agree today. UI-23 checks
-all four bindings.
+same value through the same commit path, not two paths that agree today. Every binding in
+the table above commits through that one path, and so does every button on a row.
 
 **Copy** — namespace `models.hub.order.*`
 
@@ -1194,6 +1227,7 @@ all four bindings.
 | `section.ordered.note` | 拖动排序 | Drag to reorder |
 | `section.heldOut` | 未排入这条顺序 | Not in this order |
 | `action.include` | 排进来 | Add to order |
+| `action.exclude` | 移出 | Remove from order |
 | `empty.noEligible` `[derived]` | 这个后端还没有可用来源。 | No source is available to this backend yet. |
 | `empty.ordered` `[derived]` | 这条顺序现在是空的。把下面的来源排进来。 | This order is empty. Add a source from below. |
 | `cancel` | 取消 | Cancel |
@@ -1209,10 +1243,10 @@ all four bindings.
 - **Empty order, held-out sources remaining** `[derived]`: the *ordered* section renders
   「这条顺序现在是空的。把下面的来源排进来。」 and the held-out rows stay listed with their
   排进来 buttons; 保存顺序 stays enabled. This is a different emptiness from the one above
-  and needs saying, because it is reachable and the repair is already on screen: a user
-  can empty the order by hand, and a source that stops being eligible for this backend
-  leaves both sections (UI-34), so an order can empty itself while a usable source sits
-  one press away. 保存顺序 is deliberately **not** disabled here: an empty order is a real
+  and needs saying, because it is reachable by two routes and the repair is already on
+  screen: a user can empty the order by hand with 移出, and a source that stops being
+  eligible for this backend leaves both sections, so an order can also empty itself while
+  a usable source sits one press away. 保存顺序 is deliberately **not** disabled here: an empty order is a real
   configuration meaning *this backend uses none of these sources*, which frame 01 already
   renders as 没有可用来源, and refusing to save it would trap a user who genuinely wants
   that in a drawer they cannot leave without undoing their work.
@@ -1220,7 +1254,7 @@ all four bindings.
   but inert, and the drawer is still reachable — the order is trivially satisfied, not
   meaningless.
 - **A `needs_action` source already in the order** keeps its rank and shows its cause;
-  it is not silently dropped (UI-19).
+  it is not silently dropped.
 - **Long names**: source name truncates at the row width with the full value in
   `title`; the meta line truncates from the middle, keeping both ends.
 
@@ -1275,7 +1309,6 @@ This is the item most likely to be implemented from the pixels alone, and gettin
 backwards in either direction costs something real: checkboxes would promise a
 one-press both-channels action the engine never receives, and a radio group whose
 second pass hides the taken option would make the hint's instruction unfollowable.
-(UI-26.)
 
 **State machine**
 
@@ -1301,7 +1334,7 @@ nothing — a property worth stating here rather than three times, because the r
 one reason. The two that are not OAuth failures are the easy ones to forget: an engine
 that is down and an account that is already taken are both conditions the *dialog* cannot
 fix, and leaving them with only a forward exit would trap a user behind someone else's
-state. UI-27 checks all three.
+state.
 
 **There is no partial-completion state here, and that is a property of the rebuild, not
 an omission.** An earlier draft of this section carried a `[contract-gap]` (G-5) for the
@@ -1428,17 +1461,17 @@ implemented the opposite decision.
 | State | Entry | Exit |
 | --- | --- | --- |
 | ① Default | Dialog opened | Add pressed → ②; 拉取型号 pressed → ②′ |
-| ② Adding | Add pressed | Success → dialog closes into 06; classified failure → ③; undetermined interface → ④; identified but no inventory → ⑤; 取消 → ① (transient credential revoked server-side `[contract]` AC-26) |
-| ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | Success → the inline model count in ①; classified failure → ③′; undetermined interface → ④′; identified but no inventory → ⑤′; 取消 → ① with the form's values intact, **nothing to revoke** because a pull writes no credential |
-| ③ Failure, **Add origin** | A probe run *as part of Add* classified the failure | 重试 → ②; 取消 → dismiss |
-| ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | 重试 → **another 拉取型号, not ②**; 取消 → ① |
-| ④ Interface undetermined, **Add origin** | Reachable **and** authenticated, response shape matches no known interface | Pick a hint + 重试 → **probe again in the hinted order** → identified: persist and close; still undetermined: back to ④ with the attempt as evidence. 取消 → dismiss |
-| ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | Pick a hint + 重试 → **probe again in the hinted order, still as a pull** → identified: report the inventory inline in ①, **persisting nothing**; still undetermined: back to ④′. 取消 → ① |
-| ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | The probe proved the protocol with a real response, **and** the model fetch came back unusable | 重试 → re-run **the fetch only**, not the whole add; 仍要添加 → persist the source with its proved protocol and an empty inventory, close into 06; 取消 → dismiss, nothing persisted |
-| ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | 重试 → re-run the fetch as a pull; 取消 → ①. **No 仍要添加**: the foot is the ordinary two, because the user did not ask to add anything |
+| ② Adding | Add pressed | Success → dialog closes into 06; classified failure → ③; undetermined interface → ④; identified but no inventory → ⑤ |
+| ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | Success → the inline model count in ①; classified failure → ③′; undetermined interface → ④′; identified but no inventory → ⑤′ |
+| ③ Failure, **Add origin** | A probe run *as part of Add* classified the failure | 重试 → ② |
+| ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | 重试 → **another 拉取型号, not ②** |
+| ④ Interface undetermined, **Add origin** | Reachable **and** authenticated, response shape matches no known interface | Pick a hint + 重试 → **probe again in the hinted order** → identified: persist and close; still undetermined: back to ④ with the attempt as evidence |
+| ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | Pick a hint + 重试 → **probe again in the hinted order, still as a pull** → identified: report the inventory inline in ①, **persisting nothing**; still undetermined: back to ④′ |
+| ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | The probe proved the protocol with a real response, **and** the model fetch came back unusable | 重试 → re-run **the fetch only**, not the whole add; 仍要添加 → persist the source with its proved protocol and an empty inventory, close into 06 |
+| ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | 重试 → re-run the fetch as a pull |
 | Empty | — | Not applicable: a form has no empty state |
 | Credential-invalid | Auth failure is one of ③'s three causes | As ③ |
-| Engine unavailable `[derived]` | Gateway not running | Add is blocked with 「网关没有响应,请重试」; the form keeps its values |
+| Engine unavailable `[derived]` | Gateway not running | Add is blocked with `fail.engineDown`; the form keeps its values |
 
 **Origin is an axis, not a state, and it is the whole reason this table has primed
 twins** `[derived]`. 添加 and 拉取型号 run the *same* probe, so every outcome the probe
@@ -1447,14 +1480,23 @@ never the pixels; it is exactly two things, and they are the same two for every 
 
 - **重试 repeats the operation that failed, not a different one.** From a pull, every
   retry is another pull.
-- **取消 returns to where the operation started** — ① for a pull, dismissed for an add —
-  and **a pull-origin state can never persist**. Where a state's Add-origin form offers
-  a persisting exit, the pull-origin form does not offer it at all: ④′ reports its
-  result inline instead of saving, and ⑤′ drops 仍要添加 and keeps the ordinary
-  two-button foot.
+- **取消 returns to where the operation started, and this is the only place that says
+  so.** A pull is an optional operation *inside* the dialog, so its 取消 returns to ① with
+  the form's values intact; an add is what the dialog is for, so its 取消 dismisses. This
+  holds for the in-flight states exactly as it does for the outcome states: ② dismisses,
+  ②′ returns to ①. A cancelled in-flight add has its transient credential revoked
+  server-side (`[contract]` AC-26); a cancelled pull has nothing to revoke, because a
+  pull writes no credential.
+- **A pull-origin state can never persist.** Where a state's Add-origin form offers a
+  persisting exit, the pull-origin form does not offer it at all: ④′ reports its result
+  inline instead of saving, and ⑤′ drops 仍要添加 and keeps the ordinary two-button foot.
 
-Stating it as an axis rather than as a list of special cases is the point. An earlier
-version primed ③ alone, which left ④ and ⑤ silently shared between the two origins —
+Stating it as an axis rather than as a list of special cases is the point, and it is why
+the table's Exit column carries no 取消 clause per row: a fact restated once per row is a
+fact with eight owners, and the eighth is the one that drifts — which is exactly what had
+happened to ②, whose row said 取消 returned to ① while the axis said an add dismisses. An
+earlier version primed ③ alone, which left ④ and ⑤ silently shared between the two
+origins —
 and both of their success paths persist a source and close the dialog. A user who
 pressed the optional button, picked a hint, and pressed 重试 would then have created a
 source they never asked for, or lost the form to 取消; the same hole existed twice
@@ -1473,8 +1515,8 @@ transient credential to revoke on the way out.
 
 Two consequences follow from ②′ occupying the body rather than sitting inside the form.
 **A second pull cannot be started while one is in flight**, because 拉取型号 is not on
-screen to press — the mechanism is absence, not a disabled button, which is why UI-22's
-enumeration does not and should not list it. And **取消 during ②′ is a real abort**, not
+screen to press — the mechanism is absence, not a disabled button, which is why an
+enumeration of this dialog's interactive elements does not and should not list it. And **取消 during ②′ is a real abort**, not
 a dismissal: it stops the in-flight probe and returns the user to a form still holding
 everything they typed. A build that leaves ① fully interactive during a pull has to
 invent an answer for what a second press means and for which of two responses wins —
@@ -1489,8 +1531,9 @@ twice.
 
 **The distinction has no visual carrier**, and that is what makes it worth stating so
 precisely: the only way to get it right is to keep the origin in state, and the only way
-to get it wrong is to reconstruct it from what is on screen. UI-35 checks the ③/③′ pair
-and UI-39 checks that the non-persistence property holds across the whole branch.
+to get it wrong is to reconstruct it from what is on screen. The property is not about
+one pair: **no Pull-origin state persists anything**, and that quantifies over every
+primed twin, ②′ included.
 
 **④'s selector is a hint to the prober, not a declaration of the answer** `[frame]`
 `[contract]`. The drawn hint is explicit — 「提示只改探测顺序 · 仍要真的连上才会保存;
@@ -1508,12 +1551,12 @@ file got wrong in three different ways:
 `[derived]` for ④'s entry gate: until a segment is chosen, 重试 stays in the dimmed
 treatment. Retrying with no hint would re-run the identical probe order that just
 failed, and a button that is guaranteed to reproduce the current screen is worse than
-no button. (D-3, UI-20.)
+no button. (D-3.)
 
 **This is the one screen in the product where the user supplies a fact the product
 normally derives, and the frame goes out of its way to bound it** — one hint, affecting
 one attempt, not stored as an answer. 「全产品唯一一处让你提示接口类型的地方」 is the
-frame's own caption. UI-12 keeps that uniqueness checkable. At `ca45aeb6` the ledger
+frame's own caption. At `ca45aeb6` the ledger
 uses the frame's own word for it: AC-27 calls the control 「a one-time three-value
 **probe-order hint**」 and FC-07 contracts it as 「a manual three-value probe-order hint」
 that 「cannot save a protocol without response proof」. The frame and the contract now
@@ -1558,10 +1601,10 @@ distinction ⑤ needs is between *primary* and *secondary*, which is chrome's jo
 advisory inks describe the state of the world, and the world's state here is already
 said once, by the gold strip above.
 
-**`UI-38` is the acceptance item this state produces**, and it checks the property
-rather than the pixels: the set of dialog exits that persist a source equals the set
-whose protocol came from an observed response. A build that lets ③ or ④ save, or
-that refuses ⑤, fails the same item — which is the point of writing it as an equality.
+**The property this state produces is an equality, not a pixel**: the set of dialog exits
+that persist a source equals the set whose protocol came from an observed response. A
+build that lets ③ or ④ save, and a build that refuses ⑤, break the same equality from
+opposite sides — which is why it is worth stating as one.
 
 **Copy** — `models.hub.addKey.*`
 
@@ -1583,6 +1626,7 @@ that refuses ⑤, fails the same item — which is the point of writing it as an
 | `fail.auth.detail` | 检查 API Key 是否有效 | Check whether the API key is valid |
 | `fail.address` `[derived]` | 地址不对:404 Not Found | Wrong address: 404 Not Found |
 | `fail.network` `[derived]` | 网络不通:连接超时 | Network unreachable: connection timed out |
+| `fail.engineDown` `[derived]` | 网关没有响应,请重试 | The gateway is not responding — try again |
 | `retry` | 重试 | Retry |
 | `undetermined.title` | 连上了、也通过了鉴权 —— 但认不出它说哪种接口 | Connected and authenticated — but we cannot tell which interface it speaks |
 | `undetermined.detail` | {{request}} · {{status}} · 返回结构对不上任何一种已知接口 | {{request}} · {{status}} · the response shape matches no interface we know |
@@ -1600,7 +1644,7 @@ that refuses ⑤, fails the same item — which is the point of writing it as an
 | `cancel` | 取消 | Cancel |
 
 The three protocol strings above are the **only** protocol names anywhere in the
-product surface (UI-12). They are identifiers, identical in both locales, and they
+product surface. They are identifiers, identical in both locales, and they
 are exactly the three transports the protocol enum admits `[contract]` AC-28 — the
 label 「OpenAI Chat Completions」 maps to `openai_chat`.
 
@@ -1662,7 +1706,7 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | `myA8k` header | 型号 ID (250) · 录入 (84) · 推理强度 (470, with info) · fill spacer | static | no | — |
 | `OM5PH` row | model id, entry-kind pill, tier chips, overflow icon | one model | tiers, overflow | Edit tiers / row menu |
 | `p2JwTz` tiers | chips, or 未设置档位 + `+ 添加档位` | `reasoning_efforts[]` `[contract]` FC-03 | yes | Enter edit mode |
-| `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit → `PATCH /api/models/custom-models` `[contract]` AC-26 | yes | Add / remove a tier |
+| `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit → one saved mutation on the source's whole inventory `[contract-gap]` G-8 | yes | Add / remove a tier |
 | `nN4TZ` manual row | editable id input, 手动添加 pill, tier affordance, 取消 / 添加 | local draft | yes | Commit or discard |
 | `Q83BF` add row | 添加模型 + when to use it | — | yes | Append a manual draft row |
 | `tF3Bh` footnote | scope of this page; that tiers are yours to type; that the interface type is identified at add time, fixed, and neither shown nor editable here | static | no | — |
@@ -1676,17 +1720,56 @@ disagree the first time a chain changed. What the page owns is the *inventory* �
 which models this source has, and what tiers each accepts.
 
 That is also what makes **G-3** a gap in the record rather than a missing control on
-this frame `[contract-gap]`. A row carries an overflow icon, so there is already a
-place to put 「移除这个型号」; what there is no place to put is the *consequence*. A
+this frame `[contract-gap]`. **The frame already answers it, and the answer is that a
+discovered row carries no retire control at all.** Removal is scoped to manual models,
+and the frame says so on the surface that does the removing: `Qp6FI`'s subtitle reads
+「aihub · 只有手动添加的型号能移除」. A row's overflow icon opens a menu no frame here
+draws, and nothing in this file puts 「移除这个型号」 in it.
+
+The scoping is a decision, and the reason is the consequence rather than the control. A
 discovered row exists because a refetch found it, and the refetch rule two paragraphs
-down is a diff, not a replacement — so a removal that writes nothing durable is undone
-by the next successful 重新拉取, and the user watches a row they deleted come back. The
-missing piece is a retention marker on the discovered-model record: a per-model,
-per-source fact that says 「this one was retired by hand」 and that rediscovery reads
-before re-adding. Both halves are one gap because either half alone is worse than
-neither — a control with no marker lies, and a marker with no control is unreachable.
-G-3 is therefore stated in §0.5 as a single additive request, and no `UI-n` requires
-the control without the marker.
+down is a diff, not a replacement — so a removal that writes nothing durable is undone by
+the next successful 重新拉取, and the user watches a row they deleted come back. Closing
+that means a retention marker on the discovered-model record, and §0.5 records why three
+further rules would have to come with it. No rule in this file requires the control.
+
+**Dropping the control is only not a net loss with one property attached, so the property
+is stated here** `[derived]`. Without a per-model retirement, a source that broadcasts a
+large catalogue leaves every one of its models on this page. What has to hold is about
+reach, not about controls:
+
+> However many models a source broadcasts, the number of actions a user needs to reach a
+> particular model does not grow linearly with the size of the set.
+
+How that is satisfied is an implementation choice — search, grouping, recent use, or
+something else. This file deliberately names no control for it: naming one would turn a
+property into a fixture and freeze the weakest implementation that happens to pass.
+
+**The removal confirmation is one surface, and every guarded change uses it** `[frame]`.
+`Qp6FI` is 520 wide, `$--surface`, `radius 14`, `$--border-strong`, with the standard
+outer shadow. Head `kCVJB` `padding [16,20]` `gap 4` with a bottom border: title `R4NNdG`
+Inter 15 / 700 naming the exact operation (「从 aihub 移除 ernie-5.0」), subtitle `I8g2k`
+JetBrains Mono 10.5 `$--muted` naming the scope, close `eT9Sn` 15px `#FFFFFF59`. Body
+`UnP1t` `padding 20` `gap 14` carries the three parts of the guard envelope in order: a
+label `flV8I` (Inter 10.5 / 700 `#FFFFFF73`, letter-spacing 1.1) with a count pill
+`ZnpYd` (`#FFFFFF0A`, `radius 999`, `$--border`, `padding [3,8]`, Inter 10 / 600
+`$--muted`); the affected hops `smTsO` (`$--background`, `radius 10`, `$--border`,
+`gap 6`, `padding 8`), one 52-high row each (`#FFFFFF03`, `radius 8`, `$--border`,
+`padding [0,10]`, `gap 10`) showing the hop's model line at Inter 12 / 600 `#F5F1E8B3`,
+its consequence at JetBrains Mono 10.5 `#9BA3B8B3`, and its position as a pill; and a
+hint `uAs5V` (13px `info` `#FFFFFF59` + Inter 11.5 `#FFFFFF73`, width 420, line-height
+1.5) stating whether anything is left without supply. Foot `P9Sxv8` `#FFFFFF05` with a
+top border, `padding [14,20]` `gap 8`, right-aligned: 取消 `FijDU` in the neutral
+treatment, and the forcing action `QRZGe` in the destructive one (`#FF6B6B1A`, stroke
+`#FF6B6B59`, label `$--destructive`).
+
+That structure is not specific to removing a model, and the surface is not either. It is
+the `409 {error, would_remove_hops, would_interrupt}` envelope rendered once: the count
+pill and the row list are `would_remove_hops`, the hint line is `would_interrupt`, and
+the destructive button is the `force` re-send. Every guarded change renders through it —
+including §1.3's whole-order save — with the title naming the operation and the rows
+naming the hops. A second surface for the same envelope would be a second reading of what
+`would_interrupt` means, and the two would disagree the first time the envelope grew.
 
 **Metrics** `[frame]`: source bar `fill_container` `padding [14,18]` `gap 14`
 `radius 12` `$--surface` / `$--border`, identity tile 36×36 `radius 9`, status row =
@@ -1745,7 +1828,8 @@ drawn either way, since 重新拉取 is enabled in every state.
 
 **No repair control is drawn here, and that is deliberate.** A third source-scoped
 action would be exactly the invention the 重新拉取 rule below forbids. Repair has one
-owner — the upstream card, where UI-19 requires it — and `iGcAi` returns there. A stated
+owner — the upstream card, where a `needs_action` source must stay visible and
+repairable — and `iGcAi` returns there. A stated
 cause plus one tap beats a second repair control that can disagree with the first.
 
 **The 录入 pill is a second witness for D-19's neutral pair** `[frame]`. 自动拉取
@@ -1753,9 +1837,9 @@ renders `#FFFFFF0A` / `$--border` / `$--muted`; 手动添加 renders `#FFFFFF14`
 `$--border` / `$--foreground`. Same shell, one step of contrast, and the brighter one
 is the one the user put there — identical to 02's 3 跳 versus 自定义链. Neither pill
 takes an accent hue, because 录入 records *where a row came from*, not whether
-anything is wrong with it. UI-37 checks the two pairs together, which is the point of
-checking it as a rule rather than per frame: one shared meaning, two independent
-renderings, and a mismatch in either one is a defect in both.
+anything is wrong with it. D-19's pair is one rule with two renderings, stated once
+rather than per frame: one shared meaning, two independent instances, and a mismatch in
+either one is a defect in both.
 
 **Deviation, not yet resolved** `[frame]`. The model-id text in `wzfF1` renders at
 `$--foreground` on four rows and `#FFFFFF59` on nine, interleaved. It matches no row
@@ -1796,9 +1880,9 @@ Five rules:
   Source recovers or the user changes it, and §4.4's `model_supply` projects
   `chain_length: 0` into 「无来源可供」 on the menu. **No new field, no new mechanism, and
   no stale row on this frame.** The marker itself renders on the model menu, which no
-  frame in this document draws, so **no `UI-n` checks it** — writing one would put a
-  §3 item on a surface §1 does not specify, which is the defect §3's own preamble names.
-  It is checked in the AC ledger instead. This frame's acceptance is unchanged.
+  frame in this document draws, so **this file states nothing about how it renders** —
+  doing so would specify a surface no frame here draws. It is covered by the AC ledger
+  instead, and nothing about this frame changes.
 
   *What that costs, said here too because this is the page where it is felt.* The source
   a model came from is exactly what this table used to tell you, and after the refetch it
@@ -1898,7 +1982,7 @@ edge case; tier strings are free text and are neither validated nor
 case-normalized (D-5); the count `sourceDetail.summary` interpolates must be plural-safe
 in English at 0 and 1, and it is `{{count}}` — the variable name is not a preference here
 but the thing i18next selects the plural form from, so this rule reads it from §1.6's copy
-table rather than naming its own (UI-14).
+table rather than naming its own.
 
 ---
 
@@ -1961,7 +2045,7 @@ candidate left the group shows 「没有可用来源」 and the wire layer draws
 path** — violet means *rerouted*, and painting it where nothing was rerouted would
 report a recovery that did not happen. The gold demotion still applies, because the
 head source really is paused; what is absent is the thing that replaced it. The header
-pill counts backends in takeover, so at zero it is absent, not `0 处接管中` (UI-14).
+pill counts backends in takeover, so at zero it is absent, not `0 处接管中`.
 `[contract]` AC-30 fixes the counting rule across grains, and an exhausted chain
 contributes zero to it.
 
@@ -2121,7 +2205,7 @@ does not have.
 **Copy states outcomes, not architecture** `[frame]`. Each of the three benefits names a
 thing that happens to the user (the session survives; one key covers three backends; you
 choose per model) rather than a mechanism that makes it happen (failover, a local proxy,
-a route table). UI-15 is the check; this frame is where it was hardest to hold, because
+a route table). This frame is where that rule was hardest to hold, because
 the honest description of the gateway *is* a mechanism, and the user has no reason to
 care about it yet.
 
@@ -2129,7 +2213,7 @@ care about it yet.
 
 - **A backend the user does not have installed** is omitted from the list rather than
   shown disabled; the pill count follows the list. `{{count}}` is derived from the rows
-  rendered, never hard-coded to 3 (UI-32).
+  rendered, never hard-coded to 3.
 - **One backend already on the gateway** ends this frame's display condition; the page
   is 01.
 - **Long account names** truncate in the detail line with the full value in `title`.
@@ -2144,7 +2228,8 @@ commits.
 
 **It is a state of 09, not a second layout** `[frame]` — the same relationship 08 has to
 01. Everything behind the scrim is byte-identical to 09; the delta is `scrim MHuuA`
-(1440×1100, `#05050BE0`) plus `dialog_UkQqY`. UI-21's method applies here too (UI-36).
+(1440×1100, `#05050BE0`) plus `dialog_UkQqY`. The byte-identity is established the same
+way 08's is.
 
 **Geometry** `[frame]`
 
@@ -2168,6 +2253,7 @@ commits.
 | 可以撤回 ×3 | That it is reversible, and precisely where the exit is | no | — |
 | 取消 | Leave unchanged | yes | Dismiss; nothing is written |
 | 切换到网关 | Commit | yes | Switch **this backend only**; the page becomes 01 |
+| Failure strip `[derived]` | `fail.title` over `fail.detail`, in the Failed state only | no | — |
 
 **The dialog names the exit by location, not by promise** `[frame]`. The second
 可以撤回 bullet reads 「回退入口:这一页的 Claude Code 卡片 → 切换到直连」. "You can
@@ -2198,6 +2284,8 @@ a way out.
 | `cancel` | 取消 | Cancel |
 | `confirm` | 切换到网关 | Switch to gateway |
 | `confirm.install` `[derived]` D-26 | 安装并切换 | Install and switch |
+| `fail.title` `[derived]` | 没能切换到网关 | The switch to the gateway did not go through |
+| `fail.detail` `[derived]` | {{request}} · {{status}} · {{reason}} | {{request}} · {{status}} · {{reason}} |
 
 **The first two bullets are selected by backend, and only OpenCode differs** `[derived]`.
 Every backend row on 09 opens this same confirm, so its copy has to be true for all three.
@@ -2220,8 +2308,8 @@ behave the same way. Nothing in this document was wrong about OpenCode — §1.8
 its config model plainly, one screen earlier — the confirm simply never asked whether its
 own sentence survived that row. The general form: **a string with a `{{backend}}` slot is
 a claim quantified over every value that slot can take**, and it must be checked against
-the least convenient one, not the one it was drafted from. UI-32 already counts the rows;
-it does not read what they say.
+the least convenient one, not the one it was drafted from. A rule that counts the rows
+does not read what they say.
 
 **Every bullet is a consequence the user can check afterwards** `[frame]`. 型号菜单不变
 and 正在进行的对话不受影响 are there because they are the two things a cautious user
@@ -2237,6 +2325,20 @@ card, and repeating it in the confirm would turn a decision surface into a secon
 | Committing | Confirm pressed | Success → dialog closes, page becomes 01 with this backend in 网关 mode; failure → Failed |
 | Failed | The mode change did not persist | The dialog stays open, states the failure, keeps 取消 enabled and 切换到网关 retryable |
 | Dependency missing `[derived]` D-26 | Runtime `health` is `not_installed` (§1.0) | The confirm gains one line naming the component and roughly how long installing it takes, and the primary becomes 安装并切换; pressing it installs, then starts, then switches — one press, three steps, reported as one outcome. 取消 is unchanged |
+
+**The Failed state has a rendering, and it is not a new one** `[derived]`. The failure
+renders as one strip at the top of `dbody` `PtmwS`, above 会发生什么 — the same place the
+consequences are read from, because a failure is the consequence that actually happened.
+Its ink is §1.5's error treatment, cited rather than re-specified: fill `#FF6B6B14`,
+stroke `#FF6B6B40`, a `circle-x` in `#FF8A8A`, title Inter 12 / 600 in `#FF8A8A`, and the
+machine detail under it in JetBrains Mono 10.5 `#9BA3B8B3`. Nothing else in the dialog
+changes — the bullets stay, 取消 stays, and 切换到网关 stays in its full mint treatment.
+That last point is the one place this differs from §1.5's dimmed-重试 rule, and the
+difference is real rather than an exception: there, a retry with no new hint re-runs an
+identical probe and is guaranteed to reproduce the screen; here the input was never the
+thing that failed, so a second press is not a guaranteed repeat. Stating it this way
+keeps one rule — *a control is dimmed when pressing it cannot change the outcome* —
+rather than two rules that happen to disagree.
 
 **The dependency case neither refuses nor installs behind the user's back** `[derived]`
 D-26. This was G-6, and the ruling rejected both of the obvious answers. Refusing is
@@ -2337,7 +2439,7 @@ somebody's own decision makes it unfindable. The ruling deleted the badge instea
 (§1.6, E-2), and the reasoning it replaced that with is better: the hint was never a
 decision the user can revisit, so making it findable buys nothing and teaches everyone
 else that protocols are their problem. A rule with no exceptions is also the only kind
-UI-15 can check as a set equality.
+that can be checked as a set equality.
 
 **D-9 — Chains are derived, not hand-wired, and the order they derive from belongs to
 one backend.** One order per gateway-mode backend, plus a per-model override. E-1 is
@@ -2364,13 +2466,15 @@ directly. A label that overstates a scope teaches a wrong model of the system, a
 one taught the exact model E-1 was resolved against. The section still exists to answer
 "why isn't this source in the list" *before* it is asked. `[spec §4.1]`
 
-**D-10a — 自定义 is an ownership transfer, and it always shows the way back.** Choosing
-自定义 stops the recommendation from maintaining the order; the drawer says so and
-offers 恢复推荐顺序.
-*Why:* the cost of going custom is invisible and deferred — new sources silently stop
-being added — so it has to be stated at the moment it is incurred, not discovered a
+**D-10a — An ownership transfer shows the way back on the surface that takes it.**
+Frame 02's per-model chain is the one place a user takes ownership of a derivation:
+choosing 自定义 stops the backend's source order from maintaining that model's chain, and
+the dialog carries 恢复跟随来源顺序 as a first-class exit, set apart from 取消 / 保存.
+*Why:* the cost of taking ownership is invisible and deferred — the chain stops tracking
+what changes elsewhere — so it has to be stated where it is incurred, not discovered a
 month later. And an ownership transfer with no return path is a one-way door built by
-accident.
+accident. §1.3's order drawer takes no such transfer, so it needs no such exit; what it
+lost when S-1 deleted its 自定义 mode is recorded there as a real loss, not answered here.
 
 **D-11 — A successful add has no success screen; it lands on 06.**
 *Why:* the question after adding is always "what did I just get". A confirmation
@@ -2476,7 +2580,7 @@ alpha, and only where the wire's own alpha is below the legibility floor.** The
 *Why:* a legend that cannot be seen fails at the one job it has. This is a real
 exception to "every colour resolves to a declared token", so it is written down and
 bounded here rather than left for a reviewer to discover as an unexplained literal —
-UI-4 admits exactly this one deviation and no other.
+the token rule admits exactly this one deviation and no other.
 
 **D-24 — 原生 and 直连 are two different properties of two different things, and neither
 may appear in the other's sentence.** 直连 is a property of a **backend**: it means
@@ -2560,876 +2664,7 @@ a frame's shell is not the shipped shell.
 
 ---
 
-## 3. UI acceptance checklist
-
-**How to read this list.** Each item is a **property that must hold**, not a
-prohibition. A blacklist ("X must not appear") is never complete but always looks
-complete, so it certifies nothing; a property either holds or names its own
-counterexample. Each item is checkable by someone who has never seen this project,
-in minutes, with the stated action and the stated criterion.
-
-**Fidelity items are checked geometrically, never by eye.** Method, once, for all
-of them:
-
-1. In the design file, read the node's resolved box and style —
-   `Get("<nodeId>", (n, ctx) => …)` via the `pencil` MCP `execute` tool. `ctx.bounds`
-   is **parent-relative**; accumulate a stack across `ctx.depth` for absolute
-   coordinates.
-2. In the running UI, read the same element's `getBoundingClientRect()` and
-   `getComputedStyle()`.
-3. Compare box (±1px), padding, gap, radius, border width, colour, font size and
-   font weight.
-
-**Do not compare screenshots for fidelity.** A missing font substitutes metrics
-and shows up as drift in size, weight and spacing all at once, so a screenshot
-diff will send you hunting a token bug that does not exist. Screenshots are for
-overall impression only. Two font families are load-bearing here: Inter for prose,
-JetBrains Mono for identifiers, URLs and keys.
-
-**Boundary.** This list covers only what is visible: layout fidelity, copy, state
-reachability, interaction feedback. Behaviour invariants — persistence, event
-fan-out, resolver precedence, schema constraints — belong to
-`model-hub-implementation.md` §8 (AC-1…AC-31) and are neither duplicated nor
-extended here.
-
-**No item depends on a `[contract-gap]`.** Where a frame draws an affordance whose
-persistence does not exist yet (§0.5: G-3, the one gap left), the item below says so and
-checks only the part that is real — usually that the affordance is absent rather than
-present-and-broken. An acceptance list that requires something unbuildable does not
-raise the bar; it trains people to sign off on items they could not actually verify.
-
-**No item depends on an open conflict either — and there are none left.** All five
-E-n in §0.6 are ruled, and the list came through the rulings without a retraction,
-which is the property it was written for: E-1 and E-3 moved the frames, E-2 deleted a
-surface (06's protocol badge), E-4 rewrote three strings, and E-5 added a state that
-was then drawn. Only §1's prose changed. That was not luck — it is what stating items
-over *what is drawn* and quantifying over *sets* rather than wordings buys. UI-12 is the
-one that came closest: it names the set of surfaces that render a protocol name, and
-E-2's ruling changed the set's membership without changing the item.
-
-**Every item names the §1 section that owns each fact it uses, and restates no metric.**
-This is the newest rule here and it was bought with four rounds of review. An item that
-re-prints a padding, a column width or a string becomes a second specification of the
-frame, and two specifications of one frame drift — silently, because each one looks
-self-consistent. Every drift found so far had this exact shape: UI-6 carried its own
-overlay metrics, UI-7 its own column widths, UI-17 its own message strings, UI-22 its own
-control inventory, UI-27 its own failure list. When the frames were rebuilt, §1 was
-re-measured and §3 was not, so the checklist began certifying an older design — and a
-reviewer running it would have failed a *correct* build. So: an item may name a **domain**
-by pointing at a §1 table, and may state a **property** that spans sections, and must read
-every number and every string from §1 at check time. Where an item does carry a value, it
-is because that value **is** the item's content and no §1 section owns it — UI-1's
-384+72+632+16+16 = 1120, UI-28's six fixtures, UI-37's two colour triples — and those are
-marked as such below. The test for a new item is one question: *if a frame changed, would
-this item become wrong on its own?* If yes, it is restating instead of checking.
-
-**Every item names its domain before it claims anything about it.** This is the
-convention the whole list is written to, and it is the one that cost the most to
-learn. An acceptance item is a quantified statement — *every* X has property P, or
-the set of X *equals* S. Such a statement is only checkable if a reviewer can
-mechanically produce the X's. Write the claim without bounding the domain and you
-get a predicate that is true of the members you were picturing and undefined on the
-rest; it reads as rigorous, and it certifies nothing. Worse, it is unfalsifiable in
-the direction that matters: the reviewer who cannot enumerate the domain concludes
-the item passed.
-
-So each item below is stated as three parts:
-
-- **Domain** — a mechanical filter that yields the exact members. "Every
-  interactive element" is not a domain; "every element that some state table in §1
-  assigns a disabled state" is.
-- **Claim** — the property or set equality that must hold over that domain.
-- **Check** — how a reviewer obtains both sides and compares them.
-
-**A domain is a selection rule over §1, never a list of the members it selects.**
-This is the newest rule and it closes the last hole the previous two left open. Round 4
-removed restated *values and strings* from §3 and round 5 found six items still wrong —
-every one of them because the item had written out, by hand, the members of a set §1
-owns: UI-6 named five overlays, UI-12 named one surface, UI-16 asserted a list was
-empty, UI-17 spelled six locale keys, UI-22 counted four controls, UI-39 claimed two
-states were twins. Each list was true when written. Each went stale the moment §1 gained
-or lost a member, and — this is the part that matters — **it went stale silently**,
-because a hand-written domain is self-consistent no matter how wrong it is. The
-value-restating rule and this one are the same defect at two grains: the first copies
-what §1 *says about a member*, the second copies *which members there are*. So the test
-above gets a third axis: *if §1 added or removed a member of this set, would this item
-become wrong on its own?* If yes, its domain is a copy and must be rewritten as the
-filter that produces the members. Write 「every overlay for which §1 declares a scrim」,
-not 「02, 04, 05, 10」; then adding a scrim to a sixth overlay extends the check instead
-of defeating it. Where a member is named below, it is named as an *illustration of what
-the filter currently yields* — the phrase 「today that is …」 marks it — and a reviewer
-who finds today's yield different follows §1, not the illustration.
-
-**Every check generates its own input in the same run it makes its claim.** A gate that
-consumes a snapshot produced by an earlier run is comparing the past with the past, and
-it does not fail loudly — **it reports green**. That happened here: a copy-audit was
-reported clean on head `1b51e234` while reading a string dump taken before the frames
-changed, so the run certified a comparison it had not made. So: dumping the artefact is
-the check's *first step*, not its precondition. Where a tool genuinely cannot regenerate
-its input, the snapshot must carry a fingerprint of the artefact it came from and the
-check must **fail** on a mismatch — 「no snapshot, so skipped」 is not an admissible
-outcome, and neither is 「snapshot present, so trusted」. This governs every mechanical
-procedure in this section, not only the copy audit: the node-id sweep, the `UI-n`
-numbering check and the locale-key diffs are all subject to it. The general form is the
-same one UI-14 states for its own empty output: **a check whose null result is
-indistinguishable from success has removed the reviewer's ability to notice**, which is
-worse than having no check at all.
-
-Three domain-exclusions are global, so no individual item restates them:
-
-1. **Rows a state table marks 「不适用」 / "Not applicable" are in no domain.** They
-   document that a state was considered and ruled out; requiring them to render
-   inverts their meaning.
-2. **A control is in a state's domain only if some state table assigns it that
-   state.** Requiring a disabled state for a control nothing ever disables invents an
-   unreachable state, and for the sole exit control it would contradict D-15.
-3. **A `[contract-gap]` member is in no domain until its gap closes** (§0.5). Where a
-   set equality would otherwise name one, the member is written as conditional and the
-   condition is the gap id.
-
-The set equalities (UI-9, UI-10, UI-12, UI-14, UI-27, UI-31, UI-33, UI-34) get the sharpest version
-of this: the failure mode is not "the set is wrong", it is an equality whose
-right-hand side was never enumerated. Where the right-hand side depends on the
-fixture, the item **derives** it from the fixture rather than hard-coding a count —
-a hard-coded count silently becomes a second, competing specification of the fixture.
-
-### Layout fidelity
-
-**UI-1 — The three-column skeleton has exactly the drawn geometry.**
-*Check:* measure `cols` and its three children on the Models page.
-*Criterion:* track 1120; upstream 384, rail 72, gateway 632; two gaps of 16;
-384+72+632+16+16 = 1120 exactly.
-
-**UI-2 — Page chrome matches the shell metrics.**
-*Check:* measure `Main`, `header`, `tabs`, and the active tab.
-*Criterion:* `Main` padding 36/40, gap 22; title 26/700 Inter; tabs 39 tall with a
-1px `$--border` bottom edge; the active tab has a 2px `$--mint` bottom edge and no
-other tab does.
-
-**UI-3 — Every repeated card and row uses the drawn metrics.**
-*Check:* measure one instance of each: upstream card, backend group, model row,
-collapse row, dialog foot.
-*Criterion:* 80 / radius 10; 616 / radius 12; 36 / radius 8; 24 with transparent
-fill **and** transparent border; foot 61 with a 1px top border and `#FFFFFF05`
-fill.
-
-**UI-4 — Every colour on these surfaces resolves to a declared token, or to an
-alpha composite over one, and the composite is named in §1.**
-*Domain:* every computed `color`, `background-color`, `border-color` and SVG `stroke`
-on the nine surfaces.
-*Claim:* each value appears in §1.0's ink table or in that frame's metrics table.
-*Check:* enumerate them and look each one up.
-*Criterion:* every value has a row. An unlisted literal hex is a finding, whatever it
-looks like. **Exactly one deviation is admitted:** the legend swatch for
-已启用 · 当前未被使用 renders `#FFFFFF33` where the wire it stands for is `#FFFFFF26`,
-per D-23. Any other mismatch between a swatch and its referent fails, and so does a
-second exception added without amending D-23.
-
-**UI-5 — Font role assignment is total.**
-*Check:* for every text node, read `font-family`.
-*Criterion:* identifiers, URLs, masked keys and request evidence resolve to
-JetBrains Mono; all prose resolves to Inter; nothing falls back to a system font.
-
-**UI-6 — Every overlay container matches its own geometry table, and the parts that
-are shared are shared exactly.**
-*Domain:* every overlay container §1 gives a geometry table for — today that is 02's
-dialog, 03's drawer, 04's dialog, 05's dialog and 10's dialog. A container with no §1
-table is not in this item's domain (it is a §1 gap instead), and a table added to §1
-puts its container in-domain without amending this item.
-*Claim:* two properties hold across the whole domain — body `padding 20`, and a foot at
-`padding [14,20]` `gap 8` with a 1px top border over `#FFFFFF05`. **Head padding and body
-gap are not among them**, and neither is any width. A third property is **conditional on
-§1, not universal**: an overlay renders a scrim of `#05050BE0` at 1440×1100 *iff* its own
-§1 section declares one — today §1.0 declares it for 04, 05 and 10, and §1.2 specifies
-none for 02's side-by-side dialog states, so a frame-02 build with no scrim passes and one
-that invents a scrim fails. Every other metric is per container and is read at check time
-from that container's own §1 table: §1.2 for 02, §1.3 for 03, §1.4 for 04, §1.5 for 05,
-§1.9 for 10.
-*Check:* enumerate the domain from §1, then measure each member. Compare the two shared
-properties against this item; read each member's scrim declaration from its own §1
-section; compare everything else against the §1 tables, opened while checking.
-*Criterion:* the two shared properties hold on every member; each member's scrim matches
-what its §1 section declares, in both directions; and each container matches its own §1
-table exactly. 03 is the one full-height container, with a left border only.
-*The scrim was the third shared property until round 5, and the way it failed is the
-reason the conditional form is now the default.* Writing it as universal did not make five
-overlays consistent — it made a **correct** frame-02 build fail, because §1.2 draws two
-dialogs side by side over an unmasked page and §1.0 lists only three overlays behind the
-scrim. The item had generalised from a majority again, one grain up from the head-padding
-mistake below: not a copied *value* this time but a copied *extent*. A property that only
-some members carry is not shared; it is per-member, and the item's job is to send the
-reviewer to the section that decides it.
-*Why the shared set is this small, and why the rest is not reprinted here.* An earlier
-version claimed head `padding [16,20]` and body `gap 14` for all five. Measured, 03's
-head is `[18,20]` / `gap 6` and its body gap is 18, and 10's body gap is 16 — so a drawer
-built to §1.3 failed UI-6 and a drawer built to UI-6 failed §1.3, the item and the frame
-each certifying the other wrong. The first repair was to copy the true numbers into a
-table here, and that repair failed the *next* round for the same reason the original did:
-the copy went stale the moment §1 was re-measured. Three of five is not a majority worth
-generalising from, and a private copy of the other two is not a fix — it is the defect
-with better initial values. What is genuinely shared is three properties; everything else
-has an owner, and this item's job is to send the reviewer to it.
-
-**UI-7 — Frame 06's body rows align to its header on the three fixed columns, and
-differ from it by exactly one trailing control.**
-*Domain:* header `myA8k` and every `row_*` in the same table.
-*Claim:* the three fixed columns hold the widths §1.6 states, identically in header and
-body, at the gap and horizontal padding §1.6 states. The fourth cell is a
-**`fill_container` spacer, not a fixed width**; body rows carry a fifth 16px `more`
-control after it, so the body spacer resolves exactly `32` narrower than the header
-spacer — the control plus one gap. Vertical padding differs between the two by one pixel,
-per §1.6's two rows.
-*Check:* measure `myA8k` and one `row_*`; read §1.6's geometry rows; compare the three
-fixed cells to ±1px and compute the spacer difference.
-*Criterion:* fixed columns match §1.6 and each other; the spacer difference is 32; the
-`more` control is present on body rows and absent from the header.
-*The `32` is this item's own content, and the column widths are not.* The difference is a
-relationship between two cells that no §1 table states, because §1.6 describes each row
-type on its own; it survives any re-measurement of the columns, which is what makes it
-safe to write here. The widths are §1.6's, and an earlier version that copied them was
-one re-measurement away from failing a correct build.
-*Note.* An earlier version also asserted a fixed `110` fourth column in both, which the
-rebuilt frame contradicts twice over — the cell is flexible, and header and body do not
-resolve to the same width. Replacing `110` with "the remaining fill width" would have
-kept the second error, since a single number cannot describe two cells that are designed
-to differ.
-
-### Semantic colour
-
-**UI-8 — For every cyan-inked element, its subject is a native-direct supply
-relation.**
-*Domain:* every element whose computed colour, border or stroke is `#3FE0E5` or an
-alpha of it, **minus backend identity tiles** — a filled 30×30 rounded tile carrying a
-backend glyph, per §1.0's identity-ink paragraph and D-20. The exclusion is not a
-convenience: an identity tile's hue is a per-backend constant, so under the all-gateway
-fixture of UI-33 Claude Code's tile is still cyan while nothing on the page is
-native-direct. Without the exclusion, UI-8 and UI-33 cannot both pass, and the item
-that would fail is the one describing a page that is behaving correctly.
-*Check:* enumerate the domain, then for each member name the entity it describes.
-*Criterion:* every one is a native-direct source, its card, its wire, or its
-「原生」 tag. One cyan element in the domain describing anything else fails the item.
-*Also check the exclusion is not hiding a defect:* every excluded tile is 30×30 with a
-glyph and sits in a backend group header. A cyan element that merely *looks* like a
-tile — a card tint `#3FE0E50A`, a status chip — is in the domain and must still be a
-native-direct subject.
-
-**UI-9 — Mint, violet, gold, rose and `#FFFFFF26` partition by element role exactly as
-§1.0's ink table says.**
-*Domain:* every element whose computed colour, border, stroke or fill is one of those
-five inks or an alpha of it. Nothing is excluded — unlike UI-8, this item's whole
-content is that the roles cover the domain, so removing a member would beg the
-question.
-*Check:* classify each member by form factor alone, before reading any meaning:
-**relation/status** (a stroke, a 5px dot, a status word, a supply pill, a 20×2 legend
-swatch), **control** (an interactive affordance: tab underline, ordinal badge,
-selection mark, focus ring, row wash, primary button), **identity** (a filled 30×30
-rounded tile carrying a backend glyph), **advisory** (a static bordered note or result
-strip that is not actionable: 04's ToS note, and all three of 05's result strips —
-③ rose, ④ gold, the mint success note). Then read meaning.
-*Criterion:* the four roles **partition** the domain — every inked element is in
-exactly one, and no element is in none. Then, per role: a mint relation means gateway
-supply, a mint control means active/selected/primary, and a mint advisory means
-success; **violet on a relation means taken over and temporarily rerouted**; **gold on
-a relation means supply paused because the source is temporarily unavailable, and gold
-on an advisory element means warning emphasis**; **rose on an advisory element means
-error emphasis, and on the reference fixtures no domain member is a rose relation/status
-element** — the nine frames draw no source in `needs_action` or `error`, so a rose dot or
-status word *on these fixtures* is a defect rather than a state. That last clause is
-scoped to the fixtures on purpose: §1.6 maps two source statuses to rose, and on a fixture
-that carries one of them a rose status word is the correct rendering, not a finding. What
-UI-9 forbids is rose appearing where no rose-mapped state is in the data — which is
-checkable only against the fixture, never against the screen; `#FFFFFF26` means a
-connected-but-unused wire; and an identity tile carries its backend's constant ink and
-asserts nothing (D-20).
-*Why four and not two.* Each of the two additions was forced by an element the frames
-require and the earlier partition had no home for. Identity came from OpenCode's violet
-tile, which a two-role reading turns into a takeover that is not happening. Advisory
-came from 04's ToS note and 05's state-④ strip, both explicitly noninteractive in §1.4
-and §1.5: they are not relations and not controls, so under the earlier wording the
-item was simply undefined on them — and an item that is undefined on the reference
-design passes by default, which is the failure mode this whole section exists to avoid.
-Neither role is a loophole; they are the reason the other two can stay strict.
-
-**UI-10 — The legend keys and the ink classes actually rendered on the page are in
-bijection.**
-*Domain:* the wire layer of whichever frame is under test, on any fixture.
-*Claim:* `{distinct strokes present in the wire layer}` equals `{inks named by legend
-keys}`, as sets, on every fixture.
-*Check:* enumerate the wire layer's distinct `stroke` values; enumerate the legend's
-swatch inks; compare. **Derive both sides from the render — do not compare either side
-against a number written here.** Per D-23 a swatch may differ from its wire in alpha
-only; match on the ink class, not the literal.
-*Criterion:* the two sets are equal on every fixture, including zero relations, where
-both are empty and **no legend row renders at all**. An earlier version fixed the
-nominal side at "3 keys", which is a second specification of the fixture: change the
-fixture and a correct build fails, or worse, the count is kept passing by pinning the
-legend to a static list — the exact defect this item exists to catch. Two consequences
-survive: a takeover shipped without its legend entry fails, and UI-31's zero-relation
-state stays satisfiable.
-
-### Copy
-
-**UI-11 — Every string on these nine surfaces resolves through an i18n key, and
-`zh.json` / `en.json` have identical key sets.**
-*Check:* three steps, and the first two are not interchangeable. **(1)** Render each of
-the nine surfaces with the locale forced to `en` and confirm no Chinese text remains.
-**(2)** Render the same nine with the locale forced to `zh` and confirm every visible
-string is the Chinese value its §1 copy table names — not merely that *some* Chinese is
-present. **(3)** Diff the two files' key sets.
-*Criterion:* zero hardcoded literals in the components; every `zh` render matches §1's
-Chinese column; the key-set difference in both directions is empty (they are at parity
-today at 3534 keys each).
-*Step 2 is the whole check, and rendering `en` alone cannot substitute for it.* The
-earlier version ran `en` only and inferred "no hardcoded literals" from the absence of
-Chinese — a component containing a literal `Close` or `Retry` passes that, and passes the
-key-set diff too, and then renders English to a user who selected Chinese. The absence of
-one language does not establish the presence of a key: `en` output is
-**indistinguishable** between a string that resolved through `en.json` and a string that
-was never externalised at all, which is exactly the null-result-reads-as-success failure
-the section preamble forbids. Rendering `zh` separates them, because a hardcoded English
-literal survives the locale switch and a resolved key does not. Where a build system can
-run one, a source-level scan for display literals in the components is an acceptable
-substitute for step 2 — but not an addition *to* step 1 that leaves step 2 undone.
-
-**UI-12 — A protocol name renders exactly where §1 specifies one, and nowhere else.**
-*Domain:* the rendered DOM of all nine surfaces, both locales.
-*Claim:* `{surfaces containing any protocol string}` equals `{places §1 renders a
-protocol}`, as sets. The right-hand side is **derived from §1 at check time, not read
-from here**: enumerate the §1.5 copy table's `protocol.*` keys, then find every §1
-location that interpolates one — directly, or through a `{{protocol}}` slot. Today that
-yields frame 05's state-④ selector and the `inventory.detail` evidence line that ⑤ and
-its pull twin ⑤′ render; ④′ inherits ④'s selector under §1.5's origin axis.
-*Check:* search all nine surfaces for the protocol strings; derive the right-hand side
-from §1; compare the two sets.
-*Criterion:* exact set equality. Stated as an equality rather than a prohibition, so a
-*new* surface that leaks a protocol name fails it too — and so does a §1-specified
-location that stops rendering one.
-*This item was a one-member list until round 5, and the member it omitted was in §1 the
-whole time.* The old text fixed the set at 「frame 05 state ④ selector」. But §1.5's
-`inventory.detail` opens with `{{protocol}} 已认出`, deliberately — UI-38 requires ⑤'s
-evidence strip to name the proved protocol, because *the interface is known* is the one
-fact that distinguishes ⑤ from ④ and the only thing that licenses 仍要添加. So a probe
-that identified the protocol and then failed to fetch an inventory renders a protocol
-name in ⑤ as well as ④, and the one-member equality was **unsatisfiable by any correct
-build**: passing it required deleting a string UI-38 requires. Neither side was wrong
-about the product; the item had written down a snapshot of §1 instead of a rule for
-reading it, and §1 then grew a state.
-*The set stayed one member through a ruling that could have added one, and the way it
-did is the point.* An earlier version wrote 06's quiet protocol badge as a conditional
-member 「once G-4 closes」, on the reading that the provenance field was merely unbuilt.
-At `ca45aeb6` AC-27 still says the stored shape carries no manual/automatic marker at
-all —
-not silence but a sentence pointing the other way — so the question became **E-2**, and
-E-2 was ruled for AC-27: the badge, its tooltip and its edit entry are deleted from
-frame 06, and §1.6 now renders no protocol anywhere. This item did not change. That is
-the argument for writing a conditional member as an escalation rather than as scheduled
-work: 「once G-4 closes」 reads as a commitment, so nobody would have escalated it, and
-the equality would have quietly documented a surface that turned out never to be
-allowed. The one member is now the whole truth, and a build that reintroduces the badge
-fails here rather than passing on a technicality.
-
-**UI-13 — Every product noun rendered on these surfaces has a row in
-`model-hub.md` §3's vocabulary table, and uses the term that table marks required.**
-*Check:* extract the nouns from the copy tables in §1 and look each up in §3.
-*Criterion:* every one has a row, and where §3 marks a term **required**, the copy
-uses that term and not a synonym. 网关 / Gateway is the required noun for the local
-adaptation and routing module, so 「网关」 as the module heading, 「来源与网关」 as its tab
-and 「网关供给」 as the supply phrasing all pass; a build that substituted 「Models」 or
-「路由」 for them fails. **「模型网关」 is not one of the passing renderings** — it is the
-plan documents' name for the whole effort and D-29 keeps it out of the product, so a
-page titled 模型网关 fails this item rather than satisfying it. Any noun with no row is a
-finding against whichever side is wrong — usually this file, occasionally the table.
-
-**UI-14 — The set of count-bearing keys equals the set of keys shipping i18next
-plural variants, and each is grammatically correct in English at 0, 1 and 2.**
-*Domain:* keys under the `models.hub.*` namespace in `zh.json` and `en.json` — **not
-the whole file**. The rest of the product predates this spec and is not this lane's to
-certify; an unscoped grep makes this item fail on strings nobody here wrote, which is
-how a real check gets marked flaky and then ignored.
-*Claim:* within that namespace, `{keys interpolating {{count}}}` equals `{keys shipping
-an i18next plural family}`, and each renders correctly in English at 0, 1 and 2.
-*Check:* **flatten the JSON to dotted paths first, then filter.** Walk each locale file
-recursively and emit one `path → value` pair per leaf; keep the pairs whose path starts
-with the namespace; strip a trailing `_one` / `_other` to get stems. The left-hand set is
-the stems whose value interpolates the count variable; the right-hand set is the stems
-that have at least one suffixed sibling. Compare the two stem sets, then render each at
-0, 1 and 2.
-*The flattening is not a convenience — a text search here cannot work at all.* The locale
-files store paths as nested objects, so no line in them contains the namespace as a
-literal dotted string, and a raw `grep -o` for it matches nothing. Both sets come back
-empty, the equality holds vacuously, and every plural defect in the namespace passes
-while the item is marked run. That is worse than having no item: a check whose empty
-output is indistinguishable from success removes the reviewer's ability to notice. So
-whatever tool is used, **confirm both sets are non-empty before trusting the comparison**
-— today each should hold seven stems.
-*Criterion:* the two sets are equal — a count-bearing key with no plural family fails,
-and so does a plural family nobody interpolates a count into. In `en`, no `1 models` and
-no `1 source` mismatch; in `zh`, both variants exist and carry identical values.
-`0 takeovers active` never renders because the element is absent at zero, not because
-the string handles it. The right-hand side is **§1.0's list, which is the single place
-it is maintained**: `shell.allDirect`, `upstream.count`, `gateway.modelCount`,
-`gateway.collapse`, `chain.derived.hops`, `sourceDetail.summary`, `takeover.pill` —
-seven keys, each `_one` and `_other` in both files, twenty-eight entries.
-*The variable name is part of the check, not a detail.* i18next selects a plural form
-from the `count` option specifically, so a key that ships `_one` / `_other` while its
-value interpolates some other name renders whichever variant the default happens to be
-and never varies. `sourceDetail.summary` was written `{{host}} · {{total}} 个型号` and
-had exactly that defect: the suffix grep found it, the `{{count}}` grep did not, and the
-two sets differed by one member for a reason that looked like a naming preference and
-was actually a string that could not pluralise. It is `{{count}}` now. Any future
-count-bearing key must interpolate `{{count}}` by that name — a second count in one
-string means a second key, not a second variable, because only one of them could ever
-drive the selection.
-
-**UI-15 — Explanatory copy states consequences, not mechanisms or rationale.**
-*Domain:* strings whose job is to explain or persuade — option descriptions, hints,
-notes, benefit bullets, empty states, error sentences. **Not** labels that name a thing
-the user must identify, choose between, or repair.
-*Claim:* every string in the domain tells the reader what happens to them, and none of
-them argues for a design decision — the arguments live in §2.
-*Check:* read each string in the domain and ask, "does this tell me what happens to me?"
-*Criterion:* no domain string names an internal mechanism as an explanation, and none
-argues. Two strings failed this during the design pass and were rewritten; E-4's ruling
-deleted a third clause from three more.
-*The domain is bounded, and the boundary is the difference between naming a mechanism
-and explaining by mechanism.* Applied to every string in §1, this item contradicts the
-product: frame 05 state ④ must print the interface type, the probe order and the three
-protocol identifiers — UI-12 *requires* that selector to render them — because the user
-is being asked to supply a hint, and a hint they cannot read is not a question. Frame
-02's chain labels are the same case: 跳, 覆盖, 来源顺序 are the product's own concepts,
-the nouns UI-13 checks against the vocabulary table, and a user editing a chain is
-manipulating exactly those things. **Copy that lets a person inspect or repair their
-configuration is allowed to name the parts** — what UI-15 forbids is answering *why
-should I choose this* or *what went wrong* with an internal mechanism, which is the
-failure E-4 corrected: 「不经网关:额度用完不会自动接管」 explained a consequence by
-naming a subsystem the reader has no stake in, and deleting the clause cost the sentence
-nothing.
-
-### State reachability
-
-**UI-16 — Every state in §1's state tables is reachable, and each has a named
-trigger.**
-*Domain:* rows of §1's state tables, **excluding** exactly two kinds — rows whose exit
-column reads 「不适用」 / "Not applicable", and rows marked `[contract-gap]`. Everything
-else is in-domain, **including every state §1 specifies but no frame draws**. Per the
-global exclusions, a 不适用 row records that a state was considered and ruled out — 04's
-Loading row and 05's Empty row exist to say *a form fetches nothing* and *a form has no
-empty state* — so demanding that they render inverts what they document.
-*Not drawn is not an exclusion.* §1.0 marks Empty, Not installed, Not started, Starting,
-Unreachable and Partial 「not drawn」 and then states, for each, the pill copy, the ink
-treatment and what the derived columns show. Those six are **specified states that happen
-to have no reference frame**, and they are in this item's domain exactly like the drawn
-ones: an implementation that ships no install pill, no start pill and no unreachable
-treatment must fail here, and under the earlier phrasing it passed. The distinction that
-matters is not *drawn versus undrawn* but *specified versus not*: a state this file names
-and then declines to render — because the contract asks for it and no ruling exists —
-carries `[contract-gap]` and is excluded by that marker, which is the only exclusion that
-tracks the real reason. Today no state in §1 is in that position; the two former
-candidates closed (05's ⑤ is drawn as `d6bFlX` since E-5, and 10's dependency row is
-specified since G-6 became D-26), so the `[contract-gap]` exclusion currently yields
-nothing and the two 不适用 rows are the whole exemption. Both exemptions are checkable in
-both directions: a 不适用 row that *does* render is a finding, and a `[contract-gap]` row
-whose gap has closed without the marker being removed is a stale exemption.
-*Claim:* every remaining row renders, from the trigger its entry column names.
-*Check:* perform each entry condition directly, or serve the payload that produces it.
-*Criterion:* every in-domain state renders. An unreachable in-domain state is either a
-missing implementation or a spec row that should be deleted; both are findings. A 不适用
-row that *does* render is also a finding, in the other direction.
-
-**UI-17 — Every list has an empty state that keeps its frame, says which emptiness it
-is, and offers the exit.**
-*Domain:* the five lists these frames draw — the upstream source list, a backend group's
-model rows, a source detail page's model table, and frame 03's two drawer sections.
-*Claim:* at zero rows each keeps its head and footer and renders the message §1 names
-for **that** list. Whether it also keeps a live way out depends on whether §1 draws one,
-and the three cases are different:
-
-- **An add control, kept live** — the upstream source list keeps 添加订阅 / 添加 API Key;
-  06's model table keeps its header row and 添加模型.
-- **An in-place exit, kept live** — frame 03's *ordered* section, when it is empty but
-  eligible sources are still held out. §1.3 draws 排进来 on every held-out row, so the
-  exit already exists on screen and the item requires it to work: the empty ordered
-  section renders its message, the held-out rows stay listed, and 排进来 appends. This is
-  the case an earlier version of this item got wrong.
-- **Message plus preserved shell, and nothing invented** — a backend group's model rows,
-  and frame 03 when **no** eligible source exists at all, so there is nothing to 排进来
-  from. A build that invents a button in either place fails this item exactly as one
-  that hides the list does.
-
-*Check:* six fixtures, one per row below — zero sources at all; a backend whose every
-candidate source is filtered out; a backend that resolves to zero model rows; zero
-models on a source detail page; a backend order with an empty ordered section and at
-least one held-out source; and a backend order with zero eligible sources.
-*Criterion:* nothing vanishes, and the six emptinesses are **pairwise distinguishable** —
-each renders the string its own §1 row names, and no two render the same string, because
-they have different causes and different fixes:
-
-| Fixture | Which §1 row names its message |
-| --- | --- |
-| No sources at all | §1.0, the upstream module's empty line |
-| A backend with no source able to supply it | §1.0, the per-group supply-absent line |
-| A backend whose menu resolves to zero models | §1.0's group line for zero models, state in §1.1 |
-| A source detail page with zero models | §1.6's empty inventory line |
-| A backend order that is empty with sources held out | §1.3's empty-ordered-section line |
-| A backend order with zero eligible sources | §1.3's no-eligible-source line |
-
-*Neither the strings nor their keys are reprinted here, and the keys are the newer half
-of that rule.* Copying the six sentences into §3 is how this item drifted first; copying
-the six **handles** is how it drifted again, and the second failure is the worse one
-because a stale key looks authoritative. Round 5 found three of the six pointing at keys
-that do not exist — §1.0 defines the group's supply-absent line as `gateway.supply.none`
-and this table had invented `gateway.group.emptySources`; §1.3's declared namespace is
-`models.hub.order.*`, so its two keys are `order.empty.ordered` and
-`order.empty.noEligible`, and this table had written them under a `sourceOrder.*`
-namespace that no §1 section declares. A reviewer running the check mechanically would
-have grepped for three absent handles, found nothing, and had no way to tell that from a
-missing implementation. So the column is now the §1 *location*, which is stable under
-renaming, and the key and the string are both read from there at check time. Two rows are
-worth the pointer anyway. The second and third are the pair an earlier version collapsed:
-*no source can supply this backend* and *this backend has no models* are different
-failures with different repairs, and one shared string sends the user to add a source
-that is already there. The fifth is the one the round before found missing altogether —
-an empty order with a live 排进来 one row below it was being checked as though it had no
-exit.
-
-**UI-18 — Exactly one flow blocks on a wait, and every other load degrades in
-place.**
-*Check:* throttle the network and enter each surface; then press 添加 in frame 05.
-*Criterion:* 05 state ② is the only modal wait, and it is cancellable; every other
-surface renders its shell with per-region placeholders and never a full-page
-spinner.
-
-**UI-19 — A `needs_action` source renders as itself, in place, everywhere it
-appears.**
-*Domain:* the four surfaces that draw a source at all — the upstream card on 01, the
-frame 03 order row, any chain hop naming it on 02, and frame 06's `sugad` source bar.
-The headline says *everywhere*, so the domain has to be the places a source is drawn,
-not a sample of them; 06's bar was the one the earlier three-surface list missed, and
-it is the surface a user reaches *because* the credential died.
-*Check:* serve one source in `needs_action` and inspect all four.
-*Criterion:* present in all four, position unchanged, cause shown on each — including
-06's bar, which renders 凭据失效 in `#FF6B6B` and not 使用中. The repair control appears
-exactly once, on the upstream card, and is deliberately absent from 06 (§1.6). Absence
-anywhere fails — including "helpfully" dropping it from the order.
-
-**UI-20 — Any value the surface cannot currently prove renders as indeterminate.**
-*Check:* stop the engine and reload 01; separately, fail a refetch on 06.
-*Criterion:* derived columns show `—` and never a stale value; the refetch keeps
-the previous list and puts the failure on the source bar; frame 05 state ④ has no
-segment pre-selected and its primary button is disabled.
-
-**UI-21 — Frame 08 is a state of frame 01, not a second layout.**
-*Check:* diff the computed geometry of 01 and 08 for `cols` and its three children.
-*Criterion:* identical boxes; all differences are inks, chips, text and one extra
-wire — exactly the delta table in §1.7. Any box shift fails.
-
-### Interaction feedback
-
-**UI-22 — Every interactive element has hover and focus-visible; every element some
-state table disables has a disabled style; every mutating control has pending.**
-*Domain:* three different domains, which is the whole repair. Hover and focus-visible:
-every interactive element on the nine surfaces. Disabled: **only** elements §1 actually
-assigns a disabled state — enumerate them from §1's state and element tables, and check
-exactly what that enumeration yields. Today it yields three: 05's 重试 in ④ before a hint
-is picked, 03's 保存顺序 with no eligible sources, and **frame 02's first hop `↑`**, whose
-dimmed treatment §1.2 states. Frame 03 contributes no arrow at all: §1.3's rows carry a
-grip and bind `↑`/`↓` on the row itself, so there is no per-row arrow button to disable —
-the list boundary is expressed by the key doing nothing, not by a dimmed control. Frame 04
-contributes none either: a radio group has no zero-selected state, so 去登录 is enabled
-from the moment the dialog opens. Pending: only controls that mutate.
-*Claim:* each element has the states of the domains it belongs to, and no others are
-required.
-*Check:* tab through each surface, then hover each control; then reach **every** disabled
-state the enumeration produced, from the §1 table that assigns it.
-*Criterion:* focus is always visible without a mouse; every disabled state in the domain
-uses the dimmed-token style (`#5BFFA059` for a dimmed primary; `#FFFFFF33` for a dimmed
-glyph in a retained shell); a mutating control shows pending and cannot be double-fired.
-**No count appears in this item**, and that is deliberate: the previous version repaired
-the domain to three members and left the check and the criterion asking for four, so a
-reviewer following it had to reach a state nobody could name. A count is a second copy of
-the domain's size, and it goes stale on exactly the edit the domain was rewritten to
-survive. **A control nothing ever disables needs no disabled style** —
-the earlier universal phrasing demanded one for every control including 取消, which would
-have contradicted D-15's requirement that the exit is always enabled. An acceptance list
-that contradicts a decision it also contains is worse than a missing item, because it
-forces the implementer to guess which one was meant.
-*One member was wrong in the other direction, and it is the more instructive error.* An
-earlier list named 「01's collapse row at zero hidden models」 as a disabled state. §1.1
-renders the collapse row **iff** the hidden count is positive, so that state does not
-exist: the item asked a reviewer to reach a screen the spec forbids, and the only way to
-pass was to build the row the spec says not to build. Narrowing a domain is not the same
-as enumerating it correctly — the narrowed set was still wrong, once by including an
-unreachable member and once by omitting a reachable one, and the two errors cancelled in
-the count. That is why this item now names the frame and section each member comes from.
-
-**UI-23 — Reordering in frame 03 is fully keyboard-operable, with the bindings §1.3
-names.**
-*Domain:* frame 03's ordered rows and its 排进来 buttons.
-*Claim:* the four bindings in §1.3's keyboard table work as written, and the order a
-keyboard produces is identical to the one a drag produces.
-*Check:* with no mouse: focus a row; `Space` to grab; `↑`/`↓` to move; `Space` to drop;
-then repeat and press `Escape` mid-grab; then `Enter` on 排进来; then save and compare
-the persisted order against the same arrangement made by dragging.
-*Criterion:* `Space` grabs and drops, `↑`/`↓` move a grabbed row and move focus when not
-grabbed, `Escape` cancels a grab and restores the pre-grab order (and closes the drawer
-when nothing is grabbed), `Enter` on 排进来 appends and moves focus to the moved row.
-Ordinals renumber contiguously from 1 after every move; the grabbed state is announced.
-**Naming the keys is the point** — "a documented key moves a row" is not checkable by
-someone who has not read the implementation, which is the standard §3 is written to.
-
-**UI-24 — The collapse row is a real control that discloses and never hides an
-active state.**
-*Check:* activate it by keyboard; then serve a group where 5 of 15 models are
-cooling.
-*Criterion:* it is focusable and announces expanded/collapsed; the group shows all 5
-non-nominal rows **plus 3 nominal baseline rows = 8 visible**, and the label reads
-「还有 7 个型号」 — the number actually hidden, never `total − 3`.
-
-**UI-25 — The tier editor accepts arbitrary text, commits on Enter, and never
-supplies a value.**
-*Check:* on a model with no tiers, open the editor and type an unfamiliar string.
-*Criterion:* the empty state reads 未设置档位 with nothing preselected; Enter
-commits the string as typed, without validation or case normalization; each chip
-removes individually; leaving without typing leaves the list empty.
-
-**UI-26 — Frame 04 is a radio group, and one 去登录 produces exactly one effect.**
-*Check:* on the Claude dialog, read the initial selection, select 登录为网关来源,
-inspect the accessible roles, then press 去登录 and count the sources created.
-*Criterion:* 原生使用 is selected on open; selecting the other option deselects it;
-the controls expose `role="radiogroup"` labelled by the dialog title, never checkbox
-semantics; 去登录 is enabled throughout and there is no reachable zero-selected state;
-exactly one source is created. Two sources from one press fails this item — the
-two-channel path is two passes, which is what `hint.claude` says.
-
-**UI-26a — A model's participation has exactly one owner, and frame 06 is not it.**
-*Domain:* every control on the source-detail page.
-*Claim:* no control on 06 changes whether a model participates in routing; that fact
-is owned solely by the routing chain that resolves it (D-9).
-*Check:* enumerate 06's controls — 重新拉取, 添加模型, the tier editor, the manual
-draft row, the row overflow menu — and for each, name the field it writes.
-*Criterion:* every one writes inventory or tier data. A per-model on/off switch, an
-接入 column, or an overflow item that means "stop using this model" fails, because it
-creates a second owner for participation that the chain does not read. Removing a
-*manually added* model passes: that deletes the row itself, not its participation.
-
-**UI-27 — Every failure state offers a way out that is not a mutation.**
-*Domain:* enumerate it from §1 at check time — **every row of every §1 state table whose
-entry condition is a failure**, with no exception and no list kept here. The domain splits
-in two by a property §1 also states: whether the failing surface is a dialog or a page
-region.
-*Claim:* a failure inside a dialog carries a present, enabled control that leaves without
-writing anything — 取消 or 关闭. A failure rendered inline on a page leaves the
-surrounding page navigable, and needs no dismiss control, because the surface was never
-captured and back-navigation *is* the way out.
-*Check:* read the failure rows out of §1.1 … §1.9, then reach each one. In a dialog, look
-for the control and press it, then confirm nothing was written. Inline, confirm the page's
-own navigation still works and the failure has not blocked it.
-*Criterion:* every row satisfies the half of the claim its surface selects. Two failure
-modes fail this item, in opposite directions. **Requiring a 取消 button on an inline
-failure is a finding, not a pass** — it adds a dismiss control to a page-level error strip,
-which either does nothing or hides the error while it is still true; a failed refetch on 06
-is the counterexample. And **a dialog failure whose only stated exit is the world
-recovering is the other failure** — an engine that is down or an account already bound are
-conditions the dialog cannot fix, and a forward-only exit traps the user behind them.
-*This item used to carry its own list of nine failures, and the list was short.* It named
-04's OAuth failure and neither of 04's other two. Enumerating a domain by hand, in a
-document whose §1 already enumerates it, produces exactly this: an item that passes while
-the surfaces it forgot go unchecked. Reading the domain out of §1 is not a stylistic
-preference — it is the only version of this item that stays correct when a frame gains a
-tenth failure state.
-
-### Extreme data
-
-**UI-28 — The collapse predicate is implemented as written in §1.1, including that
-`N` is additive.**
-*Check:* serve §1.1's six fixtures for one backend, verbatim: (12, 0), (12, 2),
-(12, 5), (12, 12), (3, 0), (2, 1) as `(models, non-nominal)`.
-*Criterion:* visible rows are 3, 5, 8, 12, 3, 2 and the collapse labels are 「还有 9 /
-7 / 4 个型号」, none, none, none. A build that treats `N` as a total row floor produces
-3, 3, 5 on the first three fixtures and fails — that is the specific mistake this
-fixture set exists to catch. Then check the ordering half separately, because a build can
-get every count right and still render them in the wrong sequence: on a fixture with one
-overridden nominal model late in the menu and one cooling model early in it, the rendered
-sequence must equal §1.1's `sorted` restricted to the visible rows. §1.1 owns that
-comparator; this item only asserts that what renders is a *filter* of it, never a
-reordering — the specific failure being a build that floats every non-nominal row to the
-top of the group.
-
-**UI-29 — Every unbounded string in a single-line identifier field has a stated
-truncation rule and keeps its full value reachable.**
-*Domain:* fields §1 renders on one line and whose content is an identifier the user did
-not compose as prose — source names, base URLs, API keys, model ids. **Explicitly not
-in the domain:** anything §1 states as wrapping. §1.6 says a tier list past its column
-grows the row rather than clipping, and §1.9 says the consequence bullets wrap rather
-than truncate. Those are not exceptions to be tolerated; they are the correct behaviour
-for their content, and an item that failed them would be asking for the wrong product.
-*Claim:* in the domain, the layout is stable and the value is recoverable.
-*Check:* serve a 120-character source name, a 200-character base URL, and an
-80-character model id.
-*Criterion:* nothing in the domain overflows its container or reflows the layout; URLs
-and keys truncate from the middle keeping both ends; the full value is in `title` or a
-tooltip. **Truncation is the right answer only when the string is a handle, not a
-sentence.** A user scanning a table needs a model id to occupy one predictable row and
-be copyable in full; a user deciding whether to hand a subscription to the gateway needs
-to read the whole consequence. The earlier phrasing — nothing reflows the layout, with
-no domain — demanded truncation of both, which would have clipped exactly the sentences
-someone is reading in order to decide.
-
-**UI-30 — Every scrollable region has exactly one declared scroll owner, and its
-pinned chrome stays pinned.**
-*Check:* serve 20 sources, 6 backends, 60 models on a source detail page, and 13
-rows in frame 03.
-*Criterion:* the region named in §1 scrolls; module head/footer, table header and
-drawer footer stay fixed; the page itself does not gain a second scrollbar.
-
-**UI-31 — The wire layer is generated from the supply-relation set.**
-*Check:* serve 0 relations, then 1, then a takeover, then two simultaneous
-takeovers.
-*Criterion:* path count equals the relation count; 0 relations draws nothing; each
-gold path is individually traceable rather than stacked on another; no path is a
-fixed asset that survives a relation disappearing.
-
-**UI-32 — Numeric summaries agree with the rows they summarize.**
-*Check:* on 06, compare the source bar against the table; on 08, compare the
-header pill against the group chips; on 01, compare each group's model count
-against its rows plus its collapsed count.
-*Criterion:* `total` equals the row count, the pill count equals the number of groups
-carrying a takeover chip, and visible + collapsed equals the group's stated model
-count. 06's source bar prints one count and one timestamp and nothing else — any
-additional derived figure there (a connected count, a latency) fails, because the page
-holds no field it could come from (D-16), and AC-26 independently bans 「latency or
-『last checked』 field, copy, fixture, or route heuristic」 while allowing exactly the
-「型号列表更新于…」 the frame draws `[contract]`.
-
-*And the pill counts a projection, not a stored flag* `[contract]`. AC-30 rules
-takeover 「true exactly when the resolved chain's current hop is not its first hop and
-the first hop is unavailable for a self-healing quota/cooldown reason」, derived from
-§4.3's chain and adding no field. Two consequences are checkable here: a backend whose
-chain has **no** runnable hop renders `interrupted` with 「no takeover badge, connector
-color, or other takeover visual semantics」, so it must not be counted in the pill; and
-a custom chain whose first configured hop is healthy and deliberately not native must
-not be counted either, however much its shape resembles a fallback. Exhaustion looks
-like takeover in the data and is the opposite fact for the user, which is why AC-30
-spends a fixture on it and why counting rows instead of projecting them fails silently.
-
-**UI-33 — The set of backends showing a 来源顺序 control equals the set of backends in
-网关 mode.**
-*Domain:* every backend group head in the gateway module.
-*Claim:* `{heads with a 来源顺序 button}` equals `{backends whose status line begins
-网关}`, as sets, on every fixture.
-*Check:* on the reference fixture (Claude Code direct, Codex and OpenCode gateway),
-then with all three direct, then with all three on the gateway: enumerate both sides.
-*Criterion:* set equality every time. A direct backend showing the control fails (D-9a:
-it would edit a list nothing reads); a gateway backend missing it fails too. Stated as an
-equality rather than "direct backends must not show it", so a fourth backend added later
-is covered without amending the item.
-
-**UI-34 — Frame 03's two sections partition the backend's eligible sources exactly.**
-*Domain:* for one backend, the sources the server reports as eligible for it.
-*Claim:* `{ordered rows}` ∪ `{held-out rows}` equals that set, and the two are disjoint.
-*Check:* serve a fixture where a source is eligible for two backends and ordered on only
-one of them; open both drawers and enumerate.
-*Criterion:* every eligible source appears exactly once in each drawer; a source held out
-of backend A's order still appears in backend B's ordered section. Neither section may
-silently drop a source — including a `needs_action` one (UI-19). This is the item that
-catches a build reading the held-out section as a global exclusion list, which is what
-the old 不参与排序 label asserted and D-10 corrects.
-
-**UI-35 — A failed pull and a failed add are distinguishable, and 重试 repeats the
-operation that failed.**
-*Domain:* frame 05's states ③ and ③′ — the two ways to reach the red strip.
-*Claim:* they render identically and differ only in what 重试 does: ③′ re-runs 拉取型号,
-③ re-runs 添加.
-*Check:* in ①, enter a bad key and press 拉取型号; when it fails, fix the key and press
-重试, then inspect whether a source was created. Repeat the same sequence via 添加 and
-confirm a source **is** created.
-*Criterion:* the pull-origin retry creates **nothing** — the source list is unchanged —
-and the add-origin retry does create one. This is the item most likely to be failed by a
-build that is otherwise correct, because the two states are pixel-identical: the origin
-has no visual carrier, so it has to live in state and cannot be reconstructed from the
-screen. A build where the optional pull's retry persists a source fails: 拉取型号 is
-labelled 可选 (D-4), and a retry that commits withdraws that promise at the moment the
-user is least expecting it.
-
-**UI-36 — Frame 10 is a state of frame 09, not a second layout.**
-*Check:* diff the computed geometry of 09 and 10 for `body`, `topRow` and both cards.
-*Criterion:* identical boxes; the only differences are the scrim and the dialog. Same
-method and same reasoning as UI-21 — a confirm that re-lays-out the page behind it tells
-the user they have gone somewhere, when they have not.
-
-**UI-37 — Derived and user-set values of the same field are inked as D-19's neutral
-pair, everywhere both appear.**
-*Domain:* every pill whose value can be either system-derived or user-set. Two are
-drawn: 06's 录入 (自动拉取 / 手动添加) and 02's chain state (N 跳 / 自定义链).
-*Claim:* the derived member renders `#FFFFFF0A` / `$--border` / `$--muted` and the
-user-set member `#FFFFFF14` / `$--border` / `$--foreground`, in the same shell.
-*Check:* read the computed fill, stroke and text colour of all four pills.
-*Criterion:* the four values are exactly those two triples. An accent hue on either
-member fails — that would classify a provenance fact as a status (D-21) — and so does
-a pair that differs only in text, because the contrast step is what makes the
-distinction legible without reading. This item exists as a rule rather than as two
-per-frame checks because the two renderings are independent implementations of one
-meaning, and a divergence between them is the defect D-19 was written after.
-
-**UI-38 — 仍要添加 persists the source with the protocol the probe proved, and with an
-empty inventory.**
-*Domain:* frame 05 state ⑤, the only place in the product where a source is written after
-a step of adding it failed.
-*Claim:* the row that lands is a complete source — its protocol is the one the probe
-observed, never a guess and never the user's hint — and its inventory is empty rather than
-absent, so 06 opens on a source with zero models instead of on a source in an
-indeterminate state.
-*Check:* reach ⑤ with a key whose probe succeeds and whose model fetch fails; press
-仍要添加; then read the stored source and open its detail page.
-*Criterion:* the stored protocol equals the one ⑤'s evidence strip named; the model list is
-empty and 06 renders §1.6's empty row, not an error; a later 重新拉取 populates it without
-any further identification step. **A build that stores the user's ④ hint as the protocol
-fails**, and so does one that leaves the protocol unset and re-identifies on first use —
-D-27's property is that a saved source always carries a protocol something observed, and ⑤
-is the state that tests it, because it is the one place where the temptation to fill the
-field from something weaker is real.
-
-**UI-39 — Nothing reached from 拉取型号 ever persists.**
-*Domain:* the three pull-origin states in §1.5 — ③′, ④′, ⑤′ — and every exit each of them
-offers, including the successful ones.
-*Claim:* the entire pull-origin branch is read-only. No exit from it creates a source,
-mutates one, or leaves a credential on the engine; the only thing it can produce is
-information rendered in ①.
-*Check:* for each of the three, take every exit its §1.5 row lists — 重试 to success,
-重试 to the same failure, and 取消 — and after each one enumerate the source list and the
-stored credentials.
-*Criterion:* both are unchanged in all cases, including the case where ④′'s hinted retry
-succeeds and reports an inventory: that inventory renders inline and is discarded when the
-dialog closes. **This item exists because the branch is defined by a property that is
-almost entirely invisible.** Origin is an axis §1.5 states, not something on screen: a pull
-twin renders identically to its add-origin counterpart **except where §1.5 states a
-difference**, and §1.5 states exactly one — ⑤′ drops 仍要添加 and keeps the ordinary
-two-button foot, because that button is the persisting exit and a pull may not persist.
-Today ③′ and ④′ are therefore pixel-identical to ③ and ④, and ⑤′ is not. So for every twin
-but that one button, no amount of looking at the surface can distinguish a correct build
-from one that quietly commits, and the check has to be made against the stored state
-instead. UI-35 checks the same property for ③′ alone; this item is the version that covers
-the axis, which is what the earlier per-row phrasing missed twice.
-*The exception is not a caveat — it is the one place where the invariant is visible.* An
-earlier version wrote the twins as pixel-identical without qualification, which put this
-item in direct contradiction with §1.5: satisfying the sentence required giving ⑤′ a
-三-button foot including 仍要添加, and a persisting exit inside the pull branch is the exact
-thing the item's own claim forbids. The phrasing generalised 「identical」 from the two twins
-where it holds to the one where §1.5 says it must not, and it would have failed a correct
-build while licensing the defect. Stating the identity as *modulo what §1.5 differentiates*
-keeps the item true when a future state gains a second visible difference.
-
-**Total: 40 items (UI-1 … UI-39, with UI-26a).** Nothing is blocked on another lane.
-No item is bounded by a contract gap or by an open conflict: the one gap left (G-3)
-touches no acceptance claim, and every conflict is now ruled — including E-2, which
-UI-12 was written to survive either way and which landed on the side the item already
-stated. Per the three global exclusions, none of them
-asserts an unbuildable requirement. Light-theme and mobile variants are not drawn, so UI-1…UI-7, UI-21 and
-UI-36 are checkable for Dark desktop only until those frames exist.
-
----
-
-## 4. Anchors into the behaviour spec
+## 3. Anchors into the behaviour spec
 
 This file never restates the behaviour spec. Use these anchors:
 
@@ -3457,7 +2692,7 @@ rather than spot-corrected.
 | Modes and onboarding | `model-hub.md` §6 — *Modes & onboarding* |
 | Security boundaries | `model-hub.md` §7 |
 | Explicit non-goals | `model-hub.md` §9 — *(v3)* |
-| Behaviour acceptance criteria | `model-hub-implementation.md` §8 — *AC-1…AC-31, v3 addenda through 2026-08-09; AC-29/30/31 arrived with the `176b41b7` basis and are cited in §0.2, §0.5, §0.6, §0.7 and §3* |
+| Behaviour acceptance criteria | `model-hub-implementation.md` §8 — *AC-1…AC-31, v3 addenda through 2026-08-09; AC-29/30/31 arrived with the `176b41b7` basis and are cited in §0.2, §0.5, §0.6 and §0.7* |
 | Final contract shapes and their landing lane | `model-hub-implementation.md` §8, *Final contract shape handoff* — FC-01…FC-14 |
 | Frozen wire contracts | `docs/plans/model-hub-contracts/` |
 | Probe result shape (incl. saved-source recovery tests) | `model-hub-contracts/probe-result.schema.json` |
@@ -3478,6 +2713,6 @@ otherwise write the same thing twice — or write it in two places that then dis
 - **`model-hub.md` §4.3 remains the sole normative authority for routing
   resolution.** Nothing in this file may be read as modifying it. Where a frame
   displays a resolved chain, the frame is a *view* of §4.3's output.
-- **`model-hub-implementation.md` §8 owns behaviour acceptance; §3 here owns visible
-  acceptance.** A candidate item that would pass or fail regardless of what is on
-  screen belongs in §8, not here.
+- **`model-hub-implementation.md` §8 owns acceptance; this file owns the surface.** A
+  statement that would hold or fail regardless of what is on screen belongs in §8 — and
+  this file keeps no acceptance list of its own to put it in.
