@@ -128,13 +128,33 @@ class ModelHubRemoteService:
     async def set_opencode_menu(self, menu: object) -> dict:
         return await _rpc("set_opencode_menu", {"menu": menu})
 
-    async def add_custom_model(self, payload: dict) -> dict:
-        return await _rpc("add_custom_model", {"model": payload})
+    async def add_custom_model(self, source_id: object, payload: dict) -> dict:
+        return await _rpc(
+            "add_custom_model",
+            {"source_id": source_id, "model": payload},
+        )
 
-    async def delete_custom_model(self, source_id: object, model_id: object) -> dict:
+    async def update_model_reasoning_efforts(
+        self,
+        source_id: object,
+        model_id: object,
+        payload: dict,
+    ) -> dict:
+        return await _rpc(
+            "update_model_reasoning_efforts",
+            {"source_id": source_id, "model_id": model_id, "model": payload},
+        )
+
+    async def delete_custom_model(
+        self,
+        source_id: object,
+        model_id: object,
+        *,
+        force: bool = False,
+    ) -> dict:
         return await _rpc(
             "delete_custom_model",
-            {"source_id": source_id, "model_id": model_id},
+            {"source_id": source_id, "model_id": model_id, "force": force},
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:

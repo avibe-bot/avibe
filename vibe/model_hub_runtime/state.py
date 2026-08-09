@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
-_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "openai_compatible"}
+_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat"}
 
 
 class EngineStateError(RuntimeError):
@@ -107,7 +107,7 @@ class EngineStateStore:
         value: str,
         *,
         vendor: str = "custom",
-        protocol: str = "openai_compatible",
+        protocol: str = "openai_chat",
         base_url: str | None = None,
     ) -> str:
         if not isinstance(value, str) or not value:
@@ -523,5 +523,5 @@ def _validate_source_target(vendor: str, protocol: str, base_url: str | None) ->
         raise EngineStateError("Anthropic-compatible source requires a base URL")
     if protocol == "openai_responses" and base_url is None and vendor not in {"openai", "codex"}:
         raise EngineStateError("Responses API source requires a base URL")
-    if protocol in {"openai_chat", "openai_compatible"} and base_url is None and vendor != "openai":
+    if protocol == "openai_chat" and base_url is None and vendor != "openai":
         raise EngineStateError("OpenAI-compatible source requires a base URL")

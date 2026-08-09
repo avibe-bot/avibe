@@ -174,46 +174,23 @@ async def _post_turn(
             return response.status, await response.read()
 
 
-def test_mh_pri_001_order_mutations_change_the_next_turn(tmp_path: Path) -> None:
-    """MH-PRI-001: custom edits and follow restoration affect the next turn."""
+def test_mh_pri_001_source_order_projection_has_no_policy_state(tmp_path: Path) -> None:
+    """MH-PRI-001: the persisted Source order is projected without policy state."""
 
-    async def exercise() -> None:
-        alpha = _source("src_alpha001")
-        zulu = _source("src_zulu0001")
-        store = MemoryStore(_config(alpha, zulu))
-        adapter = AdapterBoundaryFake([])
-        service = _service(
-            tmp_path,
-            store,
-            adapter,
-            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
-        )
-        gateway = ModelHubTurnGateway(service)
-        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
-        try:
-            initial = await router.resolve("claude", "model-live")
-            assert initial.source_id == alpha.id
+    alpha = _source("src_alpha001")
+    zulu = _source("src_zulu0001")
+    store = MemoryStore(_config(alpha, zulu))
+    store.config.agents["claude"].sources.order = [zulu.id, alpha.id]
+    service = _service(
+        tmp_path,
+        store,
+        AdapterBoundaryFake([]),
+        now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+    )
 
-            custom = await service.set_agent_sources(
-                "claude",
-                {"policy": "custom", "order": [zulu.id, alpha.id]},
-            )
-            assert custom["sources"]["policy"] == "custom"
-            reordered = await router.resolve("claude", "model-live")
-            assert reordered.source_id == zulu.id
-
-            restored = await service.set_agent_sources(
-                "claude",
-                {"policy": "follow"},
-            )
-            assert restored["sources"]["policy"] == "follow"
-            assert restored["sources"]["order"] == [alpha.id, zulu.id]
-            recommended = await router.resolve("claude", "model-live")
-            assert recommended.source_id == alpha.id
-        finally:
-            await gateway.close()
-
-    asyncio.run(exercise())
+    projected = service.get_agent_sources("claude")["sources"]
+    assert projected["order"] == [zulu.id, alpha.id]
+    assert "policy" not in projected
 
 
 def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(

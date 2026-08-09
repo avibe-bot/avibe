@@ -95,7 +95,7 @@ def _binding(credential_ref: str, **overrides: object) -> SourceBinding:
     payload = {
         "source_id": "src_fixture123",
         "vendor": "custom",
-        "protocol": "openai_compatible",
+        "protocol": "openai_chat",
         "base_url": "https://api.example.test/v1",
         "credential_ref": credential_ref,
         "allowed_origins": (),
@@ -745,14 +745,14 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         )
         credential_ref = await adapter.provision_credential(
             "custom",
-            "openai_compatible",
+            "openai_chat",
             "probe-secret",
             base_url,
         )
 
         models = await adapter.discover_models(
             "custom",
-            "openai_compatible",
+            "openai_chat",
             f"{base_url}/",
             credential_ref,
         )
@@ -762,7 +762,7 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         with pytest.raises(EngineStateError, match="does not match"):
             await adapter.discover_models(
                 "custom",
-                "openai_compatible",
+                "openai_chat",
                 "https://different.example/v1",
                 credential_ref,
             )
@@ -1090,7 +1090,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
         credential_ref = await adapter.provision_credential(
             "custom",
-            "openai_compatible",
+            "openai_chat",
             "upstream-secret",
             "https://api.example.test/v1",
         )
@@ -1176,7 +1176,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     ("source_protocol", "origin", "caller_protocol", "request_protocol"),
     [
-        ("openai_compatible", "claude", "openai_chat", "anthropic"),
+        ("openai_chat", "claude", "openai_chat", "anthropic"),
         ("anthropic", "codex", "anthropic", "openai_responses"),
         ("openai_chat", "opencode", "anthropic", "anthropic"),
     ],
@@ -1443,7 +1443,7 @@ def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None
         adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
         credential_ref = await adapter.provision_credential(
             "custom",
-            "openai_compatible",
+            "openai_chat",
             "upstream-secret",
             "https://api.example.test/v1",
         )

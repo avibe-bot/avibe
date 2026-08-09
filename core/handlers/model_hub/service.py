@@ -88,8 +88,8 @@ from .resolver import (
 from .revocations import CredentialRevocationJournal
 
 CONTRACT_VERSION = 3
-AGENT_CHAIN_CONTRACT_VERSION = 4
-PROBE_RESULT_CONTRACT_VERSION = 4
+AGENT_CHAIN_CONTRACT_VERSION = 5
+PROBE_RESULT_CONTRACT_VERSION = 5
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -321,7 +321,7 @@ def _default_protocol(vendor: str) -> str:
         return "anthropic"
     if vendor == "openai":
         return "openai_responses"
-    return "openai_compatible"
+    return "openai_chat"
 
 
 def _binding(source: ModelHubSourceConfig) -> SourceBinding:
@@ -370,7 +370,7 @@ def _runtime_payload(status: EngineStatus) -> dict:
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     return {
-        "contract_version": 4,
+        "contract_version": 5,
         "manifest": EngineRuntimeManager().contract_manifest(),
         "status": {
             "installed_version": status.installed_version,
@@ -808,11 +808,22 @@ class ModelHubService:
             raise ModelHubError("discovery_failed", status=502)
         discovered_at = self.now().isoformat()
         manual_model_ids = {model.id for model in manual_models}
-        source.models = [
-            ModelHubModelConfig(id=model_id, provenance="discovered", discovered_at=discovered_at)
-            for model_id in discovered
-            if model_id not in manual_model_ids
-        ] + manual_models
+        existing_by_id = {model.id: model for model in source.models}
+        discovered_models = []
+        for model_id in discovered:
+            if model_id in manual_model_ids:
+                continue
+            existing = existing_by_id.get(model_id)
+            discovered_models.append(
+                ModelHubModelConfig(
+                    id=model_id,
+                    provenance="discovered",
+                    reasoning_efforts=list(existing.reasoning_efforts) if existing else [],
+                    display_name=existing.display_name if existing else None,
+                    discovered_at=discovered_at,
+                )
+            )
+        source.models = discovered_models + manual_models
         source.last_discovered_at = discovered_at
 
     async def _commit_new_source_locked(
@@ -2109,7 +2120,6 @@ class ModelHubService:
         }
         sources = (
             {
-                "policy": agent.sources.policy,
                 "order": config.effective_source_order(agent.backend),
                 "eligibility": [
                     {
@@ -2161,8 +2171,10 @@ class ModelHubService:
                         ),
                     }
                 )
+        agent_payload = agent.to_payload()
+        agent_payload.pop("mappings", None)
         return {
-            **agent.to_payload(),
+            **agent_payload,
             "selected_by_agent": selected_by_agent,
             "selected_model_id": selected_model_id,
             "selected_model_explicit": selected_model_explicit,
@@ -2254,11 +2266,28 @@ class ModelHubService:
             self.store.save(config)
             return self._agent_payload(config, agent)
 
-    async def add_custom_model(self, payload: dict) -> dict:
+    @staticmethod
+    def _validated_reasoning_efforts(
+        model: ModelHubModelConfig,
+        value: object,
+    ) -> list[str]:
+        try:
+            validated = ModelHubModelConfig.from_payload(
+                {
+                    **model.to_payload(),
+                    "reasoning_efforts": value,
+                }
+            )
+        except ValueError:
+            raise ModelHubError("mapping_target_unavailable") from None
+        return validated.reasoning_efforts
+
+    async def add_custom_model(self, source_id: object, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("source_not_found", status=404)
         model_id = payload.get("model_id")
         display_name = payload.get("display_name")
+        reasoning_efforts = payload.get("reasoning_efforts")
         if (
             not isinstance(model_id, str)
             or not model_id
@@ -2272,39 +2301,79 @@ class ModelHubService:
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
-            source = self._source(config, str(payload.get("source_id") or ""))
+            source = self._source(config, str(source_id or ""))
             existing = next((model for model in source.models if model.id == model_id), None)
             if existing is None:
-                source.models.append(
-                    ModelHubModelConfig(
-                        id=model_id,
-                        display_name=display_name,
-                        provenance="manual",
-                        discovered_at=None,
-                    )
+                model = ModelHubModelConfig(
+                    id=model_id,
+                    display_name=display_name,
+                    provenance="manual",
+                    discovered_at=None,
                 )
-            elif existing.provenance == "manual":
+                model.reasoning_efforts = self._validated_reasoning_efforts(
+                    model,
+                    reasoning_efforts,
+                )
+                source.models.append(model)
+            elif existing.provenance == "discovered":
+                raise ModelHubError("source_model_managed_upstream", status=409)
+            else:
                 existing.display_name = display_name
+                existing.reasoning_efforts = self._validated_reasoning_efforts(
+                    existing,
+                    reasoning_efforts,
+                )
             await self._commit_synced(previous, config)
             return source.to_payload()
 
-    async def delete_custom_model(self, source_id: object, model_id: object) -> dict:
+    async def update_model_reasoning_efforts(
+        self,
+        source_id: object,
+        model_id: object,
+        payload: object,
+    ) -> dict:
+        if not isinstance(model_id, str) or not model_id or not isinstance(payload, dict):
+            raise ModelHubError("mapping_target_unavailable")
+        if set(payload) != {"reasoning_efforts"}:
+            raise ModelHubError("mapping_target_unavailable")
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            source = self._source(config, str(source_id or ""))
+            model = next((item for item in source.models if item.id == model_id), None)
+            if model is None:
+                raise ModelHubError("mapping_target_unavailable", status=404)
+            model.reasoning_efforts = self._validated_reasoning_efforts(
+                model,
+                payload["reasoning_efforts"],
+            )
+            await self._commit_synced(previous, config)
+            return source.to_payload()
+
+    async def delete_custom_model(
+        self,
+        source_id: object,
+        model_id: object,
+        *,
+        force: bool = False,
+    ) -> dict:
         if not isinstance(model_id, str) or not model_id:
             raise ModelHubError("mapping_target_unavailable")
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, str(source_id or ""))
-            manual = next(
-                (model for model in source.models if model.id == model_id and model.provenance == "manual"),
-                None,
-            )
-            if manual is not None and self._only_selected_model_supplier(config, source, model_id):
+            model = next((item for item in source.models if item.id == model_id), None)
+            if model is None:
+                raise ModelHubError("mapping_target_unavailable", status=404)
+            if model.provenance == "discovered":
+                raise ModelHubError("source_model_managed_upstream", status=409)
+            if not force and self._only_selected_model_supplier(config, source, model_id):
                 raise ModelHubError("mode_switch_blocked", status=409)
             source.models = [
-                model
-                for model in source.models
-                if not (model.id == model_id and model.provenance == "manual")
+                item
+                for item in source.models
+                if item.id != model_id
             ]
             self._prune_unavailable_agent_references(config)
             await self._commit_synced(previous, config)

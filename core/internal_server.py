@@ -1737,6 +1737,17 @@ def _build_session_context(
     resolved_user_id = user_id or (
         target_info.session_key.scope_id if is_dm else "workbench"
     )
+    if not channel_id and is_dm and resolved_platform != "avibe":
+        # A DM Session's scope_id is the USER id, which is not a channel. Every
+        # other resolver (``running_agents._resolve_session_key_context``,
+        # ``ScheduledTasks._resolve_target_context``) swaps in the bound
+        # ``dm_chat_id``; this builder must too. Slack's ``chat.postMessage``
+        # silently tolerates a user id (it opens the DM for you) so sending kept
+        # working, but ``reactions.add`` rejects it with ``channel_not_found`` —
+        # the reaction ack then failed and silently downgraded to an ack message.
+        bound_dm_channel_id = _lookup_dm_channel_id(resolved_platform, str(resolved_user_id))
+        if bound_dm_channel_id:
+            resolved_channel_id = bound_dm_channel_id
     platform_specific: dict[str, Any] = {
         "agent_session_id": session_id,
         "platform": resolved_platform,
@@ -1780,6 +1791,39 @@ def _build_session_context(
         files=files,
         is_ordinary_text=is_ordinary_text,
     )
+
+
+def _lookup_dm_channel_id(platform: str, user_id: str) -> Optional[str]:
+    """Return the bound DM channel id for ``user_id`` on ``platform``.
+
+    Reads the persisted user scope settings directly (no controller / settings
+    manager in scope here). Returns ``None`` when the user is unbound or has no
+    recorded ``dm_chat_id`` — callers then keep the scope_id fallback.
+    """
+
+    if not platform or not user_id:
+        return None
+    try:
+        from sqlalchemy import select
+
+        from storage.models import scope_settings
+        from storage.settings_service import make_scope_id
+
+        scope_id = make_scope_id(platform, "user", user_id)
+        engine = get_cached_sqlite_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(scope_settings.c.settings_json).where(scope_settings.c.scope_id == scope_id)
+            ).first()
+        if row is None or not row[0]:
+            return None
+        payload = json.loads(row[0])
+    except Exception:
+        logger.debug("internal_server: failed to resolve dm_chat_id for %s/%s", platform, user_id, exc_info=True)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return str(payload.get("dm_chat_id") or "").strip() or None
 
 
 def _lookup_session(session_id: str) -> Optional[dict[str, Any]]:
