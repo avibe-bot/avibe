@@ -48,6 +48,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from core.memory.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -1074,7 +1075,7 @@ def create_app(
             return None
         return runtime.principal_for_user_key(user_key)
 
-    def _memory_ui_processing_operator_ref(
+    async def _memory_ui_processing_operator_ref(
         request: Request,
         runtime: Any,
     ) -> str | None:
@@ -1084,7 +1085,7 @@ def create_app(
         if user_key is None:
             return None
         try:
-            return runtime.principal_for_user_key(user_key)
+            return await run_blocking(runtime.principal_for_user_key, user_key)
         except Exception:
             logger.debug(
                 "Memory Processing Record operator lookup unavailable",
@@ -1146,7 +1147,7 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
             return await runtime.processing_record_payload(
-                operator_ref=_memory_ui_processing_operator_ref(request, runtime)
+                operator_ref=await _memory_ui_processing_operator_ref(request, runtime)
             )
         except Exception:
             logger.warning("internal memory Processing Record read failed")

@@ -54,6 +54,12 @@ class AnomalyProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class FailureLogObservation:
+    items: tuple[MemoryFailureLogEntry, ...]
+    unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MaintenanceProjection:
     source: SourceObservation
     data_exists: bool
@@ -78,7 +84,7 @@ class MemoryProcessingRecordPort:
     observe_health: Callable[[str | None], Awaitable[RuntimeHealthObservation]]
     failure_log: Callable[
         [str | None],
-        Awaitable[tuple[MemoryFailureLogEntry, ...]],
+        Awaitable[FailureLogObservation],
     ]
     recorder_health: Callable[[], Mapping[str, str | None]]
     observe_sources: Callable[[str | None], Awaitable[ProcessingSourceObservations]]
@@ -106,16 +112,17 @@ class MemoryProcessingRecord:
         """Read one independently degrading Processing Record summary."""
 
         observation = await self._read_maintenance_observation(operator_ref)
-        runtime, sources, anomalies, maintenance = await asyncio.gather(
-            self.read_runtime(observation),
+        runtime_result, sources, anomalies, maintenance = await asyncio.gather(
+            self._read_runtime(observation),
             self._read_sources(observation.block_reason),
             self._read_durable_anomalies(observation.block_reason),
             self._read_maintenance(operator_ref, observation),
         )
+        runtime, recorder_anomaly = runtime_result
         return ProcessingRecordSummary(
             runtime=runtime,
             sources=sources,
-            anomalies=self._merge_recorder_anomaly(anomalies),
+            anomalies=self._merge_recorder_anomaly(anomalies, recorder_anomaly),
             maintenance=maintenance,
         )
 
@@ -127,6 +134,13 @@ class MemoryProcessingRecord:
 
         if observation is None:
             observation = await self._read_maintenance_observation(None)
+        runtime, _recorder_anomaly = await self._read_runtime(observation)
+        return runtime
+
+    async def _read_runtime(
+        self,
+        observation: MaintenanceObservation,
+    ) -> tuple[RuntimeHealthProjection, MemoryFailureLogEntry | None]:
         runtime = await self._read_health(observation.block_reason)
         self.observe_recorder(
             self._runtime.recorder_health(),
@@ -136,7 +150,7 @@ class MemoryProcessingRecord:
                 else None
             ),
         )
-        return runtime
+        return runtime, self._recorder_anomaly()
 
     async def read_failures(
         self,
@@ -145,12 +159,28 @@ class MemoryProcessingRecord:
         """Project compatibility failure facts without probing runtime health."""
 
         self.observe_recorder(self._runtime.recorder_health())
+        recorder_anomaly = self._recorder_anomaly()
         observation = await self._read_maintenance_observation(operator_ref)
         anomalies, maintenance = await asyncio.gather(
             self._read_durable_anomalies(observation.block_reason),
             self._read_maintenance(operator_ref, observation),
         )
-        return self._merge_recorder_anomaly(anomalies), maintenance
+        if (
+            observation.block_reason is not None
+            and anomalies.source.status == "unavailable"
+            and anomalies.source.reason == observation.block_reason
+        ):
+            anomalies = AnomalyProjection(
+                source=SourceObservation(
+                    "unknown",
+                    reason=observation.block_reason,
+                ),
+                items=anomalies.items,
+            )
+        return (
+            self._merge_recorder_anomaly(anomalies, recorder_anomaly),
+            maintenance,
+        )
 
     async def read_maintenance(
         self,
@@ -232,8 +262,16 @@ class MemoryProcessingRecord:
         maintenance_reason: str | None,
     ) -> AnomalyProjection:
         try:
-            durable = await self._runtime.failure_log(maintenance_reason)
-            source = SourceObservation("available", observed_at=_utc_observed_at())
+            observation = await self._runtime.failure_log(maintenance_reason)
+            durable = observation.items
+            source = (
+                SourceObservation(
+                    "unavailable",
+                    reason=observation.unavailable_reason,
+                )
+                if observation.unavailable_reason is not None
+                else SourceObservation("available", observed_at=_utc_observed_at())
+            )
         except Exception:
             durable = ()
             source = SourceObservation(
@@ -245,9 +283,9 @@ class MemoryProcessingRecord:
     def _merge_recorder_anomaly(
         self,
         durable: AnomalyProjection,
+        recorder: MemoryFailureLogEntry | None,
     ) -> AnomalyProjection:
         items = list(durable.items)
-        recorder = self._recorder_anomaly()
         if recorder is not None:
             items.insert(0, recorder)
         return AnomalyProjection(source=durable.source, items=tuple(items[:50]))
@@ -269,10 +307,16 @@ class MemoryProcessingRecord:
                 can_clear=False,
                 clear_recovery=None,
             )
+        unavailable_reason = result.error
+        if (
+            unavailable_reason is None
+            and observation.block_reason == "memory_store_unavailable"
+        ):
+            unavailable_reason = observation.block_reason
         source = (
-            SourceObservation("available", observed_at=_utc_observed_at())
-            if result.error is None
-            else SourceObservation("unavailable", reason=result.error)
+            SourceObservation("unavailable", reason=unavailable_reason)
+            if unavailable_reason is not None
+            else SourceObservation("available", observed_at=_utc_observed_at())
         )
         return MaintenanceProjection(
             source=source,

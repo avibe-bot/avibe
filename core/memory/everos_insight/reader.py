@@ -582,6 +582,13 @@ class MemoryInsightReader:
                     LIMIT 1
                     """
                 ).fetchone()
+                conn.execute(
+                    """
+                    SELECT md_path, status, last_changed_at, error
+                    FROM md_change_state
+                    LIMIT 1
+                    """
+                ).fetchone()
             return {"status": "available"}
         except _Unavailable as unavailable:
             return {"status": "unavailable", "reason": unavailable.reason}

@@ -20,6 +20,7 @@ import contextlib
 import socket
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -635,6 +636,76 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert operator_refs == [None]
+
+
+def test_processing_record_operator_lookup_does_not_block_event_loop() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    lookup_started = threading.Event()
+    event_loop_progressed = threading.Event()
+    operator_refs: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            lookup_started.set()
+            if not event_loop_progressed.wait(timeout=1):
+                raise AssertionError("principal lookup blocked the ASGI event loop")
+            return "u-remote-principal"
+
+        async def processing_record_payload(
+            self,
+            *,
+            operator_ref: str | None = None,
+        ) -> dict[str, object]:
+            operator_refs.append(operator_ref)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        async def mark_event_loop_progress() -> None:
+            while not lookup_started.is_set():
+                await asyncio.sleep(0)
+            event_loop_progressed.set()
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response, _ = await asyncio.gather(
+                client.get(
+                    path,
+                    headers={
+                        MEMORY_USER_KEY_HEADER: user_key,
+                        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                            secret,
+                            method="GET",
+                            path=path,
+                            user_key=user_key,
+                        ),
+                    },
+                ),
+                mark_event_loop_progress(),
+            )
+            return response
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert operator_refs == ["u-remote-principal"]
 
 
 @pytest.mark.parametrize(

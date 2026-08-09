@@ -15,6 +15,7 @@ from config.v2_config import MemoryConfig
 from core.memory.everos import ProviderHealthSnapshot
 from core.memory.maintenance import MaintenanceObservation, MaintenanceResult
 from core.memory.processing_record import (
+    FailureLogObservation,
     MemoryProcessingRecord,
     MemoryProcessingRecordPort,
     ProcessingSourceObservations,
@@ -61,38 +62,56 @@ class _RuntimeObservations:
         }
         self.sources = _sources()
         self.maintenance = MaintenanceResult(False, True, None)
+        self.maintenance_observation = MaintenanceObservation(None, None, True)
         self.operator_refs: list[str | None] = []
         self.failure_error: Exception | None = None
         self.maintenance_error: Exception | None = None
+        self.maintenance_observation_error: Exception | None = None
 
     async def observe_maintenance(
         self,
         operator_ref: str | None,
     ) -> MaintenanceObservation:
         self.operator_refs.append(operator_ref)
-        return MaintenanceObservation(None, None, True)
+        if self.maintenance_observation_error is not None:
+            raise self.maintenance_observation_error
+        return self.maintenance_observation
 
     async def observe_health(
         self,
-        _maintenance_reason: str | None,
+        maintenance_reason: str | None,
     ) -> RuntimeHealthObservation:
+        if maintenance_reason is not None:
+            return RuntimeHealthObservation(None, maintenance_reason)
         return self.health
 
     async def failure_log(
         self,
-        _maintenance_reason: str | None,
-    ) -> tuple[MemoryFailureLogEntry, ...]:
+        maintenance_reason: str | None,
+    ) -> FailureLogObservation:
         if self.failure_error is not None:
             raise self.failure_error
-        return self.failures
+        if maintenance_reason is not None:
+            return FailureLogObservation((), maintenance_reason)
+        return FailureLogObservation(self.failures)
 
     def recorder_health(self) -> dict[str, str | None]:
         return self.recorder
 
     async def observe_sources(
         self,
-        _maintenance_reason: str | None,
+        maintenance_reason: str | None,
     ) -> ProcessingSourceObservations:
+        if maintenance_reason is not None:
+            unavailable = SourceObservation(
+                "unavailable",
+                reason=maintenance_reason,
+            )
+            return ProcessingSourceObservations(
+                everos=unavailable,
+                capture=unavailable,
+                calls=unavailable,
+            )
         return self.sources
 
     async def maintenance_payload(
@@ -137,7 +156,7 @@ class _ConcurrentRuntimeObservations(_RuntimeObservations):
     async def failure_log(
         self,
         maintenance_reason: str | None,
-    ) -> tuple[MemoryFailureLogEntry, ...]:
+    ) -> FailureLogObservation:
         self._mark_independent_read()
         return await super().failure_log(maintenance_reason)
 
@@ -155,6 +174,38 @@ class _ConcurrentRuntimeObservations(_RuntimeObservations):
     ) -> MaintenanceResult:
         self._mark_independent_read()
         return await super().maintenance_payload(operator_ref, observation)
+
+
+class _OverlappingRecorderObservations(_RuntimeObservations):
+    def __init__(self) -> None:
+        super().__init__()
+        self._health_reads = 0
+        self._failure_reads = 0
+        self.first_health_read = asyncio.Event()
+        self.release_first_failure_read = asyncio.Event()
+
+    async def observe_health(
+        self,
+        _maintenance_reason: str | None,
+    ) -> RuntimeHealthObservation:
+        self._health_reads += 1
+        if self._health_reads == 1:
+            recorder = {"state": "degraded", "reason": "writer_failures"}
+            self.recorder = recorder
+            self.first_health_read.set()
+            return RuntimeHealthObservation(_health(recorder))
+        recorder = {"state": "active", "reason": None}
+        self.recorder = recorder
+        return RuntimeHealthObservation(_health(recorder))
+
+    async def failure_log(
+        self,
+        maintenance_reason: str | None,
+    ) -> FailureLogObservation:
+        self._failure_reads += 1
+        if self._failure_reads == 1:
+            await self.release_first_failure_read.wait()
+        return await super().failure_log(maintenance_reason)
 
 
 @pytest.mark.asyncio
@@ -274,6 +325,65 @@ async def test_sources_anomalies_and_maintenance_degrade_independently() -> None
     assert summary.maintenance.source.reason == "memory_store_unavailable"
     assert observations.operator_refs == ["u-operator"]
     assert "private" not in repr(summary)
+
+
+@pytest.mark.asyncio
+async def test_fenced_anomaly_read_reports_maintenance_reason() -> None:
+    observations = _RuntimeObservations()
+    observations.maintenance_observation = MaintenanceObservation(
+        "busy",
+        None,
+        False,
+    )
+
+    summary = await MemoryProcessingRecord(observations.port()).read(None)
+
+    assert summary.anomalies.source == SourceObservation(
+        "unavailable",
+        reason="busy",
+    )
+    assert summary.anomalies.items == ()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_observation_failure_marks_only_maintenance_unavailable(
+) -> None:
+    observations = _RuntimeObservations()
+    observations.maintenance_observation_error = OSError("journal unavailable")
+    observations.maintenance = MaintenanceResult(False, False, None)
+
+    summary = await MemoryProcessingRecord(observations.port()).read(None)
+
+    assert summary.runtime.source.reason == "memory_store_unavailable"
+    assert summary.sources.everos.reason == "memory_store_unavailable"
+    assert summary.anomalies.source.reason == "memory_store_unavailable"
+    assert summary.maintenance.source == SourceObservation(
+        "unavailable",
+        reason="memory_store_unavailable",
+    )
+    assert summary.maintenance.data_exists is False
+    assert summary.maintenance.can_clear is False
+
+
+@pytest.mark.asyncio
+async def test_overlapping_composite_reads_keep_their_own_recorder_episode() -> None:
+    observations = _OverlappingRecorderObservations()
+    record = MemoryProcessingRecord(observations.port())
+
+    first_reading = asyncio.create_task(record.read(None))
+    await asyncio.wait_for(observations.first_health_read.wait(), timeout=0.2)
+    second = await asyncio.wait_for(record.read(None), timeout=0.2)
+    observations.release_first_failure_read.set()
+    first = await asyncio.wait_for(first_reading, timeout=0.2)
+
+    assert first.runtime.health is not None
+    assert first.runtime.health.recorder["state"] == "degraded"
+    assert [item.kind for item in first.anomalies.items] == [
+        "recorder_degraded"
+    ]
+    assert second.runtime.health is not None
+    assert second.runtime.health.recorder["state"] == "active"
+    assert second.anomalies.items == ()
 
 
 @pytest.mark.asyncio

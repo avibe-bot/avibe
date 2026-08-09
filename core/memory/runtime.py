@@ -56,6 +56,7 @@ from core.memory.process import (
 )
 from core.memory.processing_record import (
     AnomalyProjection,
+    FailureLogObservation,
     MaintenanceProjection,
     MemoryProcessingRecord,
     MemoryProcessingRecordPort,
@@ -858,15 +859,18 @@ class MemoryRuntime:
     async def _processing_record_failure_log(
         self,
         maintenance_reason: str | None,
-    ) -> tuple[MemoryFailureLogEntry, ...]:
+    ) -> FailureLogObservation:
         if not self.available:
             raise self._unavailable()
-        if maintenance_reason is not None or self.module._clear_active:
-            return ()
+        if maintenance_reason is not None:
+            return FailureLogObservation((), maintenance_reason)
+        if self.module._clear_active:
+            return FailureLogObservation((), "busy")
         async with self.module._root_lifecycle_lock():
             if self.module._clear_active:
-                return ()
-            return await run_blocking(self._store.failure_log, limit=50)
+                return FailureLogObservation((), "busy")
+            entries = await run_blocking(self._store.failure_log, limit=50)
+            return FailureLogObservation(entries)
 
     async def _processing_record_sources(
         self,

@@ -1336,6 +1336,18 @@ def test_processing_record_source_observation_avoids_timeline_query(
     assert "LIMIT 1" in query
     assert "ORDER BY" not in query
     assert "json_" not in query.casefold()
+    indexing_queries = [
+        statement
+        for statement in statements
+        if "FROM md_change_state" in statement
+        and statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(indexing_queries) == 1
+    indexing_query = indexing_queries[0]
+    for column in ("md_path", "status", "last_changed_at", "error"):
+        assert column in indexing_query
+    assert "LIMIT 1" in indexing_query
+    assert "ORDER BY" not in indexing_query
 
 
 def test_processing_record_source_observation_degrades_sources_independently(
@@ -1373,6 +1385,25 @@ def test_processing_record_source_observation_validates_memcell_columns(
 ) -> None:
     with sqlite3.connect(insight_paths.system_db_path) as connection:
         connection.execute("ALTER TABLE memcell DROP COLUMN payload_json")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "unavailable"
+    assert observation.everos.reason == "malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+@pytest.mark.parametrize("damage", ["missing_table", "missing_required_column"])
+def test_processing_record_source_observation_validates_indexing_state_schema(
+    insight_paths: MemoryInsightPaths,
+    damage: str,
+) -> None:
+    with sqlite3.connect(insight_paths.system_db_path) as connection:
+        if damage == "missing_table":
+            connection.execute("DROP TABLE md_change_state")
+        else:
+            connection.execute("ALTER TABLE md_change_state DROP COLUMN error")
 
     observation = MemoryInsightReader(insight_paths).source_observation()
 
