@@ -49,7 +49,13 @@ import { AgentationToggle } from './components/AgentationToggle';
 import { PwaLoopbackLinkGuard } from './components/PwaLoopbackLinkGuard';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { REMOTE_AUTH_REQUIRED_EVENT, shouldDeferRemoteAuthRedirect } from './lib/remoteAuth';
+import {
+    checkRemoteAuthForPath,
+    isSetupCheckBypassed,
+    remoteLoginPath,
+    REMOTE_AUTH_REQUIRED_EVENT,
+    shouldDeferRemoteAuthRedirect,
+} from './lib/remoteAuth';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -93,17 +99,14 @@ import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
 
-// Paths that bypass the setup guard so the wizard and diagnostics can show
-// logs / doctor output even before configuration is complete.
-const LOGIN_CHECK_PATHS = new Set(['/admin/logs', '/admin/settings/diagnostics']);
-
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
     const requireUserAction = shouldDeferRemoteAuthRedirect();
+    const loginPath = remoteLoginPath(target);
 
     useEffect(() => {
-        if (!requireUserAction) window.location.assign(target);
-    }, [requireUserAction, target]);
+        if (!requireUserAction) window.location.assign(loginPath);
+    }, [loginPath, requireUserAction]);
 
     if (requireUserAction) {
         return (
@@ -114,7 +117,7 @@ const RemoteLoginGate = ({ target }: { target: string }) => {
                         <CardDescription>{t('remoteLogin.body')}</CardDescription>
                     </CardHeader>
                     <CardContent>
-                        <Button onClick={() => window.location.assign(target)}>{t('remoteLogin.action')}</Button>
+                        <Button onClick={() => window.location.assign(loginPath)}>{t('remoteLogin.action')}</Button>
                     </CardContent>
                 </Card>
             </main>
@@ -232,7 +235,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
-    const bypassSetupGuard = LOGIN_CHECK_PATHS.has(location.pathname);
+    const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
     // off /setup; that pathname flip re-runs the effect so the stale
@@ -271,10 +274,6 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         let cancelled = false;
 
-        if (bypassSetupGuard) {
-            return;
-        }
-
         // Reset to loading while (re)validating. On the setup-boundary
         // re-run this prevents a one-frame bounce: a stale `needs-setup`
         // on a non-/setup route would otherwise redirect to /setup before
@@ -282,10 +281,14 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // transition is fine — it's the setup boundary, not every nav.
         setGuardStatus('loading');
 
-        getAuthSession().then(session => {
+        checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ loginRequired, checkSetup }) => {
             if (cancelled) return;
-            if (session.remote && !session.authenticated) {
+            if (loginRequired) {
                 setGuardStatus('remote-login-required');
+                return null;
+            }
+            if (!checkSetup) {
+                setGuardStatus('ready');
                 return null;
             }
             return getConfig().then(config => {
@@ -298,10 +301,14 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
             });
         }).catch(async (error) => {
             if (cancelled) return;
-            const session = await getAuthSession().catch(() => null);
+            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
             if (cancelled) return;
-            if (session?.remote && !session.authenticated) {
+            if (authCheck?.loginRequired) {
                 setGuardStatus('remote-login-required');
+                return;
+            }
+            if (authCheck && !authCheck.checkSetup) {
+                setGuardStatus('ready');
                 return;
             }
             const blocked = accessBlockedCode(error);
@@ -331,7 +338,6 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // shell behind the Loading state).
     }, [authCheckVersion, bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
 
-    if (bypassSetupGuard) return children;
     if (guardStatus === 'loading') {
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
@@ -341,6 +347,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
+    if (bypassSetupGuard) return children;
     if (guardStatus === 'needs-setup') {
         if (location.pathname === '/setup') return children;
         // A wizard finish navigates from /setup to / before the re-validation
@@ -645,6 +652,10 @@ const router = createBrowserRouter(
         <Route path="/remote-access" element={<Navigate to="/admin/remote-access" replace />} />
         <Route path="/doctor" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/doctor/logs" element={<Navigate to="/admin/logs" replace />} />
+        {/* The server intentionally serves the SPA shell for every extensionless
+            path. Keep stale bookmarks and retired push targets inside AuthGuard,
+            then recover authenticated/local clients to the workbench root. */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Route>,
   ),

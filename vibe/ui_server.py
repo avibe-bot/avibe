@@ -1466,6 +1466,7 @@ def _remote_auth_exempt_path() -> bool:
     path = request.path
     return (
         path == "/health"
+        or path == "/auth/login"
         or path == "/auth/callback"
         or path == "/auth/logout"
         or path == "/api/session"
@@ -1496,6 +1497,11 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         }
         or request.path == "/favicon.ico"
     )
+
+
+def _is_ui_static_request() -> bool:
+    endpoint = request._request.scope.get("endpoint")
+    return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
@@ -1626,6 +1632,14 @@ def _strip_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", query, ""))
 
 
+def _oauth_retry_requested(value: Any) -> bool:
+    target = _safe_remote_redirect_target(value)
+    return any(
+        key == REMOTE_OAUTH_RETRY_PARAM and val == "1"
+        for key, val in parse_qsl(urlsplit(target).query, keep_blank_values=True)
+    )
+
+
 def _add_oauth_retry_param(value: str) -> str:
     target = _strip_oauth_retry_param(value)
     parsed = urlsplit(target)
@@ -1638,20 +1652,20 @@ def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
 
 
-def _redirect_to_vibe_cloud_login(config: V2Config):
+def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None = None):
     from vibe import remote_access
 
     cloud = config.remote_access.vibe_cloud
     code_verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    raw_next = request.full_path if request.query_string else request.path
+    raw_next = next_target if next_target is not None else (request.full_path if request.query_string else request.path)
     next_target = _strip_oauth_retry_param(raw_next)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
         next_target=next_target,
-        retry=request.args.get(REMOTE_OAUTH_RETRY_PARAM) == "1",
+        retry=_oauth_retry_requested(raw_next),
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
@@ -2161,12 +2175,14 @@ def enforce_remote_access_cookie():
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
         return None
-    if request.method == "GET":
-        # Bound unauthenticated login-start floods at the door (this writes a
-        # handshake + sets cookies); a real user spends only a couple per login.
-        if _auth_rate_limited():
-            return _auth_rate_limit_response()
-        return _redirect_to_vibe_cloud_login(config)
+    # The SPA shell is non-sensitive and its APIs remain protected. Serving it
+    # lets AuthGuard keep an iOS Home-Screen cold launch on the installed app's
+    # origin instead of automatically crossing into an OAuth browser sheet.
+    if _is_ui_static_request():
+        return None
+    if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
+        target = request.full_path if request.query_string else request.path
+        return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
 
 
@@ -4900,6 +4916,28 @@ async def remote_access_diagnostics():
             "detail": str(exc),
         }
     return jsonify(result), 200 if result.get("ok") else 409
+
+
+@app.route("/auth/login", methods=["GET"])
+def remote_access_login():
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return jsonify({"error": "remote_access_not_enabled"}), 400
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.enabled:
+        return jsonify({"error": "remote_access_disabled"}), 503
+    if not cloud.session_secret:
+        return jsonify({"error": "remote_access_session_secret_missing"}), 503
+
+    next_target = _safe_remote_redirect_target(request.args.get("next"))
+    session = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
+    if session is not None:
+        return redirect(next_target)
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    return _redirect_to_vibe_cloud_login(config, next_target=next_target)
 
 
 @app.route("/auth/callback", methods=["GET"])
