@@ -66,6 +66,48 @@ describe('MentionEditor voice preview', () => {
     expect(onChange.mock.calls.at(-1)?.[3]).toBe(false);
   });
 
+  it('keeps an appended realtime preview visible after the editor starts scrolling', async () => {
+    const { ref } = renderEditor('Existing draft');
+    const editor = screen.getByLabelText('Message');
+    await waitFor(() => expect(editor.textContent).toBe('Existing draft'));
+    let scrollHeight = 240;
+    Object.defineProperty(editor, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    editor.scrollTop = 0;
+    const snapshot = voiceInsertionSnapshot('Existing draft', 14, 14);
+
+    act(() => {
+      expect(ref.current?.showVoicePreview(snapshot, 'first realtime words')).toBe(true);
+    });
+    await waitFor(() => expect(editor.scrollTop).toBe(240));
+
+    scrollHeight = 360;
+    editor.scrollTop = 80;
+    act(() => {
+      expect(ref.current?.showVoicePreview(snapshot, 'first realtime words and more')).toBe(true);
+    });
+    await waitFor(() => expect(editor.scrollTop).toBe(360));
+  });
+
+  it('does not move the scroll position for a sentence insertion away from the end', async () => {
+    const { ref } = renderEditor('Plan today');
+    const editor = screen.getByLabelText('Message');
+    await waitFor(() => expect(editor.textContent).toBe('Plan today'));
+    Object.defineProperty(editor, 'scrollHeight', { configurable: true, value: 320 });
+    editor.scrollTop = 40;
+
+    act(() => {
+      expect(ref.current?.showVoicePreview(
+        voiceInsertionSnapshot('Plan today', 5, 5),
+        'the launch',
+      )).toBe(true);
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan the launch today'));
+    expect(editor.scrollTop).toBe(40);
+  });
+
   it('restores the original rich editor state when recording is discarded', async () => {
     const { ref } = renderEditor();
     const editor = screen.getByLabelText('Message');
