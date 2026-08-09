@@ -11,6 +11,7 @@ import {
   WORKBENCH_PLATFORM_ID,
 } from '../../lib/platforms';
 import { hasUsableSecret, secretInputValue } from '../../lib/secretFields';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { EyebrowBadge, PlatformIcon, WizardCard } from '../visual';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -447,7 +448,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                         {getExternalUrl(activeCredentialPlatform) ? (
                           <button
                             type="button"
-                            onClick={() => window.open(getExternalUrl(activeCredentialPlatform), '_blank')}
+                            onClick={() => openLinkInNewContext(getExternalUrl(activeCredentialPlatform))}
                             className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-border bg-surface-3 px-2.5 text-[10px] font-medium text-foreground hover:border-border-strong"
                           >
                             <ExternalLink className="size-3" />

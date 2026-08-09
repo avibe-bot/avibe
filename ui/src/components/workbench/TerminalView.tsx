@@ -16,6 +16,7 @@ import {
   subscribeTerminalFontSize,
 } from '../../lib/terminalFontSize';
 import { IS_APPLE } from '../../lib/platform';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
@@ -180,11 +181,12 @@ export const TerminalView: React.FC<{
     // Persistent sessions run tmux with `mouse on`, so an unmodified click is meaningful input for
     // tmux/copy-mode and mouse-aware TUIs — gating on the modifier keeps plain clicks as terminal input
     // and matches how VS Code / iTerm / GNOME Terminal follow terminal links. noopener defeats reverse-
-    // tabnabbing (the addon's own typings call this out); window.open never navigates the app frame.
+    // tabnabbing (the addon's own typings call this out). The shared opener keeps
+    // same-origin URLs in an installed iOS PWA instead of creating a restorable sheet.
     term.loadAddon(
       new WebLinksAddon((event, uri) => {
         if (IS_APPLE ? event.metaKey : event.ctrlKey) {
-          window.open(uri, '_blank', 'noopener');
+          openLinkInNewContext(uri, 'noopener');
         }
       }),
     );
