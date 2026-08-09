@@ -8264,9 +8264,6 @@ async def sessions_bootstrap(session_id: str):
     from vibe import internal_client
 
     authorization_context = getattr(g, "authorization_context", None)
-    can_manage_instance = bool(
-        authorization_context and authorization_context.can_manage_instance
-    )
     engine = _projects_engine()
     with engine.connect() as conn:
         try:
@@ -8316,19 +8313,15 @@ async def sessions_bootstrap(session_id: str):
             logger.exception("sessions_bootstrap: failed to load Vibe Agents")
 
     try:
-        config_payload = vibe_api.client_config_payload(settings_service.load_config_or_default())
+        config = settings_service.load_config_or_default()
+        config_payload = (
+            vibe_api.remote_config_payload(config)
+            if authorization_context and authorization_context.is_remote
+            else vibe_api.client_config_payload(config)
+        )
     except Exception:
         logger.exception("sessions_bootstrap: failed to load config")
         config_payload = None
-    if config_payload is not None and not can_manage_instance:
-        ui_payload = config_payload.get("ui")
-        config_payload = {
-            "ui": {
-                key: ui_payload[key]
-                for key in ("chat_message_font_size", "show_agent_activity", "show_tool_calls")
-                if isinstance(ui_payload, dict) and key in ui_payload
-            }
-        }
 
     visible_queued = queued if can_chat else []
     visible_draft = draft if can_access_draft else None

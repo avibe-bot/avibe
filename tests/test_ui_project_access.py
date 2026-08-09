@@ -21,7 +21,7 @@ from storage import (
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import media_object_references, media_objects, scopes
+from storage.models import agent_sessions, media_object_references, media_objects, scopes
 from storage.workbench_sessions_service import create_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
@@ -324,6 +324,18 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert editor_payload["default_agent_name"] == "editor-agent"
     assert editor_payload["queued"][0]["text"] == "editor-only queued prompt"
     assert editor_payload["draft"] == {"text": ""}
+    assert editor_payload["config"] == api.remote_config_payload(config)
+
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    owner_payload = _get(owner, f"/api/sessions/{ids['session_a']}/bootstrap").get_json()
+    assert owner_payload["config"] == api.remote_config_payload(config)
+    assert "runtime" not in owner_payload["config"]
+
+    local_payload = app.test_client().get(
+        f"/api/sessions/{ids['session_a']}/bootstrap",
+        base_url="http://localhost",
+    ).get_json()
+    assert local_payload["config"]["runtime"]["default_cwd"] == "."
 
     draft_get = _get(client, f"/api/sessions/{ids['session_a']}/draft")
     draft_put = client.put(
@@ -505,6 +517,14 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
             .where(scopes.c.native_id == ids["project_a"])
             .values(metadata_json=json.dumps({"host_path_hint": "/private/host"}))
         )
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == ids["session_a"])
+            .values(
+                workdir=str((tmp_path / "project-a").resolve()),
+                metadata_json=json.dumps({"host_session_hint": "/private/session"}),
+            )
+        )
     engine.dispose()
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
@@ -581,6 +601,13 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         row["folder_path"] == "" and row["metadata"] == {}
         for row in owner_bootstrap["projects"]
     )
+    owner_sessions = _get(owner, "/api/sessions").get_json()["sessions"]
+    owner_session_a = next(row for row in owner_sessions if row["id"] == ids["session_a"])
+    assert owner_session_a["workdir"] is None
+    assert owner_session_a["metadata"] == {}
+    owner_session_a = _get(owner, f"/api/sessions/{ids['session_a']}").get_json()
+    assert owner_session_a["workdir"] is None
+    assert owner_session_a["metadata"] == {}
     assert _get(owner, f"/api/sessions/{ids['unscoped']}").status_code == 200
 
     local = app.test_client()
@@ -589,6 +616,12 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     local_project_a = next(row for row in local_projects if row["id"] == ids["project_a"])
     assert local_project_a["folder_path"] == str((tmp_path / "project-a").resolve())
     assert local_project_a["metadata"] == {"host_path_hint": "/private/host"}
+    local_session_a = local.get(
+        f"/api/sessions/{ids['session_a']}",
+        base_url="http://localhost",
+    ).get_json()
+    assert local_session_a["workdir"] == str((tmp_path / "project-a").resolve())
+    assert local_session_a["metadata"] == {"host_session_hint": "/private/session"}
     assert local.get(f"/api/sessions/{ids['unscoped']}", base_url="http://localhost").status_code == 200
 
 

@@ -242,7 +242,7 @@ def list_sessions(
     query = query.order_by(*order_columns).limit(effective_limit)
     rows = [dict(row) for row in conn.execute(query).mappings().all()]
     sessions = [
-        _row_to_payload(row, include_local_details=context.is_instance_owner)
+        _row_to_payload(row, include_local_details=context.is_trusted_local)
         for row in rows
     ]
     # Use the clamped page size for the cursor check — comparing against
@@ -272,7 +272,7 @@ def get_session(
             raise LookupError(f"Session not found: {session_id}")
     return _row_to_payload(
         dict(row),
-        include_local_details=context.is_instance_owner,
+        include_local_details=context.is_trusted_local,
     )
 
 
