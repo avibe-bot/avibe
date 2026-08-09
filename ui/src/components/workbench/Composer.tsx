@@ -17,10 +17,8 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
-  applyVoiceInsertion,
   applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
-  voiceInsertionText,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import {
@@ -673,19 +671,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return inserted;
     }
     const current = valueRef.current;
-    const snapshot = session.previewInsertion ?? session.insertion;
-    const insertion = voiceInsertionText(current, snapshot, session.transcript ?? '');
-    const next = applyVoiceInsertion(current, snapshot, session.transcript ?? '');
-    if (insertion === null || next === null) {
-      session.previewInsertion = undefined;
-      return false;
-    }
+    const result = applyVoiceInsertionWithSnapshot(
+      current,
+      session.previewInsertion ?? session.insertion,
+      session.transcript ?? '',
+      session.insertion,
+    );
+    if (result === null) return false;
     session.previewInsertion = undefined;
-    valueRef.current = next;
-    setValue(next);
+    valueRef.current = result.text;
+    setValue(result.text);
     setRealtimeAnnouncement('');
-    onDraftChange?.(next);
-    const caret = session.insertion.start + insertion.length;
+    onDraftChange?.(result.text);
+    const caret = session.insertion.start + result.insertion.length;
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
     return true;
   }, [onDraftChange, useMentions]);
@@ -723,6 +721,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       current,
       session.previewInsertion ?? session.insertion,
       normalized,
+      session.insertion,
     );
     if (result === null) return;
     session.previewInsertion = result.snapshot;
@@ -730,6 +729,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setValue(result.text);
     setRealtimeAnnouncement(normalized);
   }, [restoreRealtimePreview, useMentions]);
+
+  const retainSettledVoiceSession = useCallback((session: VoiceRecordingSession): void => {
+    restoreRealtimePreview(session);
+    setVoiceRetainedSession(session);
+  }, [restoreRealtimePreview]);
 
   const queueVoiceSegment = (
     session: VoiceRecordingSession,
@@ -780,11 +784,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
     if (session.status === 'ready' && session.transcript) {
       if (disabledRef.current) {
-        setVoiceRetainedSession(session);
+        retainSettledVoiceSession(session);
         return;
       }
       if (!insertVoiceTranscript(session)) {
-        setVoiceRetainedSession(session);
+        retainSettledVoiceSession(session);
         showToast(t('chat.compose.voiceDraftChanged'), 'error');
         return;
       }
@@ -794,11 +798,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'failed') {
-      restoreRealtimePreview(session);
-      setVoiceRetainedSession(session);
+      retainSettledVoiceSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
-  }, [insertVoiceTranscript, restoreRealtimePreview, sessionId, showToast, t]);
+  }, [insertVoiceTranscript, retainSettledVoiceSession, sessionId, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
     const activeHere = !unmountedRef.current && sessionId === session.sessionId;

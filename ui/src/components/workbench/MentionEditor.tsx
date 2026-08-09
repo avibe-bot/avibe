@@ -466,17 +466,23 @@ function BootstrapPlugin({
     bridgeRef,
     () => {
       const replaceCapturedSelection = (
-        snapshot: VoiceInsertionSnapshot,
+        replacement: VoiceInsertionSnapshot,
         text: string,
         tag?: string | string[],
+        insertion: VoiceInsertionSnapshot = replacement,
       ): VoiceInsertionSnapshot | null => {
         let inserted: VoiceInsertionSnapshot | null = null;
         editor.update(() => {
           const current = serializeCurrentEditor().text;
-          const result = applyVoiceInsertionWithSnapshot(current, snapshot, text);
+          const result = applyVoiceInsertionWithSnapshot(
+            current,
+            replacement,
+            text,
+            insertion,
+          );
           if (result === null) return;
-          const start = serializedPointAtOffset(snapshot.start);
-          const end = serializedPointAtOffset(snapshot.end);
+          const start = serializedPointAtOffset(replacement.start);
+          const end = serializedPointAtOffset(replacement.end);
           if (!start || !end) return;
           const selection = $createRangeSelection();
           selection.anchor.set(start.key, start.offset, start.type);
@@ -540,6 +546,7 @@ function BootstrapPlugin({
             active?.insertion ?? snapshot,
             text,
             [VOICE_PREVIEW_TAG, HISTORIC_TAG],
+            snapshot,
           );
           if (insertion === null) {
             voicePreviewRef.current = null;
@@ -554,8 +561,9 @@ function BootstrapPlugin({
             active?.insertion ?? snapshot,
             text,
             HISTORY_PUSH_TAG,
+            snapshot,
           );
-          voicePreviewRef.current = null;
+          if (inserted !== null) voicePreviewRef.current = null;
           return inserted !== null;
         },
         restoreVoicePreview: () => {

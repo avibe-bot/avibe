@@ -151,11 +151,17 @@ describe('voice cleanup', () => {
   it('keeps successive realtime previews in one replaceable draft range', () => {
     const original = voiceInsertionSnapshot('Plan today', 5, 5);
     const first = applyVoiceInsertionWithSnapshot(original.text, original, 'the lau');
-    const second = first && applyVoiceInsertionWithSnapshot(first.text, first.snapshot, 'the launch');
+    const second = first && applyVoiceInsertionWithSnapshot(
+      first.text,
+      first.snapshot,
+      'the launch',
+      original,
+    );
     const final = second && applyVoiceInsertionWithSnapshot(
       second.text,
       second.snapshot,
       'The launch is tomorrow.',
+      original,
     );
 
     expect(first?.text).toBe('Plan the lau today');
@@ -166,6 +172,20 @@ describe('voice cleanup', () => {
       start: 5,
       end: 29,
     });
+  });
+
+  it('recomputes final boundary spacing from the original caret', () => {
+    const original = voiceInsertionSnapshot('Say hello', 3, 3);
+    const preview = applyVoiceInsertionWithSnapshot(original.text, original, 'actually');
+    const final = preview && applyVoiceInsertionWithSnapshot(
+      preview.text,
+      preview.snapshot,
+      ', actually',
+      original,
+    );
+
+    expect(preview?.text).toBe('Say actually hello');
+    expect(final?.text).toBe('Say, actually hello');
   });
 
 });

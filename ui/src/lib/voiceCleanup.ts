@@ -139,22 +139,26 @@ export const voiceInsertionText = (
 
 export const applyVoiceInsertionWithSnapshot = (
   currentText: string,
-  snapshot: VoiceInsertionSnapshot,
+  replacement: VoiceInsertionSnapshot,
   transcript: string,
+  insertion: VoiceInsertionSnapshot = replacement,
 ): VoiceInsertionResult | null => {
-  const insertion = voiceInsertionText(currentText, snapshot, transcript);
-  if (insertion === null) return null;
-  const text = `${currentText.slice(0, snapshot.start)}${insertion}${currentText.slice(snapshot.end)}`;
+  if (currentText !== replacement.text) return null;
+  const insertedText = voiceInsertionText(insertion.text, insertion, transcript);
+  if (insertedText === null) return null;
+  const text = `${currentText.slice(0, replacement.start)}${insertedText}${
+    currentText.slice(replacement.end)
+  }`;
   return {
     text,
-    insertion,
+    insertion: insertedText,
     snapshot: voiceInsertionSnapshot(
       text,
-      snapshot.start,
-      snapshot.start + insertion.length,
+      replacement.start,
+      replacement.start + insertedText.length,
       {
-        left: snapshot.leftBoundary,
-        right: snapshot.rightBoundary,
+        left: insertion.leftBoundary,
+        right: insertion.rightBoundary,
       },
     ),
   };
