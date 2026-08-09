@@ -32,6 +32,7 @@ from core.runtime_activation import (
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
+    TURN_LIFECYCLE_ADMISSION_KEY,
     DeliveryRequest,
     SessionTurnManager,
     Turn,
@@ -97,6 +98,15 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
             },
         },
     )
+
+
+def _complete_capture_admission(context: MessageContext) -> None:
+    admission = (context.platform_specific or {}).pop(
+        TURN_LIFECYCLE_ADMISSION_KEY,
+        None,
+    )
+    if admission is not None:
+        admission.release()
 
 
 def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
@@ -167,12 +177,69 @@ def managers(tmp_path: Path):
     async def fake_run(_session_id, _context_value, text, **kwargs):
         with starts_lock:
             starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        _complete_capture_admission(_context_value)
 
     manager_a._run = fake_run
     manager_b._run = fake_run
     yield manager_a, manager_b, engine_a, engine_b, starts
     engine_a.dispose()
     engine_b.dispose()
+
+
+@pytest.mark.anyio
+async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = MessageHandler.__new__(MessageHandler)
+    handler._memory_capture_tasks = set()
+    capture_entered = asyncio.Event()
+    release_capture = asyncio.Event()
+    lifecycle_entered = asyncio.Event()
+
+    async def run_turn(_session_id, context, _text, **_kwargs):
+        admission = context.platform_specific.pop(
+            TURN_LIFECYCLE_ADMISSION_KEY
+        )
+
+        async def capture() -> None:
+            capture_entered.set()
+            await release_capture.wait()
+
+        capture_task = asyncio.create_task(capture())
+        handler._track_memory_capture_task(
+            capture_task,
+            lifecycle_admission=admission,
+        )
+
+    async def lifecycle_operation() -> str:
+        lifecycle_entered.set()
+        return "reset"
+
+    manager._run = run_turn
+    delivery = asyncio.create_task(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="remember this",
+            ),
+            context=_context(),
+        )
+    )
+    await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
+    lifecycle = asyncio.create_task(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            lifecycle_operation,
+            deadline_seconds=1.0,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert not lifecycle_entered.is_set()
+    release_capture.set()
+    await delivery
+    assert await lifecycle == "reset"
+    assert lifecycle_entered.is_set()
 
 
 async def _activate(
@@ -580,6 +647,7 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
 
     async def capture_run(_session_id, context, _text, **_kwargs):
         captured.update(context.platform_specific or {})
+        _complete_capture_admission(context)
 
     manager._run = capture_run
     admitted = asyncio.run(
@@ -1443,6 +1511,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
                 prompt_controller.memory_scope_for_cli_session("ses_fsm"),
             )
         )
+        _complete_capture_admission(context)
 
     manager._run = capture_start
     if launch_path == "immediate":
@@ -1517,6 +1586,7 @@ def test_durable_memory_cli_admission_fails_closed(
 
     async def capture_start(_session_id, context, _text, **_kwargs):
         admissions.append((context.platform_specific or {}).get("memory_cli_admitted"))
+        _complete_capture_admission(context)
 
     manager.bind_context(stale_context)
     manager._run = capture_start
@@ -1619,6 +1689,7 @@ def test_durable_batch_preserves_each_delivery_memory_admission_facts(
                 tuple(payload.get("delivery_ids") or ()),
             )
         )
+        _complete_capture_admission(context)
 
     manager._run = capture_start
 
@@ -1700,6 +1771,7 @@ def test_dispatch_uses_current_session_route_without_mutating_delivery_provenanc
 
     async def capture_run(_session_id, context, _text, **_kwargs):
         captured.update(context.platform_specific or {})
+        _complete_capture_admission(context)
 
     manager._run = capture_run
     admitted = asyncio.run(
@@ -3150,6 +3222,7 @@ def test_adapter_not_active_runner_cleanup_starts_linked_successor_once(
                 context=start_context,
                 logical_turn_id=logical_turn_id,
             )
+            _complete_capture_admission(start_context)
 
         manager._run = record_successor_start
         admitted = await manager.deliver(
@@ -3552,6 +3625,7 @@ def test_second_unknown_start_retires_delivery_and_unblocks_fifo(managers) -> No
 
     async def succeeds(_session_id, _context_value, text, **kwargs):
         starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        _complete_capture_admission(_context_value)
 
     first._run = succeeds
     first._active_identity = lambda *_args: None
@@ -4391,6 +4465,7 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
                 [str(item.local_path) for item in (context.files or [])],
             )
         )
+        _complete_capture_admission(context)
 
     manager._run = capture
     asyncio.run(manager.recover_durable_delivery_state())
@@ -5287,6 +5362,7 @@ def test_open_backlog_starts_oldest_before_new_idle_p3(managers) -> None:
     async def capture_start(_session_id, context, text, **kwargs):
         starts.append((str(kwargs.get("logical_turn_id") or ""), text))
         started_contexts.append(dict(context.platform_specific or {}))
+        _complete_capture_admission(context)
 
     manager._run = capture_start
     with engine.begin() as conn:

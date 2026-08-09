@@ -156,19 +156,34 @@ class CommandHandlers(BaseHandler):
         session_anchor: Optional[str],
         operation: Callable[[], Awaitable[_NewSessionResult]],
     ) -> _NewSessionResult:
-        """Run one `/new` transition behind Memory's exact-session fence."""
+        """Run `/new` after admitted turns finish their Memory capture."""
 
-        lifecycle = getattr(self.controller, "run_memory_session_lifecycle", None)
-        if session_anchor and callable(lifecycle):
-            return await lifecycle(
-                context,
+        async def run_memory_lifecycle() -> _NewSessionResult:
+            lifecycle = getattr(
+                self.controller,
+                "run_memory_session_lifecycle",
+                None,
+            )
+            if session_anchor and callable(lifecycle):
+                return await lifecycle(
+                    context,
+                    session_anchor,
+                    operation,
+                    deadline_seconds=5.0,
+                )
+
+            await self._final_flush_for_new(context, session_anchor)
+            return await operation()
+
+        turn_manager = getattr(self.controller, "session_turns", None)
+        turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
+        if session_anchor and callable(turn_lifecycle):
+            return await turn_lifecycle(
                 session_anchor,
-                operation,
+                run_memory_lifecycle,
                 deadline_seconds=5.0,
             )
-
-        await self._final_flush_for_new(context, session_anchor)
-        return await operation()
+        return await run_memory_lifecycle()
 
     def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
         keys = [session_key]

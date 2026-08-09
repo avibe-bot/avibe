@@ -1874,7 +1874,7 @@ export type MemoryRecallResult =
 
 export type MemoryLogSourceStatus = {
   status: 'available' | 'partial' | 'stale' | 'unknown' | 'unavailable';
-  observed_at?: string | null;
+  observed_at: string | null;
   reason?: string | null;
 };
 

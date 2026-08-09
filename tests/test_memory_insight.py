@@ -1267,6 +1267,27 @@ def test_configured_provider_keys_are_scrubbed_from_run_and_current_state_errors
     assert embedding_key not in encoded
 
 
+def test_source_sections_include_query_observation_time(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = "2026-08-09T15:15:00.000Z"
+    monkeypatch.setattr(reader_module, "_utc_observed_at", lambda: observed_at)
+    _insert_memcell(insight_paths, "mc_observed", ALICE, timestamp_ms=10_900)
+    reader = MemoryInsightReader(insight_paths)
+
+    listed = reader.list_entries((ALICE, PROJECT), None, 10)
+    detail = reader.entry_detail((ALICE, PROJECT), "mc_observed")
+
+    expected = {
+        "everos": {"status": "available", "observed_at": observed_at},
+        "capture": {"status": "available", "observed_at": observed_at},
+        "calls": {"status": "available", "observed_at": observed_at},
+    }
+    assert listed["sections"] == expected
+    assert detail["sections"] == expected
+
+
 def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     root = tmp_path / "missing"
     reader = MemoryInsightReader(
@@ -1276,9 +1297,9 @@ def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     assert result["status"] == "ok"
     assert result["entries"] == []
     assert result["sections"] == {
-        "everos": {"status": "unavailable", "reason": "missing"},
-        "capture": {"status": "unavailable", "reason": "missing"},
-        "calls": {"status": "unavailable", "reason": "missing"},
+        "everos": {"status": "unavailable", "reason": "missing", "observed_at": None},
+        "capture": {"status": "unavailable", "reason": "missing", "observed_at": None},
+        "calls": {"status": "unavailable", "reason": "missing", "observed_at": None},
     }
 
 
@@ -1293,7 +1314,11 @@ def test_locked_optional_db_does_not_fail_everos_result(insight_paths: MemoryIns
         lock.rollback()
         lock.close()
     assert [entry["memcell_id"] for entry in result["entries"]] == ["mc_locked"]
-    assert result["sections"]["capture"] == {"status": "unavailable", "reason": "busy"}
+    assert result["sections"]["capture"] == {
+        "status": "unavailable",
+        "reason": "busy",
+        "observed_at": None,
+    }
 
 
 def test_list_keeps_direct_call_count_when_run_table_is_unavailable(
@@ -1306,7 +1331,9 @@ def test_list_keeps_direct_call_count_when_run_table_is_unavailable(
 
     result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
 
-    assert result["sections"]["everos"] == {"status": "partial", "reason": "runs_malformed"}
+    assert result["sections"]["everos"]["status"] == "partial"
+    assert result["sections"]["everos"]["reason"] == "runs_malformed"
+    assert result["sections"]["everos"]["observed_at"] is not None
     assert result["entries"][0]["run_summary"] is None
     assert result["entries"][0]["authorized_call_count"] == 1
 
@@ -1322,8 +1349,13 @@ def test_list_keeps_direct_call_count_when_capture_table_is_malformed(
 
     result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
 
-    assert result["sections"]["capture"] == {"status": "unavailable", "reason": "malformed"}
-    assert result["sections"]["calls"] == {"status": "available"}
+    assert result["sections"]["capture"] == {
+        "status": "unavailable",
+        "reason": "malformed",
+        "observed_at": None,
+    }
+    assert result["sections"]["calls"]["status"] == "available"
+    assert result["sections"]["calls"]["observed_at"] is not None
     assert result["entries"][0]["authorized_call_count"] == 1
 
 

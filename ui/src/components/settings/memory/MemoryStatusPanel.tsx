@@ -218,20 +218,27 @@ const FactList: React.FC<{
 
 const SourceCard: React.FC<{
   label: string;
-  source: { status: SourceState; observed_at?: string | null; reason?: string | null };
+  source: { status: SourceState; observed_at: string | null; reason?: string | null };
 }> = ({ label, source }) => {
   const { t } = useTranslation();
+  const displayStatus = source.observed_at || source.status === 'unavailable'
+    ? source.status
+    : 'unknown';
   return (
     <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border bg-surface px-3 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-[12px] font-semibold text-foreground">{label}</span>
-        <Badge variant={SOURCE_BADGE_VARIANT[source.status]}>
-          {t(`memory.processingRecord.sourceState.${source.status}`)}
+        <Badge variant={SOURCE_BADGE_VARIANT[displayStatus]}>
+          {t(`memory.processingRecord.sourceState.${displayStatus}`)}
         </Badge>
       </div>
       <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] text-muted">
         <Clock3 className="size-3 shrink-0" />
-        <span className="truncate">{formatTimestamp(source.observed_at)}</span>
+        <span className="truncate">
+          {source.observed_at
+            ? formatTimestamp(source.observed_at)
+            : t('memory.processingRecord.sourceNotObserved')}
+        </span>
       </div>
       {source.reason ? (
         <div className="break-words text-[11px] text-muted">

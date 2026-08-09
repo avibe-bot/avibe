@@ -3719,6 +3719,7 @@
         "unavailable": "Unavailable"
       },
       "sourceReason": "Reason: {{reason}}",
+      "sourceNotObserved": "Not observed",
       "sources": {
         "title": "Source availability",
         "description": "Each source is observed independently; one unavailable source does not imply a global runtime state."

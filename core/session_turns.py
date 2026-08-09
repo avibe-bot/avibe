@@ -19,9 +19,9 @@ import json
 import logging
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iterator, Literal, Optional
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
@@ -75,6 +75,29 @@ if TYPE_CHECKING:
     from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
+
+
+TURN_LIFECYCLE_ADMISSION_KEY = "_turn_lifecycle_admission"
+
+
+@dataclass
+class TurnLifecycleAdmission:
+    """One idempotent lease bridging turn admission into Memory capture."""
+
+    _lock: asyncio.Lock
+    _released: bool = field(default=False, init=False)
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._lock.release()
+
+
+class SessionTurnLifecycleBusyError(RuntimeError):
+    """A destructive lifecycle operation could not quiesce admitted turns."""
+
+    code = "memory_session_lifecycle_busy"
 
 
 def _utc_now_iso() -> str:
@@ -548,6 +571,7 @@ class SessionTurnManager:
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
+        self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -581,6 +605,44 @@ class SessionTurnManager:
     def is_in_flight(self, session_id: Optional[str]) -> bool:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
+
+    async def acquire_lifecycle_admission(
+        self,
+        raw_session_id: str,
+    ) -> TurnLifecycleAdmission:
+        """Fence one admitted turn until its Memory capture is durably decided."""
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            raise ValueError("session lifecycle admission requires a session id")
+        lock = self._session_lifecycle_locks.setdefault(
+            raw_session_id,
+            asyncio.Lock(),
+        )
+        await lock.acquire()
+        return TurnLifecycleAdmission(lock)
+
+    async def run_session_lifecycle(
+        self,
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> Any:
+        """Run a destructive transition after admitted turns finish capture."""
+
+        try:
+            admission = await asyncio.wait_for(
+                self.acquire_lifecycle_admission(raw_session_id),
+                timeout=max(float(deadline_seconds), 0.001),
+            )
+        except asyncio.TimeoutError as exc:
+            raise SessionTurnLifecycleBusyError(
+                "turn capture admission did not quiesce before the deadline"
+            ) from exc
+        try:
+            return await operation()
+        finally:
+            admission.release()
 
     @staticmethod
     def _agent_run_ids_from_spec(spec: Any) -> set[str]:
@@ -1941,6 +2003,25 @@ class SessionTurnManager:
             )
         context.files = file_attachments_from_specs(specs)
         return payload
+
+    @staticmethod
+    def _lifecycle_anchor_for_delivery(
+        delivery: dict[str, Any],
+        session_id: str,
+    ) -> str:
+        """Use the same raw anchor that capture and `/new` use for this turn."""
+
+        admission_context = delivery_store.delivery_admission_context(delivery)
+        route = (
+            admission_context.get("message_handler_route")
+            if isinstance(admission_context, dict)
+            else None
+        )
+        if isinstance(route, dict):
+            raw_session_id = route.get("base_session_id")
+            if isinstance(raw_session_id, str) and raw_session_id:
+                return raw_session_id
+        return session_id
 
     @staticmethod
     def _has_resolvable_delivery_input(
@@ -3462,6 +3543,18 @@ class SessionTurnManager:
                 evidence_kind="context_build_failed",
             )
             return False
+        lifecycle_admission = await self.acquire_lifecycle_admission(
+            self._lifecycle_anchor_for_delivery(delivery, str(turn["session_id"]))
+        )
+
+        def release_lifecycle_admission_if_owned() -> None:
+            payload = getattr(resolved, "platform_specific", None)
+            if isinstance(payload, dict) and payload.get(
+                TURN_LIFECYCLE_ADMISSION_KEY
+            ) is lifecycle_admission:
+                payload.pop(TURN_LIFECYCLE_ADMISSION_KEY, None)
+            lifecycle_admission.release()
+
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
         invalid_delivery_ids: set[str] = set()
@@ -3488,6 +3581,7 @@ class SessionTurnManager:
                 or latest.get("initial_delivery_id") != fresh_delivery.get("id")
                 or any(row["state"] != "claimed" for row in fresh_deliveries)
             ):
+                release_lifecycle_admission_if_owned()
                 return False
             turn = latest
             deliveries = fresh_deliveries
@@ -3534,6 +3628,7 @@ class SessionTurnManager:
                 settled_by="session_archive",
                 evidence_kind="archive_won_before_native_dispatch",
             )
+            release_lifecycle_admission_if_owned()
             return False
         if run_terminal_before_dispatch:
             terminal = self._terminalize_durable_turn(
@@ -3542,6 +3637,7 @@ class SessionTurnManager:
                 settled_by="agent_run_terminal",
                 evidence_kind="agent_run_terminal_before_native_dispatch",
             )
+            release_lifecycle_admission_if_owned()
             if terminal.get("changed"):
                 await self._resume_post_terminal(str(turn["session_id"]))
             return False
@@ -3557,12 +3653,16 @@ class SessionTurnManager:
                 evidence_kind="invalid_input_before_native_dispatch",
                 retire_unwritten_delivery_ids=invalid_delivery_ids,
             )
+            release_lifecycle_admission_if_owned()
             if terminal.get("changed"):
                 self._publish_queue_update(str(turn["session_id"]))
                 await self._resume_post_terminal(str(turn["session_id"]))
             return False
         try:
             delivery_payload = self._hydrate_delivery_batch_context(resolved, deliveries)
+            resolved.platform_specific[TURN_LIFECYCLE_ADMISSION_KEY] = (
+                lifecycle_admission
+            )
             resolved.platform_specific["turn_token"] = turn_id
             resolved.platform_specific["delivery_start_attempt_id"] = attempt_id
             metadata = delivery_payload.get("metadata") or {}
@@ -3604,6 +3704,7 @@ class SessionTurnManager:
                 settled_by="pre_write_failure",
                 evidence_kind="dispatch_preparation_failed",
             )
+            release_lifecycle_admission_if_owned()
             return False
         try:
             await self._run(
@@ -3616,7 +3717,11 @@ class SessionTurnManager:
                 durable_preallocated=True,
             )
             return True
+        except asyncio.CancelledError:
+            release_lifecycle_admission_if_owned()
+            raise
         except Exception:
+            release_lifecycle_admission_if_owned()
             logger.exception("durable native start became ambiguous for Turn=%s", turn_id)
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
@@ -6302,6 +6407,18 @@ class SessionTurnManager:
                         )
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
+        lifecycle_admission = context.platform_specific.get(
+            TURN_LIFECYCLE_ADMISSION_KEY
+        )
+        if lifecycle_admission is not None:
+            def release_unclaimed_admission(_task: asyncio.Task[Any]) -> None:
+                payload = context.platform_specific or {}
+                if payload.get(TURN_LIFECYCLE_ADMISSION_KEY) is not lifecycle_admission:
+                    return
+                payload.pop(TURN_LIFECYCLE_ADMISSION_KEY, None)
+                lifecycle_admission.release()
+
+            task.add_done_callback(release_unclaimed_admission)
         if isinstance(session_id, str) and session_id:
             self.in_flight[session_id] = Turn(
                 task=task,

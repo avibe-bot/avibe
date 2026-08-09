@@ -60,9 +60,9 @@ const entry = (memcellId: string, preview = memcellId): MemoryLogEntry => ({
 });
 
 const sections = {
-  everos: { status: 'available' as const },
-  capture: { status: 'available' as const },
-  calls: { status: 'available' as const },
+  everos: { status: 'available' as const, observed_at: '2026-08-08T12:00:00Z' },
+  capture: { status: 'available' as const, observed_at: '2026-08-08T12:00:00Z' },
+  calls: { status: 'available' as const, observed_at: '2026-08-08T12:00:00Z' },
 };
 
 const listResult = (entries: MemoryLogEntry[], nextCursor: string | null = null): MemoryLogListResult => ({
@@ -385,7 +385,7 @@ describe('Memory Log bounded helpers and static states', () => {
         entries={[entry('a')]}
         sections={{
           ...sections,
-          everos: { status: 'partial', reason: 'runs_missing' },
+          everos: { status: 'partial', observed_at: '2026-08-08T11:00:00Z', reason: 'runs_missing' },
           capture: { status: 'stale', observed_at: '2026-08-08T11:00:00Z', reason: 'busy' },
         }}
         loading={false}

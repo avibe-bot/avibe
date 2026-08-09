@@ -141,11 +141,14 @@ class MemoryInsightReader:
             capture_available=capture_section["status"] == "available",
             runs_available=runs_section["status"] == "available",
         )
-        sections = {
-            "everos": _combine_everos_section(everos_section, runs_section),
-            "capture": capture_section,
-            "calls": call_section,
-        }
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(everos_section, runs_section),
+                "capture": capture_section,
+                "calls": call_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
         if memcells is None:
             return {
                 "status": "ok",
@@ -206,11 +209,14 @@ class MemoryInsightReader:
             runs_available=runs_section["status"] == "available",
         )
 
-        sections = {
-            "everos": _combine_everos_section(everos_section, runs_section),
-            "capture": capture_section,
-            "calls": call_section,
-        }
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(everos_section, runs_section),
+                "capture": capture_section,
+                "calls": call_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
         if memcells is None:
             return {
                 "status": "ok",
@@ -289,11 +295,14 @@ class MemoryInsightReader:
                 return {"status": "not_found"}
             return {
                 "status": "not_found",
-                "sections": {
-                    "everos": everos_section,
-                    "capture": _source_status(self._paths.capture_db_path),
-                    "calls": _source_status(self._paths.call_log_db_path),
-                },
+                "sections": _observed_sections(
+                    {
+                        "everos": everos_section,
+                        "capture": _source_status(self._paths.capture_db_path),
+                        "calls": _source_status(self._paths.call_log_db_path),
+                    },
+                    observed_at=_utc_observed_at(),
+                ),
             }
         queues, capture_section = self._read_detail_capture_rows(
             row,
@@ -350,11 +359,14 @@ class MemoryInsightReader:
             "omitted_call_count": max(0, owned_call_count - len(selected_calls)),
             "omitted_step_count": max(0, owned_run_count - len(selected_runs)),
             "current_state": current_state,
-            "sections": {
-                "everos": _combine_everos_section(everos_section, runs_section),
-                "capture": capture_section,
-                "calls": call_section,
-            },
+            "sections": _observed_sections(
+                {
+                    "everos": _combine_everos_section(everos_section, runs_section),
+                    "capture": capture_section,
+                    "calls": call_section,
+                },
+                observed_at=_utc_observed_at(),
+            ),
         }
         if _encoded_size(result) > _MAX_RESPONSE_BYTES:
             raise AssertionError("memory insight detail exceeded its fixed response budget")
@@ -1224,6 +1236,32 @@ def _combine_everos_section(
     if runs["status"] != "available":
         return {"status": "partial", "reason": f"runs_{runs['reason']}"}
     return {"status": "available"}
+
+
+def _observed_sections(
+    sections: dict[str, dict[str, str]],
+    *,
+    observed_at: str,
+) -> dict[str, dict[str, str | None]]:
+    return {
+        name: {
+            **section,
+            "observed_at": (
+                observed_at
+                if section["status"] in {"available", "partial"}
+                else None
+            ),
+        }
+        for name, section in sections.items()
+    }
+
+
+def _utc_observed_at() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:

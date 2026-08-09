@@ -462,16 +462,34 @@ class MemoryStore:
     def resolve_current_session_scope(self, session_id: str) -> tuple[str, str] | None:
         """Recover one unambiguous current-epoch scope for a raw session ID.
 
+        Callers that own a terminal lifecycle transition must use
+        :meth:`resolve_current_session_scopes` so a raw Workbench session that
+        changed projects cannot silently drop an older scope.
+        """
+
+        scopes = self.resolve_current_session_scopes(session_id)
+        return scopes[0] if scopes is not None and len(scopes) == 1 else None
+
+    def resolve_current_session_scopes(
+        self,
+        session_id: str,
+    ) -> tuple[tuple[str, str], ...] | None:
+        """Recover every trusted current-epoch scope for a raw session ID.
+
         Raw session IDs are never persisted.  Recompute each durable canonical
         reference with the store-owned key so only exact capture state can
-        authorize recovery after a controller restart.
+        authorize recovery after a controller restart.  ``None`` means the
+        durable identity set cannot be trusted; an empty tuple means no exact
+        match exists.
         """
 
         if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
-            return None
+            return ()
         with self._connection() as conn:
             meta = self._meta_in_connection(conn)
-            if meta is None or meta.clear_in_progress:
+            if meta is None:
+                return ()
+            if meta.clear_in_progress:
                 return None
             rows = conn.execute(
                 """
@@ -503,9 +521,7 @@ class MemoryStore:
             )
             if hmac.compare_digest(ref.session_id, expected_session_id):
                 matches.add((ref.principal_id, ref.project_ref))
-                if len(matches) > 1:
-                    return None
-        return next(iter(matches)) if matches else None
+        return tuple(sorted(matches))
 
     def get_meta(self) -> MemoryMeta | None:
         """Return the metadata row without creating Memory state."""

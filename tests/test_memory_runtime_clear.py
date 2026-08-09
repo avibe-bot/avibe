@@ -139,8 +139,10 @@ async def test_processing_record_does_not_compact_queue_during_clear_snapshot(
     )
     clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
     assert await asyncio.to_thread(snapshot_copied.wait, 1)
-    runtime._recorder_health = {"state": "degraded", "reason": "call_log_corrupt"}
-    runtime._recorder_health_observed_at = "2026-01-01T00:00:00.000Z"
+    runtime._observe_recorder_health(
+        {"state": "degraded", "reason": "call_log_corrupt"},
+        observed_at="2026-01-01T00:00:00.000Z",
+    )
     processing_record = await asyncio.wait_for(runtime.failure_log_payload(), 1)
     compacted_during_snapshot = compaction_entered.is_set()
     release_snapshot.set()
@@ -1435,7 +1437,7 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
         "state": "disabled",
     }
     assert await asyncio.to_thread(entered.wait, 1)
-    assert runtime._maintenance_open() is True
+    assert runtime._maintenance_open() is False
 
     closing = asyncio.create_task(runtime.close())
     await asyncio.sleep(0)
@@ -1443,6 +1445,55 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
     release.set()
     await closing
     assert runtime._backup_stage_reconcile_task is None
+
+
+async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    manager = runtime._backup_manager
+    assert manager is not None
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_reconcile() -> tuple[str, ...]:
+        entered.set()
+        assert release.wait(2)
+        return ()
+
+    monkeypatch.setattr(manager, "reconcile_unpublished_backup_stages", blocking_reconcile)
+    cleanup = asyncio.create_task(runtime._run_backup_stage_reconcile())
+    assert await asyncio.to_thread(entered.wait, 1)
+    assert runtime._reconcile_lock.locked()
+    assert runtime.module._lifecycle_lock.locked()
+    assert runtime.module._root_lifecycle_lock().locked()
+
+    capturing = asyncio.create_task(
+        runtime.module.capture(
+            CaptureRequest(
+                source_message_id="during-backup-stage-cleanup",
+                session_id="session",
+                principal_id=PRINCIPAL,
+                project_id=PROJECT,
+                provenance="user_input",
+                text="must be captured after cleanup",
+                occurred_at_ms=1,
+            )
+        )
+    )
+    await asyncio.sleep(0)
+    completed_during_cleanup = capturing.done()
+    release.set()
+
+    await cleanup
+    assert completed_during_cleanup is False
+    assert await capturing == CaptureAccepted()
+    assert [row.payload_text for row in runtime._store.list_queue_rows()] == [
+        "must be captured after cleanup"
+    ]
+    await runtime.close()
 
 
 async def test_runtime_backup_restore_round_trips_queue_state(

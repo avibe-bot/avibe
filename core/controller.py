@@ -1745,32 +1745,50 @@ class Controller:
                 raise cancellation
             return result
 
-        scope = self.memory_scope_for_cli_session(raw_session_id)
-        runtime = getattr(self, "memory_runtime", None)
-        if scope is None:
-            resolve = getattr(runtime, "resolve_current_session_scope", None)
-            if callable(resolve):
-                scope = await resolve(raw_session_id)
-        if scope is None:
-            return await archive_operation()
-        if (
-            not isinstance(scope, tuple)
-            or len(scope) != 2
-            or not is_principal_id(scope[0])
-            or not is_project_id(scope[1])
-        ):
-            raise RuntimeError("invalid canonical Memory session scope")
+        async def run_memory_lifecycle() -> dict[str, Any]:
+            live_scope = self.memory_scope_for_cli_session(raw_session_id)
+            runtime = getattr(self, "memory_runtime", None)
+            resolve_scopes = getattr(runtime, "resolve_current_session_scopes", None)
+            if not callable(resolve_scopes):
+                raise RuntimeError("Memory session scope recovery is unavailable")
+            durable_scopes = await resolve_scopes(raw_session_id)
+            if durable_scopes is None:
+                raise RuntimeError("Memory session scopes could not be recovered safely")
 
-        run_lifecycle = getattr(runtime, "run_session_lifecycle", None)
-        if not callable(run_lifecycle):
-            raise RuntimeError("Memory session lifecycle is unavailable")
-        return await run_lifecycle(
-            principal_id=scope[0],
-            project_id=scope[1],
-            raw_session_id=raw_session_id,
-            operation=archive_operation,
-            deadline_seconds=deadline_seconds,
-        )
+            scopes = set(durable_scopes)
+            if live_scope is not None:
+                scopes.add(live_scope)
+            if not scopes:
+                return await archive_operation()
+            for scope in scopes:
+                if (
+                    not isinstance(scope, tuple)
+                    or len(scope) != 2
+                    or not is_principal_id(scope[0])
+                    or not is_project_id(scope[1])
+                ):
+                    raise RuntimeError("invalid canonical Memory session scope")
+            canonical_scopes = tuple(sorted(scopes))
+
+            run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
+            if not callable(run_lifecycle):
+                raise RuntimeError("Memory session lifecycle is unavailable")
+            return await run_lifecycle(
+                scopes=canonical_scopes,
+                raw_session_id=raw_session_id,
+                operation=archive_operation,
+                deadline_seconds=deadline_seconds,
+            )
+
+        turn_manager = getattr(self, "session_turns", None)
+        turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
+        if callable(turn_lifecycle):
+            return await turn_lifecycle(
+                raw_session_id,
+                run_memory_lifecycle,
+                deadline_seconds=deadline_seconds,
+            )
+        return await run_memory_lifecycle()
 
     async def _final_flush_memory_scope(
         self,

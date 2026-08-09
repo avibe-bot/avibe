@@ -54,7 +54,7 @@ from core.memory.process import (
     SidecarOwnership,
     sidecar_record_path,
 )
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, is_principal_id, is_project_id
 from core.memory.snapshot import MemorySnapshot, MemorySnapshotManager
 from core.memory.types import (
     MemoryItems,
@@ -883,6 +883,19 @@ class MemoryRuntime:
             raw_session_id,
         )
 
+    async def resolve_current_session_scopes(
+        self,
+        raw_session_id: str,
+    ) -> tuple[tuple[str, str], ...] | None:
+        """Recover all trusted capture scopes for a terminal session transition."""
+
+        if not self.available:
+            return None
+        return await asyncio.to_thread(
+            self._store.resolve_current_session_scopes,
+            raw_session_id,
+        )
+
     async def final_flush(
         self,
         *,
@@ -957,6 +970,73 @@ class MemoryRuntime:
             return await operation()
         finally:
             admission_lock.release()
+
+    async def run_session_scopes_lifecycle(
+        self,
+        *,
+        scopes: tuple[tuple[str, str], ...],
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
+        deadline_seconds: float = 5.0,
+    ) -> _SessionLifecycleResult:
+        """Flush all session scopes and run one transition under every fence."""
+
+        canonical_scopes = tuple(sorted(set(scopes)))
+        if (
+            not canonical_scopes
+            or not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or any(
+                not is_principal_id(principal_id) or not is_project_id(project_id)
+                for principal_id, project_id in canonical_scopes
+            )
+        ):
+            raise ValueError("invalid canonical Memory session scopes")
+        if not self.available or not self._config.enabled or self._maintenance_open():
+            raise MemorySessionLifecycleBusyError("memory session lifecycle is unavailable")
+
+        timeout = _final_flush_timeout(deadline_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        locks = [
+            self.module._capture_admission_lock(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=raw_session_id,
+            )
+            for principal_id, project_id in canonical_scopes
+        ]
+        acquired: list[asyncio.Lock] = []
+        try:
+            for admission_lock in locks:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
+                acquired.append(admission_lock)
+        except asyncio.TimeoutError as error:
+            for admission_lock in reversed(acquired):
+                admission_lock.release()
+            raise MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ) from error
+        except asyncio.CancelledError:
+            for admission_lock in reversed(acquired):
+                admission_lock.release()
+            raise
+
+        try:
+            for principal_id, project_id in canonical_scopes:
+                await self._final_flush_under_admission(
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    raw_session_id=raw_session_id,
+                    deadline=deadline,
+                )
+            return await operation()
+        finally:
+            for admission_lock in reversed(acquired):
+                admission_lock.release()
 
     async def _final_flush_under_admission(
         self,
@@ -1714,7 +1794,7 @@ class MemoryRuntime:
         task.add_done_callback(clear_reconcile)
 
     async def _run_backup_stage_reconcile(self) -> None:
-        """Remove abandoned unpublished stages under the backup fence."""
+        """Remove abandoned unpublished stages under lifecycle serialization."""
 
         # Both jobs reopen the clear journal, whose transient SQLite sidecars
         # must not be inspected while the preceding terminal GC is settling.
@@ -1729,15 +1809,9 @@ class MemoryRuntime:
                 async with self.module._root_lifecycle_lock():
                     journal.assert_backup_allowed()
                     restore_journal.assert_idle()
-                    self._backup_active = True
-                    self.module._clear_active = True
-                    try:
-                        await self._run_maintenance_io(
-                            manager.reconcile_unpublished_backup_stages
-                        )
-                    finally:
-                        self._backup_active = False
-                        self.module._clear_active = False
+                    await self._run_maintenance_io(
+                        manager.reconcile_unpublished_backup_stages
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:

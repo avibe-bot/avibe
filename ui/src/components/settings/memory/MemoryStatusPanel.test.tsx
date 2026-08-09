@@ -85,6 +85,21 @@ describe('MemoryStatusPanel', () => {
     expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
   });
 
+  it('does not present an unobserved source as available', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        logSections={{
+          ...baseProps.logSections!,
+          everos: { status: 'available', observed_at: null },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('memory.processingRecord.sourceState.unknown')).toBeTruthy();
+    expect(screen.getAllByText('memory.processingRecord.sourceNotObserved').length).toBeGreaterThan(0);
+  });
+
   it('preserves a future runtime health status as diagnostic fallback text', () => {
     render(
       <MemoryStatusPanel

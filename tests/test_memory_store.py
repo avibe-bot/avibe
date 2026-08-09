@@ -323,6 +323,28 @@ def test_session_scope_recovery_fails_closed_when_raw_session_is_ambiguous(tmp_p
     )
 
     assert store.resolve_current_session_scope("shared-session") is None
+    assert store.resolve_current_session_scopes("shared-session") == (
+        (
+            "u-11111111111111111111111111111111",
+            PROJECT,
+        ),
+        (
+            "u-22222222222222222222222222222222",
+            "p-33333333333333333333333333333333",
+        ),
+    )
+
+    reopened = MemoryStore(store.path)
+    assert reopened.resolve_current_session_scopes("shared-session") == (
+        (
+            "u-11111111111111111111111111111111",
+            PROJECT,
+        ),
+        (
+            "u-22222222222222222222222222222222",
+            "p-33333333333333333333333333333333",
+        ),
+    )
 
 
 def test_provider_session_ref_preserves_the_canonical_identity(tmp_path: Path) -> None:

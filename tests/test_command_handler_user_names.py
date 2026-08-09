@@ -387,6 +387,48 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_new_waits_for_an_admitted_turn_capture_before_reset(self):
+        controller = _StubController({"display_name": "Alex"})
+        turn_lock = asyncio.Lock()
+        reset_entered = asyncio.Event()
+
+        class _TurnManager:
+            async def run_session_lifecycle(
+                self,
+                raw_session_id,
+                operation,
+                *,
+                deadline_seconds,
+            ):
+                self_outer.assertEqual(raw_session_id, "wechat_wx-chat")
+                self_outer.assertEqual(deadline_seconds, 5.0)
+                async with turn_lock:
+                    return await operation()
+
+        self_outer = self
+        controller.session_turns = _TurnManager()
+
+        async def _clear_sessions(_session_key):
+            reset_entered.set()
+            return {}
+
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        await turn_lock.acquire()
+        new_task = asyncio.create_task(handler.handle_new(context))
+        await asyncio.sleep(0)
+        self.assertFalse(reset_entered.is_set())
+
+        turn_lock.release()
+        await new_task
+        self.assertTrue(reset_entered.is_set())
+
     async def _run_new_with_memory_lifecycle_error(
         self,
         error: Exception,

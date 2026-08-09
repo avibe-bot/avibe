@@ -51,6 +51,40 @@ const renderAnomaly = (language: 'en' | 'zh', errorCode: string) => {
   );
 };
 
+const renderUnobservedSource = (language: 'en' | 'zh') => {
+  const i18n = createInstance();
+  void i18n.use(initReactI18next).init({
+    lng: language,
+    fallbackLng: 'en',
+    resources: { en: { translation: en }, zh: { translation: zh } },
+    interpolation: { escapeValue: false },
+  });
+
+  render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryStatusPanel
+        status={null}
+        failures={[]}
+        recovery={null}
+        logSections={{
+          everos: { status: 'available', observed_at: null },
+          capture: { status: 'unavailable', observed_at: null, reason: 'missing' },
+          calls: { status: 'unavailable', observed_at: null, reason: 'missing' },
+        }}
+        statusLoading={false}
+        failuresLoading={false}
+        statusError={null}
+        failuresError={null}
+        refreshPending={false}
+        recoveryAction={null}
+        onRefresh={vi.fn()}
+        onResumeClear={vi.fn()}
+        onAbortClear={vi.fn()}
+      />
+    </I18nextProvider>,
+  );
+};
+
 afterEach(cleanup);
 
 describe('MemoryStatusPanel anomaly error localization', () => {
@@ -62,5 +96,15 @@ describe('MemoryStatusPanel anomaly error localization', () => {
     renderAnomaly(language, errorCode);
 
     expect(screen.getByText(expected)).toBeTruthy();
+  });
+
+  it.each([
+    ['en', en.memory.processingRecord.sourceState.unknown, en.memory.processingRecord.sourceNotObserved],
+    ['zh', zh.memory.processingRecord.sourceState.unknown, zh.memory.processingRecord.sourceNotObserved],
+  ] as const)('localizes unobserved source evidence in %s', (language, state, timestamp) => {
+    renderUnobservedSource(language);
+
+    expect(screen.getAllByText(state).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(timestamp).length).toBeGreaterThan(0);
   });
 });

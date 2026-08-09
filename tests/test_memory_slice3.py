@@ -58,7 +58,9 @@ class _Runtime:
         self.session_lifecycle_calls: list[dict[str, object]] = []
         self.session_lifecycle_error: Exception | None = None
         self.recovered_scope: tuple[str, str] | None = None
+        self.recovered_scopes: tuple[tuple[str, str], ...] = ()
         self.scope_recovery_calls: list[str] = []
+        self.scopes_recovery_calls: list[str] = []
 
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
@@ -72,6 +74,13 @@ class _Runtime:
         self.scope_recovery_calls.append(raw_session_id)
         return self.recovered_scope
 
+    async def resolve_current_session_scopes(
+        self,
+        raw_session_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        self.scopes_recovery_calls.append(raw_session_id)
+        return self.recovered_scopes
+
     async def final_flush(self, **kwargs) -> bool:
         self.final_flush_calls.append(kwargs)
         if self.final_flush_error is not None:
@@ -79,6 +88,13 @@ class _Runtime:
         return self.final_flush_result
 
     async def run_session_lifecycle(self, **kwargs):
+        operation = kwargs.pop("operation")
+        self.session_lifecycle_calls.append(kwargs)
+        if self.session_lifecycle_error is not None:
+            raise self.session_lifecycle_error
+        return await operation()
+
+    async def run_session_scopes_lifecycle(self, **kwargs):
         operation = kwargs.pop("operation")
         self.session_lifecycle_calls.append(kwargs)
         if self.session_lifecycle_error is not None:
@@ -452,6 +468,7 @@ def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
 
     principal_id = "u-" + ("2" * 32)
     admission_lock = asyncio.Lock()
+    capture_may_enter = asyncio.Event()
     capture_entered = asyncio.Event()
     release_capture = asyncio.Event()
     flush_entered = asyncio.Event()
@@ -459,7 +476,7 @@ def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
     archive_lock_states: list[bool] = []
 
     class LifecycleRuntime(_Runtime):
-        async def run_session_lifecycle(self, **kwargs):
+        async def run_session_scopes_lifecycle(self, **kwargs):
             operation = kwargs.pop("operation")
             self.session_lifecycle_calls.append(kwargs)
             async with admission_lock:
@@ -469,6 +486,9 @@ def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
 
     controller = _controller()
     controller.memory_runtime = LifecycleRuntime(controller.memory_module)
+    from core.session_turns import SessionTurnManager
+
+    controller.session_turns = SessionTurnManager()
     controller._memory_scopes_by_session = {
         session_id: (principal_id, PROJECT),
     }
@@ -483,13 +503,18 @@ def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
     monkeypatch.setattr(sessions_service, "archive_session", archive_under_test)
 
     async def run() -> None:
+        turn_admission = await controller.session_turns.acquire_lifecycle_admission(
+            session_id
+        )
+
         async def old_capture() -> None:
+            await capture_may_enter.wait()
             async with admission_lock:
                 capture_entered.set()
                 await release_capture.wait()
+            turn_admission.release()
 
         capture = asyncio.create_task(old_capture())
-        await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
         archive = asyncio.create_task(
             controller.archive_memory_cli_session(
                 session_id,
@@ -501,6 +526,12 @@ def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
         with engine.connect() as conn:
             assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
         assert not archive.done()
+        assert not flush_entered.is_set()
+
+        # This turn was admitted before archive but had not reached capture yet.
+        # Archive must not take Memory admission ahead of it.
+        capture_may_enter.set()
+        await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
         assert not flush_entered.is_set()
 
         release_capture.set()
@@ -518,8 +549,7 @@ def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
         assert archive_lock_states == [True]
         assert controller.memory_runtime.session_lifecycle_calls == [
             {
-                "principal_id": principal_id,
-                "project_id": PROJECT,
+                "scopes": ((principal_id, PROJECT),),
                 "raw_session_id": session_id,
                 "deadline_seconds": 2.0,
             }
@@ -586,6 +616,67 @@ def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
 
     assert controller.memory_runtime.session_lifecycle_calls == []
     assert controller.memory_runtime.scope_recovery_calls == []
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_archive_memory_cli_session_flushes_every_cwd_scope_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    restarted: bool,
+) -> None:
+    from storage import workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive every Memory project",
+        )["id"]
+
+    first_scope = (
+        "u-11111111111111111111111111111111",
+        "p-11111111111111111111111111111111",
+    )
+    second_scope = (
+        "u-22222222222222222222222222222222",
+        "p-22222222222222222222222222222222",
+    )
+    controller = _controller()
+    controller._memory_scopes_by_session = (
+        {} if restarted else {session_id: second_scope}
+    )
+    controller._memory_cli_facts_by_session = {}
+    controller.memory_runtime.recovered_scopes = (second_scope, first_scope)
+
+    try:
+        result = asyncio.run(
+            controller.archive_memory_cli_session(
+                session_id,
+                deadline_seconds=3.0,
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert result["status"] == "archived"
+    assert controller.memory_runtime.scopes_recovery_calls == [session_id]
+    assert controller.memory_runtime.session_lifecycle_calls == [
+        {
+            "scopes": (first_scope, second_scope),
+            "raw_session_id": session_id,
+            "deadline_seconds": 3.0,
+        }
+    ]
 
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:

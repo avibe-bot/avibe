@@ -3719,6 +3719,7 @@
         "unavailable": "不可用"
       },
       "sourceReason": "原因：{{reason}}",
+      "sourceNotObserved": "未观测",
       "sources": {
         "title": "来源可用性",
         "description": "每个来源独立观测；单个来源不可用不代表运行时存在全局状态。"

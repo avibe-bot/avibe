@@ -1869,6 +1869,127 @@ def test_session_lifecycle_fences_capture_through_reset(
     asyncio.run(run())
 
 
+def test_multi_scope_session_lifecycle_holds_every_fence_through_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    first_scope = (
+        "u-11111111111111111111111111111111",
+        "p-11111111111111111111111111111111",
+    )
+    second_scope = (
+        "u-22222222222222222222222222222222",
+        "p-22222222222222222222222222222222",
+    )
+    session_id = "multi-scope-lifecycle-session"
+    locks = [
+        runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        for principal_id, project_id in (first_scope, second_scope)
+    ]
+    flushes: list[tuple[str, str]] = []
+
+    async def flush_under_fence(*, principal_id, project_id, **_kwargs) -> bool:
+        assert all(lock.locked() for lock in locks)
+        flushes.append((principal_id, project_id))
+        return True
+
+    monkeypatch.setattr(runtime, "_final_flush_under_admission", flush_under_fence)
+
+    async def run() -> None:
+        async def archive_session() -> str:
+            assert all(lock.locked() for lock in locks)
+            return "archived"
+
+        assert await runtime.run_session_scopes_lifecycle(
+            scopes=(second_scope, first_scope, second_scope),
+            raw_session_id=session_id,
+            operation=archive_session,
+            deadline_seconds=2.0,
+        ) == "archived"
+        assert flushes == [first_scope, second_scope]
+        assert all(not lock.locked() for lock in locks)
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    scopes = (
+        (
+            "u-11111111111111111111111111111111",
+            "p-11111111111111111111111111111111",
+        ),
+        (
+            "u-22222222222222222222222222222222",
+            "p-22222222222222222222222222222222",
+        ),
+    )
+    session_id = "cancelled-multi-scope-lifecycle"
+
+    async def run() -> None:
+        first_lock, second_lock = [
+            runtime.module._capture_admission_lock(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
+            for principal_id, project_id in scopes
+        ]
+        await second_lock.acquire()
+
+        async def archive_session() -> None:
+            raise AssertionError("archive must not run before every fence is held")
+
+        lifecycle = asyncio.create_task(
+            runtime.run_session_scopes_lifecycle(
+                scopes=scopes,
+                raw_session_id=session_id,
+                operation=archive_session,
+                deadline_seconds=2.0,
+            )
+        )
+        for _ in range(20):
+            if first_lock.locked():
+                break
+            await asyncio.sleep(0)
+        assert first_lock.locked()
+        # Let ``wait_for`` return the acquired first lock and enter the wait for
+        # the already-held second lock before cancelling the outer lifecycle.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not lifecycle.done()
+
+        lifecycle.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifecycle
+        assert not first_lock.locked()
+        second_lock.release()
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
