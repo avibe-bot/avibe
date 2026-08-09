@@ -447,6 +447,15 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD"}),
             r"^/api/harness/counts$",
         ),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/memory/(?:settings|status|failures|profile|log|log/entry)$",
+        ),
+        (frozenset({"PATCH"}), r"^/api/memory/settings$"),
+        (
+            frozenset({"POST"}),
+            r"^/api/memory/(?:search|runtime/restart|clear)$",
+        ),
     )
 )
 

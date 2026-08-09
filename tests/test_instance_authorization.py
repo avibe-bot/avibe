@@ -169,6 +169,8 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
         ("GET", "/api/bind-codes/future-capability"),
         ("GET", "/api/future-owner-capability"),
         ("POST", "/api/future-owner-capability"),
+        ("GET", "/api/memory/future-capability"),
+        ("POST", "/api/memory/future-capability"),
     ],
 )
 def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_only(
@@ -204,6 +206,12 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("POST", "/api/show-pages/ses-1/rotate-share", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/share-id", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/ensure", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
+        ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_ALLOWED),
+        ("PATCH", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/search", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/clear", REMOTE_HTTP_ALLOWED),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),

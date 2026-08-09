@@ -16,7 +16,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
 
@@ -58,6 +58,10 @@ def _renewable_remote_session_cookie(
         "instance_id": config.remote_access.vibe_cloud.instance_id,
         "iat": expires_at - remote_access.SESSION_TTL_SECONDS,
         "exp": expires_at,
+        "claims_issued_at": int(time.time()),
+        "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+        "vibe_instance_role": "owner",
+        "vibe_instance_access_source": "owner",
     }
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = remote_access._session_signature(
@@ -139,7 +143,7 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     remote_headers = {"Origin": "https://alex.avibe.bot"}
@@ -180,7 +184,7 @@ def test_memory_diagnostics_patch_is_rejected_for_remote_ui(monkeypatch, tmp_pat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     calls: list[bool] = []
@@ -235,7 +239,7 @@ def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_pat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
