@@ -205,7 +205,7 @@ export const ChatPage: React.FC = () => {
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
-  const { focusedId: foregroundAppWindowId } = useWindowManager();
+  const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
   const isDesktop = useIsDesktop();
   const [pageActive, setPageActive] = useState(() => readPageActivity());
   useEffect(() => {
@@ -2490,6 +2490,8 @@ export const ChatPage: React.FC = () => {
       <div
         ref={chatSurfaceRef}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
+        onPointerDown={focusCanvas}
+        onFocusCapture={focusCanvas}
         {...fileDropHandlers}
       >
         {/* Drag-and-drop overlay: shown while files hover anywhere over the chat

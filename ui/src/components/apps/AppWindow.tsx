@@ -231,15 +231,15 @@ export const AppWindow: React.FC<{
       inert={win.minimized}
       tabIndex={-1}
       onPointerDown={(e) => {
-        wm.focus(win.id);
         // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus from
-        // an inner control/editor/terminal the click lands in (xterm's screen isn't a
-        // textarea, so it needs an explicit exemption or terminal input would break).
+        // an inner control/editor/terminal the click lands in. FocusCapture below
+        // then gives the same window foreground ownership and raises its z-order.
         const tgt = e.target as HTMLElement;
         if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor,.xterm')) {
           rootRef.current?.focus({ preventScroll: true });
         }
       }}
+      onFocusCapture={() => wm.focus(win.id)}
       onAnimationEnd={(e) => {
         // Only the root's own close animation drives the unmount (ignore the
         // entrance, and any child animation bubbling up). Minimize doesn't animate
