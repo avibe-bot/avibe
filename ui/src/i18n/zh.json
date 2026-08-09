@@ -3635,6 +3635,7 @@
         "errorCode": "错误代码",
         "attempts": "尝试次数",
         "kind": {
+          "boot_recovery": "启动恢复",
           "delivery_abandoned": "投递已放弃",
           "distillation_rejected": "提炼被拒绝",
           "recorder_degraded": "记录器已降级",

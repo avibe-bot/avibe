@@ -1818,6 +1818,7 @@ export type MemoryFailureLogResult =
 export type MemoryMaintenance = {
   status: 'ok';
   data_exists: boolean;
+  can_clear: boolean;
   clear_recovery: MemoryClearRecovery | null;
 };
 

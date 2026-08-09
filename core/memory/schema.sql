@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS memory_flush_settlements (
     confirmed_watermark_ms INTEGER,
     observed_at TEXT NOT NULL,
     error_code TEXT,
+    recovery_origin TEXT CHECK (recovery_origin IS NULL OR recovery_origin = 'boot'),
     UNIQUE (
         provider_session_ref, epoch, generation, operation_kind, operation_token
     )

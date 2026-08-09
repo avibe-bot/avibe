@@ -138,7 +138,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: false, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: false, can_clear: true, clear_recovery: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -158,6 +158,29 @@ describe('MemorySettingsPanel', () => {
     await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
       processing: { embedding: { base_url: 'https://new-embedding.example.test/v1' } },
     }));
+  });
+
+  it('disables Clear when authoritative maintenance state refuses it', async () => {
+    const onClearAll = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: false, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={onClearAll}
+        clearing={false}
+      />,
+    );
+
+    const clear = screen.getByRole('button', { name: 'memory.clear.button' }) as HTMLButtonElement;
+    expect(clear.disabled).toBe(true);
+    await user.click(clear);
+    expect(onClearAll).not.toHaveBeenCalled();
   });
 
 });

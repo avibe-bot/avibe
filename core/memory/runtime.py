@@ -704,23 +704,28 @@ class MemoryRuntime:
             return {
                 "status": "ok",
                 "data_exists": True,
+                "can_clear": False,
                 "clear_recovery": self._clear_recovery_payload(),
             }
         try:
-            meta, history = await asyncio.gather(
+            meta, history, manual_required = await asyncio.gather(
                 asyncio.to_thread(self._store.get_meta),
                 asyncio.to_thread(self._store.has_provider_data_history),
+                asyncio.to_thread(self._store.has_manual_required_fence),
             )
         except Exception:
             return {
                 "status": "ok",
                 "data_exists": True,
+                "can_clear": False,
                 "clear_recovery": self._clear_recovery_payload(),
             }
+        recovery = self._clear_recovery_payload()
         return {
             "status": "ok",
             "data_exists": bool(history or (meta is not None and meta.last_success_at)),
-            "clear_recovery": self._clear_recovery_payload(),
+            "can_clear": not manual_required and recovery is None,
+            "clear_recovery": recovery,
         }
 
     def principal_for_user_key(self, user_key: str) -> str:
@@ -949,25 +954,47 @@ class MemoryRuntime:
                 operation: ClearOperation | None = None
                 self.module._clear_active = True
                 try:
-                    meta = await self._run_maintenance_io(self._store.ensure_meta)
-                    operation = await self._run_maintenance_io(
-                        lambda: journal.start(
-                            operator_ref=operator_ref,
-                            pre_epoch=meta.epoch,
-                            target_epoch=meta.epoch + 1,
+                    try:
+                        await self._pause_clear_claims()
+                        manual_required = await self._run_maintenance_io(
+                            self._store.has_manual_required_fence
                         )
-                    )
-                    await self._run_maintenance_io(self._store.begin_clear_fence)
-                    operation = await self._prepare_clear(operation)
-                    operation = await self._delete_clear_surfaces(operation)
-                except BaseException as error:
-                    current = await self._mark_clear_recovery(operation)
-                    if current is not None and current.state == "completed":
+                    except BaseException as error:
                         self.module._clear_active = False
-                        await self._finish_clear(current)
-                    if isinstance(error, asyncio.CancelledError):
-                        raise
-                    return self._clear_blocked_payload()
+                        self.module._worker.resume_claims()
+                        if isinstance(error, asyncio.CancelledError):
+                            raise
+                        return self._clear_blocked_payload()
+                    if manual_required:
+                        self.module._clear_active = False
+                        self.module._worker.resume_claims()
+                        return self._clear_blocked_payload()
+                    try:
+                        meta = await self._run_maintenance_io(self._store.ensure_meta)
+                        operation = await self._run_maintenance_io(
+                            lambda: journal.start(
+                                operator_ref=operator_ref,
+                                pre_epoch=meta.epoch,
+                                target_epoch=meta.epoch + 1,
+                            )
+                        )
+                        await self._run_maintenance_io(self._store.begin_clear_fence)
+                        operation = await self._prepare_clear(
+                            operation,
+                            claims_already_paused=True,
+                        )
+                        operation = await self._delete_clear_surfaces(operation)
+                    except BaseException as error:
+                        current = await self._mark_clear_recovery(operation)
+                        if current is not None and current.state == "completed":
+                            self.module._clear_active = False
+                            await self._finish_clear(current)
+                        elif current is None:
+                            self.module._clear_active = False
+                            self.module._worker.resume_claims()
+                        if isinstance(error, asyncio.CancelledError):
+                            raise
+                        return self._clear_blocked_payload()
                 finally:
                     self.module._clear_active = False
                 if operation is None:
@@ -1068,10 +1095,17 @@ class MemoryRuntime:
                     return self._clear_blocked_payload()
                 return await self._finish_aborted_clear(operation)
 
-    async def _prepare_clear(self, operation: ClearOperation) -> ClearOperation:
+    async def _prepare_clear(
+        self,
+        operation: ClearOperation,
+        *,
+        claims_already_paused: bool = False,
+    ) -> ClearOperation:
         journal = self._require_clear_journal()
         manager = self._require_snapshot_manager()
-        await self._quiesce_for_clear()
+        await self._quiesce_for_clear(
+            claims_already_paused=claims_already_paused,
+        )
         if operation.state == "preparing":
             if operation.snapshot_path is None or operation.manifest_sha256 is None:
                 if operation.resolution == "resume":
@@ -1192,11 +1226,15 @@ class MemoryRuntime:
             )
         )
 
-    async def _quiesce_for_clear(self) -> None:
+    async def _pause_clear_claims(self) -> None:
         if not await self.module._worker.pause_and_wait(
             timeout_seconds=self.module._clear_drain_timeout_seconds
         ):
             raise RuntimeError("Memory worker did not quiesce before clear")
+
+    async def _quiesce_for_clear(self, *, claims_already_paused: bool = False) -> None:
+        if not claims_already_paused:
+            await self._pause_clear_claims()
         await self._stop_worker()
         if self._process is not None:
             await self._process.stop()

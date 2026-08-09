@@ -38,6 +38,7 @@ const SOURCE_BADGE_VARIANT: Record<SourceState, BadgeVariant> = {
 
 const ANOMALY_LABEL_KEYS = {
   kind: {
+    boot_recovery: 'memory.status.failureLog.kind.boot_recovery',
     delivery_abandoned: 'memory.status.failureLog.kind.delivery_abandoned',
     distillation_rejected: 'memory.status.failureLog.kind.distillation_rejected',
     recorder_degraded: 'memory.status.failureLog.kind.recorder_degraded',

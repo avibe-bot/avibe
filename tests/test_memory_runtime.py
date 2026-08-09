@@ -173,6 +173,7 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     assert asyncio.run(runtime.maintenance_payload()) == {
         "status": "ok",
         "data_exists": True,
+        "can_clear": False,
         "clear_recovery": None,
     }
 
@@ -3903,7 +3904,7 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
         if lifecycle == "clear":
-            async def blocked_prepare(_operation):
+            async def blocked_prepare(_operation, **_kwargs):
                 entered.set()
                 await release.wait()
                 raise RuntimeError("injected clear pause")

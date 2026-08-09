@@ -11,6 +11,7 @@ MemoryKind = Literal["profile", "episode", "fact"]
 RecallMode = Literal["auto", "keyword", "vector", "hybrid", "agentic"]
 MemoryContentKind = Literal["image", "audio", "doc", "pdf", "html", "email"]
 MemoryFailureKind = Literal[
+    "boot_recovery",
     "delivery_abandoned",
     "distillation_rejected",
     "recorder_degraded",

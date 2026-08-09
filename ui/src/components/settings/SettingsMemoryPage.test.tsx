@@ -100,7 +100,12 @@ beforeEach(() => {
   });
   api.getMemoryStatus.mockResolvedValue(readyStatus());
   api.getMemoryFailures.mockResolvedValue({ status: 'ok', items: [], recovery: null });
-  api.getMemoryMaintenance.mockResolvedValue({ status: 'ok', data_exists: false, clear_recovery: null });
+  api.getMemoryMaintenance.mockResolvedValue({
+    status: 'ok',
+    data_exists: false,
+    can_clear: true,
+    clear_recovery: null,
+  });
   api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
   api.restartMemoryRuntime.mockResolvedValue({ ok: true, state: 'ready' });
   api.clearMemory.mockResolvedValue({ status: 'completed', operation_id: 'clear-ok', epoch: 1 });
@@ -200,6 +205,7 @@ describe('SettingsMemoryPage Processing Record', () => {
     api.getMemoryMaintenance.mockResolvedValue({
       status: 'ok',
       data_exists: true,
+      can_clear: false,
       clear_recovery: {
         operation_id: 'clear-maintenance',
         state: 'recovery_required',
@@ -246,6 +252,7 @@ describe('SettingsMemoryPage Processing Record', () => {
     ['resume', 'resumeMemoryClear', 'non-success', {
       status: 'ok',
       data_exists: true,
+      can_clear: false,
       clear_recovery: {
         operation_id: 'clear-refreshed',
         state: 'recovery_needed',
@@ -256,6 +263,7 @@ describe('SettingsMemoryPage Processing Record', () => {
     ['abort', 'abortMemoryClear', 'rejection', {
       status: 'ok',
       data_exists: false,
+      can_clear: true,
       clear_recovery: null,
     }],
   ] as const)(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 import threading
 
@@ -9,6 +11,7 @@ import pytest
 from config.v2_config import MemoryConfig
 from core.memory.runtime import MemoryRuntime
 from core.memory.snapshot import MemorySnapshotManager
+from core.memory.store import AmbiguousAdd
 from core.memory.types import CaptureAccepted, CaptureRequest, CaptureSkipped
 
 
@@ -28,6 +31,161 @@ def _enqueue(runtime: MemoryRuntime, source: str) -> None:
         max_provider_timestamp_ms=100,
     )
     assert result.outcome == "accepted"
+
+
+async def test_clear_refuses_manual_required_fence_without_mutating_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    worker = runtime.module._worker
+
+    class RetainedProcess:
+        running = True
+
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    process = RetainedProcess()
+    runtime._process = process
+    _enqueue(runtime, "manual-clear-source")
+    claimed = runtime._store.claim_due(
+        lease_owner="manual-clear-worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert (await runtime.maintenance_payload())["can_clear"] is True
+
+    surface_payloads = {
+        tmp_path / "memory/everos-root/sentinel.json": b'{"provider":"keep"}',
+        tmp_path / "memory/call-log/call-log.db": b"call-log-must-remain",
+        tmp_path / "memory/attachments/bundles/a/00.txt": b"attachment-must-remain",
+    }
+    for path, payload in surface_payloads.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def settlement_evidence() -> list[tuple]:
+        with sqlite3.connect(runtime._store.path) as connection:
+            return connection.execute(
+                """
+                SELECT provider_session_ref, epoch, generation, operation_kind,
+                       operation_token, observation, request_id, error_code
+                FROM memory_flush_settlements
+                ORDER BY rowid
+                """
+            ).fetchall()
+
+    journal = runtime._clear_journal
+    manager = runtime._snapshot_manager
+    assert journal is not None
+    assert manager is not None
+    with sqlite3.connect(journal.database_path) as connection:
+        before_journal_operations = connection.execute(
+            "SELECT COUNT(*) FROM clear_operation"
+        ).fetchone()[0]
+
+    evidence: dict[str, object] = {}
+    events: list[str] = []
+
+    async def settle_while_quiescing(**_kwargs) -> bool:
+        worker.pause_claims()
+        events.append("quiesce")
+        settled = runtime._store.settle(
+            claimed,
+            AmbiguousAdd(add_request_id="manual-clear-request"),
+            lease_owner="manual-clear-worker",
+            now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+        assert settled.state == "manual_required"
+        evidence["meta"] = runtime._store.ensure_meta()
+        evidence["queue"] = runtime._store.list_queue_rows()
+        evidence["session"] = runtime._store.get_session_flush_state(
+            claimed.provider_session_ref
+        )
+        evidence["settlements"] = settlement_evidence()
+        return True
+
+    original_has_manual_required_fence = runtime._store.has_manual_required_fence
+
+    def observed_manual_required_fence() -> bool:
+        events.append("manual-check")
+        return original_has_manual_required_fence()
+
+    resume_calls = 0
+    original_resume_claims = worker.resume_claims
+
+    def counted_resume_claims() -> None:
+        nonlocal resume_calls
+        resume_calls += 1
+        events.append("resume")
+        original_resume_claims()
+
+    stop_worker_calls = 0
+    original_stop_worker = runtime._stop_worker
+
+    async def observed_stop_worker() -> None:
+        nonlocal stop_worker_calls
+        stop_worker_calls += 1
+
+    start_calls: list[str] = []
+    original_start = journal.start
+
+    def observed_start(**kwargs):
+        start_calls.append("start")
+        return original_start(**kwargs)
+
+    monkeypatch.setattr(worker, "pause_and_wait", settle_while_quiescing)
+    monkeypatch.setattr(
+        runtime._store,
+        "has_manual_required_fence",
+        observed_manual_required_fence,
+    )
+    monkeypatch.setattr(worker, "resume_claims", counted_resume_claims)
+    monkeypatch.setattr(runtime, "_stop_worker", observed_stop_worker)
+    monkeypatch.setattr(journal, "start", observed_start)
+
+    result = await runtime.clear(operator_ref="user:owner")
+
+    assert result == {
+        "status": "failed",
+        "error": "memory_clear_failed",
+        "recovery": None,
+    }
+    assert events == ["quiesce", "manual-check", "resume"]
+    assert resume_calls == 1
+    assert stop_worker_calls == 0
+    assert runtime.module._worker is worker
+    assert worker._claims_paused is False
+    assert runtime._process is process
+    assert process.stop_calls == 0
+    assert start_calls == []
+    queue = evidence["queue"]
+    session = evidence["session"]
+    settlements = evidence["settlements"]
+    assert isinstance(queue, tuple) and queue[0].state == "manual_required"
+    assert session is not None and session.state == "manual_required"
+    assert isinstance(settlements, list) and settlements[0][5] == "manual_required"
+    assert runtime._store.ensure_meta() == evidence["meta"]
+    assert runtime._store.list_queue_rows() == queue
+    assert runtime._store.get_session_flush_state(claimed.provider_session_ref) == session
+    assert settlement_evidence() == settlements
+    with sqlite3.connect(journal.database_path) as connection:
+        after_journal_operations = connection.execute(
+            "SELECT COUNT(*) FROM clear_operation"
+        ).fetchone()[0]
+    assert after_journal_operations == before_journal_operations == 0
+    assert journal.get_open_operation() is None
+    assert not manager.snapshot_root.exists()
+    for path, payload in surface_payloads.items():
+        assert path.read_bytes() == payload
+    assert (await runtime.maintenance_payload())["can_clear"] is False
+    monkeypatch.setattr(runtime, "_stop_worker", original_stop_worker)
+    await runtime.close()
 
 
 async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch(

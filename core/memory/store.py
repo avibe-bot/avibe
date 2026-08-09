@@ -896,8 +896,9 @@ class MemoryStore:
                     INSERT OR IGNORE INTO memory_flush_settlements (
                         provider_session_ref, epoch, generation, operation_kind,
                         operation_token, observation, request_id,
-                        confirmed_watermark_ms, observed_at, error_code
-                    ) VALUES (?, ?, ?, 'flush', ?, 'manual_required', NULL, ?, ?, ?)
+                        confirmed_watermark_ms, observed_at, error_code,
+                        recovery_origin
+                    ) VALUES (?, ?, ?, 'flush', ?, 'manual_required', NULL, ?, ?, ?, 'boot')
                     """,
                     (
                         row["provider_session_ref"],
@@ -1948,8 +1949,9 @@ class MemoryStore:
                     INSERT OR IGNORE INTO memory_flush_settlements (
                         provider_session_ref, epoch, generation, operation_kind,
                         operation_token, observation, request_id,
-                        confirmed_watermark_ms, observed_at, error_code
-                    ) VALUES (?, ?, ?, 'add', ?, 'manual_required', NULL, NULL, ?, ?)
+                        confirmed_watermark_ms, observed_at, error_code,
+                        recovery_origin
+                    ) VALUES (?, ?, ?, 'add', ?, 'manual_required', NULL, NULL, ?, ?, 'boot')
                     """,
                     (
                         serialized_ref,
@@ -2070,6 +2072,20 @@ class MemoryStore:
                     SELECT
                         CASE
                             WHEN state = 'dead' THEN 'delivery_abandoned'
+                            WHEN EXISTS (
+                                SELECT 1
+                                FROM memory_flush_settlements AS settlement
+                                WHERE settlement.provider_session_ref =
+                                        capture.provider_session_ref
+                                  AND settlement.epoch = capture.epoch
+                                  AND settlement.generation = capture.generation
+                                  AND settlement.operation_kind = 'add'
+                                  AND settlement.observation = 'manual_required'
+                                  AND settlement.recovery_origin = 'boot'
+                                  AND settlement.operation_token =
+                                      'add:' || capture.source_message_digest || ':' ||
+                                      capture.lease_token
+                            ) THEN 'boot_recovery'
                             ELSE 'result_unknown'
                         END AS kind,
                         state,
@@ -2098,6 +2114,7 @@ class MemoryStore:
 
                     SELECT
                         CASE
+                            WHEN recovery_origin = 'boot' THEN 'boot_recovery'
                             WHEN observation = 'rejected' AND operation_kind = 'flush'
                                 THEN 'distillation_rejected'
                             WHEN observation = 'rejected' THEN 'delivery_abandoned'

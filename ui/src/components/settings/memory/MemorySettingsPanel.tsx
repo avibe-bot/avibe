@@ -163,6 +163,7 @@ export const MemorySettingsPanel: React.FC<{
     ? t('memory.settings.embeddingLocked')
     : maintenanceError ?? (!maintenanceKnown ? t('memory.settings.embeddingStatusPending') : undefined);
   const canClearKeys = !enabledDraft;
+  const canClearMemory = maintenance?.can_clear === true;
 
   // If data_exists transitions to true while the user has an unsaved embedding draft
   // (e.g. they edited it while data_exists was false, then a refreshed maintenance read reports
@@ -281,7 +282,12 @@ export const MemorySettingsPanel: React.FC<{
           {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
           {saving ? t('memory.settings.saving') : t('memory.settings.save')}
         </Button>
-        <Button variant="destructive" size="sm" onClick={onClearAll} disabled={clearing}>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={onClearAll}
+          disabled={clearing || !canClearMemory}
+        >
           <Trash2 className="size-3.5" />
           {t('memory.clear.button')}
         </Button>

@@ -214,6 +214,18 @@ describe('MemoryStatusPanel', () => {
     expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' })).toBeNull();
   });
 
+  it('localizes the boot recovery anomaly kind', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        failures={[{ ...MANUAL_FAILURE, kind: 'boot_recovery' }]}
+      />,
+    );
+
+    expect(screen.getByText('memory.status.failureLog.kind.boot_recovery')).toBeTruthy();
+    expect(screen.queryByText('boot_recovery')).toBeNull();
+  });
+
   it('leaves future anomaly enum values as inert fallback text', () => {
     render(
       <MemoryStatusPanel

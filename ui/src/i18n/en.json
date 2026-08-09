@@ -3635,6 +3635,7 @@
         "errorCode": "Error code",
         "attempts": "Attempts",
         "kind": {
+          "boot_recovery": "Boot recovery",
           "delivery_abandoned": "Delivery abandoned",
           "distillation_rejected": "Distillation rejected",
           "recorder_degraded": "Recorder degraded",

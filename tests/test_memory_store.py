@@ -130,6 +130,9 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
+        settlement_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info('memory_flush_settlements')")
+        }
         assert {
             "generation",
             "lease_token",
@@ -155,6 +158,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "processing_alert_active",
             "last_error_at",
         }.issubset(meta_columns)
+        assert "recovery_origin" in settlement_columns
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -257,6 +261,9 @@ def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> No
     assert store.has_manual_required_fence() is True
     assert store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:02.000Z") is None
     assert store.ensure_meta().last_error == "memory_provider_response_invalid"
+    failures = store.failure_log()
+    assert len(failures) == 1
+    assert (failures[0].kind, failures[0].operation) == ("result_unknown", "add")
     stats = store.queue_stats()
     assert stats.receipt_unknown == 1
     assert stats.queue_plaintext_bytes == len("queued payload")
@@ -581,6 +588,13 @@ def test_store_activation_recovery_fences_submitted_and_resumes_unsubmitted_flus
         now="2026-01-01T00:00:05.000Z",
         provider_session_ref=resumable_ref,
     ) == resumable_lease
+    failures = store.failure_log()
+    assert len(failures) == 1
+    assert (
+        failures[0].kind,
+        failures[0].operation,
+        failures[0].state,
+    ) == ("boot_recovery", "flush", "manual_required")
 
 
 def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path) -> None:
@@ -737,6 +751,17 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     assert reclaimed.payload_text == "queued payload"
     assert reclaimed.last_error == "memory_provider_response_invalid"
     assert store.has_manual_required_fence() is True
+    failures = store.failure_log()
+    assert len(failures) == 1
+    assert (
+        failures[0].kind,
+        failures[0].operation,
+        failures[0].state,
+    ) == ("boot_recovery", "add", "manual_required")
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute(
+            "SELECT recovery_origin FROM memory_flush_settlements"
+        ).fetchall() == [("boot",)]
 
     before = store.ensure_meta()
     clearing = store.begin_clear()
