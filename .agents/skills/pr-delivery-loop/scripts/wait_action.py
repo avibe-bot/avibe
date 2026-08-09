@@ -80,10 +80,11 @@ def _select_latest_runs_by_workflow(
     workflows: list[str],
     branch: str | None,
     head_sha: str,
-) -> dict[str, dict[str, Any] | None]:
+) -> dict[str, list[dict[str, Any]]]:
     workflow_set = set(workflows)
-    result: dict[str, dict[str, Any] | None] = {workflow: None for workflow in workflows}
+    result: dict[str, list[dict[str, Any]]] = {workflow: [] for workflow in workflows}
     normalized_sha = head_sha.casefold()
+    seen_ids: dict[str, set[int]] = {workflow: set() for workflow in workflows}
 
     for run in sorted(runs, key=_run_sort_key):
         name = _workflow_name(run)
@@ -93,7 +94,11 @@ def _select_latest_runs_by_workflow(
             continue
         if branch and str(run.get("head_branch") or "") != branch:
             continue
-        result[name] = run
+        run_id = run.get("id")
+        if not isinstance(run_id, int) or run_id in seen_ids[name]:
+            continue
+        seen_ids[name].add(run_id)
+        result[name].append(run)
 
     return result
 
@@ -113,49 +118,53 @@ def _render_actions_result(
     repo: str,
     branch: str | None,
     head_sha: str,
-    selected: dict[str, dict[str, Any] | None],
+    selected: dict[str, list[dict[str, Any]]],
     success_conclusions: set[str],
 ) -> tuple[str | None, bool]:
-    missing = [workflow for workflow, run in selected.items() if run is None]
+    missing = [workflow for workflow, runs in selected.items() if not runs]
     running = [
         workflow
-        for workflow, run in selected.items()
-        if run is not None and str(run.get("status") or "") != TERMINAL_STATUS
+        for workflow, runs in selected.items()
+        if any(str(run.get("status") or "") != TERMINAL_STATUS for run in runs)
     ]
     if missing or running:
         return None, False
 
     failed = [
         workflow
-        for workflow, run in selected.items()
-        if run is not None and str(run.get("conclusion") or "") not in success_conclusions
+        for workflow, runs in selected.items()
+        if any(str(run.get("conclusion") or "") not in success_conclusions for run in runs)
     ]
     result = "failure" if failed else "success"
     short_sha = head_sha[:12]
     branch_label = f" on {branch}" if branch else ""
     lines = [f"GitHub Actions {result} for {repo}@{short_sha}{branch_label}"]
     for workflow in selected:
-        run = selected[workflow]
-        if run is not None:
+        for run in selected[workflow]:
             lines.append(_format_run(run))
     if failed:
         lines.append(f"Failed workflow(s): {', '.join(failed)}")
     return "\n".join(lines), bool(failed)
 
 
-def _write_cursor_output(path: str | None, *, selected: dict[str, dict[str, Any] | None]) -> None:
+def _write_cursor_output(path: str | None, *, selected: dict[str, list[dict[str, Any]]]) -> None:
     if not path:
         return
 
     payload = {
         workflow: {
-            "id": run.get("id"),
-            "status": run.get("status"),
-            "conclusion": run.get("conclusion"),
-            "html_url": run.get("html_url"),
+            "runs": [
+                {
+                    "id": run.get("id"),
+                    "status": run.get("status"),
+                    "conclusion": run.get("conclusion"),
+                    "html_url": run.get("html_url"),
+                }
+                for run in runs
+            ],
         }
-        for workflow, run in selected.items()
-        if run is not None
+        for workflow, runs in selected.items()
+        if runs
     }
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
@@ -225,7 +234,7 @@ def main() -> int:
     effective_interval = base_interval
     success_conclusions = _parse_success_conclusions(args.success_conclusion)
     start = time.monotonic()
-    selected: dict[str, dict[str, Any] | None] = {workflow: None for workflow in args.workflow}
+    selected: dict[str, list[dict[str, Any]]] = {workflow: [] for workflow in args.workflow}
     first_successful_fetch = True
 
     print(
@@ -262,7 +271,7 @@ def main() -> int:
                 )
                 return 1
             print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            runs = []
+            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
         except urllib.error.URLError as err:
             print(f"GitHub network error: {err.reason}", file=sys.stderr)
             if first_poll:
@@ -329,11 +338,11 @@ def main() -> int:
                 print(output)
                 return 0
 
-        missing = [workflow for workflow, run in selected.items() if run is None]
+        missing = [workflow for workflow, runs in selected.items() if not runs]
         running = [
             workflow
-            for workflow, run in selected.items()
-            if run is not None and str(run.get("status") or "") != TERMINAL_STATUS
+            for workflow, runs in selected.items()
+            if any(str(run.get("status") or "") != TERMINAL_STATUS for run in runs)
         ]
         print(f"Waiting for GitHub Actions: missing={missing or '-'} running={running or '-'}", file=sys.stderr)
 

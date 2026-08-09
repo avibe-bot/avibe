@@ -29,7 +29,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _github_wait_common import (  # noqa: E402
     filter_new,
-    get_authenticated_login,
     get_token,
     github_get,
     is_retryable_http_error,
@@ -42,6 +41,7 @@ from _github_wait_common import (  # noqa: E402
     REQUEST_TIMEOUT_SECONDS,
     RETRY_EXIT_CODE,
     requests_per_poll,
+    resolve_authenticated_login,
     ResponseCache,
     squash,
     WATCH_ID_ENV,
@@ -1223,14 +1223,30 @@ def main() -> int:
     )
     token_fingerprint = _token_fingerprint(token)
     viewer_login = None
-    if not args.include_self_comments:
+    if args.pr is not None and not args.include_self_comments:
         # The stored login spares a /user request on every cycle of a forever watch,
         # but only while the token still belongs to the account it was resolved for.
         # A rotated or swapped credential would otherwise keep filtering out the old
         # account's comments and let the new account's own comments wake the Agent.
         if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
             viewer_login = _saved_str(saved, "viewer_login")
-        viewer_login = viewer_login or get_authenticated_login(token)
+        try:
+            viewer_login = viewer_login or resolve_authenticated_login(token)
+        except urllib.error.HTTPError as err:
+            print(f"GitHub viewer lookup failed: {err.code} {err.reason}", file=sys.stderr)
+            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
+        except urllib.error.URLError as err:
+            print(f"GitHub viewer lookup failed: {err.reason}", file=sys.stderr)
+            return RETRY_EXIT_CODE
+        except Exception as err:  # noqa: BLE001
+            print(f"GitHub viewer lookup failed: {err}", file=sys.stderr)
+            return 1
+        if not viewer_login:
+            print(
+                "GitHub viewer identity could not be resolved; pass --include-self-comments explicitly to continue.",
+                file=sys.stderr,
+            )
+            return 1
 
     base_interval = max(args.interval, 1.0)
     effective_interval = base_interval
@@ -1610,7 +1626,7 @@ def main() -> int:
                 )
                 return 1
             print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            continue
+            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
         except Exception as err:  # noqa: BLE001
             print(f"Polling failed: {err}", file=sys.stderr)
             continue

@@ -234,6 +234,20 @@ def get_authenticated_login(token: str | None) -> str | None:
     return str(login) if isinstance(login, str) and login else None
 
 
+def resolve_authenticated_login(token: str | None) -> str | None:
+    """Resolve the viewer identity without hiding an authenticated lookup failure."""
+
+    if not token:
+        return None
+    payload = github_get("https://api.github.com/user", token)
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub /user returned an unexpected payload")
+    login = payload.get("login")
+    if not isinstance(login, str) or not login:
+        raise RuntimeError("GitHub /user did not return a viewer login")
+    return login
+
+
 def list_paginated(
     base_url: str,
     token: str | None,
