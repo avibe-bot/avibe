@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,9 @@ from core.memory.store import (
 from core.memory.types import MemoryErrorCode, ProviderSessionRef, is_memory_error_code
 
 
+logger = logging.getLogger(__name__)
+
+
 IDLE_FLUSH_TIMEOUT = timedelta(minutes=5)
 MAX_UNFLUSHED_AGE = timedelta(minutes=30)
 MAX_UNFLUSHED_MESSAGES = 100
@@ -53,14 +57,9 @@ ProcessingEvent = Callable[
 ]
 
 
-class _AddSubmissionGuard:
+class _ProviderSubmissionAttempt:
     def __init__(self) -> None:
-        self.started = False
-
-
-class _FlushSubmissionGuard:
-    def __init__(self) -> None:
-        self.started = False
+        self.provider_entered = False
 
 
 class SessionFlushCoordinator:
@@ -136,22 +135,26 @@ class SessionFlushCoordinator:
             referenced, releasing = await self._store_call(
                 self._store.attachment_bundle_sets
             )
-            await asyncio.to_thread(
-                self._attachment_store.reconcile,
-                referenced,
-                releasing,
-            )
-            for bundle_id in releasing:
-                await self._store_call(
-                    self._store.finalize_attachment_release,
-                    bundle_id,
+            try:
+                await asyncio.to_thread(
+                    self._attachment_store.reconcile,
+                    referenced,
+                    releasing,
                 )
+            except AttachmentPinError:
+                logger.warning("Memory attachment reconciliation was deferred")
+            else:
+                for bundle_id in releasing:
+                    await self._store_call(
+                        self._store.finalize_attachment_release,
+                        bundle_id,
+                    )
 
     async def deliver(self, row: QueueRow, *, lease_owner: str) -> bool:
         """Deliver one claimed add under the exact canonical session lock."""
 
         key = row.provider_session_ref.serialize()
-        submission = _AddSubmissionGuard()
+        submission = _ProviderSubmissionAttempt()
         try:
             async with self._session_lock(key):
                 if await self._store_call(
@@ -315,7 +318,7 @@ class SessionFlushCoordinator:
                 )
                 if row is None:
                     break
-                submission = _AddSubmissionGuard()
+                submission = _ProviderSubmissionAttempt()
                 try:
                     delivered = await self._deliver_locked(
                         row,
@@ -347,7 +350,7 @@ class SessionFlushCoordinator:
                 return
             result: FlushResult
             async with self._write_slots:
-                submission = _FlushSubmissionGuard()
+                submission = _ProviderSubmissionAttempt()
                 try:
                     submitted_at = _iso(self._current_time())
                     if not await self._store_call(
@@ -358,7 +361,12 @@ class SessionFlushCoordinator:
                         return
                     try:
                         result = await asyncio.wait_for(
-                            self._submit_flush(lease, submission),
+                            _submit_provider_write(
+                                submission,
+                                lambda: self._provider.flush(
+                                    lease.provider_session_ref
+                                ),
+                            ),
                             timeout=self._flush_timeout_seconds,
                         )
                     except asyncio.TimeoutError:
@@ -384,7 +392,7 @@ class SessionFlushCoordinator:
                     except Exception:
                         result = FlushUnknown(reason="transport")
                 except asyncio.CancelledError:
-                    if submission.started:
+                    if submission.provider_entered:
                         await asyncio.shield(
                             self._store_call(
                                 self._store.settle_flush,
@@ -428,7 +436,7 @@ class SessionFlushCoordinator:
         row: QueueRow,
         *,
         lease_owner: str,
-        submission: _AddSubmissionGuard,
+        submission: _ProviderSubmissionAttempt,
     ) -> bool:
         if row.payload_text is None:
             await self._settle_failure(
@@ -437,37 +445,56 @@ class SessionFlushCoordinator:
                 outcome=MessageFailure(error="memory_invalid_input", retryable=False),
             )
             return False
+        attachment_payload = row.payload_attachments
+        if (row.attachment_bundle_id is None) != (attachment_payload is None):
+            await self._settle_failure(
+                row,
+                lease_owner=lease_owner,
+                outcome=MessageFailure(
+                    error="memory_store_unavailable",
+                    retryable=False,
+                ),
+            )
+            return False
         if row.attachment_bundle_id is None:
-            if row.payload_attachments is not None:
-                await self._settle_failure(
-                    row,
-                    lease_owner=lease_owner,
-                    outcome=AmbiguousAdd(error="memory_store_unavailable"),
-                )
-                return False
             attachments = ()
         else:
-            if self._attachment_store is None or row.payload_attachments is None:
+            assert attachment_payload is not None
+            if self._attachment_store is None:
                 await self._settle_failure(
                     row,
                     lease_owner=lease_owner,
-                    outcome=AmbiguousAdd(error="memory_store_unavailable"),
+                    outcome=SystemOutage(error="memory_store_unavailable"),
                 )
                 return False
             try:
                 bundle = decode_pinned_bundle(
                     row.attachment_bundle_id,
-                    row.payload_attachments,
+                    attachment_payload,
                 )
+            except AttachmentPinError as failure:
+                await self._settle_failure(
+                    row,
+                    lease_owner=lease_owner,
+                    outcome=MessageFailure(
+                        error=failure.error,
+                        retryable=False,
+                    ),
+                )
+                return False
+            try:
                 attachments = await asyncio.to_thread(
                     self._attachment_store.provider_attachments,
                     bundle,
                 )
-            except AttachmentPinError:
+            except AttachmentPinError as failure:
                 await self._settle_failure(
                     row,
                     lease_owner=lease_owner,
-                    outcome=AmbiguousAdd(error="memory_store_unavailable"),
+                    outcome=MessageFailure(
+                        error=failure.error,
+                        retryable=True,
+                    ),
                 )
                 return False
         capture = ProviderCapture(
@@ -484,9 +511,11 @@ class SessionFlushCoordinator:
                     lease_owner=lease_owner,
                 ):
                     return False
-                submission.started = True
                 ack = await asyncio.wait_for(
-                    self._provider.add(capture),
+                    _submit_provider_write(
+                        submission,
+                        lambda: self._provider.add(capture),
+                    ),
                     timeout=self._add_timeout_seconds,
                 )
         except asyncio.TimeoutError:
@@ -552,22 +581,14 @@ class SessionFlushCoordinator:
             await self._close_processing_fault()
         return settled.settled
 
-    async def _submit_flush(
-        self,
-        lease: FlushLease,
-        submission: _FlushSubmissionGuard,
-    ) -> FlushResult:
-        submission.started = True
-        return await self._provider.flush(lease.provider_session_ref)
-
     async def _return_cancelled_unsubmitted(
         self,
         row: QueueRow,
         *,
         lease_owner: str,
-        submission: _AddSubmissionGuard,
+        submission: _ProviderSubmissionAttempt,
     ) -> None:
-        if submission.started:
+        if submission.provider_entered:
             return
         await self._store_call(
             self._store.return_unsubmitted_claim,
@@ -713,6 +734,16 @@ def _positive_timeout(value: float) -> float:
     except (TypeError, ValueError):
         return 1.0
     return parsed if parsed > 0 else 1.0
+
+
+async def _submit_provider_write(
+    submission: _ProviderSubmissionAttempt,
+    operation: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Mark the exact point where a provider coroutine may begin executing."""
+
+    submission.provider_entered = True
+    return await operation()
 
 
 def _iso(value: datetime) -> str:

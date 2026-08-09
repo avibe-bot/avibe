@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from config import paths
+from core.memory.attachments import (
+    AttachmentPinStore,
+    PinnedBundle,
+    encode_pinned_bundle,
+)
 from core.memory.coordinator import SessionFlushCoordinator
 from core.memory.everos import (
     FakeMemoryProvider,
@@ -16,13 +21,14 @@ from core.memory.everos import (
     MemoryProviderSystemFailure,
 )
 from core.memory.observations import AddAck, FlushRetryable, FlushSucceeded
-from core.memory.store import MemoryStore
-from core.memory.types import ProviderSessionRef
+from core.memory.store import MemoryStore, MessageFailure, QueueRow
+from core.memory.types import CaptureAttachment, ProviderSessionRef
 from core.memory.worker import MemoryWorker
 
 
 PRINCIPAL = "u-11111111111111111111111111111111"
 PROJECT = "p-22222222222222222222222222222222"
+TEST_BUNDLE_ID = "a" * 32
 
 
 def _store(tmp_path: Path) -> MemoryStore:
@@ -37,6 +43,57 @@ def _enqueue(store: MemoryStore, source: str, *, session: str = "session"):
         project_ref=PROJECT,
         provenance="user_input",
         payload_text=f"payload-{source}",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert result.row is not None
+    return result.row
+
+
+def _pin_attachment_bundle() -> tuple[AttachmentPinStore, PinnedBundle, Path]:
+    home = paths.get_vibe_remote_dir()
+    source_root = home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    source_root.chmod(0o700)
+    source = source_root / "evidence.txt"
+    source.write_bytes(b"durable attachment")
+    source.chmod(0o600)
+    attachment_store = AttachmentPinStore(
+        effective_home=home,
+        source_root=source_root,
+    )
+    bundle = attachment_store.pin(
+        (
+            CaptureAttachment(
+                kind="doc",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="txt",
+            ),
+        )
+    )
+    pinned_path = home / "memory" / "attachments" / bundle.attachments[0].storage_key
+    return attachment_store, bundle, pinned_path
+
+
+def _enqueue_attachment_bundle(
+    store: MemoryStore,
+    bundle: PinnedBundle,
+    *,
+    source: str,
+) -> QueueRow:
+    result = store.enqueue_request(
+        source_message_id=source,
+        session_id="attachment-session",
+        principal_id=PRINCIPAL,
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="remember the attachment",
+        payload_attachments=encode_pinned_bundle(bundle),
+        attachment_bundle_id=bundle.bundle_id,
+        attachment_bundle_relative_path=bundle.relative_path,
+        attachment_file_count=len(bundle.attachments),
+        attachment_total_bytes=bundle.total_bytes,
         occurred_at_ms=1_000,
         max_provider_timestamp_ms=4_102_444_800_000,
     )
@@ -673,6 +730,59 @@ def test_cancelled_flush_while_submission_marker_commits_remains_retryable(
     asyncio.run(run())
 
 
+def test_cancelled_flush_before_submission_coroutine_entry_remains_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=coordinator,
+        )
+        row = _enqueue(store, "cancelled-flush-before-entry")
+        assert await worker.drain_once() == 1
+
+        real_wait_for = asyncio.wait_for
+
+        async def cancel_provider_submission(awaitable, *, timeout: float):
+            code = getattr(awaitable, "cr_code", None)
+            if code is not None and code.co_name == "_submit_provider_write":
+                awaitable.close()
+                raise asyncio.CancelledError
+            return await real_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", cancel_provider_submission)
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator.final_flush(
+                row.provider_session_ref,
+                deadline_seconds=1,
+            )
+
+        assert provider.flushes == []
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None
+        assert state.state == "due"
+        assert state.submission_started_at is None
+
+        monkeypatch.setattr(asyncio, "wait_for", real_wait_for)
+        assert await coordinator.final_flush(
+            row.provider_session_ref,
+            deadline_seconds=1,
+        )
+        assert provider.flushes == [row.provider_session_ref]
+
+    asyncio.run(run())
+
+
 def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -747,6 +857,307 @@ def test_cancelled_add_waiting_for_write_slot_returns_exact_claim(tmp_path: Path
             "payload-first-add",
             "payload-waiting-add",
         ]
+
+    asyncio.run(run())
+
+
+def test_cancelled_add_before_submission_coroutine_entry_returns_exact_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        _enqueue(store, "cancelled-before-entry")
+        claimed = store.claim_due(
+            lease_owner="worker",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+
+        wait_for_calls = 0
+
+        async def cancel_before_entry(awaitable, *, timeout: float):
+            nonlocal wait_for_calls
+            wait_for_calls += 1
+            awaitable.close()
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(asyncio, "wait_for", cancel_before_entry)
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator.deliver(claimed, lease_owner="worker")
+
+        assert wait_for_calls == 1
+        assert provider.captures == []
+        queued = store.list_queue_rows()[0]
+        assert (queued.state, queued.attempts) == ("pending", 0)
+        recovery = store.recover_after_boot(
+            lease_owner="next-boot",
+            clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert recovery.reclaimed == 0
+
+    asyncio.run(run())
+
+
+def test_cancelled_add_after_provider_entry_remains_ambiguous(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider_entered = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                provider_entered.set()
+                await asyncio.Event().wait()
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        row = _enqueue(store, "cancelled-after-entry")
+        claimed = store.claim_due(
+            lease_owner="worker",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+
+        delivery = asyncio.create_task(
+            coordinator.deliver(claimed, lease_owner="worker")
+        )
+        await asyncio.wait_for(provider_entered.wait(), timeout=1)
+        delivery.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await delivery
+
+        assert len(provider.captures) == 1
+        assert store.list_queue_rows()[0].state == "processing"
+        recovery = store.recover_after_boot(
+            lease_owner="next-boot",
+            clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert recovery.reclaimed == 1
+        assert store.list_queue_rows()[0].state == "manual_required"
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None and state.state == "manual_required"
+
+    asyncio.run(run())
+
+
+def test_attachment_preflight_failure_is_bounded_without_session_fence(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+        row = _enqueue_attachment_bundle(
+            store,
+            bundle,
+            source="broken-attachment",
+        )
+        pinned_path.chmod(0o644)
+
+        provider = FakeMemoryProvider()
+        current = [datetime(2026, 1, 1, tzinfo=UTC)]
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            attachment_store=attachment_store,
+        )
+        await coordinator.recover(lease_owner="initial-boot")
+
+        for expected_attempts, delay in ((1, 30), (2, 120), (3, 0)):
+            claimed = store.claim_due(
+                lease_owner=f"worker-{expected_attempts}",
+                now=current[0].isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            )
+            assert claimed is not None
+            assert not await coordinator.deliver(
+                claimed,
+                lease_owner=f"worker-{expected_attempts}",
+            )
+            queued = store.list_queue_rows()[0]
+            assert queued.attempts == expected_attempts
+            expected_state = "dead" if expected_attempts == 3 else "pending"
+            assert queued.state == expected_state
+            session_state = store.get_session_flush_state(row.provider_session_ref)
+            assert session_state is not None and session_state.state == "idle"
+            current[0] += timedelta(seconds=delay)
+
+        assert store.attachment_bundle_sets() == (
+            frozenset(),
+            frozenset({bundle.bundle_id}),
+        )
+        restarted = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            attachment_store=attachment_store,
+        )
+        await restarted.recover(lease_owner="restarted-worker")
+        assert store.attachment_bundle_sets() == (
+            frozenset(),
+            frozenset({bundle.bundle_id}),
+        )
+
+        later = _enqueue(
+            store,
+            "after-broken-attachment",
+            session="attachment-session",
+        )
+        unrelated = _enqueue(
+            store,
+            "unrelated-after-broken-attachment",
+            session="unrelated-session",
+        )
+        for expected in (later, unrelated):
+            claimed = store.claim_due(
+                lease_owner="later-worker",
+                now=current[0].isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            )
+            assert claimed is not None
+            assert await restarted.deliver(claimed, lease_owner="later-worker")
+        assert [capture.text for capture in provider.captures] == [
+            later.payload_text,
+            unrelated.payload_text,
+        ]
+
+    asyncio.run(run())
+
+
+def test_successful_boot_attachment_reconcile_finalizes_release(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        attachment_store, bundle, pinned_path = _pin_attachment_bundle()
+        _enqueue_attachment_bundle(
+            store,
+            bundle,
+            source="boot-release",
+        )
+        claimed = store.claim_due(
+            lease_owner="crashed-worker",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+        settled = store.settle(
+            claimed,
+            MessageFailure(error="memory_store_unavailable", retryable=False),
+            lease_owner="crashed-worker",
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        assert settled.attachment_release_id == bundle.bundle_id
+        assert pinned_path.exists()
+
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=FakeMemoryProvider(),
+            enabled=lambda: True,
+            attachment_store=attachment_store,
+        )
+        await coordinator.recover(lease_owner="next-boot")
+
+        assert store.attachment_bundle_sets() == (frozenset(), frozenset())
+        assert not pinned_path.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    (
+        "case",
+        "payload",
+        "bundle_id",
+        "bundle_relative_path",
+        "file_count",
+        "total_bytes",
+        "expected_state",
+        "expected_attempts",
+    ),
+    [
+        ("manifest_without_bundle", "{}", None, None, 0, 0, "dead", 1),
+        (
+            "bundle_without_manifest",
+            None,
+            TEST_BUNDLE_ID,
+            f"bundles/{TEST_BUNDLE_ID}",
+            1,
+            1,
+            "dead",
+            1,
+        ),
+        (
+            "pin_store_unavailable",
+            "{}",
+            TEST_BUNDLE_ID,
+            f"bundles/{TEST_BUNDLE_ID}",
+            1,
+            1,
+            "pending",
+            0,
+        ),
+    ],
+)
+def test_attachment_preflight_classifies_local_failures_without_ambiguity(
+    tmp_path: Path,
+    case: str,
+    payload: str | None,
+    bundle_id: str | None,
+    bundle_relative_path: str | None,
+    file_count: int,
+    total_bytes: int,
+    expected_state: str,
+    expected_attempts: int,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        result = store.enqueue_request(
+            source_message_id=f"attachment-{case}",
+            session_id=f"attachment-{case}",
+            principal_id=PRINCIPAL,
+            project_ref=PROJECT,
+            provenance="user_input",
+            payload_text="remember the attachment",
+            payload_attachments=payload,
+            attachment_bundle_id=bundle_id,
+            attachment_bundle_relative_path=bundle_relative_path,
+            attachment_file_count=file_count,
+            attachment_total_bytes=total_bytes,
+            occurred_at_ms=1_000,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert result.row is not None
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        claimed = store.claim_due(
+            lease_owner="worker",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+
+        assert not await coordinator.deliver(claimed, lease_owner="worker")
+
+        queued = store.list_queue_rows()[0]
+        assert (queued.state, queued.attempts) == (
+            expected_state,
+            expected_attempts,
+        )
+        assert provider.captures == []
+        state = store.get_session_flush_state(result.row.provider_session_ref)
+        assert state is not None and state.state == "idle"
 
     asyncio.run(run())
 
