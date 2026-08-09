@@ -13,9 +13,8 @@ import inspect
 import re
 from pathlib import Path
 
-from core.memory.module import (
-    PROVIDER_READ_TIMEOUT_SECONDS,
-)
+from core.memory.confined_filesystem import PrivateSqliteDatabase
+from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
 from core.memory.process import (
     _PROCESSING_PROBE_TIMEOUT_SECONDS,
     _STARTUP_TIMEOUT_SECONDS,
@@ -25,6 +24,7 @@ from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
     MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
+    MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS,
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_SEARCH_TIMEOUT_SECONDS,
@@ -75,6 +75,24 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
         memory_search_sync,
     ):
         assert inspect.signature(read).parameters["timeout"].default > PROVIDER_READ_TIMEOUT_SECONDS
+
+
+def _private_sqlite_busy_timeout_seconds() -> float:
+    source = inspect.getsource(PrivateSqliteDatabase.connect)
+    match = re.search(r"sqlite3\.connect\([^\n]+timeout=([\d.]+)\)", source)
+    assert match, "could not locate the private SQLite connection busy timeout"
+    return float(match.group(1))
+
+
+def test_processing_record_client_covers_maintenance_then_provider_health() -> None:
+    sequential_bound = (
+        _private_sqlite_busy_timeout_seconds() + PROVIDER_READ_TIMEOUT_SECONDS
+    )
+    assert MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS == sequential_bound + 5.0
+    assert (
+        inspect.signature(memory_processing_record).parameters["timeout"].default
+        == MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+    )
 
 
 def test_search_clients_outlast_capability_probe_and_provider_search() -> None:

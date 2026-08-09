@@ -48,6 +48,10 @@ _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
 MEMORY_SEARCH_TIMEOUT_SECONDS = 45.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
+# Processing Record first reads a private SQLite maintenance journal (up to 5s)
+# before its provider health probe (up to 20s). Retain the same 5s transport
+# margin as an ordinary Memory read around those sequential bounds.
+MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS = 30.0
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
@@ -417,7 +421,7 @@ async def memory_processing_record(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+    timeout: float = MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     path = "/internal/memory/processing-record"
     return await _memory_request(
