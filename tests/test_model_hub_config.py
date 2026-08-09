@@ -342,6 +342,11 @@ class GateCase(NamedTuple):
 #                prefix for free while an unbounded extraction reads the suffix
 #                as a hit. Every direction the extraction admits needs a case,
 #                or the grid reads full over a rule that was never exercised.
+#                Enumerating directions does not terminate, though — a boundary
+#                written against the reported `G-15x` still credited `G-15.1`.
+#                So the cases here exist to hold a rule that is stated
+#                positively (what may end a name) rather than to chase the
+#                spellings that break a negative one.
 #   empty      — a *total miss*: nothing resolves, and the gate reports it
 #                instead of skipping the comparison in silence.
 #   duplicate  — one canonical token declared twice with different content.
@@ -425,6 +430,19 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`[contract]` `[contract-gap]` G-99 carries",
         "is named by no §0.8 row",
     ),
+    # The same rule read from the registry side: a row that stops parsing as a
+    # row stops being a registration, and the route it was excusing goes back to
+    # being a contracted call this document reaches from nowhere. Both halves of
+    # the silencer are one comparison, but only this half exercises the parse
+    # that decides what a registration *is* — and it is a parse the citation
+    # cases cannot reach, because they never look at a row.
+    GateCase(
+        "A", "gaps", "empty",
+        "a gap row loses the number that makes it a registration",
+        "| G-13 |",
+        "| gap 13 |",
+        "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
+    ),
     # The same marker pointed at a *prefix* of a registered number. Set
     # intersection got this right by accident and would have gone on getting it
     # right; the case is here because the cell is, and because the silencer is
@@ -447,6 +465,18 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "gap marker cites a suffix of a registered number",
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-15x carries",
+        "is named by no §0.8 row",
+    ),
+    # The same near miss reached through a joiner instead of a letter. The first
+    # boundary rejected `G-15x` and still credited `G-15.1`, because it was
+    # written against the one direction a reviewer had named. A dot is the joiner
+    # the document actually contains — it also ends citations as a full stop —
+    # so it is the one direction the rule has to get right in both readings.
+    GateCase(
+        "A", "gaps", "token",
+        "gap marker joins a registered number to a sub-number",
+        "`[contract]` `[contract-gap]` G-15 carries",
+        "`[contract]` `[contract-gap]` G-15.1 carries",
         "is named by no §0.8 row",
     ),
     # Reviewer's repro, round 14: a route first mentioned inside a
@@ -588,8 +618,8 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     GateCase(
         "E", "routes", "token",
         "a route extended past a real one by one segment",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
-        "`PUT /api/models/agents/<backend>/sources/order` with `{order: string[]}`",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
+        "`PUT /api/models/agents/<backend>/sources/order` with `{order: string[]}` `[contract]`",
         "is contracted by no `api.md` route row",
     ),
     # A route the spec names that the contract does not have. This is the class
@@ -597,8 +627,8 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     GateCase(
         "E", "routes", "empty",
         "route literal drifts off api.md",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
-        "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}`",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
+        "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}` `[contract]`",
         "is contracted by no `api.md` route row",
     ),
     GateCase(
@@ -676,14 +706,20 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
         "is defined twice in gaps with different content",
     ),
-    # A row that stops being a registration stops excusing its own claim: G-9's
-    # row states a 409 branch for a route `api.md` does not guard, which is the
-    # gap it registers, and which E reports the moment the row is not one.
+    # A number no row defines silences nothing. This case used to be reached
+    # from the registry side — de-number G-9's row and watch the 409 it excused
+    # come back — and round 17 withdrew G-9, because the missing 409 was the
+    # contract agreeing with itself rather than a debt. Nothing in the document
+    # is silenced by a gap on E's side any more, so the claim is written by the
+    # mutation, exactly as the three `token` cases below write theirs. The
+    # registry side kept its coverage and moved to class A, where a de-numbered
+    # row still costs a route its excuse: see the G-13 case above.
     GateCase(
         "E", "gaps", "empty",
-        "a gap row loses the number that makes it a registration",
-        "| G-9 | 03 order save that drops sources |",
-        "| gap 9 | 03 order save that drops sources |",
+        "a silenced claim cites a number no row defines",
+        "the surface of truth when it does not.",
+        "the surface of truth when it does not.\n\nA 409 conflict answer to "
+        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-99.",
         "a 409 branch is claimed for",
     ),
     # E's own use of the marker, against a near miss: the claim cites `G-1`,
@@ -710,6 +746,14 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9x.",
         "a 409 branch is claimed for",
     ),
+    GateCase(
+        "E", "gaps", "token",
+        "a silenced claim joins a registered number to a sub-number",
+        "the surface of truth when it does not.",
+        "the surface of truth when it does not.\n\nA 409 conflict answer to "
+        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9.1.",
+        "a 409 branch is claimed for",
+    ),
     # A total rendering of a contracted vocabulary that quietly drops a row. The
     # author cannot see the schema while writing the table, so nothing but a set
     # comparison catches this.
@@ -725,8 +769,8 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     GateCase(
         "E", "routes", "arm",
         "body key belongs to another route",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
-        "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}`",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
+        "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}` `[contract]`",
         "not contracted for",
     ),
     # `api.md` puts request and response in one cell, and a check that unions

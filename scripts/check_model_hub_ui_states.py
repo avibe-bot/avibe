@@ -1171,7 +1171,13 @@ def mapping_tables(doc: Document) -> list[tuple[int, str, set[str], set[str], bo
     return found
 
 
-GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)(?![\w-])")
+# What may follow a gap number: whitespace, a punctuation mark that closes or
+# separates the citation, a sentence-ending `.`, or end of input. Written as an
+# allow-list rather than as "not a suffix character", because the two spellings
+# fail in opposite directions and only one of them fails loudly. See
+# `registered_gaps`.
+GAP_END = r"(?=$|[\s,;:*'\"`)\]}，、。；:）」』】]|\.(?!\w))"
+GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)" + GAP_END)
 GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 
 
@@ -1188,13 +1194,28 @@ def registered_gaps(doc: Document) -> Universe:
     bare `[contract-gap]`, or one citing a number no row defines, exempts
     nothing — the claim is checked as if the marker were not there.
 
-    A reference ends where its digits end. Without that boundary the number was
-    read as a prefix, so `G-9x` borrowed the row written about G-9 and a
-    `G-15`-shaped typo silenced a route on the strength of a registration that
-    was about something else — the same accident as the bare marker, reached by
-    one *extra* keystroke instead of one fewer, and harder to see because the
-    citation looks like it names something. A suffixed citation now resolves to
-    nothing and silences nothing, exactly like a bare one.
+    A reference ends where its digits end, and it has to end at something the
+    document uses to end a citation. Without that the number was read as a
+    prefix, so `G-9x` borrowed the row written about G-9 and a `G-15`-shaped typo
+    silenced a route on the strength of a registration that was about something
+    else — the same accident as the bare marker, reached by one *extra* keystroke
+    instead of one fewer, and harder to see because the citation looks like it
+    names something. A suffixed citation now resolves to nothing and silences
+    nothing, exactly like a bare one.
+
+    `GAP_END` states which characters may end one, and the choice of an
+    allow-list over "anything that is not a suffix character" is the whole
+    lesson of the second attempt. The first rejected `G-15x` and still accepted
+    `G-15.1`, because a rule written against the direction that was reported
+    covers that direction and no other. The two spellings are not symmetric:
+    naming what may *not* follow leaves every unnamed joiner silencing a route
+    quietly, while naming what *may* follow turns an unforeseen one into a
+    citation that resolves to nothing — which this checker reports on the next
+    run. For a silencer, the failure that shows up in the output is the one to
+    prefer, so the unforeseen case is spelled to be loud. `.` is the exception
+    the census forces: it ends seven real citations as a full stop and begins
+    the malformed `G-15.1`, so it is admitted only when no word character
+    follows it.
 
     Read from §0.5 alone. Scanning the document for the row *shape* let anything
     shaped like `| G-99 |` — a §1 example, a quoted table, a row moved out of the
