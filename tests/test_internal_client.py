@@ -326,22 +326,47 @@ def test_memory_final_flush_round_trip(socket_path):
     }
 
 
-def test_memory_failures_round_trip(socket_path):
-    app = FastAPI()
+def test_memory_recovery_reads_round_trip_signed_operator(monkeypatch, socket_path):
+    from core.memory import ui_access
 
-    @app.get("/internal/memory/failures")
-    async def _failures():
-        return {"items": [], "retention_days": 90}
+    captured: list[httpx.Request] = []
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"status": "ok"})
 
     async def _go():
-        fake_transport = httpx.ASGITransport(app=app)
-        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
-            return await internal_client.memory_failures(socket_path=socket_path)
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            failures = await internal_client.memory_failures(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            maintenance = await internal_client.memory_maintenance(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            return failures, maintenance
 
-    assert asyncio.run(_go()) == {
-        "status_code": 200,
-        "body": {"items": [], "retention_days": 90},
-    }
+    failures, maintenance = asyncio.run(_go())
+
+    assert failures == {"status_code": 200, "body": {"status": "ok"}}
+    assert maintenance == {"status_code": 200, "body": {"status": "ok"}}
+    assert [request.url.path for request in captured] == [
+        "/internal/memory/failures",
+        "/internal/memory/maintenance",
+    ]
+    for request in captured:
+        assert request.headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+        assert request.headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+            "test-ui-controller-secret",
+            method="GET",
+            path=request.url.path,
+            user_key="avibe:remote:user-1",
+        )
 
 
 def test_memory_sync_read_helpers_use_verified_uds(socket_path):

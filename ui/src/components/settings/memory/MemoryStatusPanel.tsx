@@ -316,7 +316,10 @@ const ClearRecoveryCard: React.FC<{
           <Field label={t('memory.processingRecord.field.occurredAt')} value={formatTimestamp(recovery.occurred_at)} />
         ) : null}
         {recovery.error_code ? (
-          <Field label={t('memory.processingRecord.field.errorCode')} value={recovery.error_code} />
+          <Field
+            label={t('memory.processingRecord.field.errorCode')}
+            value={memoryErrorMessage(t, recovery.error_code)}
+          />
         ) : null}
       </div>
       <div className="grid gap-1.5">

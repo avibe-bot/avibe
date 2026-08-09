@@ -399,20 +399,31 @@ async def memory_status(
 
 async def memory_failures(
     *,
+    user_key: str,
     socket_path: Optional[Path] = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
+    path = "/internal/memory/failures"
+    return await _memory_request(
+        "GET",
+        path,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
 
 
 async def memory_maintenance(
     *,
+    user_key: str,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    path = "/internal/memory/maintenance"
     return await _memory_request(
         "GET",
-        "/internal/memory/maintenance",
+        path,
+        headers=_memory_user_key_headers("GET", path, user_key),
         socket_path=socket_path,
         timeout=timeout,
     )

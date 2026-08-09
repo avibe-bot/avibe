@@ -335,6 +335,75 @@ def test_memory_final_flush_delegates_identity_to_controller() -> None:
     controller.memory_scope_for_cli_session.assert_not_called()
 
 
+def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    calls: list[tuple[str, str | None]] = []
+
+    class Runtime:
+        def principal_for_user_key(self, user_key: str) -> str:
+            return {
+                "avibe:local": "u-local-principal",
+                "avibe:remote:subject-2": "u-remote-principal",
+            }[user_key]
+
+        async def failure_log_payload(self, *, operator_ref: str | None = None):
+            calls.append(("failures", operator_ref))
+            return {"status": "ok", "items": [], "recovery": None}
+
+        async def maintenance_payload(self, *, operator_ref: str | None = None):
+            calls.append(("maintenance", operator_ref))
+            return {
+                "status": "ok",
+                "data_exists": False,
+                "can_clear": True,
+                "clear_recovery": None,
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str, user_key: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: user_key,
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key=user_key,
+            ),
+        }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            local = await client.get(
+                "/internal/memory/failures",
+                headers=headers("/internal/memory/failures", "avibe:local"),
+            )
+            remote = await client.get(
+                "/internal/memory/maintenance",
+                headers=headers(
+                    "/internal/memory/maintenance",
+                    "avibe:remote:subject-2",
+                ),
+            )
+            unsigned = await client.get("/internal/memory/failures")
+            return local, remote, unsigned
+
+    local, remote, unsigned = asyncio.run(_exercise())
+
+    assert local.status_code == remote.status_code == unsigned.status_code == 200
+    assert calls == [
+        ("failures", "u-local-principal"),
+        ("maintenance", "u-remote-principal"),
+        ("failures", None),
+    ]
+
+
 @pytest.mark.parametrize(
     "payload",
     [

@@ -513,6 +513,110 @@ def test_boot_recovery_never_replays_submitted_flush(tmp_path: Path) -> None:
     ) is None
 
 
+@pytest.mark.parametrize("operation", ["add", "flush"])
+def test_boot_recovery_opens_and_emits_processing_fault_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        row = _enqueue(store, f"hard-crash-{operation}")
+        claimed = store.claim_due(
+            lease_owner="old-boot",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+        if operation == "flush":
+            assert store.settle_add_ack(
+                claimed,
+                AddAck("add-before-crash", "accumulated"),
+                lease_owner="old-boot",
+                now=datetime(2026, 1, 1, tzinfo=UTC),
+                idle_timeout=timedelta(0),
+            ).settled
+            lease = store.acquire_flush(
+                now="2026-01-01T00:00:01.000Z",
+                provider_session_ref=row.provider_session_ref,
+            )
+            assert lease is not None
+            assert store.mark_flush_submission_started(
+                lease,
+                now="2026-01-01T00:00:02.000Z",
+            )
+
+        open_fault = store._open_processing_fault_in_connection
+
+        def fail_open_fault(_conn, *, now: str) -> bool:
+            del now
+            raise OSError("injected processing fault write failure")
+
+        monkeypatch.setattr(
+            store,
+            "_open_processing_fault_in_connection",
+            fail_open_fault,
+        )
+        with pytest.raises(OSError, match="injected processing fault write failure"):
+            store.recover_after_boot(
+                lease_owner="failed-new-boot",
+                clock=lambda: datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+            )
+        monkeypatch.setattr(
+            store,
+            "_open_processing_fault_in_connection",
+            open_fault,
+        )
+        assert store.ensure_meta().processing_fault_since is None
+        if operation == "add":
+            assert store.list_queue_rows()[0].state == "processing"
+        else:
+            flush_state = store.get_session_flush_state(row.provider_session_ref)
+            assert flush_state is not None and flush_state.state == "in_flight"
+
+        recovery = store.recover_after_boot(
+            lease_owner="crashed-new-boot",
+            clock=lambda: datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+        )
+        assert (recovery.reclaimed, recovery.interrupted_flushes) == (
+            (1, 0) if operation == "add" else (0, 1)
+        )
+        recovered_fault_since = store.ensure_meta().processing_fault_since
+        assert recovered_fault_since is not None
+
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        coordinator = SessionFlushCoordinator(
+            store=MemoryStore(store.path),
+            provider=FakeMemoryProvider(processing_healthy_flag=True),
+            enabled=lambda: True,
+            now=lambda: datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+            processing_event=record_event,
+        )
+
+        await coordinator.recover(lease_owner="next-boot")
+        await coordinator.recover(lease_owner="same-boot")
+
+        meta = store.get_meta()
+        assert meta is not None
+        assert meta.processing_fault_since == recovered_fault_since
+        assert meta.processing_fault_kind == "engine"
+        assert meta.processing_alert_active is True
+        assert [(event, kind) for event, kind, _at, _queued in events] == [
+            ("fault", "engine")
+        ]
+
+    asyncio.run(run())
+
+
 def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)

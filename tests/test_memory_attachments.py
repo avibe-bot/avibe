@@ -405,6 +405,68 @@ def test_reconcile_reports_missing_reference(attachment_roots) -> None:
     _assert_pin_error(error, "memory_store_unavailable")
 
 
+def test_clear_all_removes_safe_entries_without_trusting_their_names(
+    attachment_roots,
+) -> None:
+    home, source_root = attachment_roots
+    store = AttachmentPinStore()
+    store.pin((_attachment(_source_file(source_root, "valid.txt")),))
+    root = home / "memory" / "attachments"
+
+    malformed_bundle = root / "bundles" / "NOT-A-BUNDLE"
+    malformed_bundle.mkdir(mode=0o700)
+    malformed_file = malformed_bundle / "not-a-pinned-filename.bin"
+    malformed_file.write_bytes(b"malformed but confined")
+    malformed_file.chmod(0o600)
+    loose_bundle_file = root / "bundles" / "loose bytes"
+    loose_bundle_file.write_bytes(b"loose but confined")
+    loose_bundle_file.chmod(0o600)
+    loose_staging_file = root / "staging" / "not-a-stage-name"
+    loose_staging_file.write_bytes(b"partial")
+    loose_staging_file.chmod(0o600)
+
+    store.clear_all()
+    store.clear_all()
+
+    assert list((root / "bundles").iterdir()) == []
+    assert list((root / "staging").iterdir()) == []
+
+
+@pytest.mark.parametrize("unsafe_entry", ["bundle_symlink", "file_symlink", "special"])
+def test_clear_all_rejects_unsafe_entries_without_touching_outside(
+    attachment_roots,
+    unsafe_entry: str,
+) -> None:
+    home, _source_root = attachment_roots
+    store = AttachmentPinStore()
+    root = home / "memory" / "attachments"
+    outside = home / "outside-attachments"
+    outside.mkdir(mode=0o700)
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"outside must remain")
+
+    if unsafe_entry == "bundle_symlink":
+        unsafe = root / "bundles" / "malformed-bundle"
+        unsafe.symlink_to(outside, target_is_directory=True)
+    else:
+        malformed_bundle = root / "bundles" / "malformed-bundle"
+        malformed_bundle.mkdir(mode=0o700)
+        unsafe = malformed_bundle / "malformed-entry"
+        if unsafe_entry == "file_symlink":
+            unsafe.symlink_to(sentinel)
+        else:
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("FIFO creation is unavailable")
+            os.mkfifo(unsafe, mode=0o600)
+
+    with pytest.raises(AttachmentPinError) as error:
+        store.clear_all()
+
+    _assert_pin_error(error, "memory_store_unavailable")
+    assert unsafe.exists() or unsafe.is_symlink()
+    assert sentinel.read_bytes() == b"outside must remain"
+
+
 def test_release_never_follows_bundle_symlink(attachment_roots) -> None:
     home, _source_root = attachment_roots
     store = AttachmentPinStore()

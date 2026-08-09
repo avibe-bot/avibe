@@ -135,8 +135,29 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         calls.append(("clear", user_key))
         return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
 
+    async def failures(*, user_key: str):
+        calls.append(("failures", user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "items": [], "recovery": None},
+        }
+
+    async def maintenance(*, user_key: str):
+        calls.append(("maintenance", user_key))
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "data_exists": False,
+                "can_clear": True,
+                "clear_recovery": None,
+            },
+        }
+
     monkeypatch.setattr(internal_client, "memory_profile", profile)
     monkeypatch.setattr(internal_client, "memory_clear", clear)
+    monkeypatch.setattr(internal_client, "memory_failures", failures)
+    monkeypatch.setattr(internal_client, "memory_maintenance", maintenance)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -157,6 +178,18 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         base_url="https://alex.avibe.bot",
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
+    failures_response = client.get(
+        "/api/memory/failures",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    maintenance_response = client.get(
+        "/api/memory/maintenance",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
     clear_response = client.post(
         "/api/memory/clear",
         json={"confirm": True},
@@ -168,9 +201,13 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     assert settings_response.status_code == 200
     assert "diagnostics" not in settings_response.get_json()
     assert profile_response.status_code == 200
+    assert failures_response.status_code == 200
+    assert maintenance_response.status_code == 200
     assert clear_response.status_code == 200
     assert calls == [
         ("profile", "avibe:remote:user-1"),
+        ("failures", "avibe:remote:user-1"),
+        ("maintenance", "avibe:remote:user-1"),
         ("clear", "avibe:remote:user-1"),
     ]
 
@@ -301,7 +338,10 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
-    async def maintenance():
+    user_keys: list[str] = []
+
+    async def maintenance(*, user_key: str):
+        user_keys.append(user_key)
         return {
             "status_code": 200,
             "body": {
@@ -330,13 +370,17 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
     assert response.get_json()["clear_recovery"]["operation_id"] == "clear-42"
     assert response.get_json()["clear_recovery"]["can_resume"] is False
     assert response.headers["cache-control"] == "no-store"
+    assert user_keys == ["avibe:local"]
 
 
 def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
-    async def failures():
+    user_keys: list[str] = []
+
+    async def failures(*, user_key: str):
+        user_keys.append(user_key)
         return {
             "status_code": 200,
             "body": {
@@ -376,6 +420,7 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
     assert response.get_json()["items"][0]["kind"] == "delivery_abandoned"
     assert response.headers["cache-control"] == "no-store"
     assert forwarded.status_code == 403
+    assert user_keys == ["avibe:local"]
 
 
 def test_memory_search_requires_csrf_and_only_forwards_query_and_policy(monkeypatch, tmp_path) -> None:

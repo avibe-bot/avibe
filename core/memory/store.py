@@ -924,6 +924,8 @@ class MemoryStore:
                         row["fence_token"],
                     ),
                 )
+            if rows:
+                self._open_processing_fault_in_connection(conn, now=now)
             return len(rows)
 
     def settle_add_ack(
@@ -1963,11 +1965,7 @@ class MemoryStore:
                     ),
                 )
             if rows:
-                self._set_last_error_in_connection(
-                    conn,
-                    "memory_provider_response_invalid",
-                    now,
-                )
+                self._open_processing_fault_in_connection(conn, now=now)
             return len(rows)
 
     def queue_stats(self) -> QueueStats:
@@ -2408,23 +2406,31 @@ class MemoryStore:
         """Persist one OPEN cycle and return whether it starts a new outage."""
 
         with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            newly_open = meta.processing_fault_since is None
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET processing_fault_kind = CASE
-                        WHEN processing_fault_since IS NULL THEN NULL
-                        ELSE processing_fault_kind
-                    END,
-                    processing_fault_since = ?,
-                    last_error = 'memory_processing_failed', last_error_at = ?,
-                    updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now, now, now),
-            )
-            return newly_open
+            return self._open_processing_fault_in_connection(conn, now=now)
+
+    def _open_processing_fault_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        now: str,
+    ) -> bool:
+        meta = self._ensure_meta_in_connection(conn)
+        newly_open = meta.processing_fault_since is None
+        conn.execute(
+            """
+            UPDATE memory_meta
+            SET processing_fault_kind = CASE
+                    WHEN processing_fault_since IS NULL THEN NULL
+                    ELSE processing_fault_kind
+                END,
+                processing_fault_since = ?,
+                last_error = 'memory_processing_failed', last_error_at = ?,
+                updated_at = ?
+            WHERE singleton = 1
+            """,
+            (now, now, now),
+        )
+        return newly_open
 
     def classify_processing_fault(self, kind: Literal["credential", "engine"]) -> bool:
         """Store display classification and report whether its alert is pending."""

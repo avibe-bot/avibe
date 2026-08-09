@@ -194,6 +194,8 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    owner = runtime.principal_for_user_key("avibe:local")
+    other_operator = runtime.principal_for_user_key("avibe:remote:other-subject")
     _enqueue(runtime, "resume-source")
     pre_epoch = runtime._store.ensure_meta().epoch
     journal = runtime._clear_journal
@@ -210,7 +212,7 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
 
     monkeypatch.setattr(journal, "record_surface_deleted", interrupt_queue_receipt)
 
-    failed = await runtime.clear(operator_ref="user:owner")
+    failed = await runtime.clear(operator_ref=owner)
 
     assert failed["status"] == "failed"
     recovery = journal.get_open_operation()
@@ -221,16 +223,76 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     assert runtime._store.ensure_meta().epoch == pre_epoch + 1
     assert runtime._store.list_queue_rows() == ()
 
+    owner_maintenance = await runtime.maintenance_payload(operator_ref=owner)
+    other_maintenance = await runtime.maintenance_payload(
+        operator_ref=other_operator
+    )
+    owner_failures = await runtime.failure_log_payload(operator_ref=owner)
+    other_failures = await runtime.failure_log_payload(operator_ref=other_operator)
+    assert owner_maintenance["clear_recovery"]["can_resume"] is True
+    assert owner_maintenance["clear_recovery"]["can_abort"] is True
+    assert owner_failures["recovery"]["can_resume"] is True
+    assert owner_failures["recovery"]["can_abort"] is True
+    assert other_maintenance["clear_recovery"]["can_resume"] is False
+    assert other_maintenance["clear_recovery"]["can_abort"] is False
+    assert other_failures["recovery"]["can_resume"] is False
+    assert other_failures["recovery"]["can_abort"] is False
+    assert "operator_ref" not in owner_maintenance["clear_recovery"]
+    assert owner not in repr(owner_maintenance)
+
+    rejected = await runtime.resume_clear(
+        recovery.operation_id,
+        operator_ref=other_operator,
+    )
+    assert rejected["status"] == "failed"
+    assert rejected["recovery"]["can_resume"] is False
+    assert journal.get_open_operation() == recovery
+
     monkeypatch.setattr(journal, "record_surface_deleted", original_record)
     completed = await runtime.resume_clear(
         recovery.operation_id,
-        operator_ref="user:owner",
+        operator_ref=owner,
     )
 
     assert completed["status"] == "completed"
     assert completed["epoch"] == pre_epoch + 1
     assert runtime._store.ensure_meta().epoch == pre_epoch + 1
     assert journal.get_open_operation() is None
+    await runtime.close()
+
+
+async def test_attachment_clear_failure_does_not_record_surface_deleted(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    attachment_store = runtime.module._attachment_store
+    outside = tmp_path / "outside-attachments"
+    outside.mkdir(mode=0o700)
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"outside must remain")
+    unsafe = attachment_store._bundles / "malformed-bundle"
+    original_clear_all = attachment_store.clear_all
+
+    def inject_unsafe_entry_then_clear() -> None:
+        unsafe.symlink_to(outside, target_is_directory=True)
+        original_clear_all()
+
+    monkeypatch.setattr(attachment_store, "clear_all", inject_unsafe_entry_then_clear)
+
+    failed = await runtime.clear(operator_ref="user:owner")
+
+    assert failed["status"] == "failed"
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None and recovery.state == "recovery_needed"
+    surfaces = {
+        surface.surface: surface.state
+        for surface in runtime._clear_journal.get_surfaces(recovery.operation_id)
+    }
+    assert surfaces["attachments"] == "snapshotted"
+    assert unsafe.is_symlink()
+    assert sentinel.read_bytes() == b"outside must remain"
     await runtime.close()
 
 
@@ -251,7 +313,7 @@ async def test_recovery_payload_disables_abort_before_initial_snapshot(
     recovery = journal.mark_boot_recovery_needed()
 
     assert recovery is not None
-    maintenance = await runtime.maintenance_payload()
+    maintenance = await runtime.maintenance_payload(operator_ref="user:owner")
     assert maintenance["clear_recovery"] == {
         "state": "recovery_needed",
         "operation_id": operation.operation_id,

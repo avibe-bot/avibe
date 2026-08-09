@@ -442,6 +442,27 @@ class AttachmentPinStore:
                 os.close(bundles_fd)
                 os.close(staging_fd)
 
+    def clear_all(self) -> None:
+        """Remove every safely confined entry, regardless of bundle naming."""
+
+        with self._lock:
+            self._verify_private_layout()
+            staging_fd = _open_private_directory(self._staging, "attachment staging root")
+            bundles_fd = _open_private_directory(self._bundles, "attachment bundles root")
+            try:
+                for directory_fd in (staging_fd, bundles_fd):
+                    for name in _directory_entry_names(directory_fd):
+                        _remove_private_entry(directory_fd, name)
+                    if _directory_entry_names(directory_fd):
+                        raise AttachmentPinError(
+                            "memory_store_unavailable",
+                            "attachment storage could not be fully cleared",
+                        )
+                    _fsync_fd(directory_fd, "attachment storage root")
+            finally:
+                os.close(bundles_fd)
+                os.close(staging_fd)
+
     def _prepare_private_layout(self) -> None:
         for directory in (self._root, self._staging, self._bundles):
             _ensure_private_directory(directory)
@@ -1233,6 +1254,34 @@ def _remove_private_bundle(parent_fd: int, name: str, *, strict_files: bool) -> 
         return
     except OSError as error:
         raise _storage_failure(error, "attachment bundle could not be removed") from error
+
+
+def _remove_private_entry(parent_fd: int, name: str) -> None:
+    """Remove one anchored regular file or flat private directory without following links."""
+
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _storage_failure(error, "attachment entry could not be inspected") from error
+    _require_current_owner(info, "attachment entry", storage=True)
+    if stat.S_ISREG(info.st_mode):
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+            _fsync_fd(parent_fd, "attachment entry parent")
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise _storage_failure(error, "attachment entry could not be removed") from error
+    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+        _remove_private_bundle(parent_fd, name, strict_files=False)
+        return
+    raise AttachmentPinError(
+        "memory_store_unavailable",
+        "attachment storage contains an unsafe entry",
+    )
 
 
 def _remove_private_bundle_quietly(parent_fd: int, name: str, *, strict_files: bool) -> None:

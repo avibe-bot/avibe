@@ -12,6 +12,8 @@ vi.mock('react-i18next', () => ({
     t: (key: string, options?: Record<string, unknown>) => (
       key === 'memory.processingRecord.sourceReason'
         ? `${key}:${String(options?.reason)}`
+        : key === 'errors.future_clear_error'
+          ? String(options?.defaultValue)
         : key
     ),
   }),
@@ -290,6 +292,26 @@ describe('MemoryStatusPanel', () => {
     );
 
     expect(screen.getByText('future_state')).toBeTruthy();
+  });
+
+  it.each([
+    ['memory_clear_failed', 'errors.memory_clear_failed'],
+    ['future_clear_error', 'future_clear_error'],
+  ])('renders the Clear recovery error %s safely', (errorCode, expectedLabel) => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{
+          operation_id: `clear-${errorCode}`,
+          state: 'recovery_needed',
+          can_resume: true,
+          can_abort: false,
+          error_code: errorCode,
+        }}
+      />,
+    );
+
+    expect(screen.getByText(expectedLabel)).toBeTruthy();
   });
 
   it('keeps abort unavailable until the journal verifies a complete snapshot', async () => {

@@ -669,7 +669,11 @@ class MemoryRuntime:
         self._recorder_health = dict(health)
         return dict(self._recorder_health)
 
-    async def failure_log_payload(self) -> dict[str, Any]:
+    async def failure_log_payload(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
         entries = await self.module.failure_log()
@@ -694,10 +698,14 @@ class MemoryRuntime:
         return {
             "status": "ok",
             "items": items[:50],
-            "recovery": self._clear_recovery_payload(),
+            "recovery": self._clear_recovery_payload(operator_ref=operator_ref),
         }
 
-    async def maintenance_payload(self) -> dict[str, Any]:
+    async def maintenance_payload(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> dict[str, Any]:
         """Return cheap local maintenance facts without probing or scanning EverOS."""
 
         if not self.available:
@@ -705,7 +713,9 @@ class MemoryRuntime:
                 "status": "ok",
                 "data_exists": True,
                 "can_clear": False,
-                "clear_recovery": self._clear_recovery_payload(),
+                "clear_recovery": self._clear_recovery_payload(
+                    operator_ref=operator_ref
+                ),
             }
         try:
             meta, history, manual_required = await asyncio.gather(
@@ -718,9 +728,11 @@ class MemoryRuntime:
                 "status": "ok",
                 "data_exists": True,
                 "can_clear": False,
-                "clear_recovery": self._clear_recovery_payload(),
+                "clear_recovery": self._clear_recovery_payload(
+                    operator_ref=operator_ref
+                ),
             }
-        recovery = self._clear_recovery_payload()
+        recovery = self._clear_recovery_payload(operator_ref=operator_ref)
         return {
             "status": "ok",
             "data_exists": bool(history or (meta is not None and meta.last_success_at)),
@@ -950,7 +962,7 @@ class MemoryRuntime:
         async with self._reconcile_lock, self.module._lifecycle_lock:
             async with self.module._root_lifecycle_lock():
                 if journal.get_open_operation() is not None:
-                    return self._clear_blocked_payload()
+                    return self._clear_blocked_payload(operator_ref=operator_ref)
                 operation: ClearOperation | None = None
                 self.module._clear_active = True
                 try:
@@ -964,11 +976,11 @@ class MemoryRuntime:
                         self.module._worker.resume_claims()
                         if isinstance(error, asyncio.CancelledError):
                             raise
-                        return self._clear_blocked_payload()
+                        return self._clear_blocked_payload(operator_ref=operator_ref)
                     if manual_required:
                         self.module._clear_active = False
                         self.module._worker.resume_claims()
-                        return self._clear_blocked_payload()
+                        return self._clear_blocked_payload(operator_ref=operator_ref)
                     try:
                         meta = await self._run_maintenance_io(self._store.ensure_meta)
                         operation = await self._run_maintenance_io(
@@ -994,7 +1006,7 @@ class MemoryRuntime:
                             self.module._worker.resume_claims()
                         if isinstance(error, asyncio.CancelledError):
                             raise
-                        return self._clear_blocked_payload()
+                        return self._clear_blocked_payload(operator_ref=operator_ref)
                 finally:
                     self.module._clear_active = False
                 if operation is None:
@@ -1011,7 +1023,7 @@ class MemoryRuntime:
             async with self.module._root_lifecycle_lock():
                 current = journal.get_open_operation()
                 if current is None or current.operation_id != operation_id:
-                    return self._clear_blocked_payload()
+                    return self._clear_blocked_payload(operator_ref=operator_ref)
                 try:
                     operation = await self._run_maintenance_io(
                         lambda: journal.claim_resume(
@@ -1031,7 +1043,7 @@ class MemoryRuntime:
                         await self._finish_clear(recovered)
                     if isinstance(error, asyncio.CancelledError):
                         raise
-                    return self._clear_blocked_payload()
+                    return self._clear_blocked_payload(operator_ref=operator_ref)
                 return await self._finish_clear(operation)
 
     async def abort_clear(self, operation_id: str, *, operator_ref: str) -> dict[str, Any]:
@@ -1045,7 +1057,7 @@ class MemoryRuntime:
             async with self.module._root_lifecycle_lock():
                 current = journal.get_open_operation()
                 if current is None or current.operation_id != operation_id:
-                    return self._clear_blocked_payload()
+                    return self._clear_blocked_payload(operator_ref=operator_ref)
                 try:
                     operation = await self._run_maintenance_io(
                         lambda: journal.claim_abort(
@@ -1092,7 +1104,7 @@ class MemoryRuntime:
                         await self._finish_aborted_clear(recovered)
                     if isinstance(error, asyncio.CancelledError):
                         raise
-                    return self._clear_blocked_payload()
+                    return self._clear_blocked_payload(operator_ref=operator_ref)
                 return await self._finish_aborted_clear(operation)
 
     async def _prepare_clear(
@@ -1208,7 +1220,7 @@ class MemoryRuntime:
             return
         if surface.surface == "attachments":
             await self._run_maintenance_io(
-                lambda: self.module._attachment_store.reconcile((), ())
+                self.module._attachment_store.clear_all
             )
             return
         raise RuntimeError("unknown Memory clear surface")
@@ -1364,16 +1376,21 @@ class MemoryRuntime:
         except Exception:
             return None
 
-    def _clear_recovery_payload(self) -> dict[str, Any] | None:
+    def _clear_recovery_payload(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> dict[str, Any] | None:
         operation = self._open_clear_operation()
         if operation is None:
             return None
         can_resume = False
         can_abort = False
         try:
-            journal = self._require_clear_journal()
-            can_resume = journal.can_resume(operation.operation_id)
-            can_abort = journal.can_abort(operation.operation_id)
+            if operator_ref is not None and operation.operator_ref == operator_ref:
+                journal = self._require_clear_journal()
+                can_resume = journal.can_resume(operation.operation_id)
+                can_abort = journal.can_abort(operation.operation_id)
         except Exception:
             pass
         return {
@@ -1385,11 +1402,15 @@ class MemoryRuntime:
             "can_abort": can_abort,
         }
 
-    def _clear_blocked_payload(self) -> dict[str, Any]:
+    def _clear_blocked_payload(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "status": "failed",
             "error": "memory_clear_failed",
-            "recovery": self._clear_recovery_payload(),
+            "recovery": self._clear_recovery_payload(operator_ref=operator_ref),
         }
 
     def _journal_surface_digests(self, operation_id: str) -> dict[str, str | None]:
