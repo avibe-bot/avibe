@@ -204,6 +204,7 @@ export const ChatPage: React.FC = () => {
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
+  const { focusedId: foregroundAppWindowId } = useWindowManager();
   const [pageActive, setPageActive] = useState(() => readPageActivity());
   useEffect(() => {
     const syncPageActivity = () => setPageActive(readPageActivity());
@@ -259,6 +260,7 @@ export const ChatPage: React.FC = () => {
   // before the composer bridge target, which depends on showPageMode.
   const [showPageMode, setShowPageMode] = useState(false);
   const [showPageBusy, setShowPageBusy] = useState(false);
+  const [showPageViewResolved, setShowPageViewResolved] = useState(false);
   // One authority invalidates an in-flight restore/open when the user explicitly
   // chooses Chat (including a same-session ?view=chat navigation).
   const showPageRequestRef = useRef(0);
@@ -328,6 +330,7 @@ export const ChatPage: React.FC = () => {
     // once the new session row loads, the restore effect below applies its own
     // remembered view through the same open path as a user click.
     showPageRestoreAttemptRef.current = null;
+    setShowPageViewResolved(false);
     selectChatView(sessionId ?? '', false);
     setShowPageUrl(null);
   }, [selectChatView, sessionId]);
@@ -341,6 +344,7 @@ export const ChatPage: React.FC = () => {
     const sid = sessionId ?? '';
     showPageRestoreAttemptRef.current = sid || null;
     selectChatView(sid, true);
+    setShowPageViewResolved(true);
     const next = new URLSearchParams(window.location.search);
     next.delete('view');
     setSearchParams(next, { replace: true });
@@ -1917,10 +1921,18 @@ export const ChatPage: React.FC = () => {
     showPageRestoreAttemptRef.current = sid;
     if (readOnly) {
       writeChatViewMode(sid, 'chat');
+      setShowPageViewResolved(true);
       return;
     }
-    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') return;
-    void openShowPage(sid);
+    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') {
+      setShowPageViewResolved(true);
+      return;
+    }
+    void openShowPage(sid).finally(() => {
+      if (sessionIdRef.current === sid && showPageRestoreAttemptRef.current === sid) {
+        setShowPageViewResolved(true);
+      }
+    });
   }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal]);
 
   // When the share control resolves the page (open) or flips its visibility, the
@@ -2195,11 +2207,29 @@ export const ChatPage: React.FC = () => {
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
-    if (!canMarkConversationRead({ pageActive, historicalWindow, showPageActive })) return;
+    if (!canMarkConversationRead({
+      pageActive,
+      sessionReady: !loading && session?.id === sessionId,
+      viewResolved: showPageViewResolved,
+      historicalWindow,
+      showPageActive,
+      foregroundAppWindow: foregroundAppWindowId !== null,
+    })) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead, historicalWindow, pageActive, showPageActive]);
+  }, [
+    sessionId,
+    unreadBySession,
+    markInboxRead,
+    loading,
+    session?.id,
+    showPageViewResolved,
+    historicalWindow,
+    pageActive,
+    showPageActive,
+    foregroundAppWindowId,
+  ]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn

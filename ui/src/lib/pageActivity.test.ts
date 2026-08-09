@@ -12,9 +12,21 @@ describe('isPageActive', () => {
 
 describe('canMarkConversationRead', () => {
   it('requires the visible chat transcript to be current and active', () => {
-    expect(canMarkConversationRead({ pageActive: true, historicalWindow: false, showPageActive: false })).toBe(true);
-    expect(canMarkConversationRead({ pageActive: false, historicalWindow: false, showPageActive: false })).toBe(false);
-    expect(canMarkConversationRead({ pageActive: true, historicalWindow: true, showPageActive: false })).toBe(false);
-    expect(canMarkConversationRead({ pageActive: true, historicalWindow: false, showPageActive: true })).toBe(false);
+    const visibleTranscript = {
+      pageActive: true,
+      sessionReady: true,
+      viewResolved: true,
+      historicalWindow: false,
+      showPageActive: false,
+      foregroundAppWindow: false,
+    };
+
+    expect(canMarkConversationRead(visibleTranscript)).toBe(true);
+    expect(canMarkConversationRead({ ...visibleTranscript, pageActive: false })).toBe(false);
+    expect(canMarkConversationRead({ ...visibleTranscript, sessionReady: false })).toBe(false);
+    expect(canMarkConversationRead({ ...visibleTranscript, viewResolved: false })).toBe(false);
+    expect(canMarkConversationRead({ ...visibleTranscript, historicalWindow: true })).toBe(false);
+    expect(canMarkConversationRead({ ...visibleTranscript, showPageActive: true })).toBe(false);
+    expect(canMarkConversationRead({ ...visibleTranscript, foregroundAppWindow: true })).toBe(false);
   });
 });
