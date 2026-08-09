@@ -24,6 +24,7 @@ from vibe.model_hub_runtime.supervisor import EngineSupervisor  # noqa: E402
 OPENAI_MODEL = "gpt-5.4-mini"
 ANTHROPIC_MODEL = "claude-haiku-4-5"
 ANTHROPIC_FALLBACK_MODEL = "claude-3-5-haiku-latest"
+CHAT_SOURCE_PROTOCOL = "openai_chat"
 PINNED_ENGINE_VERSION = "v7.2.95"
 PINNED_ENGINE_MANIFEST = REPO_ROOT / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
 
@@ -90,7 +91,7 @@ def main() -> int:
         chat_ref = store.store_api_key(
             openai_key,
             vendor="custom",
-            protocol="openai_compatible",
+            protocol=CHAT_SOURCE_PROTOCOL,
             base_url=openai_base,
         )
         sources = store.sync_sources(
@@ -114,7 +115,7 @@ def main() -> int:
                 _binding(
                     source_id="src_fidelitychat",
                     vendor="custom",
-                    protocol="openai_compatible",
+                    protocol=CHAT_SOURCE_PROTOCOL,
                     base_url=openai_base,
                     credential_ref=chat_ref,
                     models=(OPENAI_MODEL,),

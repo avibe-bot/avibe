@@ -1,8 +1,12 @@
 import copy
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import probe
+import run_relay
+from vibe.model_hub_runtime.state import EngineStateStore
 
 
 def _anthropic_usage():
@@ -2664,6 +2668,24 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("arguments_not_object", anthropic.parse_errors)
         self.assertIn("arguments_not_json_string", responses.parse_errors)
         self.assertIn("arguments_not_json_string", chat.parse_errors)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = EngineStateStore(Path(temporary) / "state")
+            credential_ref = store.store_api_key(
+                "test-key",
+                vendor="custom",
+                protocol=run_relay.CHAT_SOURCE_PROTOCOL,
+                base_url="https://relay.invalid/v1",
+            )
+            binding = run_relay._binding(
+                source_id="src_fidelitychat",
+                vendor="custom",
+                protocol=run_relay.CHAT_SOURCE_PROTOCOL,
+                base_url="https://relay.invalid/v1",
+                credential_ref=credential_ref,
+                models=("test-model",),
+            )
+        self.assertEqual(binding.protocol, "openai_chat")
 
     def test_transient_encrypted_reasoning_is_not_retained(self) -> None:
         events = [
