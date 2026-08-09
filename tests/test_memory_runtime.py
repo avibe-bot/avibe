@@ -4992,6 +4992,67 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     asyncio.run(run())
 
 
+def test_queued_backup_stage_reconcile_rechecks_artifact_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_entered = threading.Event()
+    release_install = threading.Event()
+
+    class BlockingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            self.ensure_calls.append(force)
+            install_entered.set()
+            release_install.wait(timeout=2)
+            return dict(self.ensure_payload)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=BlockingArtifact(python=Path(sys.executable)),
+        effective_home=tmp_path,
+    )
+    terminal_gc_entered = asyncio.Event()
+    release_terminal_gc = asyncio.Event()
+    cleanup_calls: list[bool] = []
+
+    async def blocked_terminal_gc() -> None:
+        terminal_gc_entered.set()
+        await release_terminal_gc.wait()
+
+    manager = runtime._backup_manager
+    assert manager is not None
+    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", blocked_terminal_gc)
+    monkeypatch.setattr(
+        manager,
+        "reconcile_unpublished_backup_stages",
+        lambda: cleanup_calls.append(runtime._artifact_installing),
+    )
+
+    async def run() -> None:
+        runtime._ensure_terminal_snapshot_gc()
+        runtime._ensure_backup_stage_reconcile()
+        await terminal_gc_entered.wait()
+        queued_reconcile = runtime._backup_stage_reconcile_task
+        assert queued_reconcile is not None
+
+        installing = asyncio.create_task(runtime.install_artifact())
+        assert await asyncio.to_thread(install_entered.wait, 1)
+        release_terminal_gc.set()
+        await queued_reconcile
+        assert cleanup_calls == []
+
+        release_install.set()
+        assert (await installing)["ok"] is True
+        deferred_reconcile = runtime._backup_stage_reconcile_task
+        assert deferred_reconcile is not None
+        assert deferred_reconcile is not queued_reconcile
+        await deferred_reconcile
+        assert cleanup_calls == [False]
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 class _BlockingProbeProcess:
     """A sidecar fake whose processing probe never finishes on its own.
 

@@ -1787,6 +1787,8 @@ class MemoryRuntime:
         try:
             async with self._reconcile_lock, self.module._lifecycle_lock:
                 async with self.module._root_lifecycle_lock():
+                    if self._artifact_installing:
+                        return
                     journal.assert_backup_allowed()
                     restore_journal.assert_idle()
                     await self._run_maintenance_io(
