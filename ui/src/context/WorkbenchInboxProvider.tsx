@@ -2,11 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { useApi } from './ApiContext';
-import type { InboxSession, WorkbenchMessage } from './ApiContext';
+import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
-import { notifyInboxMessage } from '../lib/inboxNotifications';
 
 const PAGE_SIZE = 30;
 
@@ -73,7 +72,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // — reconciles the loaded window instead, so a non-resume
   // rerun never collapses a multi-page feed back to page one.
   const initialFetched = useRef(false);
-  const notifiedMessageIdsRef = useRef(new Set<string>());
 
   // One home for "an authoritative unread map arrived": set the map and flip
   // ``unreadLoaded`` together so the two can never drift apart. Every whole-account
@@ -244,16 +242,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           delete next[data.session_id];
           return next;
         });
-      },
-      onMessageNew: (message: WorkbenchMessage) => {
-        if (message.id && notifiedMessageIdsRef.current.has(message.id)) return;
-        if (!message.id || message.author !== 'agent' || message.type !== 'result') return;
-        notifiedMessageIdsRef.current.add(message.id);
-        if (notifiedMessageIdsRef.current.size > 256) {
-          const oldest = notifiedMessageIdsRef.current.values().next().value;
-          if (oldest) notifiedMessageIdsRef.current.delete(oldest);
-        }
-        void notifyInboxMessage(message);
       },
       onError: (err) => {
         // ApiContext owns the explicit reconnect loop. Keep this a log, not a
