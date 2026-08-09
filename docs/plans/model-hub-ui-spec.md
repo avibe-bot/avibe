@@ -2680,8 +2680,8 @@ names for what is about to happen.**
 
 **The hint line answers 有没有 and the refusal also carries 哪些** `[derived]`
 `[contract]` `[contract-gap]` **G-23**. `would_interrupt` is not a flag. It is a
-`SupplyGap[]`, each entry naming `backend`, `model_id` and `agents`, where `model_id` is the **menu**
-model — 「the protected identifier is always the menu model, never a hop's upstream
+`SupplyGap[]`, each entry naming `backend`, `model_id` and `agents`, where `model_id` is
+the **menu** model — 「the protected identifier is always the menu model, never a hop's upstream
 `model_id`」 — and `agents` is the enabled named Vibe Agents whose explicit model is that
 one, 「present and may be empty」 `[contract]`. `model-hub.md` then requires the confirm to
 use it: 「the confirm copy names affected Agents when any exist」. A single sentence saying
@@ -2896,8 +2896,8 @@ Five rules:
   exact-hop error leads and both arrays are still carried. That refusal is *Refetch
   refused*, drawn in `Qp6FI` with `guard.hint.safe` / `guard.hint.interrupt` naming which
   of the two the user is looking at — and, once the frame grows the block G-23 registers,
-  with `guard.gap.*` naming the models and Agents behind that sentence. 仍要拉取 re-sends with `force`, and the contract is
-  equally explicit about what that does: it 「applies the inventory change and removes only
+  with `guard.gap.*` naming the models and Agents behind that sentence. 仍要拉取 re-sends
+  with `force`, and the contract is equally explicit about what that does: it 「applies the inventory change and removes only
   those invalidated hops in one transaction, preserving the identity and relative order of
   all survivors and keeping an empty route configured」, reporting every resulting gap —
   `force` is confirmation, not a claim that the change is interruption-free.
@@ -3218,8 +3218,8 @@ supply path because that is what it now is — not a deviation from the configur
 what the configuration resolves to until the user acts — the model row names its current
 source without the 接管 suffix, and the pill excludes the backend entirely, contributing
 zero to AC-30 exactly as an exhausted chain does. What it keeps from this frame is the
-**gold demotion on the head's own relation**, because gold is 「供给已暂停」 — a
-statement that *this path is not carrying traffic*, which is true of both blocker kinds.
+**gold demotion on the head's own relation**, because gold is 「供给已暂停」 — a statement
+that *this path is not carrying traffic*, which is true of both blocker kinds.
 The source's own ink is a different subject with a different owner: §1.6's status mapping
 reads `#FF6B6B` for both, and a surface that derived one from the other would be right
 only for as long as the two happened to agree.
@@ -3633,8 +3633,8 @@ inventing a request that was never sent — `POST /api/models/runtime/start` is 
 plausible lie, and it names the step that did *not* fail.
 
 So the detail is selected by step, and the sentence for the install step is the one that
-already exists: `install.fail.detail`, 这次安装没有完成,组件可能处于未完成状态。重试会重新装一遍。
-It is the same operation failing that 01's *Install failed* reports, and it needs no
+already exists: `install.fail.detail`,
+这次安装没有完成,组件可能处于未完成状态。重试会重新装一遍。 It is the same operation failing that 01's *Install failed* reports, and it needs no
 evidence shape because a client-side operation with no request has nothing to quote —
 what the user needs to know is what state the failure left behind and that the button
 works again, which is what that sentence says.
@@ -3652,8 +3652,8 @@ this dialog has no evidence either way (G-10 is exactly that absence), and it st
 one thing that is true in every case — retrying reinstalls from scratch rather than
 resuming. §1.0's *Install failed* row carries the same correction: the reading after a
 dismissal is whatever `health` reports on the next read, not an assertion this surface
-makes about the filesystem. Reusing it is the same discipline D-26 applies to the component name,
-the duration and the consent rule: two entry points into one operation, one set of
+makes about the filesystem. Reusing it is the same discipline D-26 applies to the
+component name, the duration and the consent rule: two entry points into one operation, one set of
 strings, no second wording to keep in step. What differs between the surfaces is the
 title, and it should — 没能切换到网关 is true here and false on 01, because only this
 press promised a switch.
@@ -3955,8 +3955,8 @@ nobody has drawn yet: any future add path inherits the same test.
 
 **D-28 — A backend-order surface reads `AgentSupply.sources`, that backend's stored Source
 order; a source card reads `adopted_by`. Neither substitutes for the other.** §1.3 owns
-the first reading — it is the list `PUT /api/models/agents/<backend>/sources` writes and re-echoes
-`{agent: AgentSupply}` — and §1.0 owns the second; this decision is only about
+the first reading — it is the list `PUT /api/models/agents/<backend>/sources` writes and
+re-echoes `{agent: AgentSupply}` — and §1.0 owns the second; this decision is only about
 the prohibition on deriving either from the other.
 *Why:* the two diverge on an ordinary page, not only in edge cases, and they diverge in
 **both** directions. `adopted_by` names backends some persisted Route chain references,
@@ -4008,8 +4008,8 @@ chain」, which was the wrong substitute for a second time: §1.3 saves and read
 `AgentSupply`, never a chain, so the rule named a projection its own owning section does
 not fetch. The correction is recorded here rather than applied silently, because the
 failure mode is the interesting part — a re-derivation done in one pass over the decision
-and not over the section it governs. Worth recording, because nothing in the review flagged it:
-a citation to a deleted name reads exactly like a citation to a live one.
+and not over the section it governs. Worth recording, because nothing in the review
+flagged it: a citation to a deleted name reads exactly like a citation to a live one.
 
 **D-29 — The page is 「模型」, the module is 「来源与网关」, and 「模型网关」 is never
 rendered.** The project's name for this work is not a string in the product.
