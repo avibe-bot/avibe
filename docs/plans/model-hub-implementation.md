@@ -1038,6 +1038,49 @@ the final contract and remains release-blocking under the default-off gate.
 > prevent. Apply the exact-model capability check in the shared invocation path so
 > Claude, Codex, and OpenCode inherit the same behavior.
 
+#### Sealed current-consumer findings — reviewed head `8572a542ab`
+
+This is the third reviewed head on the same prelaunch-consumer root-cause class. The
+review-loop circuit breaker therefore remains open and the sealed implementation-ledger
+ruling continues to apply: K1 records these release-blocking consumers without patching
+I1/I2/I3/I4 implementation while the default-off release gate remains in force.
+
+| Review thread | AC / disposition | Landing point | Responsible lane |
+| --- | --- | --- | --- |
+| `3742927535` | AC-33; valid prelaunch contract-mirror gap | Nested chain/probe version constants, mock responses, and frontend contract fixtures | I1 + I4 |
+| `3742927537` | AC-26 + AC-29; valid prelaunch canonical-validation gap | Final Source/model payload and persisted-config validator plus omission fixtures | I1 |
+| `3742927538` | AC-26 / FC-12; valid prelaunch guarded-mutation result gap | Source-delete service, RPC, HTTP/client envelope, and confirmation/reconciliation consumer | I1 + I4 |
+
+> **Bump the frontend nested contract mirrors with the backend**
+>
+> When the Models UI or its mock client consumes a chain or probe, the backend and
+> schemas now advertise nested contract version 5, but
+> `ui/src/components/settings/models/types.ts:15-17` still defines both versions as 4
+> and `modelsApi.ts:781,811` builds mock responses from those stale constants. The live
+> client blindly casts responses to these v4 types, while mock-mode tests continue
+> exercising v4 payloads, so the frontend no longer provides contract-version coverage
+> for the v5 transition; update the TypeScript constants and affected fixtures in the
+> same atomic bump.
+
+> **Reject final model entries that omit reasoning efforts**
+>
+> When a v5 persisted model or Source-create payload omits `reasoning_efforts`, this
+> default silently accepts it and serializes the entry back with `[]`, even though
+> `source.schema.json` requires the field and the final contract defines an empty array
+> as an explicit declaration that the model supports no reasoning effort. This lets
+> malformed final-shape data bypass the canonical config boundary and changes omission
+> into a capability decision; require the key to be present rather than defaulting it.
+
+> **Return cascade details from Source deletion**
+>
+> When a forced Source deletion removes configured route hops,
+> `ModelHubService.delete_source` returns nothing and both
+> `core/handlers/model_hub/rpc.py:31-33` and `vibe/ui_server.py:3124-3125` discard all
+> mutation detail. This new v5 route contract promises `removed_hops` and `interrupted`,
+> so the client cannot reconcile or report which routes were pruned after a successful
+> cascade; return the contracted guarded-mutation envelope through the service, RPC,
+> and HTTP layers.
+
 After I1 lands, `model-hub-contracts/**` is read-only to I2–I5. An implementation-proven
 mismatch is reported to the orchestrator for a targeted decision; the discovering lane
 does not edit or reinterpret the contract locally.
