@@ -77,15 +77,13 @@ export type SuppliedModel = {
   id: string;
   display_name?: string | null;
   provenance: ModelProvenance;
+  reasoning_efforts?: string[];
   discovered_at?: string | null;
 };
 
 export type Source = {
   id: string;
-  /** v3, immutable once written: the `follow` policy recommends api_key sources
-   *  by creation time ascending, so the rule needs a persisted stamp (the
-   *  sources array itself is explicitly unordered). May be null on rows
-   *  persisted before the field existed; `id` ascending is the tie-breaker. */
+  /** Source creation time; ordinary audit/display metadata only. */
   created_at?: string | null;
   /** Latest successful full model discovery for this source. null means the
    *  source predates the field or has no known successful discovery. */
@@ -576,12 +574,12 @@ export type SourceRepaired = {
   interrupted_pairs: SupplyGap[];
 };
 
-/** POST /api/models/custom-models — appends a manual-provenance model entry to
- *  a source's supply list (frame 08). */
+/** POST /api/models/sources/<source_id>/models — appends a user-authored model
+ *  entry to a Source inventory (frame 08). */
 export type CustomModelCreate = {
-  source_id: string;
   model_id: string;
   display_name?: string | null;
+  reasoning_efforts: string[];
 };
 
 /** POST /api/models/migration/apply response. */

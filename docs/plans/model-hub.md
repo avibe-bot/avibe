@@ -207,8 +207,10 @@ The Source workflow is complete at both entry points:
   The saved Source surface may render freshness only as “Model list updated at …” /
   「型号列表更新于…」 from `last_discovered_at`. It carries no latency or “last checked”
   field or copy.
-- **Model inventory and manual entries.** A user may add and remove exact manual model
-  ids. Model `id` is unique within a Source. Every model-list item has
+- **Model inventory and manual entries.** A `discovered` entry's existence is an
+  upstream fact, not a user decision; creating and deleting inventory entries therefore
+  applies only to entries the user wrote. Model `id` is unique within a Source. Every
+  model-list item has
   `{id, origin: "discovered" | "manual", reasoning_efforts: string[]}`; discovery
   creates `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
   `reasoning_efforts` is required and may be empty. It declares the exact reasoning
@@ -220,11 +222,13 @@ The Source workflow is complete at both entry points:
   invocation values that exact upstream model accepts, not which model or effort an
   Agent selects.
   Editing the list on either a discovered or manual entry uses the atomic
-  `PATCH /api/models/custom-models` mutation with
-  `{source_id, model_id, reasoning_efforts}`; the adapter validates the submitted list
+  `PATCH /api/models/sources/<source_id>/models/<model_id>` mutation with
+  `{reasoning_efforts}`; the adapter validates the submitted list
   and re-echoes the canonical stored value as `{source: Source}`. Editing the list never
-  changes `origin` or a route chain. Manual add/remove and the guarded-removal distinction
-  remain unchanged. This all-inventory editing scope is an owner-vetoable orchestrator
+  changes `id`, `origin`, or a route chain. Model creation and deletion use the same
+  Source-model subresource; deleting a discovered entry is rejected at the API boundary
+  with `source_model_managed_upstream`. This all-inventory editing scope is an
+  owner-vetoable orchestrator
   ruling dated 2026-08-08: discovery endpoints commonly return only ids, so a
   discovered-only immutable list would leave the capability permanently undeclarable.
 
@@ -253,9 +257,10 @@ has a response-proven protocol, and any path without that proof produces no Sour
 Chat Completions remains supported: OpenAI has not retired the platform API, and many
 third-party and open-source upstreams expose it as their only compatible surface.
 
-A source carries **no position, rank, or priority field anywhere** — not in
-config, not in the API, not in the UI. The 来源 list is an asset inventory sorted
-for reading convenience, never a spend order.
+A source carries **no position, rank, or priority field of its own**. The Sources
+module is an asset inventory sorted for reading convenience. Gateway configuration
+owns one explicit Source order per backend and one exact Route chain per menu model;
+neither order is stored on a Source.
 
 **Supply channel.** Each source has a `supply_channel`:
 
@@ -297,9 +302,11 @@ stored route for that model.
 
 ### 4.2 Gateway strategy — add-time defaults, then explicit configuration
 
-One record per Agent backend owns `mode`, its menu, and one stored Route chain for each
-menu model. There is no backend Source-order policy and no per-model route policy. The
-only order runtime can execute is the hop order stored for that model.
+One record per Agent backend owns `mode`, its menu, one stored Source order, and one
+stored Route chain for each menu model. The Source order is a visible Gateway default
+for Add-time placement, not a runtime capability filter. There is no backend
+Source-order policy discriminator and no per-model route policy. The only order runtime
+can execute is the exact hop order stored for that model.
 
 Matching is an **Add Source write-time operation**. After connectivity, protocol, and
 inventory have been observed, the add transaction proposes exact Source/model matches,
@@ -309,35 +316,26 @@ the persisted chains directly: add or remove a hop, move it, or edit its explici
 upstream `model_id` mapping.
 
 **Add-time Source placement policy (sole authority; owner 2026-08-09 S-1).** The Add
-Source service owns one write-time rule that chooses a deterministic insertion position
-for every accepted exact match. The same transaction writes the hop at that position
-and returns it through `added_to.position`; the Gateway renders that stored order and
-the user may adjust it immediately. No adapter, UI consumer, refresh path, or runtime
-resolver may implement or rerun placement. This named policy is one implementation rule,
-not a plugin point, registry, user setting, or persisted policy discriminator.
+Source service owns one write-time rule that chooses deterministic positions for the
+new Source and every accepted exact match. The same transaction writes those positions,
+returns each hop through `added_to.position`, and exposes the canonical backend Source
+order; the Gateway renders the stored results and the user may adjust them immediately.
+No adapter, UI consumer, refresh path, or runtime resolver may implement or rerun
+placement. This named policy is one implementation rule, not a plugin point, registry,
+user setting, or persisted policy discriminator.
 
-**Current policy value (`placement-v1`).** Sources added in one setup/import transaction
-are processed in this recommendation order:
+**Current policy value (`placement-v1`).** Append a newly added Source to each
+configuration-eligible backend Source order, and append every accepted exact match to
+that menu model's current Route-chain tail. This is only the current policy value, not
+an API, UI, or acceptance invariant. A later version may choose a better visible
+position from model fit or a fixed Source-reliability priority, but it must still run
+only during Add Source, persist the chosen position, and leave runtime to execute that
+configuration verbatim. There is no “new Source not enabled” state or prompt, and the
+UI never uses position to distinguish new from old.
 
-1. own-vendor subscriptions in the recommended custody form — Claude `native_cli`,
-   ChatGPT `hub` — by `created_at` ascending;
-2. own-vendor subscriptions in the supported non-recommended form — Claude `hub`,
-   ChatGPT `native_cli` — by `created_at` ascending;
-3. other hub-held subscriptions, by `created_at` ascending;
-4. API-key Sources, by `created_at` ascending;
-5. ties by Source `id` ascending.
-
-Each accepted match is then appended to its route's current tail. This is only the
-current `placement-v1` value, not an API, UI, or acceptance invariant. A later version
-may rank an incoming match by model fit or a fixed Source-reliability priority, but it
-must still run only during Add Source, persist the chosen position visibly, and leave
-runtime to execute that configuration verbatim. There is no “new Source not enabled”
-state or prompt.
-
-The table never decides runtime capability. `created_at` remains required and immutable
-so a multi-Source initial setup is reproducible, with Source `id` as its total-order
-tie-break. No health score, latency, cost, usage, vendor label, or later inventory result
-reorders an existing chain.
+No health score, latency, cost, usage, vendor label, creation timestamp, or later
+inventory result reorders existing configuration. `created_at` remains ordinary Source
+metadata for audit/display; routing and placement never read or mutate it.
 
 **Routing configuration is per backend and per model; health is Source-global.** Quota
 and reachability belong to the Source, not the Agent that touched it. §4.3 reads the
@@ -417,13 +415,14 @@ capability, not by vendor, Source kind label, or HTTP status alone. Surrounding 
 and every contract consumer may reference this matrix but cannot introduce another
 credential-failure branch.
 
-| Observed result | Credential capability | Retry / classification | Persisted state and remedy | Route effect |
-| --- | --- | --- | --- | --- |
-| first `401` | exposes a refresh operation | refresh once, then retry the same hop exactly once | none before the retry resolves | stay on this hop for the bounded retry |
-| retry after refresh is still `401` | exposes a refresh operation | no second refresh; `credential_expired` | `needs_action` + `models.source.needs_action.oauth_expired`; `POST /sources/<id>/reauth` | before output, continue to the next runnable hop |
-| first `401` | no refresh operation, including a static API key | no retry; `credential_revoked` | `needs_action` + `models.source.needs_action.credential_revoked`; `PUT /sources/<id>/credential` | before output, continue to the next runnable hop |
-| classified `402/403` account result | any | no credential refresh; retain exactly `credential_expired | credential_revoked | balance_exhausted | account_banned` | `needs_action`; choose the remedy from both classification and credential capability: refresh-capable auth re-authorizes, a static key is replaced, balance is topped up, and a banned account goes to the vendor | before output, continue to the next runnable hop |
-| request-scoped `permission_denied` | any | no credential refresh and no Source-global credential classification | no Source-health mutation; surface the request failure | terminal without fallback |
+| Decision | Observed result | Credential capability | Retry / classification | Persisted state and remedy | Route effect |
+| --- | --- | --- | --- | --- | --- |
+| `credential.refresh_once` | first `401` | exposes a refresh operation | refresh once, then retry the same hop exactly once | none before the retry resolves | stay on this hop for the bounded retry |
+| `credential.refresh_failed` | the refresh operation times out, is rejected, or returns an invalid response | exposes a refresh operation | no retry; use the existing `credential_expired` or `credential_revoked` classification the adapter can prove | the matching existing `needs_action` detail and refresh-capability-specific remedy | before output, continue to the next runnable hop |
+| `credential.refresh_rejected` | retry after refresh is still `401` | exposes a refresh operation | no second refresh; `credential_expired` | `needs_action` + `models.source.needs_action.oauth_expired`; `POST /sources/<id>/reauth` | before output, continue to the next runnable hop |
+| `credential.static_unauthorized` | first `401` | no refresh operation, including a static API key | no retry; `credential_revoked` | `needs_action` + `models.source.needs_action.credential_revoked`; `PUT /sources/<id>/credential` | before output, continue to the next runnable hop |
+| `credential.account_classified` | classified `402/403` account result | any | no credential refresh; retain the adapter's existing source-global credential classification | `needs_action`; choose the remedy from both classification and credential capability: refresh-capable auth re-authorizes, a static key is replaced, balance is topped up, and a banned account goes to the vendor | before output, continue to the next runnable hop |
+| `credential.request_nonfallback` | a non-fallback request-level failure | any | no credential refresh and no Source-global credential classification | no Source-health mutation; surface the request failure | terminal without fallback |
 
 The final mirror registry checks the closed (classification, credential capability) →
 `detail_key` → remedy relation in both directions. The resolver suite executes every
@@ -553,9 +552,10 @@ Two of those three taps use routes frozen by the current contract:
 `PUT /api/models/sources/<id>/credential` replaces an api_key in place and
 `POST /api/models/sources/<id>/reauth` re-runs OAuth bound to the existing source
 (`api.md`; the adapter already exposes `start_oauth(source_id)`). Both are
-**replacement, not re-creation** — deliberately, because "add a new Source and delete
-the old one" loses its `created_at` and invalidates every configured hop that names its
-id. Recovery must preserve the Source and every stored route position. (Top-up is the third tap
+**replacement, not re-creation** — deliberately, because the existing Source identity is
+referenced by configured hops and must remain stable during credential repair. `created_at` is
+ordinary audit/display metadata and is not a routing guard. Recovery must preserve the Source
+and every stored route position. (Top-up is the third tap
 and needs no *replacement* route of ours — no credential of ours changes; it is a
 link out to the vendor.)
 
@@ -759,16 +759,16 @@ projection of the recorded terminal outcome plus only the discriminator named in
 table. Prose, emitters, and UI code may reference the selected row but cannot assert a
 switch, remedy, or message branch absent from it.
 
-| Terminal outcome | Exhaustive discriminator | Route/source fact | In-turn rendering |
-| --- | --- | --- | --- |
-| `served` | any, including a transparent fallback | the turn completed; any switch is only a pull-surface record | silent: no Error, warning, info notice, or appended action tail |
-| `exhausted` | final model `supply_state` from the §4.5 taxonomy | fallback walked to the end; no attempt completed | `waiting` renders `models.launch.waiting`; `interrupted` renders `models.launch.interrupted` with the classified blockers |
-| `failed_terminal` | request-scoped parameter, protocol, or tool-compatibility failure | the attempted Source remains runnable and no switch occurred | `models.launch.request_incompatible`: this request is incompatible; switching Sources will not help |
-| `failed_terminal` | local `engine_down` at any request phase, including after an upstream attempt or streamed output | no Source is blamed or mutated; no replay or next-hop walk occurs | `models.errors.engine_down` |
-| `failed_terminal` | streamed fallback-class Source failure; its cooldown or `needs_action` was persisted | replay is forbidden; render `models.launch.retry` only when a fresh §4.3 projection now selects a different runnable hop; otherwise no switch exists | different current hop: “The next turn has switched Sources; retry.” No runnable hop: use the same `waiting`/`interrupted` rendering selected for `exhausted` |
-| `no_candidate` | configured chain is empty | no Source was attempted because no hop is configured | `models.launch.route_unconfigured`, naming the requested model and pointing to Models |
-| `no_candidate` | configured chain is nonempty and model `supply_state` is `waiting` or `interrupted` | no Source was attempted because every exact hop is currently blocked | `waiting` uses `models.launch.waiting`; `interrupted` uses `models.launch.interrupted` with every exact hop's classified blocker and applicable remedy |
-| `canceled` | the turn FSM, never a transport inference, settled Stop/cancel | no Source failure or route switch is fabricated | no Model Hub supply copy; the existing turn-canceled surface owns the message |
+| Decision | Terminal outcome | Exhaustive discriminator | Route/source fact | In-turn rendering |
+| --- | --- | --- | --- | --- |
+| `turn.served` | `served` | any, including a transparent fallback | the turn completed; any switch is only a pull-surface record | silent: no Error, warning, info notice, or appended action tail |
+| `turn.exhausted` | `exhausted` | final model `supply_state` from the §4.5 taxonomy | fallback walked to the end; no attempt completed | `waiting` renders `models.launch.waiting`; `interrupted` renders `models.launch.interrupted` with the classified blockers |
+| `turn.request_nonfallback` | `failed_terminal` | any non-fallback request-level failure | the attempted Source remains runnable and no switch occurred | `models.launch.request_incompatible`: this request is incompatible; switching Sources will not help |
+| `turn.engine_down` | `failed_terminal` | local `engine_down` at any request phase, including after an upstream attempt or streamed output | no Source is blamed or mutated; no replay or next-hop walk occurs | `models.errors.engine_down`; after output began it also states that this turn's output may be incomplete |
+| `turn.streamed_fallback` | `failed_terminal` | streamed fallback-class Source failure; its cooldown or `needs_action` was persisted | replay is forbidden; render `models.launch.retry` only when live inspection of the same stored chain makes a different hop current for the next turn; otherwise no switch exists | different current hop: “The next turn has switched Sources; retry.” No runnable hop: use the same `waiting`/`interrupted` rendering selected for `exhausted` |
+| `turn.no_candidate.unconfigured` | `no_candidate` | configured chain is empty | no Source was attempted because no hop is configured | `models.launch.route_unconfigured`, naming the requested model and pointing to Models |
+| `turn.no_candidate.blocked` | `no_candidate` | configured chain is nonempty and model `supply_state` is `waiting` or `interrupted` | no Source was attempted because every exact hop is currently blocked | derive copy from the exact blocker set and reuse `_launch_failure` remedies: reauthorize, replace the key, or top up; `waiting` uses `models.launch.waiting`, while `interrupted` uses `models.launch.interrupted` |
+| `turn.canceled` | `canceled` | the turn FSM, never a transport inference, settled Stop/cancel | no Source failure or route switch is fabricated | no Model Hub supply copy; the existing turn-canceled surface owns the message |
 
 The matrix supersedes the earlier unconditional 「下一回合已自动换线」 sentence. Its
 outcome/discriminator → copy-key relation is closed in the final mirror registry and
@@ -825,22 +825,25 @@ identity and relative order of all survivors and keeping an empty route configur
 It also reports every resulting supply gap; force is confirmation, not a claim that
 the mutation is interruption-free.
 
-**Guarded Source-mutation envelope matrix (authoritative and exhaustive; owner ruling
-2026-08-09).** These are
-the only guarded Source/inventory mutations. Prose may describe their guard rationale
-but cannot define a request or success envelope outside this table. Omitted `force` is
-false; every array is present even when empty.
+**Source-mutation envelope matrix (authoritative and exhaustive; owner rulings
+2026-08-09).** These are all Source/inventory mutations, including writes that cannot
+remove supply. Prose may describe their guard rationale but cannot define a request or
+success envelope outside this table. Omitted `force` is false; every reported array is
+present even when empty.
 
-| Mutation | Force carrier | Guarded `409` | Success |
-| --- | --- | --- | --- |
-| change Source metadata/Base URL | `PATCH /api/models/sources/<id>` with `{display_name?, base_url?, force?: boolean}`; `force` matters only when `base_url` changes | `{error, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` | `{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` |
-| replace API key | `PUT /api/models/sources/<id>/credential` with `{key, force?: boolean}` | same guarded `409` | same Source success envelope |
-| refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean}` | same guarded `409` | same Source success envelope |
-| delete manual model | `DELETE /api/models/custom-models` with `{source_id, model_id, force?: boolean}` | same guarded `409` | same Source success envelope |
-| delete Source | `DELETE /api/models/sources/<id>?force=<bool>` | same guarded `409` | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend route and preserving survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
+| Decision | Mutation | Request | Guarded `409` | Success |
+| --- | --- | --- | --- | --- |
+| `mutation.source_metadata` | change Source metadata/Base URL | `PATCH /api/models/sources/<id>` with `{display_name?, base_url?, force?: boolean}`; `force` matters only when `base_url` changes | `{error, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` | `{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` |
+| `mutation.credential_replace` | replace API key | `PUT /api/models/sources/<id>/credential` with `{key, force?: boolean}` | same guarded `409` | same Source success envelope |
+| `mutation.source_refresh` | refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean}` | same guarded `409` | same Source success envelope |
+| `mutation.model_create` | create a user-authored model entry | `POST /api/models/sources/<source_id>/models` with `{model_id, display_name?, reasoning_efforts}` | not guarded: it creates one new exact `id` with `origin: "manual"` and changes no existing `id`, `origin`, or Route | `{source: Source}` |
+| `mutation.model_efforts` | replace one model entry's capability list | `PATCH /api/models/sources/<source_id>/models/<model_id>` with `{reasoning_efforts}` | not guarded: it changes no `id`, `origin`, or Route | `{source: Source}` |
+| `mutation.model_delete` | delete a user-authored model entry | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean}` | deleting `origin: "discovered"` returns `source_model_managed_upstream`; otherwise the same guarded `409` | same Source success envelope |
+| `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>` | same guarded `409` | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
+| `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean}` | same guarded `409` | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the reporting fields are the same guarded-mutation family as Source success |
 
-No query-parameter variant exists for the first four mutations. The final `api.md`,
-server/client envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
+The request carrier shown in each row is the only one. The final `api.md`, server/client
+envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
 Automatic background discovery never performs this cascade: when neither literal
 inventory nor sanctioned-alias evidence remains, it records the model as
 `model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
@@ -945,6 +948,12 @@ This section defines §4.3's persisted input and mutation boundary. Every known
 {"hops": [{"source_id": "src_...", "model_id": "upstream-model-id"}]}
 ```
 
+Each backend also persists one `sources.order: string[]`. It is a visible Gateway
+configuration and Add-time placement input, contains only existing configuration-
+eligible Source ids, and has no `follow | custom` or other policy discriminator. A
+Source deletion removes its id from every backend order in the same transaction and
+preserves the relative order of survivors. Serialization/reload rejects a dangling id.
+
 `hops` may be empty and is always present. A newly introduced menu model starts with an
 empty route; catalog expansion and inventory refresh do not retroactively match it.
 Only Add Source's one-time match or an explicit user edit changes the array. Hop order,
@@ -959,8 +968,8 @@ guarded cascade removes it. Source deletion follows §4.5's transaction: a non-f
 delete refuses while any route names the Source; a confirmed delete removes all such
 hops across all backends and preserves survivor order.
 
-There is no separate `mappings` field, Source order, policy discriminator, matching
-resolver, or mapping diagnostic. `model_id == menu_model` is an identity mapping;
+There is no separate `mappings` field, policy discriminator, matching resolver, or
+mapping diagnostic. `model_id == menu_model` is an identity mapping;
 another explicit `model_id` is a user-configured substitution and must be invoked as
 written. **The system never invents a substitution; user-configured mappings are legal
 and authoritative.** This final-shape decision is **owner-vetoable (2026-08-07,
@@ -1114,12 +1123,12 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
 **Native-config import action matrix (authoritative and exhaustive; owner ruling
 2026-08-09).** Originals are never modified or deleted, and Direct remains available.
 
-| Action | Eligible detected item | Default / apply behavior |
-| --- | --- | --- |
-| `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store, create the backend's singleton `native_cli` Source, and run the same one-time route match plus §4.2 placement as Add Source; reject a duplicate native Source before OAuth or partial commit |
-| `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source, run the same one-time route match plus §4.2 placement as Add Source, and leave the original file byte-identical |
-| `reauth` | detected material that cannot be safely copied or retained as a usable native login | not auto-applied as import; direct the user into the explicit authentication flow |
-| `controlled_import` | future engine-owned OAuth-import capability that can preserve refresh semantics | reserved and not selectable/applicable in v3; explicit OAuth add is the only hub-held subscription path |
+| Decision | Action | Eligible detected item | Default / apply behavior |
+| --- | --- | --- | --- |
+| `import.keep_native` | `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store, create the backend's singleton `native_cli` Source, and run the same one-time route match plus §4.2 placement as Add Source; reject a duplicate native Source before OAuth or partial commit |
+| `import.copy_key` | `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source, run the same one-time route match plus §4.2 placement as Add Source, and leave the original file byte-identical |
+| `import.reauth` | `reauth` | detected material that cannot be safely copied or retained as a usable native login | not auto-applied as import; direct the user into the explicit authentication flow |
+| `import.controlled` | `controlled_import` | future engine-owned OAuth-import capability that can preserve refresh semantics | reserved and not selectable/applicable in v3; explicit OAuth add is the only hub-held subscription path |
 
 The final mirror registry compares this exact action enum with
 `models.migration.action.<value>` in both UI locale files, following AC-19's closed-enum
@@ -1261,9 +1270,9 @@ directions into questions that later lanes must answer before writing mechanical
 - [ ] §4.3 is the document's only configured-chain execution algorithm: it reads stored
       hops verbatim, checks only live runnability and error fallthrough, and derives the
       non-persisted takeover projection; §4.6 stores the same exact pairs the UI shows.
-- [ ] The owner-vetoable final route shape is acceptable: every menu model has one
-      explicit `hops` array, and no `follow | custom`, Source order, separate mapping,
-      or runtime matching authority exists.
+- [ ] The owner-vetoable final route shape is acceptable: every backend has one explicit
+      Source order, every menu model has one explicit `hops` array, and no
+      `follow | custom`, separate mapping, or runtime matching authority exists.
 - [ ] §4.5 keeps state source-global, status live-derived, and every successful
       takeover silent; `supply_status` is the sole backend-health line, and a no-runnable-
       hop exhaustion never borrows takeover semantics; terminal in-turn errors plus

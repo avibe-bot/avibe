@@ -1020,7 +1020,7 @@ def test_agent_chain_and_runtime_router_share_resolution_table(tmp_path: Path) -
         "src_hub_open_mapped",
         kind="api_key",
         vendor="custom",
-        protocol="openai_compatible",
+        protocol="openai_chat",
         channel="hub",
         model_ids=("mapped-open",),
     )
@@ -1037,7 +1037,7 @@ def test_agent_chain_and_runtime_router_share_resolution_table(tmp_path: Path) -
         "src_hub_open_ready",
         kind="api_key",
         vendor="custom",
-        protocol="openai_compatible",
+        protocol="openai_chat",
         channel="hub",
         model_ids=("ready-model",),
     )
@@ -1555,7 +1555,7 @@ def _opencode_config() -> ModelHubConfig:
         "src_hub0005",
         kind="api_key",
         vendor="relay-vendor",
-        protocol="openai_compatible",
+        protocol="openai_chat",
         channel="hub",
         model_ids=("local-model",),
     )

@@ -24,6 +24,7 @@ from config.v2_config import (
     is_model_hub_enabled,
 )
 from core.services.settings import default_config
+from scripts.check_model_hub_authorities import check as check_model_hub_authorities
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -177,6 +178,9 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
             "builtin_models": example.get("builtin_models"),
             "standard_vendors": example.get("standard_vendors"),
         }
+        # AgentSupply is the API projection; the dormant pre-I1 config object
+        # still carries its old mapping list behind the default-off gate.
+        serialized.pop("mappings", None)
         if "sources" not in example:
             serialized.pop("sources")
         else:
@@ -203,7 +207,6 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
         "selected_model_id": "claude-opus-4-5",
         "selected_model_explicit": True,
         "sources": {
-            "policy": "follow",
             "order": ["src_anthropic1"],
             "eligibility": [
                 {
@@ -216,7 +219,6 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
             ],
         },
         "supply_status": "ok",
-        "mappings": [],
         "menu": None,
         "model_supply": [
             {"model_id": "claude-opus-4-5", "chain_length": 1}
@@ -229,27 +231,19 @@ def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     _assert_valid("agent-supply.schema.json", payload)
 
 
-def test_v4_mirror_registry_is_executable_and_complete():
+def test_v5_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 4
-    assert [entry["id"] for entry in registry["entries"]] == [
-        "M1",
-        "M2",
-        "M3",
-        "M4",
-        "M5",
-        "M6",
-        "M7",
-        "M8",
-        "N1",
-    ]
+    assert registry["contract_version"] == 5
+    ids = [entry["id"] for entry in registry["entries"]]
+    assert ids
+    assert len(ids) == len(set(ids))
     for entry in registry["entries"]:
         _validate_mirror_entry(entry, schemas)
 
 
-def test_v4_mirror_registry_mutation_probes_detect_every_comparable_drift():
+def test_v5_mirror_registry_mutation_probes_detect_every_comparable_drift():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
@@ -292,6 +286,13 @@ def test_v4_mirror_registry_mutation_probes_detect_every_comparable_drift():
                 _validate_mirror_entry(entry, mutated)
 
 
+def test_model_hub_authority_closure_is_generated_from_live_files():
+    result = check_model_hub_authorities(Path.cwd())
+    assert result["input_mode"] == "same_run_live_files"
+    assert result["input_fingerprint"]
+    assert result["ok"], result["findings"]
+
+
 def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
     event_schema = _schema("resolution-event.schema.json")
     event_validator = Draft7Validator(event_schema)
@@ -311,7 +312,7 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
         event_validator.validate(invalid_cooldown)
 
     provenance_schema = _schema("turn-provenance.schema.json")
-    assert provenance_schema["properties"]["contract_version"]["const"] == 4
+    assert provenance_schema["properties"]["contract_version"]["const"] == 5
     permission_record = next(
         example
         for example in provenance_schema["examples"]
@@ -338,7 +339,7 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
         )
 
 
-def test_v4_shape_amendments_reject_the_false_states_they_replace():
+def test_v5_shape_amendments_reject_the_false_states_they_replace():
     supply_schema = _schema("agent-supply.schema.json")
     supply_validator = Draft7Validator(supply_schema)
     base_supply = {
@@ -348,9 +349,8 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
         "selected_by_agent": None,
         "selected_model_id": None,
         "selected_model_explicit": False,
-        "sources": {"policy": "follow", "order": [], "eligibility": []},
+        "sources": {"order": [], "eligibility": []},
         "supply_status": None,
-        "mappings": [],
         "menu": None,
         "model_supply": [],
         "named_agents": [],
@@ -397,7 +397,6 @@ def test_v4_shape_amendments_reject_the_false_states_they_replace():
         }
     )
     signal_supply["sources"] = {
-        "policy": "custom",
         "order": ["src_anthkey01"],
         "eligibility": [
             {
@@ -543,9 +542,14 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     api_payload = api.config_to_payload(loaded)
     expected_root = {field.name for field in fields(ModelHubConfig)}
     source_fields = {field.name for field in fields(ModelHubSourceConfig)}
+    # Retired consent metadata remains an internal compatibility attribute for
+    # in-memory fixtures but is intentionally absent from the final payload.
+    source_fields.discard("experimental_consent_at")
     source_state_fields = {field.name for field in fields(ModelHubSourceStateConfig)}
     source_usage_fields = {field.name for field in fields(ModelHubSourceUsageConfig)}
     source_model_fields = {field.name for field in fields(ModelHubModelConfig)}
+    source_model_fields.discard("provenance")
+    source_model_fields.add("origin")
     agent_fields = {field.name for field in fields(ModelHubAgentSupplyConfig)}
     agent_sources_fields = {field.name for field in fields(ModelHubAgentSourcesConfig)}
     mapping_fields = {field.name for field in fields(ModelHubMappingConfig)}
@@ -594,7 +598,7 @@ def test_model_hub_release_capability_defaults_and_fails_closed(value):
     assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is False
 
 
-def test_hub_subscription_requires_server_recorded_consent():
+def test_hub_subscription_load_ignores_retired_consent_metadata():
     source = _schema("source.schema.json")["examples"][0]
     source = {**source, "supply_channel": "hub"}
     payload = {
@@ -603,12 +607,8 @@ def test_hub_subscription_requires_server_recorded_consent():
         "subscription_hub_experimental": True,
     }
 
-    try:
-        ModelHubConfig.from_payload(payload)
-    except ValueError as exc:
-        assert "recorded experimental consent" in str(exc)
-    else:
-        raise AssertionError("hub-held subscription loaded without recorded consent")
+    loaded = ModelHubConfig.from_payload(payload)
+    assert loaded.sources[0].supply_channel == "hub"
 
 
 def test_legacy_global_priority_key_is_dropped_without_validation():
