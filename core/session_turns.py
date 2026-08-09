@@ -978,8 +978,28 @@ class SessionTurnManager:
         self,
         context: "MessageContext",
         text: str,
+        *,
+        delivery: Optional[dict[str, Any]] = None,
     ) -> str:
-        """Decorate scheduled backend text before it enters durable Delivery."""
+        """Decorate scheduled backend text immediately before native dispatch."""
+        if delivery is not None:
+            payload = delivery_store.delivery_payload(delivery)
+            provenance = (payload.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
+            preserved = (
+                provenance.get("platform_specific")
+                if isinstance(provenance, dict)
+                else None
+            )
+            if isinstance(preserved, dict):
+                spec = dict(getattr(context, "platform_specific", None) or {})
+                spec.update(
+                    {
+                        key: value
+                        for key, value in preserved.items()
+                        if key not in _EXECUTION_ROUTING_KEYS
+                    }
+                )
+                context.platform_specific = spec
         spec = dict(getattr(context, "platform_specific", None) or {})
         if spec.get(SCHEDULED_DISPATCH_METADATA_APPLIED_KEY):
             return text
@@ -2530,13 +2550,22 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif delivery["state"] == "steering" and turn_id and attempt_id and native_id:
+            raw_steer_text = str(delivery.get("dispatch_text") or "")
+            if request.source == "harness" or _scheduled_provenance(delivery) is not None:
+                steer_text = await self.prepare_scheduled_dispatch(
+                    context,
+                    raw_steer_text,
+                    delivery=delivery,
+                )
+            else:
+                steer_text = raw_steer_text
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=request.session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=str(delivery.get("dispatch_text") or ""),
+                    text=steer_text,
                     attempt_id=attempt_id,
                 ),
             )
@@ -2702,13 +2731,18 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif leader["state"] == "steering" and turn_id and attempt_id and native_id:
+            steer_text = await self.prepare_scheduled_dispatch(
+                context,
+                dispatch_text,
+                delivery=leader,
+            ) if _scheduled_provenance(leader) is not None else dispatch_text
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=dispatch_text,
+                    text=steer_text,
                     attempt_id=attempt_id,
                 ),
             )
@@ -4568,6 +4602,11 @@ class SessionTurnManager:
                 )
                 backend = str(turn["backend"])
                 delivery_id = str(claimed_batch[0]["id"])
+            steer_text = await self.prepare_scheduled_dispatch(
+                context,
+                steer_text,
+                delivery=claimed_batch[0],
+            ) if _scheduled_provenance(claimed_batch[0]) is not None else steer_text
             receipt = await self._attempt_steer(
                 backend,
                 SteerRequest(
@@ -6050,7 +6089,6 @@ class SessionTurnManager:
             else {}
         )
         if source == SOURCE_SCHEDULED:
-            dispatch_text = await self.prepare_scheduled_dispatch(context, text)
             scheduled_metadata[SCHEDULED_PROVENANCE_KEY] = capture_scheduled_provenance(
                 context
             )

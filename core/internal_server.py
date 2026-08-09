@@ -217,8 +217,6 @@ def create_app(
             submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
             return submission.route
 
-        dispatch_text = await manager.prepare_scheduled_dispatch(context, text)
-
         from core.message_mirror import _scope_id_for_session
         from core.session_turns import (
             DeliveryRequest,
@@ -410,7 +408,7 @@ def create_app(
                         },
                         native_message_id=native_message_id or None,
                     ),
-                    dispatch_text=dispatch_text,
+                    dispatch_text=text,
                     dedupe_key=dedupe_key,
                     history_event={
                         "kind": "admission",
@@ -455,7 +453,7 @@ def create_app(
                     if delivery_intent == "send_now"
                     else priority_for_delivery_intent(delivery_intent)
                 ),
-                content=dispatch_text,
+                content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,
                 platform=submission_platform,

@@ -640,7 +640,7 @@ def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(manager
 
 @pytest.mark.anyio
 async def test_scheduled_submit_decorates_before_native_steering(managers) -> None:
-    manager, _other, _engine, _engine_b, _starts = managers
+    manager, _other, engine, _engine_b, _starts = managers
     decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
     manager.controller.message_handler = SimpleNamespace(
         _prepend_message_metadata=decorator,
@@ -655,15 +655,27 @@ async def test_scheduled_submit_decorates_before_native_steering(managers) -> No
             "source_session_id": "source-session",
         }
     )
-    result = await manager.submit(
-        "ses_fsm",
-        context,
-        "callback result",
-        source=SOURCE_SCHEDULED,
-        delivery_intent="steer",
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p1",
+            content="callback result",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": "source-session",
+                    }
+                }
+            },
+        ),
+        context=context,
     )
 
-    assert result.route == "ran"
+    assert result.state == "accepted"
     decorator.assert_awaited_once_with(context, "callback result", include_user_info=False)
     manager._steer.assert_awaited_once()
     assert manager._steer.await_args.args[1].text == "decorated: callback result"
