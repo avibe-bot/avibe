@@ -1,8 +1,8 @@
 """P4: vault-request auto-resume callbacks.
 
-A request transition to a terminal state arms ``callback_status='pending'``; the daemon sweep
-turns each armed row into exactly one callback turn to the requesting session via the shared
-``enqueue_session_callback`` entry (``source_kind='callback'``), then marks it sent/skipped.
+A request transition to a terminal state arms ``callback_status='pending'``. The daemon sweep
+starts one callback turn for asynchronous results, or mirrors a transcript-only Vault outcome when
+a synchronous CLI waiter already returned the result, then marks the callback sent/skipped.
 """
 
 from __future__ import annotations
@@ -13,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
+from core.message_mirror import mirror_harness_inbound
+from modules.im import MessageContext
 from storage import vault_service as vs
+from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.models import metadata, vault_requests
 from storage.vault_crypto import Sealed
@@ -285,7 +288,7 @@ def test_message_and_session_by_type_status(request_type, status, needle):
 def test_only_no_callback_disables_auto_resume_at_creation():
     # Only --no-callback pre-disables. --wait must NOT: a finite wait can time out with the
     # request still pending, and the agent must still be auto-resumed when it later resolves.
-    # (A wait that observes fulfillment suppresses the redundant callback at that point instead.)
+    # (A provision wait suppresses its callback; access waiters retain a transcript-only outcome.)
     from types import SimpleNamespace
 
     from vibe import cli
@@ -346,7 +349,7 @@ def test_request_callback_ready_defers_while_cli_waiter_is_active(vault):
         assert vs.request_callback_ready(conn, row) is True
 
 
-def test_complete_request_waiter_suppresses_redundant_callback(vault):
+def test_complete_request_waiter_keeps_visible_outcome_pending(vault):
     future = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
     with vault.begin() as conn:
         vs.create_secret(conn, name="DONE_GR_KEY", sealed=_sealed(), protection="protected")
@@ -357,8 +360,9 @@ def test_complete_request_waiter_suppresses_redundant_callback(vault):
         vs.complete_request_waiter(conn, req["id"], waiter_id="vw_done")
 
         row = _row(conn, req["id"])
-        assert row["callback_status"] == "skipped"
-        assert vs.list_pending_request_callbacks(conn) == []
+        assert row["callback_status"] == "pending"
+        assert vs.request_callback_consumed_by_waiter(row) is True
+        assert [pending["id"] for pending in vs.list_pending_request_callbacks(conn)] == [req["id"]]
 
 
 def test_covering_grant_owner_waiter_suppresses_sibling_callbacks(vault):
@@ -388,9 +392,9 @@ def test_covering_grant_owner_waiter_suppresses_sibling_callbacks(vault):
 
         vs.complete_request_waiter(conn, primary["id"], waiter_id="vw_primary")
 
-        assert _callback_status(conn, primary["id"]) == "skipped"
+        assert _callback_status(conn, primary["id"]) == "pending"
         assert _callback_status(conn, sibling["id"]) == "skipped"
-        assert vs.list_pending_request_callbacks(conn) == []
+        assert [pending["id"] for pending in vs.list_pending_request_callbacks(conn)] == [primary["id"]]
 
 
 def test_request_callback_ready_defers_sibling_access_until_covering_grant_ready(vault):
@@ -636,3 +640,146 @@ def test_vault_callback_sweep_enqueues_protected_sign_callback(monkeypatch, tmp_
     assert callback_run.message
     assert "Retrieve the signature result with: vibe vault await" in callback_run.message
     assert "Do not rerun `vibe vault sign`" in callback_run.message
+
+
+@pytest.mark.parametrize("terminal_status", ["approved", "denied"])
+def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_turn(
+    monkeypatch, tmp_path, terminal_status
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from core import scheduled_tasks as st
+    from storage import messages_service
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    engine = create_sqlite_engine()
+    metadata.create_all(engine)
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_vault_waiter",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_vault_waiter",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_vault_waiter",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_vault_waiter",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="The previous Agent turn completed.",
+            native_message_id="agent:previous-result",
+        )
+        vs.create_secret(
+            conn,
+            name="WAIT_RESULT_KEY",
+            sealed=_sealed("wait-result"),
+            protection="protected",
+        )
+        req = vs.create_access_request(
+            conn,
+            "WAIT_RESULT_KEY",
+            requester={"session_id": "ses_vault_waiter"},
+            delivery={"session_id": "ses_vault_waiter"},
+        )
+        deadline = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        vs.arm_request_waiter(conn, req["id"], waiter_id="vw_visible", deadline_at=deadline)
+        if terminal_status == "approved":
+            _grant_from_request(conn, req)
+        else:
+            vs.deny_request(conn, req["id"])
+        vs.complete_request_waiter(conn, req["id"], waiter_id="vw_visible")
+        row = _row(conn, req["id"])
+
+    request_store = st.TaskExecutionStore(tmp_path / "task_requests")
+    service = st.ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=st.ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    with monkeypatch.context() as failed_mirror:
+        failed_mirror.setattr(
+            "core.message_mirror.mirror_vault_waiter_outcome",
+            lambda **_: False,
+        )
+        assert service._process_vault_callback_sync(row) == "pending"
+        with engine.connect() as conn:
+            assert _callback_status(conn, req["id"]) == "pending"
+
+    asyncio.run(service._drain_vault_callbacks())
+    # The stable native message id also closes the crash window between mirror + callback mark.
+    assert service._process_vault_callback_sync(row) == "sent"
+
+    assert request_store.list_pending() == []
+    with engine.connect() as conn:
+        assert _callback_status(conn, req["id"]) == "sent"
+        [message] = conn.execute(
+            select(messages).where(
+                messages.c.session_id == "ses_vault_waiter",
+                messages.c.type == messages_service.VAULT_TYPE,
+            )
+        ).mappings().all()
+    assert message["author"] == "harness"
+    assert message["source"] == "harness"
+    assert message["type"] == messages_service.VAULT_TYPE
+    assert message["author_name"] == "vault"
+    assert json.loads(message["metadata_json"]) == {
+        "source_kind": "callback",
+        "source_actor": f"vault:{req['id']}",
+        "vault_request_type": "access",
+        "vault_request_status": terminal_status,
+    }
+
+    with engine.connect() as conn:
+        inbox = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+            only_session="ses_vault_waiter",
+        )
+    assert inbox["sessions"][0]["replied"] is False
+
+    # A later direct/harness input remains unanswered: the Vault outcome is a
+    # transcript notification, not terminal evidence for an unrelated turn.
+    mirror_harness_inbound(
+        MessageContext(
+            user_id="scheduled",
+            channel_id="ses_vault_waiter",
+            platform="avibe",
+            message_id="harness:newer-input",
+            platform_specific={
+                "agent_session_id": "ses_vault_waiter",
+                "task_trigger_kind": "watch",
+            },
+        ),
+        "A newer harness input",
+    )
+    with engine.connect() as conn:
+        inbox = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+            only_session="ses_vault_waiter",
+        )
+    assert inbox["sessions"][0]["replied"] is True

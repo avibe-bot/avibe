@@ -40,9 +40,11 @@ All paths verified in code on 2026-07-09 (avibe `27e2a1b5`, vault-sandbox
 
 ### Interaction cost today
 
-"Confirm" = a click inside the sandbox iframe card. "Passkey" = a full OS
-biometric/PIN prompt (`navigator.credentials.get()`); PRF-unlock and UV-confirm
-prompts are indistinguishable to the user.
+"Confirm" = a click inside the top-level sandbox authorization window. The
+embedded sandbox card is a launcher only; it never acts as the authorization
+surface. "Passkey" = a full OS biometric/PIN prompt
+(`navigator.credentials.get()`); PRF-unlock and UV-confirm prompts are
+indistinguishable to the user.
 
 | Flow | Unlocked (within 10-min window) | Locked |
 | --- | --- | --- |
@@ -77,8 +79,9 @@ Key code facts:
   (`VAULT_AUTO_LOCK_MS`, own `setTimeout`, re-armed on `sealValue`) and sandbox
   `vaultLifecycle.ts:17` (re-armed on `withUnlockedVmk`). The parent reconciles
   by polling `status` after operations.
-- `unseal` is fully implemented in the sandbox (confirm + passkey + in-sandbox
-  display/clipboard) and wrapped in `vaultSandboxClient.ts`, but **no parent
+- `unseal` is fully implemented in the sandbox (top-level confirm + passkey,
+  with display/clipboard kept in the sandbox) and wrapped in
+  `vaultSandboxClient.ts`, but **no parent
   component calls it**.
 - The sandbox confirm card for `releaseDEK` shows `grantId`, `requestId`,
   `expiresAt` — raw IDs (`main.ts:943`). The parent approval card shows command,
@@ -130,8 +133,9 @@ root of the "unlocked but still prompted every time" experience.
 
 - **G1 — One passkey per human intent.** A batch approval is one intent. An
   approval inside a freshly authorized session is one intent already paid for.
-- **G2 — The sandbox is *the* authorization surface.** It renders
-  daemon-endorsed context, in human language, for every consent it collects.
+- **G2 — The top-level sandbox is *the* authorization surface.** It renders
+  daemon-endorsed context, in human language, for every consent it collects;
+  an embedded card only launches that surface.
 - **G3 — One clock.** The sandbox owns time; the parent renders events.
 - **G4 — Explicit risk tiers.** Silent / confirm / passkey-always are product
   decisions per operation class, configurable where it matters.
@@ -149,11 +153,12 @@ root of the "unlocked but still prompted every time" experience.
 
 Unlocking is redefined from "VMK becomes available" to "the user grants an
 **authorization session**": for the next W minutes (default 10, configurable),
-operations at or below the *confirm* tier proceed with in-sandbox confirmation
-only — no repeated passkey. The unlock ceremony card states exactly that:
+operations at or below the *confirm* tier proceed with confirmation in the
+top-level sandbox window only — no repeated passkey. The unlock ceremony card
+states exactly that:
 
-> Unlock your vault for ~10 minutes. While unlocked, approvals ask for an
-> in-sandbox confirmation instead of your passkey. Signing always requires
+> Unlock your vault for ~10 minutes. While unlocked, approvals ask for a
+> confirmation in the top-level sandbox window instead of your passkey. Signing always requires
 > your passkey.
 
 This turns the existing countdown pill from a lie into the truth.
@@ -163,7 +168,7 @@ This turns the existing countdown pill from a lie into the truth.
 | Tier | Operations | Unlocked (in session) | Locked |
 | --- | --- | --- | --- |
 | **R1 — self custody** | `seal` (create), `status`, `lock` | silent | first op unlocks: 1 passkey |
-| **R2 — delegated read** | `approveRelease` (DEK release, incl. batch), `reveal` (display/copy) | **in-sandbox confirm, no passkey** | confirm + 1 passkey (unlock-on-approve, starts session) |
+| **R2 — delegated read** | `approveRelease` (DEK release, incl. batch), `reveal` (display/copy) | **top-level sandbox confirm, no passkey** | confirm + 1 passkey (unlock-on-approve, starts session) |
 | **R3 — signing** | `sign` | confirm + **passkey UV, always** | confirm + passkey (PRF; unlocks + authorizes in one prompt) |
 
 Sliding renewal stays: any successful R1/R2 operation re-arms the window
@@ -174,7 +179,7 @@ currently unused by delete per #833).
 
 ### 5.3 Why R2 without per-op passkey is sound
 
-What does the per-op UV prompt actually add on top of an in-sandbox confirm?
+What does the per-op UV prompt actually add on top of a top-level sandbox confirm?
 
 - **It does not add content binding for the user.** The OS prompt shows the RP
   name, not the operation. The user reads the operation from the sandbox card
@@ -326,40 +331,28 @@ display-only).
 
 ### 6.6 Confirm-surface hardening (prerequisite for R2)
 
-Before any R2/R3 confirm the sandbox verifies its own presentation:
-document visible + focused, frame ≥ minimum size, IntersectionObserver
-reports ≥ 0.99 visible (v2 `trackVisibility` occlusion detection where the
-engine supports it), no pending `ui.show` unacknowledged. Confirm buttons are
-dead for the first ~500 ms after render (anti-timing-redress) and may use
-hold-to-confirm for release/reveal. Otherwise fail closed with
-`sandbox_not_visible` (parent responds by expanding the modal and retrying).
-Note the shape of the residual: an XSS with **no user
-present** can complete nothing (every R2/R3 needs a real gesture inside the
-sandbox document); the residual is exclusively "user present and redressed",
-bounded by these checks and by Strict mode.
+R2/R3 authorization is performed in a dedicated top-level sandbox window. The
+embedded sandbox only renders a visible launcher and cannot authorize an
+operation from its iframe-local hit tests or from a parent-supplied visibility
+claim. Each request opens a unique popup window whose URL contains only the
+random request id and appearance settings. After the popup signals readiness,
+the opener transfers the signed prompt and encrypted wrap metadata through a
+same-origin, id-gated `postMessage` handshake; approval metadata is never put
+in the URL. The popup validates the opener origin and window source, renders
+the confirmation, performs any WebAuthn ceremony, and returns a typed result
+through the same channel. The opener applies a five-minute timeout and a
+short close grace period for queued mobile-browser messages.
 
-**Parent surface attestation is advisory telemetry, not an enforced gate.**
-While an embedded confirm is up, the parent measures the sandbox iframe
-element (rect, own IntersectionObserver reading, computed opacity and
-pointer-events) and streams it as per-request `surface` plus `confirm.surface`
-events refreshed every ~10 s (wire shape frozen by the parent's
-`buildVaultConfirmSurface` unit test and the sandbox's
-`parseParentConfirmSurface`). The sandbox records it and logs anomalies but
-never fails a ceremony on it, for two reasons. First, it is self-reported by
-the very party the sandbox distrusts: a compromised parent fabricates a
-perfect reading, so enforcing it adds nothing against the adversary it
-targets (overlay redress requires a compromised parent, which lies). Second,
-honest parents fail it persistently: IntersectionObserver v2 `trackVisibility`
-reports occlusion whenever any ancestor carries a transform, filter, opacity
-transition, or animation — ordinary modal CSS. Enforcement therefore only
-taxes legitimate users. The browser-truth self-checks above remain the
-enforced gate.
+The old iframe visibility and parent-attestation checks remain telemetry-only
+compatibility signals while the top-level window is open. The security boundary
+is the browser-rendered top-level sandbox page, not the embedder's DOM.
 
 ## 7. Flow redesigns
 
 ### 7.1 Approvals (access)
 
-Parent: one click (Approve) on the request card. Parent fetches **one** batch
+Parent: one click (Approve) on the request card launches a top-level sandbox
+authorization window. Parent fetches **one** batch
 of signed contexts (`POST /vault/agent-bindings:batch` with the request id;
 daemon returns per-secret bindings sharing one display block), sends one
 `approveRelease`. Sandbox: one card — title, session label, command, egress,
@@ -425,9 +418,9 @@ triggered from the create form (`setup` immediately continues into the pending
 ### 7.4 Reveal
 
 Secret detail (protected static) gains "Show value / Copy value" actions
-calling `reveal`. R2: confirm in-sandbox, plaintext rendered inside the
-sandbox frame only. This closes the orphaned-`unseal` gap with the
-already-implemented sandbox surface.
+calling `reveal`. R2: confirm in the top-level sandbox authorization window;
+after approval, plaintext is rendered inside the sandbox iframe only. This
+closes the orphaned-`unseal` gap without moving plaintext into the parent.
 
 **Copy-mode caveat**: the system clipboard is a shared resource — once the
 sandbox writes plaintext there, the parent origin (and any XSS in it) can read
@@ -463,7 +456,7 @@ Two user-facing concepts, named apart everywhere (i18n keys, cards, docs):
 
 Settings (Vault settings section, daemon-persisted, §6.5): unlock window
 5/10/30 min (default 10); Strict approvals toggle (default off; on = today's
-passkey-per-operation for R2); both enforced in-sandbox. The daemon also
+passkey-per-operation for R2); both enforced by the top-level sandbox. The daemon also
 remembers the approver's last grant-duration choice (§7.1) — a stored
 preference, not a sandbox-enforced policy.
 

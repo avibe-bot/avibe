@@ -1167,11 +1167,11 @@ def _update_request_waiter(
         waiter["timed_out_at"] = timed_out_at
     delivery_payload["waiter"] = waiter
 
-    values: dict[str, Any] = {"delivery": json.dumps(delivery_payload)}
-    if status == "completed" and row_dict.get("callback_status") == "pending":
-        values["callback_status"] = "skipped"
-
-    conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(**values))
+    conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id)
+        .values(delivery=json.dumps(delivery_payload))
+    )
     if status == "completed":
         _skip_sibling_callbacks_for_completed_waiter(conn, request_id)
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
@@ -1432,6 +1432,13 @@ def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
         if grants and not any(grant.get("delivery_ready") for grant in grants):
             return False
     return True
+
+
+def request_callback_consumed_by_waiter(row: dict[str, Any]) -> bool:
+    """Whether the terminal result already returned through a synchronous CLI waiter."""
+
+    _, delivery = _request_json_payloads(row)
+    return str(_request_waiter(delivery).get("status") or "") == "completed"
 
 
 def expire_overdue_requests(conn: Connection) -> None:

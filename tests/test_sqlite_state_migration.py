@@ -31,15 +31,15 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260808_0048"
+HEAD_REVISION = "20260809_0049"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
         "('user', 'harness', 'agent_initiated', 'annotation', 'output', "
-        "'result', 'notify', 'error', 'assistant')"
+        "'result', 'notify', 'vault', 'error', 'assistant')"
     ),
     "ix_messages_inbox_agent_reply": (
-        "session_id is not null and type in ('output', 'result', 'notify', 'error')"
+        "session_id is not null and type in ('output', 'result', 'notify', 'vault', 'error')"
     ),
     "ix_messages_inbox_user_send": (
         "session_id is not null and ((author = 'user' and type = 'user') "
@@ -77,9 +77,9 @@ def test_message_partial_index_ddl_matches_catalog_contract(
     )
 
 
-def test_agent_lifecycle_message_index_migration_matches_catalog() -> None:
+def test_message_index_migration_matches_catalog() -> None:
     migration = import_module(
-        "storage.alembic.versions.20260808_0048_agent_lifecycle_message_indexes"
+        "storage.alembic.versions.20260809_0049_vault_message_type"
     )
 
     assert migration.UPGRADE_ACTIVITY_PREDICATE == build_partial_index_predicate(
@@ -103,6 +103,22 @@ def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
         previous_activity = _index_sql(conn, "ix_messages_inbox_activity")
         previous_agent_reply = _index_sql(conn, "ix_messages_inbox_agent_reply")
         previous_user_send = _index_sql(conn, "ix_messages_inbox_user_send")
+        conn.execute(
+            "insert into messages "
+            "(id, platform, author, type, content_json, metadata_json, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-vault-waiter",
+                "avibe",
+                "harness",
+                "notify",
+                '{"text":"legacy Vault result"}',
+                '{"source_kind":"callback","source_actor":"vault:vrq_legacy"}',
+                "2026-08-09T00:00:00.000000Z",
+                "2026-08-09T00:00:00.000000Z",
+            ),
+        )
+        conn.commit()
 
     run_migrations(db_path)
 
@@ -119,6 +135,9 @@ def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
         assert conn.execute("select version_num from alembic_version").fetchone() == (
             HEAD_REVISION,
         )
+        assert conn.execute(
+            "select type from messages where id = ?", ("legacy-vault-waiter",)
+        ).fetchone() == ("vault",)
 
     command.downgrade(migrations.alembic_config(db_path), "20260806_0047")
 
@@ -126,6 +145,9 @@ def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
         assert _index_sql(conn, "ix_messages_inbox_activity") == previous_activity
         assert _index_sql(conn, "ix_messages_inbox_agent_reply") == previous_agent_reply
         assert _index_sql(conn, "ix_messages_inbox_user_send") == previous_user_send
+        assert conn.execute(
+            "select type from messages where id = ?", ("legacy-vault-waiter",)
+        ).fetchone() == ("notify",)
 
 
 class _Pre335Cursor(sqlite3.Cursor):
