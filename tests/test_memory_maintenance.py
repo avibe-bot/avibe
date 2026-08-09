@@ -6,6 +6,7 @@ import os
 import sqlite3
 import stat
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -224,18 +225,36 @@ async def test_unavailable_store_still_projects_durable_clear_recovery(
     monkeypatch.setattr("core.memory.runtime.MemoryStore", fail_initialization)
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
-    payload = await runtime.maintenance_payload(operator_ref="user:owner")
-    assert payload["status"] == "ok"
-    assert payload["data_exists"] is True
-    assert payload["can_clear"] is False
-    assert payload["clear_recovery"] == {
+    fence_entered = False
+
+    @asynccontextmanager
+    async def observed_fence():
+        nonlocal fence_entered
+        fence_entered = True
+        yield
+
+    _replace_runtime_port(runtime, exclusive_fence=observed_fence)
+    before = await runtime.maintenance_payload(operator_ref="user:owner")
+    assert before["status"] == "ok"
+    assert before["data_exists"] is True
+    assert before["can_clear"] is False
+    assert before["clear_recovery"] == {
         "state": "recovery_needed",
         "operation_id": operation.operation_id,
-        "occurred_at": payload["clear_recovery"]["occurred_at"],
+        "occurred_at": before["clear_recovery"]["occurred_at"],
         "error_code": "memory_clear_failed",
         "can_resume": True,
         "can_abort": False,
     }
+
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert _maintenance(runtime)._backup_stage_reconcile_task is None
+    await asyncio.sleep(0)
+    assert fence_entered is False
+    assert await runtime.maintenance_payload(operator_ref="user:owner") == before
     await runtime.close()
 
 

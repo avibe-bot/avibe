@@ -742,6 +742,7 @@ class MemoryMaintenance:
         if (
             self._closing
             or state.artifact_installing
+            or self._store is None
             or self._backup_manager is None
             or self._clear_journal is None
             or self._backup_restore_journal is None
