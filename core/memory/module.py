@@ -25,8 +25,11 @@ from core.memory.attachments import (
     encode_pinned_bundle,
 )
 from core.memory.artifact import PROVIDER_ROOT_CONTROL_FILES
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    remove_confined_path,
+)
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
-from core.memory.snapshot import MemorySnapshotError, _remove_safe_path
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryMeta,
@@ -1099,8 +1102,8 @@ def _read_root_sentinel(path: Path) -> object:
 
 def _remove_root_child_no_follow(path: Path, effective_home: Path) -> None:
     try:
-        _remove_safe_path(effective_home, path)
-    except (MemorySnapshotError, OSError, ValueError) as error:
+        remove_confined_path(effective_home, path)
+    except (ConfinedFilesystemError, OSError, ValueError) as error:
         raise _ClearStepFailure("provider root child could not be removed") from error
 
 

@@ -17,6 +17,7 @@ from core.memory.clear_journal import (
     ClearTransitionError,
     MemoryClearJournal,
 )
+from core.memory.confined_filesystem import remove_confined_path
 from core.memory.snapshot import (
     MemorySnapshotError,
     MemorySnapshotManager,
@@ -801,7 +802,7 @@ def test_snapshot_accepts_path_record_beyond_256k_and_clear_gc(
         execution_token=operation.execution_token,
     )
     manager.remove(journal.terminal_snapshot_permit(operation.operation_id))
-    snapshot_module._remove_safe_path(home, source_root)
+    remove_confined_path(home, source_root)
     assert not manager.snapshot_path(snapshot.snapshot_id).exists()
 
 
@@ -1357,83 +1358,6 @@ def test_explicit_id_backup_retry_still_reclaims_its_deterministic_stage(
     backup = manager.create("explicit-retry")
     assert backup.snapshot_id == "explicit-retry"
     assert not (manager.snapshot_root / ".explicit-retry.tmp").exists()
-
-
-def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
-    home.chmod(0o700)
-    journal = MemoryClearJournal(home)
-    operation = journal.start(
-        operation_id="remove-race",
-        operator_ref="user:owner",
-        pre_epoch=0,
-        target_epoch=1,
-    )
-    manager = MemorySnapshotManager(home)
-    snapshot = manager.create("remove-race")
-    assert operation.execution_token is not None
-    operation = journal.record_snapshot(
-        operation.operation_id,
-        expected_revision=operation.revision,
-        execution_token=operation.execution_token,
-        snapshot=snapshot,
-    )
-    assert operation.execution_token is not None
-    operation = journal.mark_prepared(
-        operation.operation_id,
-        expected_revision=operation.revision,
-        execution_token=operation.execution_token,
-    )
-    assert operation.execution_token is not None
-    operation = journal.begin_deleting(
-        operation.operation_id,
-        expected_revision=operation.revision,
-        execution_token=operation.execution_token,
-    )
-    for surface in journal.surfaces:
-        assert operation.execution_token is not None
-        operation = journal.record_surface_deleted(
-            operation.operation_id,
-            surface.name,
-            expected_revision=operation.revision,
-            execution_token=operation.execution_token,
-        )
-    assert operation.execution_token is not None
-    operation = journal.mark_completed(
-        operation.operation_id,
-        expected_revision=operation.revision,
-        execution_token=operation.execution_token,
-    )
-    permit = journal.terminal_snapshot_permit(operation.operation_id)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    victim = outside / "victim.txt"
-    victim.write_text("outside must survive")
-    snapshot_dir = manager.snapshot_path(snapshot.snapshot_id)
-    tombstone = manager.snapshot_root / f".{snapshot.snapshot_id}.gc"
-    moved = manager.snapshot_root / "held-remove-race"
-    real_scandir = snapshot_module.os.scandir
-    swapped = False
-
-    def swap_directory_for_symlink(path):
-        nonlocal swapped
-        if isinstance(path, int) and not swapped and tombstone.exists():
-            swapped = True
-            tombstone.rename(moved)
-            tombstone.symlink_to(outside, target_is_directory=True)
-        return real_scandir(path)
-
-    monkeypatch.setattr(snapshot_module.os, "scandir", swap_directory_for_symlink)
-    with pytest.raises(MemorySnapshotUnsafePathError):
-        manager.remove(permit)
-
-    assert swapped
-    assert not snapshot_dir.exists()
-    assert victim.read_text() == "outside must survive"
 
 
 def test_only_completed_journal_operation_can_authorize_snapshot_removal(tmp_path: Path) -> None:

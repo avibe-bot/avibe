@@ -21,6 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Literal, Mapping, Protocol, Sequence
 
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    remove_anchored_entry,
+    remove_confined_path,
+)
+
 
 SnapshotSurfaceKind = Literal["sqlite", "tree", "call_log"]
 SnapshotEntryType = Literal["sqlite", "tree", "directory", "file", "missing"]
@@ -286,13 +292,6 @@ class _TreeCopyFrame:
 class _DirectoryWalkFrame:
     node: _RelativeNode | None
     before: tuple[int, int, int, int]
-    child_order: _DirectoryOrderCursor
-
-
-@dataclass(slots=True)
-class _RemovalFrame:
-    node: _RelativeNode
-    before: tuple[int, int]
     child_order: _DirectoryOrderCursor
 
 
@@ -930,7 +929,7 @@ class MemorySnapshotManager:
                         "Memory backup stage is not a safe directory"
                     )
                 _require_directory_private(info, "Memory backup stage")
-                _remove_entry_at(
+                _remove_safe_entry(
                     root_fd,
                     name,
                     expected_identity=(info.st_dev, info.st_ino),
@@ -2668,138 +2667,34 @@ def _require_expected_target(info: os.stat_result, kind: SnapshotSurfaceKind, *,
         _require_directory_private(info, "Memory restore tree target")
 
 
-def _remove_safe_path(home: Path, path: Path) -> None:
-    """Remove a confined entry through anchored, no-follow directory handles."""
-
-    relative = _relative_to_home(path, home)
-    if not relative.parts:
-        raise MemorySnapshotUnsafePathError("refusing to remove the effective Memory home")
-    flags = _directory_open_flags()
-    current: int | None = None
+def _remove_safe_path(
+    home: Path,
+    path: Path,
+) -> None:
     try:
-        current = os.open(home, flags)
-        for component in relative.parts[:-1]:
-            try:
-                next_descriptor = os.open(component, flags, dir_fd=current)
-            except FileNotFoundError:
-                return
-            os.close(current)
-            current = next_descriptor
-        _remove_entry_at(current, relative.parts[-1])
-    finally:
-        if current is not None:
-            os.close(current)
+        remove_confined_path(home, path)
+    except ConfinedFilesystemError as error:
+        raise MemorySnapshotUnsafePathError(
+            "Memory snapshot path could not be removed safely"
+        ) from error
 
 
-def _remove_entry_at(
+def _remove_safe_entry(
     parent_fd: int,
     name: str,
     *,
-    expected_identity: tuple[int, int] | None = None,
+    expected_identity: tuple[int, int],
 ) -> None:
-    root_node = _RelativeNode(None, name)
-    stack: list[_RemovalFrame | _RelativeNode] = [root_node]
-    with (
-        _DirectoryDescriptorCache(parent_fd, require_private=False) as cache,
-        _SpilledDirectoryOrder() as orders,
-    ):
-        while stack:
-            item = stack[-1]
-            if isinstance(item, _RelativeNode):
-                stack.pop()
-                node_parent_fd = cache.open(
-                    item.parent,
-                    "Memory snapshot removal parent",
-                )
-                try:
-                    try:
-                        before = os.stat(
-                            item.name,
-                            dir_fd=node_parent_fd,
-                            follow_symlinks=False,
-                        )
-                    except FileNotFoundError:
-                        continue
-                    if (
-                        item is root_node
-                        and expected_identity is not None
-                        and (
-                            not stat.S_ISDIR(before.st_mode)
-                            or (before.st_dev, before.st_ino) != expected_identity
-                        )
-                    ):
-                        raise MemorySnapshotUnsafePathError(
-                            "Memory snapshot entry changed during removal"
-                        )
-                    if stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode):
-                        os.unlink(item.name, dir_fd=node_parent_fd)
-                        continue
-                    if not stat.S_ISDIR(before.st_mode):
-                        raise MemorySnapshotUnsafePathError(
-                            "Memory snapshot removal refuses special files"
-                        )
-                    child_fd = os.open(
-                        item.name,
-                        _directory_open_flags(),
-                        dir_fd=node_parent_fd,
-                    )
-                    try:
-                        opened = os.fstat(child_fd)
-                        if (opened.st_dev, opened.st_ino) != (
-                            before.st_dev,
-                            before.st_ino,
-                        ):
-                            raise MemorySnapshotUnsafePathError(
-                                "Memory snapshot directory changed during removal"
-                            )
-                        child_order = orders.scan(
-                            child_fd,
-                            error_type=MemorySnapshotUnsafePathError,
-                            message="Memory snapshot directory cannot be scanned safely",
-                        )
-                    finally:
-                        os.close(child_fd)
-                finally:
-                    os.close(node_parent_fd)
-                stack.append(
-                    _RemovalFrame(
-                        node=item,
-                        before=(before.st_dev, before.st_ino),
-                        child_order=child_order,
-                    )
-                )
-                continue
-
-            child_name = orders.next_name(
-                item.child_order,
-                error_type=MemorySnapshotUnsafePathError,
-                message="Memory snapshot directory cannot be scanned safely",
-            )
-            if child_name is not None:
-                stack.append(_RelativeNode(item.node, child_name))
-                continue
-
-            stack.pop()
-            node_parent_fd = cache.open(
-                item.node.parent,
-                "Memory snapshot removal parent",
-            )
-            try:
-                current = os.stat(
-                    item.node.name,
-                    dir_fd=node_parent_fd,
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISDIR(current.st_mode)
-                    or (current.st_dev, current.st_ino) != item.before
-                ):
-                    raise MemorySnapshotUnsafePathError(
-                        "Memory snapshot directory changed during removal"
-                    )
-                os.rmdir(item.node.name, dir_fd=node_parent_fd)
-            finally:
-                os.close(node_parent_fd)
+    try:
+        remove_anchored_entry(
+            parent_fd,
+            name,
+            expected_identity=expected_identity,
+        )
+    except ConfinedFilesystemError as error:
+        raise MemorySnapshotUnsafePathError(
+            "Memory snapshot entry could not be removed safely"
+        ) from error
 
 
 def _fsync_file(path: Path) -> None:
