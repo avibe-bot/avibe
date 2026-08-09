@@ -24,6 +24,7 @@ from core.memory.everos import (
 from core.memory.observations import (
     AddAck,
     AddRejected,
+    FlushRejected,
     FlushRetryable,
     FlushSucceeded,
     FlushUnknown,
@@ -1023,6 +1024,185 @@ def test_boot_recovery_opens_and_emits_processing_fault_once(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "result",
+    (
+        FlushUnknown(reason="timeout"),
+        FlushRejected(
+            request_id="server-rejection",
+            error_code="INTERNAL_ERROR",
+            server_fault=True,
+        ),
+        FlushSucceeded(request_id=None, status="extracted"),
+    ),
+    ids=("unknown", "server-rejection", "malformed-success"),
+)
+def test_restart_finishes_submitted_flush_fault_notification_once(
+    tmp_path: Path,
+    result: FlushUnknown | FlushRejected | FlushSucceeded,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=True)
+        row = _enqueue(store, "submitted-flush-fault")
+        claimed = store.claim_due(
+            lease_owner="old-boot",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+        assert store.settle_add_ack(
+            claimed,
+            AddAck("add-before-flush", "accumulated"),
+            lease_owner="old-boot",
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        ).settled
+        lease = store.acquire_flush(
+            now="2026-01-01T00:00:01.000Z",
+            provider_session_ref=row.provider_session_ref,
+            force=True,
+        )
+        assert lease is not None
+        assert store.mark_flush_submission_started(
+            lease,
+            now="2026-01-01T00:00:02.000Z",
+        )
+
+        # Simulate process loss immediately after the local settlement commit.
+        assert store.settle_flush(
+            lease,
+            result,
+            now="2026-01-01T00:00:03.000Z",
+        ).settled
+        pending = store.ensure_meta()
+        assert pending.processing_fault_since == "2026-01-01T00:00:03.000Z"
+        assert pending.processing_fault_kind is None
+        assert pending.processing_alert_active is False
+
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        restarted = SessionFlushCoordinator(
+            store=MemoryStore(store.path),
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await restarted.recover(lease_owner="next-boot")
+        await restarted.recover(lease_owner="same-boot")
+
+        assert [event[:3] for event in events] == [
+            ("fault", "engine", "2026-01-01T00:00:03.000Z")
+        ]
+        notified = store.ensure_meta()
+        assert notified.processing_fault_kind == "engine"
+        assert notified.processing_alert_active is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "success",
+    ("add-accumulated", "add-extracted", "flush-succeeded"),
+)
+def test_restart_finishes_atomic_processing_recovery_notification_once(
+    tmp_path: Path,
+    success: str,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=True)
+        if success.startswith("add-"):
+            assert store.open_processing_fault(now="2026-01-01T00:00:00.000Z")
+            assert store.classify_processing_fault("engine")
+            assert store.mark_processing_alert_active()
+
+        row = _enqueue(store, f"recovery-{success}")
+        claimed = store.claim_due(
+            lease_owner="old-boot",
+            now="2026-01-01T00:00:01.000Z",
+        )
+        assert claimed is not None
+        if success.startswith("add-"):
+            status = success.removeprefix("add-")
+            assert store.settle_add_ack(
+                claimed,
+                AddAck(request_id=f"{success}-request", status=status),
+                lease_owner="old-boot",
+                now=datetime(2026, 1, 1, 0, 0, 2, tzinfo=UTC),
+            ).settled
+        else:
+            assert store.settle_add_ack(
+                claimed,
+                AddAck(request_id="add-before-flush", status="accumulated"),
+                lease_owner="old-boot",
+                now=datetime(2026, 1, 1, 0, 0, 2, tzinfo=UTC),
+            ).settled
+            assert store.open_processing_fault(now="2026-01-01T00:00:02.500Z")
+            assert store.classify_processing_fault("engine")
+            assert store.mark_processing_alert_active()
+            lease = store.acquire_flush(
+                now="2026-01-01T00:00:03.000Z",
+                provider_session_ref=row.provider_session_ref,
+                force=True,
+            )
+            assert lease is not None
+            assert store.mark_flush_submission_started(
+                lease,
+                now="2026-01-01T00:00:04.000Z",
+            )
+            assert store.settle_flush(
+                lease,
+                FlushSucceeded(request_id="flush-success", status="extracted"),
+                now="2026-01-01T00:00:05.000Z",
+            ).settled
+
+        # The success and close are durable; only the external edge is pending.
+        pending = store.ensure_meta()
+        assert pending.processing_fault_since is None
+        assert pending.processing_alert_active is False
+        expected_at = (
+            "2026-01-01T00:00:02.000Z"
+            if success.startswith("add-")
+            else "2026-01-01T00:00:05.000Z"
+        )
+        assert pending.processing_recovery_pending_at == expected_at
+
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        restarted = SessionFlushCoordinator(
+            store=MemoryStore(store.path),
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await restarted.recover(lease_owner="next-boot")
+        await restarted.recover(lease_owner="same-boot")
+
+        assert [event[:3] for event in events] == [
+            ("recovered", None, expected_at)
+        ]
+        assert store.ensure_meta().processing_recovery_pending_at is None
+
+    asyncio.run(run())
+
+
 def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -1622,7 +1802,7 @@ def test_cancelled_flush_after_provider_entry_opens_one_fault_and_later_recovers
     asyncio.run(run())
 
 
-def test_shutdown_bounds_post_entry_flush_classification_and_boot_recovers(
+def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1680,11 +1860,15 @@ def test_shutdown_bounds_post_entry_flush_classification_and_boot_recovers(
         assert flush_task is not None
         await asyncio.wait_for(flush_entered.wait(), timeout=1)
 
-        started = asyncio.get_running_loop().time()
-        await coordinator.prepare_shutdown(timeout_seconds=0.01)
-        elapsed = asyncio.get_running_loop().time() - started
-        assert elapsed < 0.2
-        assert health_entered.is_set()
+        shutdown = asyncio.create_task(
+            coordinator.prepare_shutdown(timeout_seconds=1)
+        )
+        await asyncio.wait_for(health_entered.wait(), timeout=1)
+        assert not shutdown.done()
+
+        # Cancel the blocked classification only after the durable local phase.
+        flush_task.cancel()
+        await asyncio.wait_for(shutdown, timeout=1)
         assert health_finished.is_set()
         assert flush_task.cancelled()
         state = store.get_session_flush_state(row.provider_session_ref)

@@ -518,9 +518,14 @@ class MemoryModule:
         )
 
     async def failure_log(self, *, limit: int = 50) -> tuple[MemoryFailureLogEntry, ...]:
-        """Return bounded, sanitized terminal failure history."""
+        """Return terminal failure history while fencing its bounded compaction."""
 
-        return await self._store_call(self._store.failure_log, limit=limit)
+        if self._clear_active or self._is_maintenance_open():
+            return ()
+        async with self._root_lifecycle_lock():
+            if self._clear_active or self._is_maintenance_open():
+                return ()
+            return await self._store_call(self._store.failure_log, limit=limit)
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:

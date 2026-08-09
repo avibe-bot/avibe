@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 
 _NewSessionResult = TypeVar("_NewSessionResult")
+_NEW_SESSION_ERROR_I18N_KEYS = {
+    "memory_session_lifecycle_busy": "error.memorySessionLifecycleBusy",
+}
 
 
 class CommandHandlers(BaseHandler):
@@ -635,7 +638,9 @@ class CommandHandlers(BaseHandler):
             logger.error(f"Error starting new session: {e}", exc_info=True)
             try:
                 channel_context = self._get_channel_context(context)
-                await im_client.send_message(channel_context, f"❌ {self._t('error.clearSession', error=str(e))}")
+                error_key = _NEW_SESSION_ERROR_I18N_KEYS.get(getattr(e, "code", None))
+                error_message = self._t(error_key) if error_key else self._t("error.clearSession", error=str(e))
+                await im_client.send_message(channel_context, f"❌ {error_message}")
             except Exception as send_error:
                 logger.error(f"Failed to send error message: {send_error}", exc_info=True)
 

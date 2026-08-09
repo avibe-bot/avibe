@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core.memory.runtime import MemorySessionLifecycleBusyError
 from modules.im import MessageContext
 
 # Imported before ``_load_command_handlers_class`` runs: that loader swaps
@@ -386,8 +387,14 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_new_does_not_reset_when_memory_session_fence_is_busy(self):
+    async def _run_new_with_memory_lifecycle_error(
+        self,
+        error: Exception,
+        *,
+        language: str,
+    ) -> _StubController:
         controller = _StubController({"display_name": "Alex"})
+        controller.config.language = language
 
         async def _busy_lifecycle(
             _context,
@@ -397,7 +404,7 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             deadline_seconds,
         ):
             self.assertEqual(deadline_seconds, 5.0)
-            raise RuntimeError("memory capture admission is busy")
+            raise error
 
         controller.run_memory_session_lifecycle = _busy_lifecycle
         handler = CommandHandlers(controller)
@@ -408,10 +415,52 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await handler.handle_new(context)
+        return controller
+
+    async def test_new_localizes_memory_session_fence_timeout_in_english(self):
+        controller = await self._run_new_with_memory_lifecycle_error(
+            MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ),
+            language="en",
+        )
 
         self.assertEqual(controller.cleared_sessions, [])
-        self.assertEqual(len(controller.im_client.sent_messages), 1)
-        self.assertIn("memory capture admission is busy", controller.im_client.sent_messages[0][1])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [
+                (
+                    "wx-chat",
+                    "❌ Memory is still processing this session. Please try /new again.",
+                )
+            ],
+        )
+
+    async def test_new_localizes_memory_session_fence_timeout_in_chinese(self):
+        controller = await self._run_new_with_memory_lifecycle_error(
+            MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ),
+            language="zh",
+        )
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("wx-chat", "❌ 记忆系统仍在处理当前会话，请稍后重试 /new。")],
+        )
+
+    async def test_new_preserves_generic_error_detail(self):
+        controller = await self._run_new_with_memory_lifecycle_error(
+            RuntimeError("provider unavailable"),
+            language="zh",
+        )
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("wx-chat", "❌ 清除会话时出错：provider unavailable")],
+        )
 
     async def test_new_does_not_flush_a_fallback_session_anchor(self):
         controller = _StubController({"display_name": "Alex"})

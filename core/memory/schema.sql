@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS memory_meta (
     processing_alert_active INTEGER NOT NULL DEFAULT 0 CHECK (
         processing_alert_active IN (0, 1)
     ),
+    processing_recovery_pending_at TEXT,
     updated_at TEXT NOT NULL
 );
 

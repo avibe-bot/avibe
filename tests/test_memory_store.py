@@ -11,7 +11,7 @@ import pytest
 
 from config import paths
 from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
-from core.memory.observations import AddRejected
+from core.memory.observations import AddAck, AddRejected
 from core.memory.store import (
     AmbiguousAdd,
     MAX_MESSAGE_ATTEMPTS,
@@ -161,6 +161,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "processing_fault_kind",
             "processing_fault_since",
             "processing_alert_active",
+            "processing_recovery_pending_at",
             "last_error_at",
         }.issubset(meta_columns)
         assert "recovery_origin" in settlement_columns
@@ -516,6 +517,147 @@ def test_exhausted_flush_retry_and_processing_fault_are_one_transaction(
     assert state is not None
     assert (state.state, state.retry_count) == ("due", 3)
     assert store.ensure_meta().processing_fault_since is None
+    assert store.failure_log() == ()
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        FlushUnknown(reason="timeout"),
+        FlushRejected(
+            request_id="server-rejection",
+            error_code="INTERNAL_ERROR",
+            server_fault=True,
+        ),
+        FlushSucceeded(request_id=None, status="extracted"),
+    ),
+    ids=("unknown", "server-rejection", "malformed-success"),
+)
+def test_submitted_flush_fault_and_settlement_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result: FlushUnknown | FlushRejected | FlushSucceeded,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_ref = _deliver(store, "atomic-submitted-flush")
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=session_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert store.mark_flush_submission_started(
+        lease,
+        now="2026-01-01T00:00:03.000Z",
+    )
+
+    def fail_fault_open(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault write failure")
+
+    monkeypatch.setattr(
+        store,
+        "_open_processing_fault_in_connection",
+        fail_fault_open,
+    )
+    with pytest.raises(OSError, match="injected processing fault write failure"):
+        store.settle_flush(
+            lease,
+            result,
+            now="2026-01-01T00:00:04.000Z",
+        )
+
+    state = store.get_session_flush_state(session_ref)
+    assert state is not None and state.state == "in_flight"
+    assert store.ensure_meta().processing_fault_since is None
+    assert store.failure_log() == ()
+
+
+@pytest.mark.parametrize("status", ("accumulated", "extracted"))
+def test_successful_add_and_processing_fault_close_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, f"atomic-add-close-{status}")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert store.open_processing_fault(now="2026-01-01T00:00:00.100Z")
+    assert store.classify_processing_fault("engine")
+    assert store.mark_processing_alert_active()
+
+    def fail_fault_close(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault close failure")
+
+    monkeypatch.setattr(
+        store,
+        "_close_processing_fault_in_connection",
+        fail_fault_close,
+    )
+    with pytest.raises(OSError, match="injected processing fault close failure"):
+        store.settle_add_ack(
+            claimed,
+            AddAck(request_id=f"add-{status}", status=status),
+            lease_owner="worker",
+            now=_dt("2026-01-01T00:00:01.000Z"),
+        )
+
+    row = _row_for_source(store, f"atomic-add-close-{status}")
+    assert row is not None and row.state == "processing"
+    meta = store.ensure_meta()
+    assert meta.processing_fault_since == "2026-01-01T00:00:00.100Z"
+    assert meta.processing_alert_active is True
+    assert meta.processing_recovery_pending_at is None
+    assert store.failure_log() == ()
+
+
+def test_successful_flush_and_processing_fault_close_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_ref = _deliver(store, "atomic-flush-close")
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=session_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert store.mark_flush_submission_started(
+        lease,
+        now="2026-01-01T00:00:03.000Z",
+    )
+    assert store.open_processing_fault(now="2026-01-01T00:00:03.100Z")
+    assert store.classify_processing_fault("engine")
+    assert store.mark_processing_alert_active()
+
+    def fail_fault_close(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault close failure")
+
+    monkeypatch.setattr(
+        store,
+        "_close_processing_fault_in_connection",
+        fail_fault_close,
+    )
+    with pytest.raises(OSError, match="injected processing fault close failure"):
+        store.settle_flush(
+            lease,
+            FlushSucceeded(request_id="flush-success", status="extracted"),
+            now="2026-01-01T00:00:04.000Z",
+        )
+
+    state = store.get_session_flush_state(session_ref)
+    assert state is not None and state.state == "in_flight"
+    meta = store.ensure_meta()
+    assert meta.processing_fault_since == "2026-01-01T00:00:03.100Z"
+    assert meta.processing_alert_active is True
+    assert meta.processing_recovery_pending_at is None
     assert store.failure_log() == ()
 
 
@@ -888,7 +1030,14 @@ def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) ->
     assert closed.processing_fault_since is None
     assert closed.processing_fault_kind is None
     assert closed.processing_alert_active is False
+    assert closed.processing_recovery_pending_at == "2026-01-01T00:05:01.000Z"
     assert closed.last_error is None
+    assert store.mark_processing_recovery_notified(
+        occurred_at="2026-01-01T00:05:01.000Z"
+    )
+    assert not store.mark_processing_recovery_notified(
+        occurred_at="2026-01-01T00:05:01.000Z"
+    )
 
 
 def test_duplicate_enqueue_is_atomic_and_does_not_advance_provider_clock(tmp_path: Path) -> None:

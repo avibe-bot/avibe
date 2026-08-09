@@ -130,13 +130,7 @@ class SessionFlushCoordinator:
             lease_owner=lease_owner,
             clock=self._current_time,
         )
-        meta = await self._store_call(self._store.get_meta)
-        if (
-            meta is not None
-            and meta.processing_fault_since is not None
-            and (meta.processing_fault_kind is None or not meta.processing_alert_active)
-        ):
-            await self._classify_processing_fault(meta.processing_fault_since)
+        await self._reconcile_processing_events()
         if self._attachment_store is not None:
             if self._attachment_admission_lock is None:
                 await self._reconcile_attachments()
@@ -455,9 +449,7 @@ class SessionFlushCoordinator:
                         now=settled_at,
                     )
                     if settled.settled and settled.state == "manual_required":
-                        await self._classify_processing_fault_locked(
-                            _iso(settled_at)
-                        )
+                        await self._reconcile_processing_events_locked()
             else:
                 await self._finalize_flush_outcome(lease, result)
 
@@ -624,7 +616,7 @@ class SessionFlushCoordinator:
         if settled.attachment_release_id is not None:
             await self._release_bundle(settled.attachment_release_id)
         if settled.settled:
-            await self._close_processing_fault()
+            await self._reconcile_processing_events()
         return settled.settled
 
     async def _finalize_flush_outcome(
@@ -632,7 +624,7 @@ class SessionFlushCoordinator:
         lease: FlushLease,
         result: FlushSucceeded | FlushRejected | FlushUnknown,
     ) -> None:
-        (settled, fault_at), cancellation = await self._drain_local_flush_outcome(
+        settled, cancellation = await self._drain_local_flush_outcome(
             lease,
             result,
         )
@@ -640,16 +632,13 @@ class SessionFlushCoordinator:
             raise cancellation
         if not settled:
             return
-        if isinstance(result, FlushSucceeded):
-            await self._close_processing_fault()
-        elif fault_at is not None:
-            await self._classify_processing_fault(fault_at)
+        await self._reconcile_processing_events()
 
     async def _drain_local_flush_outcome(
         self,
         lease: FlushLease,
         result: FlushSucceeded | FlushRejected | FlushUnknown,
-    ) -> tuple[tuple[bool, str | None], asyncio.CancelledError | None]:
+    ) -> tuple[bool, asyncio.CancelledError | None]:
         """Finish local commits, deferring cancellation before remote classification."""
 
         local_phase = asyncio.create_task(
@@ -667,7 +656,7 @@ class SessionFlushCoordinator:
         self,
         lease: FlushLease,
         result: FlushSucceeded | FlushRejected | FlushUnknown,
-    ) -> tuple[bool, str | None]:
+    ) -> bool:
         """Persist the exact outcome and its fault edge under the same local phase."""
 
         settled = await self._store_call(
@@ -676,18 +665,7 @@ class SessionFlushCoordinator:
             result,
             now=_iso(self._current_time()),
         )
-        if not settled.settled:
-            return False, None
-        if isinstance(result, FlushUnknown) or (
-            isinstance(result, FlushRejected) and result.server_fault
-        ):
-            occurred_at = _iso(self._current_time())
-            await self._store_call(
-                self._store.open_processing_fault,
-                now=occurred_at,
-            )
-            return True, occurred_at
-        return True, None
+        return settled.settled
 
     async def _return_unsubmitted_claim(
         self,
@@ -725,7 +703,7 @@ class SessionFlushCoordinator:
                     now=settled_at,
                 )
                 if settled.settled:
-                    await self._classify_processing_fault_locked(_iso(settled_at))
+                    await self._reconcile_processing_events_locked()
             if settled.attachment_release_id is not None:
                 await self._release_bundle(settled.attachment_release_id)
             return
@@ -750,7 +728,35 @@ class SessionFlushCoordinator:
         async with self._processing_fault_lock:
             occurred_at = _iso(self._current_time())
             await self._store_call(self._store.open_processing_fault, now=occurred_at)
-            await self._classify_processing_fault_locked(occurred_at)
+            await self._reconcile_processing_events_locked()
+
+    async def _reconcile_processing_events(self) -> None:
+        async with self._processing_fault_lock:
+            await self._reconcile_processing_events_locked()
+
+    async def _reconcile_processing_events_locked(self) -> None:
+        meta = await self._store_call(self._store.get_meta)
+        if meta is None:
+            return
+        if meta.processing_recovery_pending_at is not None:
+            recovered_at = meta.processing_recovery_pending_at
+            if not await self._emit_processing_event(
+                "recovered",
+                None,
+                recovered_at,
+            ):
+                return
+            await self._store_call(
+                self._store.mark_processing_recovery_notified,
+                occurred_at=recovered_at,
+            )
+            meta = await self._store_call(self._store.get_meta)
+            if meta is None:
+                return
+        if meta.processing_fault_since is not None and (
+            meta.processing_fault_kind is None or not meta.processing_alert_active
+        ):
+            await self._classify_processing_fault_locked(meta.processing_fault_since)
 
     async def _classify_processing_fault(self, occurred_at: str) -> None:
         async with self._processing_fault_lock:
@@ -775,7 +781,7 @@ class SessionFlushCoordinator:
         async with self._processing_fault_lock:
             now = _iso(self._current_time())
             if await self._store_call(self._store.close_processing_fault, now=now):
-                await self._emit_processing_event("recovered", None, now)
+                await self._reconcile_processing_events_locked()
 
     async def _provider_processing_healthy(self) -> bool:
         try:

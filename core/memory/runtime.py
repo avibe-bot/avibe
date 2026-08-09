@@ -87,6 +87,8 @@ class MemoryStoreUnavailableError(RuntimeError):
 class MemorySessionLifecycleBusyError(RuntimeError):
     """Raised when a destructive session transition cannot acquire its fence."""
 
+    code = "memory_session_lifecycle_busy"
+
 
 class _UnavailableMemoryModule:
     """Capture sink for a runtime whose store could not be opened.

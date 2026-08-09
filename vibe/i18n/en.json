@@ -258,6 +258,7 @@
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",
+    "memorySessionLifecycleBusy": "Memory is still processing this session. Please try /new again.",
     "settingsFailed": "Failed to open settings. Please try again.",
     "cwdChangeFailed": "Failed to open directory change dialog. Please try again.",
     "resumeFailed": "Failed to open resume dialog. Please try again.",
