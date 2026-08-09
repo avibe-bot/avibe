@@ -174,6 +174,7 @@ class MemoryRuntime:
         self._restart_task: asyncio.Task[dict[str, Any]] | None = None
         self._ready_activation_task: asyncio.Task[None] | None = None
         self._terminal_snapshot_gc_task: asyncio.Task[None] | None = None
+        self._backup_stage_reconcile_task: asyncio.Task[None] | None = None
         self._closing = False
         self._ready_event: EverOSProcessPort | None = None
         # Single-flight state for the drain-side processing gate. Deliberately a
@@ -292,6 +293,19 @@ class MemoryRuntime:
         except Exception:
             return True
 
+    def _clear_capability_ready(self) -> bool:
+        """Whether every local dependency required by Clear initialized."""
+
+        return (
+            self._store is not None
+            and self._module is not None
+            and self._backup_restore_journal is not None
+            and self._clear_journal is not None
+            and self._snapshot_manager is not None
+            and self._backup_manager is not None
+            and self._clear_journal_error is None
+        )
+
     def _configure_insight_reader(self, config: MemoryConfig) -> None:
         if self._insight_reader_override is not None:
             self._insight_reader = self._insight_reader_override
@@ -385,6 +399,7 @@ class MemoryRuntime:
             return await self._reconcile(config)
         finally:
             self._ensure_terminal_snapshot_gc()
+            self._ensure_backup_stage_reconcile()
 
     async def _reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Run one reconciliation owned by the public lifecycle operation."""
@@ -773,7 +788,12 @@ class MemoryRuntime:
         return {
             "status": "ok",
             "data_exists": bool(history or (meta is not None and meta.last_success_at)),
-            "can_clear": not manual_required and recovery is None,
+            "can_clear": (
+                self._clear_capability_ready()
+                and not self._maintenance_open()
+                and not manual_required
+                and recovery is None
+            ),
             "clear_recovery": recovery,
         }
 
@@ -1521,6 +1541,87 @@ class MemoryRuntime:
 
         task.add_done_callback(clear_gc)
 
+    def _ensure_backup_stage_reconcile(self) -> None:
+        """Schedule cleanup of auto-ID backup stages after lifecycle reconcile."""
+
+        task = self._backup_stage_reconcile_task
+        if (
+            self._closing
+            or not self.available
+            or self._backup_manager is None
+            or self._clear_journal is None
+            or self._backup_restore_journal is None
+            or self._clear_journal_error is not None
+            or (task is not None and not task.done())
+        ):
+            return
+        task = asyncio.create_task(
+            self._run_backup_stage_reconcile(),
+            name="memory-backup-stage-reconcile",
+        )
+        self._backup_stage_reconcile_task = task
+
+        def clear_reconcile(completed: asyncio.Task[None]) -> None:
+            if self._backup_stage_reconcile_task is completed:
+                self._backup_stage_reconcile_task = None
+
+        task.add_done_callback(clear_reconcile)
+
+    async def _run_backup_stage_reconcile(self) -> None:
+        """Remove abandoned unpublished stages under the backup fence."""
+
+        journal = self._require_clear_journal()
+        restore_journal = self._require_backup_restore_journal()
+        manager = self._require_backup_manager()
+        try:
+            async with self._reconcile_lock, self.module._lifecycle_lock:
+                async with self.module._root_lifecycle_lock():
+                    journal.assert_backup_allowed()
+                    restore_journal.assert_idle()
+                    self._backup_active = True
+                    self.module._clear_active = True
+                    try:
+                        await self._run_maintenance_io(
+                            manager.reconcile_unpublished_backup_stages
+                        )
+                    finally:
+                        self._backup_active = False
+                        self.module._clear_active = False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Unpublished Memory backup stages could not be reconciled",
+                exc_info=True,
+            )
+
+    async def _stop_backup_stage_reconcile(self) -> None:
+        """Cancel stage cleanup and wait until its current filesystem I/O settles."""
+
+        task = self._backup_stage_reconcile_task
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        settlement = asyncio.gather(task, return_exceptions=True)
+        caller_cancellation: asyncio.CancelledError | None = None
+        while not settlement.done():
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
+        try:
+            result = settlement.result()[0]
+        finally:
+            if self._backup_stage_reconcile_task is task:
+                self._backup_stage_reconcile_task = None
+        if isinstance(result, BaseException) and not isinstance(
+            result,
+            asyncio.CancelledError,
+        ):
+            raise result
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
     async def _run_terminal_snapshot_gc(self) -> None:
         """Remove terminal snapshots without occupying the activation path."""
 
@@ -1858,6 +1959,7 @@ class MemoryRuntime:
             return {"ok": False, "error": "memory_restart_failed"}
         finally:
             self._ensure_terminal_snapshot_gc()
+            self._ensure_backup_stage_reconcile()
 
     async def _restart_locked(self) -> dict[str, Any]:
         """Replace the sidecar while ``_reconcile_lock`` is held."""
@@ -1989,6 +2091,7 @@ class MemoryRuntime:
 
     async def close(self) -> None:
         self._closing = True
+        await self._stop_backup_stage_reconcile()
         restart_task = self._restart_task
         if restart_task is not None and restart_task is not asyncio.current_task():
             try:

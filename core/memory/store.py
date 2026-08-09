@@ -1835,6 +1835,7 @@ class MemoryStore:
                         lease.fence_token,
                     ),
                 )
+                self._open_processing_fault_in_connection(conn, now=now_iso)
                 return FlushSettleResult(settled=True, state="manual_required")
             retry_at = now + timedelta(seconds=2 ** (retries - 1))
             conn.execute(
@@ -1982,6 +1983,11 @@ class MemoryStore:
                             ),
                         ),
                     )
+                    if rejection.server_fault:
+                        self._open_processing_fault_in_connection(
+                            conn,
+                            now=now_iso,
+                        )
                 state: Literal["pending", "dead"] = "dead"
                 self._compact_terminal_tombstones_in_connection(conn, now)
             else:

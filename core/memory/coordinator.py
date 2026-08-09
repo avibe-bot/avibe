@@ -439,11 +439,17 @@ class SessionFlushCoordinator:
                     raise
 
             if isinstance(result, FlushRetryable):
-                await self._store_call(
-                    self._store.retry_unsubmitted_flush,
-                    lease,
-                    now=self._current_time(),
-                )
+                async with self._processing_fault_lock:
+                    settled_at = self._current_time()
+                    settled = await self._store_call(
+                        self._store.retry_unsubmitted_flush,
+                        lease,
+                        now=settled_at,
+                    )
+                    if settled.settled and settled.state == "manual_required":
+                        await self._classify_processing_fault_locked(
+                            _iso(settled_at)
+                        )
             else:
                 await self._finalize_flush_outcome(lease, result)
 
@@ -697,7 +703,10 @@ class SessionFlushCoordinator:
         lease_owner: str,
         outcome: AddRejected | AmbiguousAdd | SystemOutage | MessageFailure,
     ) -> None:
-        if isinstance(outcome, AmbiguousAdd):
+        opens_processing_fault = isinstance(outcome, AmbiguousAdd) or (
+            isinstance(outcome, AddRejected) and outcome.server_fault
+        )
+        if opens_processing_fault:
             async with self._processing_fault_lock:
                 settled_at = self._current_time()
                 settled = await self._store_call(
@@ -709,6 +718,8 @@ class SessionFlushCoordinator:
                 )
                 if settled.settled:
                     await self._classify_processing_fault_locked(_iso(settled_at))
+            if settled.attachment_release_id is not None:
+                await self._release_bundle(settled.attachment_release_id)
             return
 
         settled = await self._store_call(
@@ -726,8 +737,6 @@ class SessionFlushCoordinator:
             )
             if outcome.error == "memory_processing_failed":
                 await self._open_processing_fault()
-        elif settled.settled and isinstance(outcome, AddRejected) and outcome.server_fault:
-            await self._open_processing_fault()
 
     async def _open_processing_fault(self) -> None:
         async with self._processing_fault_lock:

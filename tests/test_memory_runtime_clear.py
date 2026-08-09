@@ -23,6 +23,60 @@ PRINCIPAL = "u-11111111111111111111111111111111"
 PROJECT = "p-22222222222222222222222222222222"
 
 
+@pytest.mark.parametrize(
+    "failed_dependency",
+    ("MemoryClearJournal", "MemoryBackupRestoreJournal"),
+)
+async def test_maintenance_refuses_clear_when_a_journal_cannot_initialize(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failed_dependency: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    def fail_initialization(*_args, **_kwargs):
+        raise OSError("injected journal initialization failure")
+
+    monkeypatch.setattr(
+        f"core.memory.runtime.{failed_dependency}",
+        fail_initialization,
+    )
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    assert runtime.available is True
+    assert (await runtime.maintenance_payload())["can_clear"] is False
+    await runtime.close()
+
+
+async def test_maintenance_advertises_clear_only_for_a_healthy_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    assert runtime.available is True
+    assert (await runtime.maintenance_payload())["can_clear"] is True
+    await runtime.close()
+
+
+async def test_maintenance_refuses_clear_when_the_store_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    def fail_initialization(*_args, **_kwargs):
+        raise OSError("injected store initialization failure")
+
+    monkeypatch.setattr("core.memory.runtime.MemoryStore", fail_initialization)
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    assert runtime.available is False
+    assert (await runtime.maintenance_payload())["can_clear"] is False
+    await runtime.close()
+
+
 def _enqueue(runtime: MemoryRuntime, source: str) -> None:
     result = runtime._store.enqueue_request(
         source_message_id=source,
@@ -1117,6 +1171,65 @@ async def test_runtime_backup_fences_capture_and_clear_for_the_full_copy(
     assert (tmp_path / "state" / "memory" / "backups" / "runtime-fence").is_dir()
     assert runtime._maintenance_open() is False
     await runtime.close()
+
+
+async def test_reconcile_schedules_auto_id_backup_stage_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    manager = runtime._backup_manager
+    assert manager is not None
+    stage = manager.snapshot_root / f".{('a' * 32)}.tmp"
+    stage.mkdir(parents=True, mode=0o700)
+    manager.snapshot_root.chmod(0o700)
+    stage.chmod(0o700)
+    (stage / "partial.bin").write_bytes(b"partial")
+    (stage / "partial.bin").chmod(0o600)
+
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    task = runtime._backup_stage_reconcile_task
+    if task is not None:
+        await task
+
+    assert not stage.exists()
+    await runtime.close()
+
+
+async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    manager = runtime._backup_manager
+    assert manager is not None
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_reconcile() -> tuple[str, ...]:
+        entered.set()
+        assert release.wait(2)
+        return ()
+
+    monkeypatch.setattr(manager, "reconcile_unpublished_backup_stages", blocking_reconcile)
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert await asyncio.to_thread(entered.wait, 1)
+    assert runtime._maintenance_open() is True
+
+    closing = asyncio.create_task(runtime.close())
+    await asyncio.sleep(0)
+    assert closing.done() is False
+    release.set()
+    await closing
+    assert runtime._backup_stage_reconcile_task is None
 
 
 async def test_runtime_backup_restore_round_trips_queue_state(

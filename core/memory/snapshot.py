@@ -29,14 +29,16 @@ _SCHEMA_VERSION = 2
 _MANIFEST_FILENAME = "manifest.jsonl"
 _PAYLOAD_DIRNAME = "payload"
 _MANIFEST_BATCH_SIZE = 1_000
-# Covers the worst-case JSON escaping of a Windows extended-length path. The
-# bound applies to one malformed record, never to total manifest bytes or rows.
-_MAX_MANIFEST_LINE_BYTES = 256 * 1024
+# Keep aggregate writer memory fixed while allowing one record to scale with the
+# current canonical path. Deep trees created through dir-fd operations can
+# legitimately exceed host whole-path limits.
+_MANIFEST_WRITE_BUFFER_BYTES = 256 * 1024
 _COPY_CHUNK_BYTES = 1024 * 1024
 # Eviction only causes a path segment to be reopened; it never limits accepted
 # tree depth. Two simultaneous caches therefore stay well below common fd limits.
 _DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
 _SNAPSHOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_AUTOMATIC_BACKUP_STAGE_RE = re.compile(r"\.([0-9a-f]{32})\.tmp\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TERMINAL_PERMIT_AUTHORITY = object()
 _PREPARING_DISCARD_PERMIT_AUTHORITY = object()
@@ -434,6 +436,7 @@ class _ManifestWriter:
         self._descriptor = os.open(path, flags, 0o600)
         self._path = path
         self._buffer: list[bytes] = []
+        self._buffer_bytes = 0
         self._entries_digest = hashlib.sha256()
         self._entry_count = 0
         self._finished = False
@@ -454,13 +457,18 @@ class _ManifestWriter:
         if self._finished:
             raise RuntimeError("Memory snapshot manifest is already finished")
         record = _json_line({"entry": entry.payload(), "record": "entry"})
-        if len(record) > _MAX_MANIFEST_LINE_BYTES:
-            raise MemorySnapshotError("Memory snapshot manifest entry is too large")
         self._entries_digest.update(record)
-        self._buffer.append(record)
         self._entry_count += 1
-        if len(self._buffer) >= _manifest_batch_size():
+        if self._buffer and (
+            self._buffer_bytes + len(record) > _MANIFEST_WRITE_BUFFER_BYTES
+            or len(self._buffer) >= _manifest_batch_size()
+        ):
             self._flush()
+        if len(record) > _MANIFEST_WRITE_BUFFER_BYTES:
+            _write_all(self._descriptor, record)
+            return
+        self._buffer.append(record)
+        self._buffer_bytes += len(record)
 
     def finish(self) -> None:
         if self._finished:
@@ -488,6 +496,7 @@ class _ManifestWriter:
             return
         _write_all(self._descriptor, b"".join(self._buffer))
         self._buffer.clear()
+        self._buffer_bytes = 0
 
 
 class _ManifestIndex:
@@ -755,6 +764,54 @@ class MemorySnapshotManager:
             except (FileNotFoundError, MemorySnapshotError, OSError):
                 pass
             raise
+
+    def reconcile_unpublished_backup_stages(self) -> tuple[str, ...]:
+        """Remove abandoned auto-ID backup stages through the managed root fd."""
+
+        if self._snapshot_root_relative != "state/memory/backups":
+            raise RuntimeError("backup stage reconciliation requires the backup manager")
+        self._assert_operation_allowed()
+        root_info = _managed_source_info(self._effective_home, self._snapshot_root)
+        if root_info is None:
+            return ()
+        _require_directory_private(root_info, "Memory backup root")
+        root_fd = _open_directory(self._snapshot_root, "Memory backup root")
+        removed: list[str] = []
+        try:
+            try:
+                with os.scandir(root_fd) as iterator:
+                    names = sorted(
+                        entry.name
+                        for entry in iterator
+                        if _AUTOMATIC_BACKUP_STAGE_RE.fullmatch(entry.name) is not None
+                    )
+            except OSError as error:
+                raise MemorySnapshotUnsafePathError(
+                    "Memory backup root cannot be scanned safely"
+                ) from error
+            for name in names:
+                try:
+                    info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                except OSError as error:
+                    raise MemorySnapshotUnsafePathError(
+                        "Memory backup stage cannot be inspected safely"
+                    ) from error
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise MemorySnapshotUnsafePathError(
+                        "Memory backup stage is not a safe directory"
+                    )
+                _require_directory_private(info, "Memory backup stage")
+                _remove_entry_at(
+                    root_fd,
+                    name,
+                    expected_identity=(info.st_dev, info.st_ino),
+                )
+                removed.append(name[1:-4])
+            if removed:
+                os.fsync(root_fd)
+            return tuple(removed)
+        finally:
+            os.close(root_fd)
 
     def verify(
         self,
@@ -1835,12 +1892,9 @@ def _read_manifest(path: Path, entries: _ManifestIndex) -> str:
         footer_seen = False
         line_number = 0
         with os.fdopen(os.dup(descriptor), "rb") as stream:
-            while True:
-                line = stream.readline(_MAX_MANIFEST_LINE_BYTES + 1)
-                if not line:
-                    break
+            for line in stream:
                 line_number += 1
-                if len(line) > _MAX_MANIFEST_LINE_BYTES or not line.endswith(b"\n"):
+                if not line.endswith(b"\n"):
                     raise MemorySnapshotVerificationError(
                         "Memory snapshot manifest record is invalid"
                     )
@@ -2232,7 +2286,12 @@ def _remove_safe_path(home: Path, path: Path) -> None:
             os.close(current)
 
 
-def _remove_entry_at(parent_fd: int, name: str) -> None:
+def _remove_entry_at(
+    parent_fd: int,
+    name: str,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
     root_node = _RelativeNode(None, name)
     stack: list[_RemovalFrame | _RelativeNode] = [root_node]
     with _DirectoryDescriptorCache(parent_fd, require_private=False) as cache:
@@ -2253,6 +2312,17 @@ def _remove_entry_at(parent_fd: int, name: str) -> None:
                         )
                     except FileNotFoundError:
                         continue
+                    if (
+                        item is root_node
+                        and expected_identity is not None
+                        and (
+                            not stat.S_ISDIR(before.st_mode)
+                            or (before.st_dev, before.st_ino) != expected_identity
+                        )
+                    ):
+                        raise MemorySnapshotUnsafePathError(
+                            "Memory snapshot entry changed during removal"
+                        )
                     if stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode):
                         os.unlink(item.name, dir_fd=node_parent_fd)
                         continue

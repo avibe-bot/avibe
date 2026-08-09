@@ -586,6 +586,99 @@ def test_server_rejected_add_is_terminal_but_opens_processing_fault(tmp_path: Pa
     asyncio.run(run())
 
 
+def test_cancelled_server_rejection_commit_is_completed_once_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=False)
+        provider.add_results.append(
+            AddRejected(
+                request_id="cancelled-server-rejection",
+                error_code="INTERNAL_ERROR",
+                server_fault=True,
+            )
+        )
+        events: list[tuple[str, str | None, str, int]] = []
+        settle_committed = threading.Event()
+        release_settle = threading.Event()
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        original_settle = store.settle
+
+        def blocking_settle(*args, **kwargs):
+            result = original_settle(*args, **kwargs)
+            settle_committed.set()
+            release_settle.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(store, "settle", blocking_settle)
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        _enqueue(store, "cancelled-server-rejection")
+
+        draining = asyncio.create_task(worker.drain_once())
+        assert await asyncio.to_thread(settle_committed.wait, 1)
+        draining.cancel()
+        await asyncio.sleep(0)
+        assert draining.done() is False
+        release_settle.set()
+        with pytest.raises(asyncio.CancelledError):
+            await draining
+
+        rejected = store.list_queue_rows()[0]
+        assert rejected.state == "dead"
+        pending_fault = store.ensure_meta()
+        assert pending_fault.processing_fault_since is not None
+        assert pending_fault.processing_fault_kind is None
+        assert pending_fault.processing_alert_active is False
+        assert events == []
+        assert len(provider.captures) == 1
+
+        reopened_store = MemoryStore(store.path)
+        restarted = SessionFlushCoordinator(
+            store=reopened_store,
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await restarted.recover(lease_owner="next-boot")
+        await restarted.recover(lease_owner="same-boot")
+        assert [event[:2] for event in events] == [("fault", "credential")]
+        assert len(provider.captures) == 1
+
+        provider.processing_healthy_flag = True
+        _enqueue(reopened_store, "server-rejection-recovery", session="recovery")
+        restarted_worker = MemoryWorker(
+            store=reopened_store,
+            provider=provider,
+            enabled=lambda: True,
+            coordinator=restarted,
+        )
+        assert await restarted_worker.drain_once() == 1
+        assert len(provider.captures) == 2
+        assert reopened_store.ensure_meta().processing_fault_since is None
+        assert [event[:2] for event in events] == [
+            ("fault", "credential"),
+            ("recovered", None),
+        ]
+
+    asyncio.run(run())
+
+
 def test_fence_routes_new_capture_to_next_generation(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -904,6 +997,113 @@ def test_proven_pre_submission_flush_failure_uses_bounded_retry(tmp_path: Path) 
         assert terminal.retry_count == 4
         assert terminal.next_attempt_at is None
         assert len(provider.flushes) == 4
+        fault = store.ensure_meta()
+        assert fault.processing_fault_kind == "engine"
+        assert fault.processing_alert_active is True
+
+    asyncio.run(run())
+
+
+def test_cancelled_exhausted_flush_retry_is_completed_once_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=True)
+        provider.flush_results.extend([FlushRetryable()] * 4)
+        current = [datetime(2026, 1, 1, tzinfo=UTC)]
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            processing_event=record_event,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            coordinator=coordinator,
+        )
+        row = _enqueue(store, "cancelled-exhausted-flush")
+        assert await worker.drain_once() == 1
+        current[0] += timedelta(minutes=5)
+        for delay in (1, 2, 4):
+            assert await coordinator.run_due() == 1
+            await _wait_for_scheduled_flush(coordinator, row.provider_session_ref)
+            current[0] += timedelta(seconds=delay)
+
+        retry_committed = threading.Event()
+        release_retry = threading.Event()
+        original_retry = store.retry_unsubmitted_flush
+
+        def blocking_retry(*args, **kwargs):
+            result = original_retry(*args, **kwargs)
+            retry_committed.set()
+            release_retry.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(store, "retry_unsubmitted_flush", blocking_retry)
+        assert await coordinator.run_due() == 1
+        flush_task = coordinator._flush_tasks[row.provider_session_ref.serialize()]
+        assert await asyncio.to_thread(retry_committed.wait, 1)
+        flush_task.cancel()
+        await asyncio.sleep(0)
+        assert flush_task.done() is False
+        release_retry.set()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        terminal = store.get_session_flush_state(row.provider_session_ref)
+        assert terminal is not None
+        assert (terminal.state, terminal.retry_count) == ("manual_required", 4)
+        pending_fault = store.ensure_meta()
+        assert pending_fault.processing_fault_since is not None
+        assert pending_fault.processing_fault_kind is None
+        assert pending_fault.processing_alert_active is False
+        assert events == []
+        assert len(provider.flushes) == 4
+
+        reopened_store = MemoryStore(store.path)
+        restarted = SessionFlushCoordinator(
+            store=reopened_store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            processing_event=record_event,
+        )
+        await restarted.recover(lease_owner="next-boot")
+        await restarted.recover(lease_owner="same-boot")
+        assert [event[:2] for event in events] == [("fault", "engine")]
+        assert len(provider.flushes) == 4
+
+        _enqueue(reopened_store, "flush-retry-recovery", session="recovery")
+        restarted_worker = MemoryWorker(
+            store=reopened_store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            coordinator=restarted,
+        )
+        assert await restarted_worker.drain_once() == 1
+        assert reopened_store.ensure_meta().processing_fault_since is None
+        assert [event[:2] for event in events] == [
+            ("fault", "engine"),
+            ("recovered", None),
+        ]
 
     asyncio.run(run())
 

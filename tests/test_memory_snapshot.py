@@ -42,6 +42,60 @@ def _private_file(path: Path, payload: bytes, home: Path) -> Path:
     return path
 
 
+def _create_deep_file_at(root: Path, components: list[str], name: str, payload: bytes) -> None:
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in components:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        file_descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=descriptor,
+        )
+        try:
+            os.write(file_descriptor, payload)
+            os.fchmod(file_descriptor, 0o600)
+        finally:
+            os.close(file_descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_deep_file_at(root: Path, components: list[str], name: str) -> bytes:
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in components:
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        file_descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=descriptor,
+        )
+        try:
+            return os.read(file_descriptor, 1024)
+        finally:
+            os.close(file_descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _sqlite_surface(path: Path, value: str, home: Path, *, keep_wal: bool = False):
     _private_directory(path.parent, home)
     connection = sqlite3.connect(path)
@@ -582,9 +636,88 @@ def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path)
 
     lines = manifest_path.read_bytes().splitlines(keepends=True)
     assert len(lines[1]) > 64 * 1024
-    assert len(lines[1]) <= snapshot_module._MAX_MANIFEST_LINE_BYTES
     with snapshot_module._indexed_manifest(manifest_path) as (entries, _digest):
         assert entries.entry(relative_path) is not None
+
+
+def test_snapshot_accepts_path_record_beyond_256k_and_clear_gc(
+    tmp_path: Path,
+) -> None:
+    home = _private_directory(tmp_path / "home", tmp_path)
+    source_root = _private_directory(home / "memory/everos-root", home)
+    component_length = min(os.pathconf(source_root, "PC_NAME_MAX") - 1, 250)
+    component_count = (256 * 1024 // (component_length + 1)) + 2
+    components = [
+        f"d{index:04d}-" + "x" * (component_length - 6)
+        for index in range(component_count)
+    ]
+    relative_leaf = "memory/everos-root/" + "/".join(components) + "/leaf.bin"
+    assert len(relative_leaf.encode()) > 256 * 1024
+    _create_deep_file_at(source_root, components, "leaf.bin", b"deep payload")
+
+    manager = MemorySnapshotManager(home)
+    journal = MemoryClearJournal(home)
+    operation = journal.start(
+        operation_id="beyond-line-limit",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    snapshot = manager.create(operation.operation_id)
+    assert manager.verify(
+        snapshot.snapshot_id,
+        expected_manifest_sha256=snapshot.manifest_sha256,
+        expected_surface_digests=snapshot.surface_digests(),
+    ) == snapshot
+    with snapshot_module._indexed_manifest(
+        manager.snapshot_path(snapshot.snapshot_id) / "manifest.jsonl"
+    ) as (entries, _digest):
+        assert entries.entry(relative_leaf) is not None
+
+    _create_deep_file_at(source_root, components, "leaf.bin", b"changed")
+    manager.restore(
+        snapshot.snapshot_id,
+        expected_manifest_sha256=snapshot.manifest_sha256,
+        expected_surface_digests=snapshot.surface_digests(),
+    )
+    assert _read_deep_file_at(source_root, components, "leaf.bin") == b"deep payload"
+
+    assert operation.execution_token is not None
+    operation = journal.record_snapshot(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+        snapshot=snapshot,
+    )
+    assert operation.execution_token is not None
+    operation = journal.mark_prepared(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    assert operation.execution_token is not None
+    operation = journal.begin_deleting(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    for surface in journal.surfaces:
+        assert operation.execution_token is not None
+        operation = journal.record_surface_deleted(
+            operation.operation_id,
+            surface.name,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+        )
+    assert operation.execution_token is not None
+    operation = journal.mark_completed(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    manager.remove(journal.terminal_snapshot_permit(operation.operation_id))
+    snapshot_module._remove_safe_path(home, source_root)
+    assert not manager.snapshot_path(snapshot.snapshot_id).exists()
 
 
 def test_manifest_index_temp_database_closes_on_success_and_failure(
@@ -946,6 +1079,149 @@ def test_create_retry_reclaims_stage_left_by_process_death(
     ) as (entries, _digest):
         assert entries.count() > snapshot_module._MANIFEST_BATCH_SIZE
     assert not list(manager.snapshot_root.glob(".stage-crash*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "crash_boundary",
+    (
+        "queue-copy",
+        "provider-copy",
+        "call-log-copy",
+        "attachments-copy",
+        "before-publish",
+        "after-publish",
+    ),
+)
+def test_auto_id_backup_stage_reconcile_covers_copy_and_publish_crashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_boundary: str,
+) -> None:
+    home = tmp_path / "home"
+    queue_connection = _build_all_surfaces(home)
+    queue_connection.close()
+    manager = MemorySnapshotManager._for_backup(home, operation_guard=lambda: None)
+    real_snapshot_sqlite = MemorySnapshotManager._snapshot_sqlite
+    real_snapshot_tree = MemorySnapshotManager._snapshot_tree
+    real_replace = snapshot_module.os.replace
+
+    sqlite_boundaries = {
+        "state/memory/memory.sqlite": "queue-copy",
+        "memory/call-log/call-log.db": "call-log-copy",
+    }
+    tree_boundaries = {
+        "memory/everos-root": "provider-copy",
+        "memory/attachments": "attachments-copy",
+    }
+
+    def crash_after_sqlite_copy(self, surface, source, destination):
+        result = real_snapshot_sqlite(self, surface, source, destination)
+        if sqlite_boundaries.get(surface.path) == crash_boundary:
+            raise SystemExit(crash_boundary)
+        return result
+
+    def crash_after_tree_copy(self, surface, source, destination, manifest):
+        result = real_snapshot_tree(self, surface, source, destination, manifest)
+        if tree_boundaries.get(surface.path) == crash_boundary:
+            raise SystemExit(crash_boundary)
+        return result
+
+    def crash_at_publish(source, destination, *args, **kwargs):
+        is_publish = (
+            Path(source).parent == manager.snapshot_root
+            and Path(source).name.endswith(".tmp")
+            and Path(destination).parent == manager.snapshot_root
+        )
+        if is_publish and crash_boundary == "before-publish":
+            raise SystemExit(crash_boundary)
+        result = real_replace(source, destination, *args, **kwargs)
+        if is_publish and crash_boundary == "after-publish":
+            raise SystemExit(crash_boundary)
+        return result
+
+    monkeypatch.setattr(MemorySnapshotManager, "_snapshot_sqlite", crash_after_sqlite_copy)
+    monkeypatch.setattr(MemorySnapshotManager, "_snapshot_tree", crash_after_tree_copy)
+    monkeypatch.setattr(snapshot_module.os, "replace", crash_at_publish)
+    with pytest.raises(SystemExit, match=crash_boundary):
+        manager.create()
+    monkeypatch.setattr(snapshot_module.os, "replace", real_replace)
+
+    stages = list(manager.snapshot_root.glob(".*.tmp"))
+    published = [path for path in manager.snapshot_root.iterdir() if not path.name.startswith(".")]
+    restarted = MemorySnapshotManager._for_backup(home, operation_guard=lambda: None)
+    if crash_boundary == "after-publish":
+        assert stages == []
+        assert len(published) == 1
+        assert restarted.reconcile_unpublished_backup_stages() == ()
+        assert published[0].is_dir()
+    else:
+        assert len(stages) == 1
+        stage_id = stages[0].name[1:-4]
+        assert restarted.reconcile_unpublished_backup_stages() == (stage_id,)
+        assert not stages[0].exists()
+        assert published == []
+
+
+@pytest.mark.parametrize("unsafe_kind", ("symlink", "fifo"))
+def test_backup_stage_reconcile_refuses_unsafe_managed_candidates(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    home = _private_directory(tmp_path / "home", tmp_path)
+    manager = MemorySnapshotManager._for_backup(home, operation_guard=lambda: None)
+    backup_root = _private_directory(manager.snapshot_root, home)
+    outside = _private_file(tmp_path / "outside.txt", b"outside", tmp_path)
+    candidate = backup_root / f".{('a' * 32)}.tmp"
+    if unsafe_kind == "symlink":
+        candidate.symlink_to(outside)
+    else:
+        os.mkfifo(candidate, mode=0o600)
+
+    with pytest.raises(MemorySnapshotUnsafePathError):
+        manager.reconcile_unpublished_backup_stages()
+
+    assert candidate.exists() or candidate.is_symlink()
+    assert outside.read_bytes() == b"outside"
+
+
+def test_backup_stage_reconcile_preserves_published_and_unmanaged_entries(
+    tmp_path: Path,
+) -> None:
+    home = _private_directory(tmp_path / "home", tmp_path)
+    manager = MemorySnapshotManager._for_backup(home, operation_guard=lambda: None)
+    published = manager.create("published-backup")
+    unmanaged = _private_directory(manager.snapshot_root / ".manual.tmp", home)
+    stage_id = "b" * 32
+    stage = _private_directory(manager.snapshot_root / f".{stage_id}.tmp", home)
+    _private_file(stage / "partial.bin", b"partial", home)
+
+    assert manager.reconcile_unpublished_backup_stages() == (stage_id,)
+    assert manager.snapshot_path(published.snapshot_id).is_dir()
+    assert unmanaged.is_dir()
+    assert not stage.exists()
+
+
+def test_explicit_id_backup_retry_still_reclaims_its_deterministic_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _private_directory(tmp_path / "home", tmp_path)
+    manager = MemorySnapshotManager._for_backup(home, operation_guard=lambda: None)
+    real_replace = snapshot_module.os.replace
+
+    def crash_before_publish(source, destination, *args, **kwargs):
+        if Path(destination) == manager.snapshot_path("explicit-retry"):
+            raise SystemExit("injected backup process death")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module.os, "replace", crash_before_publish)
+    with pytest.raises(SystemExit):
+        manager.create("explicit-retry")
+    monkeypatch.setattr(snapshot_module.os, "replace", real_replace)
+
+    backup = manager.create("explicit-retry")
+    assert backup.snapshot_id == "explicit-retry"
+    assert not (manager.snapshot_root / ".explicit-retry.tmp").exists()
 
 
 def test_remove_uses_anchored_no_follow_walk_during_directory_swap(

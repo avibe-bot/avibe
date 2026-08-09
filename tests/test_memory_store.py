@@ -438,6 +438,87 @@ def test_ambiguous_add_and_processing_fault_are_one_transaction(
     assert store.failure_log() == ()
 
 
+def test_server_rejected_add_and_processing_fault_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "atomic-server-rejection")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    def fail_fault_open(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault write failure")
+
+    monkeypatch.setattr(
+        store,
+        "_open_processing_fault_in_connection",
+        fail_fault_open,
+    )
+    with pytest.raises(OSError, match="injected processing fault write failure"):
+        store.settle(
+            claimed,
+            AddRejected(
+                request_id="server-rejection",
+                error_code="INTERNAL_ERROR",
+                server_fault=True,
+            ),
+            lease_owner="worker",
+            now=_dt("2026-01-01T00:00:01.000Z"),
+        )
+
+    row = _row_for_source(store, "atomic-server-rejection")
+    assert row is not None and row.state == "processing"
+    assert row.attempts == 0
+    assert store.ensure_meta().processing_fault_since is None
+    assert store.failure_log() == ()
+
+
+def test_exhausted_flush_retry_and_processing_fault_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_ref = _deliver(store, "atomic-flush-retry")
+    lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=session_ref,
+        force=True,
+    )
+    assert lease is not None
+    for second in range(3, 6):
+        settled = store.retry_unsubmitted_flush(
+            lease,
+            now=_dt(f"2026-01-01T00:00:0{second}.000Z"),
+        )
+        assert (settled.settled, settled.state) == (True, "due")
+
+    def fail_fault_open(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault write failure")
+
+    monkeypatch.setattr(
+        store,
+        "_open_processing_fault_in_connection",
+        fail_fault_open,
+    )
+    with pytest.raises(OSError, match="injected processing fault write failure"):
+        store.retry_unsubmitted_flush(
+            lease,
+            now=_dt("2026-01-01T00:00:06.000Z"),
+        )
+
+    state = store.get_session_flush_state(session_ref)
+    assert state is not None
+    assert (state.state, state.retry_count) == ("due", 3)
+    assert store.ensure_meta().processing_fault_since is None
+    assert store.failure_log() == ()
+
+
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     scope_key = bytes.fromhex("11" * 32)
 

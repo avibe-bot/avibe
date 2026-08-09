@@ -373,6 +373,39 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
     assert user_keys == ["avibe:local"]
 
 
+@pytest.mark.parametrize("can_clear", (False, True))
+def test_memory_maintenance_preserves_the_runtime_clear_capability(
+    monkeypatch,
+    tmp_path,
+    can_clear: bool,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def maintenance(*, user_key: str):
+        assert user_key == "avibe:local"
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "data_exists": False,
+                "can_clear": can_clear,
+                "clear_recovery": None,
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_maintenance", maintenance)
+    response = app.test_client().get(
+        "/api/memory/maintenance",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["can_clear"] is can_clear
+
+
 def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

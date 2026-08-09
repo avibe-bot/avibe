@@ -160,13 +160,13 @@ describe('MemorySettingsPanel', () => {
     }));
   });
 
-  it('disables Clear when authoritative maintenance state refuses it', async () => {
+  it.each([false, true])('disables Clear when authoritative maintenance refuses it with data_exists=%s', async (dataExists) => {
     const onClearAll = vi.fn();
     const user = userEvent.setup();
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: true, can_clear: false, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: dataExists, can_clear: false, clear_recovery: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
