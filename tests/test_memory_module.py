@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sqlite3
 import threading
@@ -22,6 +21,7 @@ from core.memory.module import (
     MIN_FREE_DISK_BYTES,
     MemoryModule,
 )
+from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
 from core.memory.store import MemoryStore
 from core.memory.types import (
     CLOSED_MEMORY_ERROR_CODES,
@@ -42,7 +42,6 @@ from core.memory.types import (
 
 PROJECT = "p-22222222222222222222222222222222"
 PRINCIPAL = "u-11111111111111111111111111111111"
-ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
 
 
 @pytest.fixture(autouse=True)
@@ -87,23 +86,17 @@ def _source_attachment(name: str, payload: bytes = b"attachment payload") -> Cap
 
 def _write_owned_provider_root(root: Path, store: MemoryStore) -> None:
     meta = store.ensure_meta()
-    root.mkdir(parents=True, exist_ok=True)
-    root.chmod(0o700)
-    sentinel = root / ROOT_SENTINEL_FILENAME
-    sentinel.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "provider_root_id": meta.provider_root_id,
-                "provider_id": "everos",
-                "provider_root_format": "slice1",
-                "created_by_artifact_fingerprint": "slice1-core",
-            },
-            sort_keys=True,
+    ProviderRoot(
+        root,
+        effective_home=paths.get_vibe_remote_dir(),
+    ).ensure(
+        meta,
+        ProviderRootMetadata(
+            provider_root_format="slice1",
+            compatible_provider_root_formats=frozenset({"slice1"}),
+            artifact_fingerprint="slice1-core",
         ),
-        encoding="utf-8",
     )
-    sentinel.chmod(0o600)
 
 
 def _request(
@@ -590,27 +583,6 @@ async def test_failure_log_is_a_bounded_read_without_creating_state(tmp_path: Pa
 
     assert await module.failure_log(limit=1) == ()
     assert store.get_meta() is None
-
-
-def test_empty_provider_root_format_activation_allows_generated_control_files(tmp_path: Path) -> None:
-    provider_root = paths.get_vibe_remote_dir() / "memory" / "provider-root"
-    module, store, _provider = _module(
-        tmp_path,
-        owned_provider_root=True,
-        provider_root=provider_root,
-    )
-    (provider_root / "everos.toml").write_text("[memory]\n", encoding="utf-8")
-    (provider_root / "ome.toml").write_text("[strategies]\n", encoding="utf-8")
-    module._set_runtime_artifact_metadata(
-        provider_root_format="everos-2.0",
-        artifact_fingerprint="artifact-2.0",
-        compatible_provider_root_formats=(),
-    )
-
-    assert module._activate_empty_provider_root_format(store.ensure_meta()) is True
-    sentinel = json.loads((provider_root / ROOT_SENTINEL_FILENAME).read_text(encoding="utf-8"))
-    assert sentinel["provider_root_format"] == "everos-2.0"
-    assert sentinel["created_by_artifact_fingerprint"] == "artifact-2.0"
 
 
 async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(

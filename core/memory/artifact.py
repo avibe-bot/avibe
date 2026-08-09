@@ -30,6 +30,14 @@ from core.managed_runtime import (
     write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
+from core.memory.provider_root import (
+    PROVIDER_ROOT_CONTROL_FILES,
+    ROOT_SENTINEL_FILENAME,
+    ProviderRoot,
+    ProviderRootError,
+    ProviderRootMetadata,
+    ProviderRootState,
+)
 
 
 EVEROS_VERSION = "1.2.3"
@@ -42,15 +50,6 @@ _DEV_PROVIDER_ROOT_FORMAT = f"everos-{EVEROS_VERSION}"
 _DEV_ARTIFACT_FINGERPRINT = f"dev-everos-{EVEROS_VERSION}"
 _MANIFEST_RESOURCE = "memory_runtime_manifest.json"
 _MAX_CURRENT_POINTER_BYTES = 16 * 1024
-ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
-#: Files Avibe itself generates inside the provider root, so none of them proves
-#: that the root holds provider data. The sentinel is written when the root is
-#: created, and ``everos.toml`` / ``ome.toml`` are regenerated on every sidecar
-#: start because EverOS discovers those fixed names under ``EVEROS_ROOT``.
-#: Counting them as data made an owned-but-empty root look occupied once Memory
-#: had started once, which then rejected an incompatible-format runtime before
-#: activation could rewrite the verified-empty sentinel.
-PROVIDER_ROOT_CONTROL_FILES = frozenset({ROOT_SENTINEL_FILENAME, "everos.toml", "ome.toml"})
 _SPEC = ManagedRuntimeSpec(
     runtime_id="memory-runtime",
     manifest_resource=_MANIFEST_RESOURCE,
@@ -75,22 +74,8 @@ _SMOKE_SCRIPT = (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class MemoryArtifactCandidate:
-    """Verified metadata needed to atomically activate one runtime artifact."""
-
-    provider_root_format: str
-    compatible_provider_root_formats: frozenset[str]
-    artifact_fingerprint: str
-
-
-@dataclass(frozen=True)
-class MemoryProviderRootState:
-    """A bounded, non-secret snapshot used before an active-pointer cutover."""
-
-    exists: bool
-    provider_root_format: str | None = None
-    empty: bool = False
+MemoryArtifactCandidate = ProviderRootMetadata
+MemoryProviderRootState = ProviderRootState
 
 
 class MemoryRuntimeActivationError(RuntimeError):
@@ -123,7 +108,15 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             manifest_url=manifest_url if manifest_url is not None else os.environ.get("VIBE_MEMORY_MANIFEST_URL"),
             offline=env_flag_enabled("VIBE_MEMORY_OFFLINE") if offline is None else offline,
         )
-        self._provider_root = Path(provider_root) if provider_root is not None else paths.get_vibe_remote_dir() / "memory" / "everos-root"
+        provider_root_path = (
+            Path(provider_root)
+            if provider_root is not None
+            else paths.get_vibe_remote_dir() / "memory" / "everos-root"
+        )
+        self._provider_root = ProviderRoot(
+            provider_root_path,
+            effective_home=provider_root_path.parent.parent,
+        )
         self._activation_coordinator: MemoryArtifactActivationCoordinator | None = None
         self._dev_runtime_checked = False
         self._dev_runtime_checked_value: str | None = None
@@ -139,7 +132,11 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def set_provider_root(self, provider_root: Path | str) -> None:
         """Bind activation compatibility checks to the controller's effective home."""
 
-        self._provider_root = Path(provider_root)
+        provider_root_path = Path(provider_root)
+        self._provider_root = ProviderRoot(
+            provider_root_path,
+            effective_home=provider_root_path.parent.parent,
+        )
 
     def resolve_python(self) -> Path | None:
         """Return a verified embedded Python without starting or downloading it."""
@@ -355,7 +352,10 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         """Activate a verified artifact only through the Memory lifecycle bridge."""
 
         candidate = self._candidate_from_manifest(manifest)
-        root_state = self._inspect_provider_root(candidate)
+        try:
+            root_state = self._provider_root.inspect(candidate)
+        except ProviderRootError as error:
+            raise MemoryRuntimeActivationError(str(error)) from error
         previous_pointer = self._active_pointer()
 
         def commit() -> None:
@@ -386,48 +386,6 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             provider_root_format=provider_root_format,
             compatible_provider_root_formats=frozenset(compatible),
             artifact_fingerprint=manifest.digest[:16],
-        )
-
-    def _inspect_provider_root(self, candidate: MemoryArtifactCandidate) -> MemoryProviderRootState:
-        """Allow only compatible data or an owned empty root to reach activation."""
-
-        try:
-            root_info = self._provider_root.lstat()
-        except FileNotFoundError:
-            return MemoryProviderRootState(exists=False)
-        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-            raise MemoryRuntimeActivationError("memory provider root is unsafe")
-        if hasattr(os, "getuid") and root_info.st_uid != os.getuid():
-            raise MemoryRuntimeActivationError("memory provider root owner mismatch")
-        if stat.S_IMODE(root_info.st_mode) != 0o700:
-            raise MemoryRuntimeActivationError("memory provider root mode mismatch")
-
-        sentinel_path = self._provider_root / ROOT_SENTINEL_FILENAME
-        try:
-            sentinel_info = sentinel_path.lstat()
-        except FileNotFoundError as exc:
-            raise MemoryRuntimeActivationError("memory provider root sentinel missing") from exc
-        if stat.S_ISLNK(sentinel_info.st_mode) or not stat.S_ISREG(sentinel_info.st_mode):
-            raise MemoryRuntimeActivationError("memory provider root sentinel is unsafe")
-        if hasattr(os, "getuid") and sentinel_info.st_uid != os.getuid():
-            raise MemoryRuntimeActivationError("memory provider root sentinel owner mismatch")
-        if stat.S_IMODE(sentinel_info.st_mode) != 0o600 or sentinel_info.st_size > 4096:
-            raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
-        sentinel = _read_owned_root_sentinel(sentinel_path, sentinel_info)
-        provider_root_format = sentinel["provider_root_format"]
-        if not _safe_metadata_value(provider_root_format):
-            raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
-        try:
-            with os.scandir(self._provider_root) as entries:
-                empty = all(entry.name in PROVIDER_ROOT_CONTROL_FILES for entry in entries)
-        except OSError as exc:
-            raise MemoryRuntimeActivationError("memory provider root cannot be inspected") from exc
-        if not empty and provider_root_format not in candidate.compatible_provider_root_formats:
-            raise MemoryRuntimeActivationError("memory provider root format is incompatible")
-        return MemoryProviderRootState(
-            exists=True,
-            provider_root_format=provider_root_format,
-            empty=empty,
         )
 
     def _active_pointer(self) -> dict[str, Any] | None:
@@ -714,54 +672,3 @@ def _safe_metadata_value(value: object) -> bool:
 
 def _valid_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
-
-
-def _read_owned_root_sentinel(path: Path, expected: os.stat_result) -> dict[str, Any]:
-    """Read a bounded sentinel without following a replacement symlink."""
-
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise MemoryRuntimeActivationError("memory provider root sentinel is invalid") from exc
-    try:
-        info = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_dev != expected.st_dev
-            or info.st_ino != expected.st_ino
-            or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_size > 4096
-        ):
-            raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
-        contents = os.read(descriptor, 4097)
-    except OSError as exc:
-        raise MemoryRuntimeActivationError("memory provider root sentinel is invalid") from exc
-    finally:
-        os.close(descriptor)
-    if len(contents) > 4096:
-        raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
-    try:
-        sentinel = json.loads(contents.decode("utf-8"))
-    except (UnicodeError, ValueError) as exc:
-        raise MemoryRuntimeActivationError("memory provider root sentinel is invalid") from exc
-    expected_keys = {
-        "schema_version",
-        "provider_root_id",
-        "provider_id",
-        "provider_root_format",
-        "created_by_artifact_fingerprint",
-    }
-    if (
-        not isinstance(sentinel, dict)
-        or set(sentinel) != expected_keys
-        or type(sentinel.get("schema_version")) is not int
-        or sentinel.get("schema_version") != 1
-        or sentinel.get("provider_id") != "everos"
-        or not _safe_metadata_value(sentinel.get("provider_root_id"))
-        or not _safe_metadata_value(sentinel.get("provider_root_format"))
-        or not _safe_metadata_value(sentinel.get("created_by_artifact_fingerprint"))
-    ):
-        raise MemoryRuntimeActivationError("memory provider root sentinel is invalid")
-    return sentinel
