@@ -6,10 +6,10 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Input } from '../../ui/input';
 import { useApi } from '../../../context/ApiContext';
-import type { MemoryItemsResult } from '../../../context/ApiContext';
+import type { MemoryRecallResult } from '../../../context/ApiContext';
 import { useMemoryResource } from './useMemoryResource';
 
-type MemoryItemsOk = Extract<MemoryItemsResult, { status: 'ok' }>;
+type MemoryItemsOk = Extract<MemoryRecallResult, { status: 'ok' }>;
 
 export const MemorySearchPanel: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   const { t } = useTranslation();

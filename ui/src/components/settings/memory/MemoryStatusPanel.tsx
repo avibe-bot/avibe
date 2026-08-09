@@ -1,301 +1,550 @@
-import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Clock, Copy, Database, Loader2, RefreshCw, X } from 'lucide-react';
+import type { TFunction } from 'i18next';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock3,
+  Database,
+  Loader2,
+  RefreshCw,
+  RotateCcw,
+  ShieldAlert,
+  XCircle,
+} from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Card, CardContent } from '../../ui/card';
-import type { MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import type {
+  MemoryClearRecovery,
+  MemoryFailureLogEntry,
+  MemoryLogSections,
+  MemoryLogSourceStatus,
+  MemoryStatus,
+} from '../../../context/ApiContext';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
+import { memoryLogEnumLabel } from './memoryLog';
 
-// Status precedence mirrors the backend contract exactly; this map
-// is display-only; the actual precedence is computed server-side.
-const STATE_BADGE_VARIANT: Record<MemoryStatus['state'], 'success' | 'warning' | 'destructive' | 'info' | 'secondary'> = {
-  disabled: 'secondary',
-  starting: 'info',
-  ready: 'success',
-  syncing: 'info',
-  degraded: 'warning',
-  down: 'destructive',
-  clearing: 'warning',
-  error: 'destructive',
+type SourceState = MemoryStatus['source']['status'] | MemoryLogSourceStatus['status'];
+type BadgeVariant = 'success' | 'warning' | 'destructive' | 'info' | 'secondary';
+
+const SOURCE_BADGE_VARIANT: Record<SourceState, BadgeVariant> = {
+  available: 'success',
+  partial: 'warning',
+  stale: 'warning',
+  unknown: 'secondary',
+  unavailable: 'destructive',
 };
 
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KiB', 'MiB', 'GiB'];
-  let value = bytes / 1024;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
-}
+const ANOMALY_LABEL_KEYS = {
+  kind: {
+    boot_recovery: 'memory.status.failureLog.kind.boot_recovery',
+    delivery_abandoned: 'memory.status.failureLog.kind.delivery_abandoned',
+    distillation_rejected: 'memory.status.failureLog.kind.distillation_rejected',
+    recorder_degraded: 'memory.status.failureLog.kind.recorder_degraded',
+    result_unknown: 'memory.status.failureLog.kind.result_unknown',
+  },
+  state: {
+    dead: 'memory.processingRecord.anomalyState.dead',
+    degraded: 'memory.processingRecord.anomalyState.degraded',
+    manual_required: 'memory.processingRecord.anomalyState.manualRequired',
+    rejected: 'memory.processingRecord.anomalyState.rejected',
+  },
+  operation: {
+    add: 'memory.processingRecord.anomalyOperation.add',
+    flush: 'memory.processingRecord.anomalyOperation.flush',
+    record: 'memory.processingRecord.anomalyOperation.record',
+  },
+} as const;
 
-const ObservationValue: React.FC<{ label: string; value: string | null }> = ({ label, value }) => (
-  <div className="flex min-w-0 items-center justify-between gap-3">
-    <span className="text-muted">{label}</span>
-    <span className="truncate font-mono text-foreground">{value ?? '—'}</span>
+const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
+  preparing: 'memory.processingRecord.clearRecovery.state.preparing',
+  prepared: 'memory.processingRecord.clearRecovery.state.prepared',
+  deleting: 'memory.processingRecord.clearRecovery.state.deleting',
+  recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
+} as const;
+
+const HEALTH_STATUS_LABEL_KEYS = {
+  ok: 'memory.processingRecord.runtime.healthStatus.ok',
+} as const;
+
+const MEMORY_SOURCE_ERROR_REASONS = new Set([
+  'memory_disabled',
+  'memory_runtime_missing',
+  'memory_runtime_unsupported',
+  'memory_runtime_install_failed',
+  'memory_sidecar_unavailable',
+  'memory_provider_timeout',
+  'memory_provider_response_invalid',
+  'memory_processing_failed',
+  'memory_clear_failed',
+  'memory_restart_failed',
+]);
+
+const RUNTIME_FACT_LABEL_KEYS = {
+  capability: {
+    llm: 'memory.processingRecord.runtime.fact.capability.llm',
+    embed: 'memory.processingRecord.runtime.fact.capability.embed',
+    rerank: 'memory.processingRecord.runtime.fact.capability.rerank',
+    multimodal_llm: 'memory.processingRecord.runtime.fact.capability.multimodalLlm',
+    parser: 'memory.processingRecord.runtime.fact.capability.parser',
+  },
+  cascade: {
+    healthy: 'memory.processingRecord.runtime.fact.cascade.healthy',
+    reasons: 'memory.processingRecord.runtime.fact.cascade.reasons',
+    pending: 'memory.processingRecord.runtime.fact.cascade.pending',
+    failed_permanent: 'memory.processingRecord.runtime.fact.cascade.failedPermanent',
+    failed_retryable: 'memory.processingRecord.runtime.fact.cascade.failedRetryable',
+    drain_consecutive_failures: 'memory.processingRecord.runtime.fact.cascade.drainConsecutiveFailures',
+    unrecoverable_total: 'memory.processingRecord.runtime.fact.cascade.unrecoverableTotal',
+    optimize_failure_streak: 'memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak',
+    prune_stale_seconds: 'memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds',
+  },
+  recorder: {
+    state: 'memory.processingRecord.runtime.fact.recorder.state',
+    reason: 'memory.processingRecord.runtime.fact.recorder.reason',
+  },
+} as const;
+
+const CASCADE_REASON_LABEL_KEYS = {
+  drain_failures: 'memory.processingRecord.runtime.fact.cascadeReason.drainFailures',
+  optimize_stuck: 'memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck',
+  prune_stale: 'memory.processingRecord.runtime.fact.cascadeReason.pruneStale',
+  health_probe_failed: 'memory.processingRecord.runtime.fact.cascadeReason.healthProbeFailed',
+  unknown: 'memory.processingRecord.runtime.fact.cascadeReason.unknown',
+} as const;
+
+const RECORDER_STATE_LABEL_KEYS = {
+  active: 'memory.processingRecord.runtime.fact.recorderState.active',
+  degraded: 'memory.processingRecord.runtime.fact.recorderState.degraded',
+  disabled: 'memory.processingRecord.runtime.fact.recorderState.disabled',
+} as const;
+
+const RECORDER_REASON_LABEL_KEYS = {
+  writer_failures: 'memory.processingRecord.runtime.fact.recorderReason.writerFailures',
+  serialization_failed: 'memory.processingRecord.runtime.fact.recorderReason.serializationFailed',
+  call_log_corrupt: 'memory.processingRecord.runtime.fact.recorderReason.callLogCorrupt',
+} as const;
+
+type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
+type RuntimeFactGroup = keyof typeof RUNTIME_FACT_LABEL_KEYS;
+
+const anomalyLabel = (t: TFunction, group: AnomalyLabelGroup, value: string): string => {
+  const keys = ANOMALY_LABEL_KEYS[group] as Record<string, string>;
+  return keys[value] ? t(keys[value]) : value;
+};
+
+const clearRecoveryStateLabel = (t: TFunction, value: string): string => {
+  const keys = CLEAR_RECOVERY_STATE_LABEL_KEYS as Record<string, string>;
+  return keys[value] ? t(keys[value]) : value;
+};
+
+const sourceReasonLabel = (t: TFunction, value: string): string => (
+  MEMORY_SOURCE_ERROR_REASONS.has(value)
+    ? memoryErrorMessage(t, value)
+    : memoryLogEnumLabel(t, 'reason', value)
+);
+
+const formatTimestamp = (value: string | null | undefined): string => {
+  if (!value) return '-';
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
+};
+
+const formatFact = (value: unknown): string => {
+  if (value === null || value === undefined) return '-';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '-';
+  }
+};
+
+const knownLabel = (t: TFunction, keys: Record<string, string>, value: string): string => {
+  const key = Object.prototype.hasOwnProperty.call(keys, value) ? keys[value] : undefined;
+  return key ? t(key) : value;
+};
+
+const runtimeFactLabel = (t: TFunction, group: RuntimeFactGroup, value: string): string => (
+  knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group] as Record<string, string>, value)
+);
+
+const formatRuntimeFact = (t: TFunction, group: RuntimeFactGroup, name: string, value: unknown): string => {
+  const knownField = Object.prototype.hasOwnProperty.call(RUNTIME_FACT_LABEL_KEYS[group], name);
+  if (!knownField) return formatFact(value);
+  if (typeof value === 'boolean') {
+    return t(`memory.processingRecord.runtime.fact.boolean.${value ? 'true' : 'false'}`);
+  }
+  if (group === 'cascade' && name === 'reasons' && Array.isArray(value)) {
+    if (value.length === 0) return formatFact(value);
+    return value
+      .map((reason) => typeof reason === 'string'
+        ? knownLabel(t, CASCADE_REASON_LABEL_KEYS, reason)
+        : formatFact(reason))
+      .join(', ');
+  }
+  if (group === 'recorder' && name === 'state' && typeof value === 'string') {
+    return knownLabel(t, RECORDER_STATE_LABEL_KEYS, value);
+  }
+  if (group === 'recorder' && name === 'reason' && typeof value === 'string') {
+    return knownLabel(t, RECORDER_REASON_LABEL_KEYS, value);
+  }
+  return formatFact(value);
+};
+
+const FactList: React.FC<{
+  facts: Record<string, unknown>;
+  emptyLabel: string;
+  group: RuntimeFactGroup;
+}> = ({ facts, emptyLabel, group }) => {
+  const { t } = useTranslation();
+  const entries = Object.entries(facts);
+  if (entries.length === 0) return <span className="text-[11.5px] text-muted">{emptyLabel}</span>;
+  return (
+    <dl className="grid min-w-0 gap-x-4 gap-y-2 text-[11.5px] sm:grid-cols-2">
+      {entries.map(([name, value]) => (
+        <div key={name} className="flex min-w-0 items-start justify-between gap-3">
+          <dt className="break-words text-muted">{runtimeFactLabel(t, group, name)}</dt>
+          <dd className="max-w-[65%] break-all text-right font-mono text-foreground">
+            {formatRuntimeFact(t, group, name, value)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+};
+
+const SourceCard: React.FC<{
+  label: string;
+  source: { status: SourceState; observed_at: string | null; reason?: string | null };
+}> = ({ label, source }) => {
+  const { t } = useTranslation();
+  const displayStatus = source.observed_at || source.status === 'unavailable'
+    ? source.status
+    : 'unknown';
+  return (
+    <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border bg-surface px-3 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-[12px] font-semibold text-foreground">{label}</span>
+        <Badge variant={SOURCE_BADGE_VARIANT[displayStatus]}>
+          {t(`memory.processingRecord.sourceState.${displayStatus}`)}
+        </Badge>
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] text-muted">
+        <Clock3 className="size-3 shrink-0" />
+        <span className="truncate">
+          {source.observed_at
+            ? formatTimestamp(source.observed_at)
+            : t('memory.processingRecord.sourceNotObserved')}
+        </span>
+      </div>
+      {source.reason ? (
+        <div className="break-words text-[11px] text-muted">
+          {t('memory.processingRecord.sourceReason', { reason: sourceReasonLabel(t, source.reason) })}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const Field: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <div className="flex min-w-0 items-start justify-between gap-3">
+    <span className="shrink-0 text-muted">{label}</span>
+    <span className="min-w-0 break-all text-right font-mono text-foreground">{value}</span>
   </div>
 );
+
+const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
+  const { t } = useTranslation();
+  const manualRequired = entry.state === 'manual_required';
+  return (
+    <div
+      className="flex min-w-0 flex-col gap-3 border-b border-border py-3 last:border-b-0 lg:flex-row lg:justify-between"
+      data-testid={`memory-anomaly-${entry.kind}`}
+    >
+      <div className="flex min-w-0 items-start gap-2.5">
+        <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="break-words text-[12.5px] font-medium text-foreground">
+              {anomalyLabel(t, 'kind', entry.kind)}
+            </span>
+            <Badge variant={manualRequired ? 'warning' : 'secondary'}>
+              {anomalyLabel(t, 'state', entry.state)}
+            </Badge>
+          </div>
+          <div className="mt-1 font-mono text-[10.5px] text-muted">{formatTimestamp(entry.occurred_at)}</div>
+          {manualRequired ? (
+            <div className="mt-1.5 text-[11px] text-gold">{t('memory.processingRecord.manualRequiredReadOnly')}</div>
+          ) : null}
+        </div>
+      </div>
+      <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2 lg:min-w-[440px]">
+        <Field
+          label={t('memory.processingRecord.field.operation')}
+          value={anomalyLabel(t, 'operation', entry.operation)}
+        />
+        <Field
+          label={t('memory.processingRecord.field.errorCode')}
+          value={entry.error_code ? memoryErrorMessage(t, entry.error_code) : '-'}
+        />
+        <Field label={t('memory.processingRecord.field.attempts')} value={entry.attempts} />
+        <Field label={t('memory.processingRecord.field.generation')} value={entry.generation} />
+        <div className="sm:col-span-2">
+          <Field label={t('memory.processingRecord.field.requestId')} value={entry.request_id ?? '-'} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ClearRecoveryCard: React.FC<{
+  recovery: MemoryClearRecovery;
+  action: 'resume' | 'abort' | null;
+  onResume: (operationId: string) => void;
+  onAbort: (operationId: string) => void;
+}> = ({ recovery, action, onResume, onAbort }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-gold/40 bg-gold/[0.06] px-4 py-3">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-gold" />
+        <div className="min-w-0">
+          <div className="text-[12.5px] font-semibold text-foreground">{t('memory.processingRecord.clearRecovery.title')}</div>
+          <div className="mt-0.5 text-[11px] text-muted">{t('memory.processingRecord.clearRecovery.description')}</div>
+        </div>
+      </div>
+      <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2">
+        <Field label={t('memory.processingRecord.field.operationId')} value={recovery.operation_id} />
+        <Field
+          label={t('memory.processingRecord.field.state')}
+          value={clearRecoveryStateLabel(t, recovery.state)}
+        />
+        {recovery.occurred_at ? (
+          <Field label={t('memory.processingRecord.field.occurredAt')} value={formatTimestamp(recovery.occurred_at)} />
+        ) : null}
+        {recovery.error_code ? (
+          <Field
+            label={t('memory.processingRecord.field.errorCode')}
+            value={memoryErrorMessage(t, recovery.error_code)}
+          />
+        ) : null}
+      </div>
+      <div className="grid gap-1.5">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="xs"
+            variant="secondary"
+            disabled={action !== null || !recovery.can_resume}
+            onClick={() => onResume(recovery.operation_id)}
+          >
+            {action === 'resume' ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+            {t('memory.processingRecord.clearRecovery.resume')}
+          </Button>
+          <Button
+            size="xs"
+            variant="destructive"
+            disabled={action !== null || !recovery.can_abort}
+            onClick={() => onAbort(recovery.operation_id)}
+          >
+            {action === 'abort' ? <Loader2 className="animate-spin" /> : <XCircle />}
+            {t('memory.processingRecord.clearRecovery.abort')}
+          </Button>
+        </div>
+        {!recovery.can_abort ? (
+          <div className="text-[11px] text-muted">
+            {t('memory.processingRecord.clearRecovery.abortUnavailable')}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+};
 
 export const MemoryStatusPanel: React.FC<{
   status: MemoryStatus | null;
   failures: MemoryFailureLogEntry[];
-  failureRetentionDays: number;
+  recovery: MemoryClearRecovery | null;
+  logSections: MemoryLogSections | null;
+  statusLoading: boolean;
+  failuresLoading: boolean;
+  statusError: string | null;
   failuresError: string | null;
-  loading: boolean;
-  error: string | null;
+  refreshPending: boolean;
+  recoveryAction: 'resume' | 'abort' | null;
   onRefresh: () => void;
-  onOpenSettings: () => void;
+  onResumeClear: (operationId: string) => void;
+  onAbortClear: (operationId: string) => void;
 }> = ({
   status,
   failures,
-  failureRetentionDays,
+  recovery,
+  logSections,
+  statusLoading,
+  failuresLoading,
+  statusError,
   failuresError,
-  loading,
-  error,
+  refreshPending,
+  recoveryAction,
   onRefresh,
-  onOpenSettings,
+  onResumeClear,
+  onAbortClear,
 }) => {
   const { t } = useTranslation();
-  const faultKey = status?.processing_fault_kind
-    ? `${status.processing_fault_kind}:${status.processing_fault_since ?? ''}`
-    : null;
-  const [dismissedFault, setDismissedFault] = useState<string | null>(null);
-
-  if (loading && !status) {
-    return (
-      <div className="flex items-center gap-2 px-1 text-sm text-muted">
-        <Loader2 className="size-4 animate-spin" />
-        {t('memory.status.loading')}
-      </div>
-    );
-  }
-  if (error && !status) {
-    return (
-      <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-        {error}
-      </div>
-    );
-  }
-  if (!status) return null;
-
-  const buckets = status.buckets;
-  const stats: Array<{ key: string; label: string; value: React.ReactNode; description?: string }> = [
-    {
-      key: 'syncing',
-      label: t('memory.status.syncing'),
-      value: buckets.syncing,
-    },
-    { key: 'succeeded', label: t('memory.status.succeeded'), value: buckets.succeeded },
-    {
-      key: 'unknown',
-      label: t('memory.status.receiptUnknown'),
-      value: buckets.unknown,
-      description: t('memory.status.receiptUnknownHint'),
-    },
-    { key: 'failed', label: t('memory.status.distillFailed'), value: buckets.failed },
-    {
-      key: 'dead',
-      label: t('memory.status.dead'),
-      value: buckets.dead,
-      description: t('memory.status.deadHint'),
-    },
-    { key: 'missed', label: t('memory.status.missed'), value: buckets.missed },
+  const health = status?.health ?? null;
+  const emptySource: MemoryLogSourceStatus = { status: 'unknown', observed_at: null };
+  const sources = [
+    { key: 'health', label: t('memory.processingRecord.source.health'), value: status?.source ?? emptySource },
+    { key: 'everos', label: t('memory.log.section.everos'), value: logSections?.everos ?? emptySource },
+    { key: 'capture', label: t('memory.log.section.capture'), value: logSections?.capture ?? emptySource },
+    { key: 'calls', label: t('memory.log.section.calls'), value: logSections?.calls ?? emptySource },
   ];
-  const showFault = faultKey && faultKey !== dismissedFault;
-  const faultKind = status.processing_fault_kind;
 
   return (
-    <div className="flex flex-col gap-3">
-      {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          {error}
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-[14px] font-semibold text-foreground">{t('memory.processingRecord.title')}</h2>
+          <p className="mt-1 text-[12px] text-muted">{t('memory.processingRecord.description')}</p>
         </div>
-      ) : null}
-      {showFault && faultKind ? (
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] text-foreground">
-          <div className="flex min-w-0 items-start gap-2.5">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
-            <div className="flex min-w-0 flex-col gap-2">
-              <span>{t(`memory.status.fault.${faultKind}`)}</span>
-              {faultKind === 'credential' ? (
-                <Button variant="secondary" size="xs" className="w-fit" onClick={onOpenSettings}>
-                  {t('memory.status.faultAction.credential')}
-                </Button>
-              ) : null}
-            </div>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="-mr-2 -mt-2 size-8"
-            aria-label={t('memory.status.dismissFault')}
-            onClick={() => setDismissedFault(faultKey)}
-          >
-            <X className="size-4" />
-          </Button>
+        <Button variant="secondary" size="sm" onClick={onRefresh} disabled={refreshPending}>
+          <RefreshCw className={refreshPending ? 'animate-spin' : undefined} />
+          {t('memory.processingRecord.refresh')}
+        </Button>
+      </div>
+
+      <section className="flex flex-col gap-2" aria-labelledby="memory-runtime-title">
+        <div className="flex items-center gap-2">
+          <Database className="size-4 text-violet" />
+          <h3 id="memory-runtime-title" className="text-[13px] font-semibold text-foreground">
+            {t('memory.processingRecord.runtime.title')}
+          </h3>
         </div>
-      ) : null}
-      <Card>
-        <CardContent className="flex flex-col gap-4 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Badge variant={STATE_BADGE_VARIANT[status.state]} className="text-[12px]">
-                {t(`memory.status.state.${status.state}`)}
-              </Badge>
-              {status.error ? (
-                <span className="flex items-center gap-1 text-[12px] text-destructive">
-                  <AlertTriangle className="size-3.5" />
-                  {memoryErrorMessage(t, status.error)}
-                </span>
-              ) : null}
-            </div>
-            <Button variant="ghost" size="sm" onClick={onRefresh}>
-              <RefreshCw className="size-3.5" />
-              {t('memory.status.refresh')}
-            </Button>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            {stats.map((s) => (
-              <div key={s.key} className="rounded-lg border border-border bg-surface px-3 py-2.5">
-                <div className="text-[10px] uppercase tracking-[0.08em] text-muted">{s.label}</div>
-                <div className="text-[18px] font-semibold text-foreground">{s.value}</div>
-                {s.description ? <div className="mt-1 text-[10.5px] leading-snug text-muted">{s.description}</div> : null}
+        <Card>
+          <CardContent className="flex flex-col gap-4 py-4">
+            {statusError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+                {statusError}
               </div>
-            ))}
-          </div>
-
-          <div className="flex flex-col gap-2 border-t border-border pt-3 text-[12.5px]">
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-1.5 text-muted">
-                <Clock className="size-3.5" />
-                {t('memory.status.lastSuccess')}
-              </span>
-              <span className="font-mono text-foreground">
-                {status.last_success_at ? new Date(status.last_success_at).toLocaleString() : t('memory.status.lastSuccessNever')}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="flex items-center gap-1.5 text-muted">
-                <Database className="size-3.5" />
-                {t('memory.status.storageUsed')}
-              </span>
-              <span className="font-mono text-foreground">{formatBytes(status.provider_disk_bytes)}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-muted">{t('memory.status.queueBytes')}</span>
-              <span className="font-mono text-foreground">{formatBytes(status.queue_plaintext_bytes)}</span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="flex flex-col gap-3 py-4 text-[12.5px]">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-semibold text-foreground">{t('memory.status.providerTitle')}</div>
-              <div className="text-[11px] text-muted">{t('memory.status.providerSubtitle')}</div>
-            </div>
-            <Badge variant="secondary">
-              {status.last_flush_observation
-                ? t(`memory.status.observation.${status.last_flush_observation}`)
-                : '—'}
-            </Badge>
-          </div>
-          <div className="grid gap-2 border-t border-border pt-3 sm:grid-cols-2">
-            <ObservationValue label={t('memory.status.flushStatus')} value={status.last_flush_status} />
-            <ObservationValue label={t('memory.status.flushError')} value={status.last_flush_error_code} />
-            <ObservationValue
-              label={t('memory.status.flushAt')}
-              value={status.last_flush_at ? new Date(status.last_flush_at).toLocaleString() : null}
-            />
-            <div className="flex min-w-0 items-center justify-between gap-3">
-              <span className="text-muted">{t('memory.status.requestId')}</span>
-              <div className="flex min-w-0 items-center gap-1">
-                <span className="truncate font-mono text-foreground">{status.last_flush_request_id ?? '—'}</span>
-                {status.last_flush_request_id ? (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    aria-label={t('memory.status.copyRequestId')}
-                    onClick={() => void navigator.clipboard.writeText(status.last_flush_request_id ?? '')}
-                  >
-                    <Copy className="size-3.5" />
-                  </Button>
-                ) : null}
+            ) : null}
+            {!status && statusLoading ? (
+              <div className="flex items-center gap-2 text-[12px] text-muted">
+                <Loader2 className="size-3.5 animate-spin" />
+                {t('memory.processingRecord.runtime.loading')}
               </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="flex flex-col gap-3 py-4 text-[12.5px]">
-          <div>
-            <div className="text-[13px] font-semibold text-foreground">{t('memory.status.failureLog.title')}</div>
-            <div className="text-[11px] text-muted">
-              {t('memory.status.failureLog.subtitle', { days: failureRetentionDays })}
-            </div>
-          </div>
-          <div className="border-t border-border pt-1">
-            {failuresError ? (
-              <div className="py-3 text-destructive">{failuresError}</div>
-            ) : failures.length === 0 ? (
-              <div className="py-3 text-muted">{t('memory.status.failureLog.empty')}</div>
-            ) : (
-              failures.map((entry, index) => (
-                <div
-                  key={`${entry.kind}:${entry.occurred_at}:${entry.request_id ?? index}`}
-                  className="flex flex-col gap-2 border-b border-border py-3 last:border-b-0 sm:flex-row sm:items-start sm:justify-between"
-                >
-                  <div className="flex min-w-0 items-start gap-2.5">
-                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
-                    <div className="min-w-0">
-                      <div className="font-medium text-foreground">
-                        {t(`memory.status.failureLog.kind.${entry.kind}`)}
-                      </div>
-                      <div className="mt-0.5 font-mono text-[11px] text-muted">
-                        {new Date(entry.occurred_at).toLocaleString()}
-                      </div>
+            ) : health ? (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={health.status === 'ok' ? 'success' : 'warning'}>
+                    {knownLabel(t, HEALTH_STATUS_LABEL_KEYS, health.status)}
+                  </Badge>
+                  <span className="text-[11.5px] text-muted">
+                    {t('memory.processingRecord.runtime.version')}: <code className="text-foreground">{health.version ?? '-'}</code>
+                  </span>
+                </div>
+                <div className="grid gap-4 border-t border-border pt-3 lg:grid-cols-2">
+                  <div className="min-w-0">
+                    <div className="mb-2 text-[11.5px] font-semibold text-foreground">
+                      {t('memory.processingRecord.runtime.capabilities')}
                     </div>
-                  </div>
-                  <div className="grid min-w-0 gap-1 text-[11px] sm:min-w-[280px]">
-                    <ObservationValue label={t('memory.status.failureLog.errorCode')} value={entry.error_code} />
-                    <ObservationValue
-                      label={t('memory.status.failureLog.attempts')}
-                      value={String(entry.attempts)}
+                    <FactList
+                      facts={health.capabilities}
+                      emptyLabel={t('memory.processingRecord.runtime.noCapabilities')}
+                      group="capability"
                     />
-                    <div className="flex min-w-0 items-center justify-between gap-3">
-                      <span className="text-muted">{t('memory.status.requestId')}</span>
-                      <div className="flex min-w-0 items-center gap-1">
-                        <span className="truncate font-mono text-foreground">{entry.request_id ?? '—'}</span>
-                        {entry.request_id ? (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-7"
-                            aria-label={t('memory.status.copyRequestId')}
-                            onClick={() => void navigator.clipboard.writeText(entry.request_id ?? '')}
-                          >
-                            <Copy className="size-3.5" />
-                          </Button>
-                        ) : null}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="mb-2 text-[11.5px] font-semibold text-foreground">
+                      {t('memory.processingRecord.runtime.disabledFeatures')}
+                    </div>
+                    {health.disabled_features.length === 0 ? (
+                      <span className="text-[11.5px] text-muted">{t('memory.processingRecord.runtime.noneDisabled')}</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {health.disabled_features.map((feature) => (
+                          <Badge key={feature} variant="secondary">{runtimeFactLabel(t, 'capability', feature)}</Badge>
+                        ))}
                       </div>
+                    )}
+                  </div>
+                  <div className="min-w-0 border-t border-border pt-3 lg:col-span-2 lg:grid lg:grid-cols-2 lg:gap-4">
+                    <div className="min-w-0">
+                      <div className="mb-2 text-[11.5px] font-semibold text-foreground">{t('memory.processingRecord.runtime.cascade')}</div>
+                      <FactList
+                        facts={health.cascade}
+                        emptyLabel={t('memory.processingRecord.runtime.noFacts')}
+                        group="cascade"
+                      />
+                    </div>
+                    <div className="mt-3 min-w-0 lg:mt-0">
+                      <div className="mb-2 text-[11.5px] font-semibold text-foreground">{t('memory.processingRecord.runtime.recorder')}</div>
+                      <FactList
+                        facts={health.recorder}
+                        emptyLabel={t('memory.processingRecord.runtime.noFacts')}
+                        group="recorder"
+                      />
                     </div>
                   </div>
                 </div>
-              ))
+              </>
+            ) : (
+              <div className="flex items-center gap-2 text-[12px] text-muted">
+                <AlertTriangle className="size-3.5" />
+                {t('memory.processingRecord.runtime.unavailable')}
+              </div>
             )}
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="flex flex-col gap-2" aria-labelledby="memory-sources-title">
+        <div>
+          <h3 id="memory-sources-title" className="text-[13px] font-semibold text-foreground">
+            {t('memory.processingRecord.sources.title')}
+          </h3>
+          <p className="mt-0.5 text-[11.5px] text-muted">{t('memory.processingRecord.sources.description')}</p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {sources.map((source) => <SourceCard key={source.key} label={source.label} source={source.value} />)}
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-2" aria-labelledby="memory-anomalies-title">
+        <div>
+          <h3 id="memory-anomalies-title" className="text-[13px] font-semibold text-foreground">
+            {t('memory.processingRecord.anomalies.title')}
+          </h3>
+          <p className="mt-0.5 text-[11.5px] text-muted">{t('memory.processingRecord.anomalies.description')}</p>
+        </div>
+        {recovery ? (
+          <ClearRecoveryCard
+            recovery={recovery}
+            action={recoveryAction}
+            onResume={onResumeClear}
+            onAbort={onAbortClear}
+          />
+        ) : null}
+        <Card>
+          <CardContent className="py-2">
+            {failuresError ? (
+              <div className="py-3 text-[12px] text-destructive">{failuresError}</div>
+            ) : null}
+            {failures.length === 0 && !failuresError ? (
+              <div className="flex items-center gap-2 py-3 text-[12px] text-muted">
+                {failuresLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5 text-mint" />}
+                {failuresLoading ? t('memory.processingRecord.anomalies.loading') : t('memory.processingRecord.anomalies.empty')}
+              </div>
+            ) : failures.map((entry) => (
+              <FailureRow
+                key={entry.id}
+                entry={entry}
+              />
+            ))}
+          </CardContent>
+        </Card>
+      </section>
     </div>
   );
 };

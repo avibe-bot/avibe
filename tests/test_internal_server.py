@@ -23,7 +23,7 @@ import tempfile
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import httpx
 import pytest
@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
+from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -294,6 +295,253 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     return controller
+
+
+def test_memory_final_flush_delegates_identity_to_controller() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.final_flush_memory_cli_session = AsyncMock(
+        side_effect=lambda session_id, **_kwargs: session_id == "ses-memory"
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            present = await client.post(
+                "/internal/memory/final-flush",
+                json={"session_id": "ses-memory"},
+            )
+            absent = await client.post(
+                "/internal/memory/final-flush",
+                json={"session_id": "ses-absent"},
+            )
+        return present, absent
+
+    present, absent = asyncio.run(_exercise())
+
+    assert present.status_code == 200
+    assert present.json() == {"ok": True, "flushed": True}
+    assert absent.status_code == 200
+    assert absent.json() == {"ok": True, "flushed": False}
+    assert controller.final_flush_memory_cli_session.await_args_list == [
+        call("ses-memory", deadline_seconds=5.0),
+        call("ses-absent", deadline_seconds=5.0),
+    ]
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.archive_memory_cli_session = AsyncMock(
+        return_value={"id": "ses-memory", "status": "archived"}
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session": {"id": "ses-memory", "status": "archived"},
+    }
+    # The UI transport waits without a reporting deadline, while the controller
+    # still bounds provider lifecycle work before its shielded archive commit.
+    controller.archive_memory_cli_session.assert_awaited_once_with(
+        "ses-memory",
+        deadline_seconds=5.0,
+    )
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": " ses-memory"},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "principal_id": "u-untrusted"},
+    ],
+)
+def test_memory_archive_session_rejects_widened_or_invalid_payloads(
+    payload: dict[str, object],
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_memory_cli_session = AsyncMock(return_value={})
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json=payload,
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.archive_memory_cli_session.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error,status_code,error_code",
+    [
+        (LookupError("missing"), 404, "session_not_found"),
+        (
+            MemorySessionLifecycleBusyError("busy"),
+            503,
+            "memory_session_lifecycle_busy",
+        ),
+        (RuntimeError("failed"), 503, "session_archive_unavailable"),
+    ],
+)
+def test_memory_archive_session_returns_closed_failure_codes(
+    error: Exception,
+    status_code: int,
+    error_code: str,
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_memory_cli_session = AsyncMock(side_effect=error)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == status_code
+    assert response.json() == {"ok": False, "error": error_code}
+
+
+def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    calls: list[tuple[str, str | None]] = []
+
+    class Runtime:
+        def principal_for_user_key(self, user_key: str) -> str:
+            return {
+                "avibe:local": "u-local-principal",
+                "avibe:remote:subject-2": "u-remote-principal",
+            }[user_key]
+
+        async def failure_log_payload(self, *, operator_ref: str | None = None):
+            calls.append(("failures", operator_ref))
+            return {"status": "ok", "items": [], "recovery": None}
+
+        async def maintenance_payload(self, *, operator_ref: str | None = None):
+            calls.append(("maintenance", operator_ref))
+            return {
+                "status": "ok",
+                "data_exists": False,
+                "can_clear": True,
+                "clear_recovery": None,
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str, user_key: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: user_key,
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key=user_key,
+            ),
+        }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            local = await client.get(
+                "/internal/memory/failures",
+                headers=headers("/internal/memory/failures", "avibe:local"),
+            )
+            remote = await client.get(
+                "/internal/memory/maintenance",
+                headers=headers(
+                    "/internal/memory/maintenance",
+                    "avibe:remote:subject-2",
+                ),
+            )
+            unsigned = await client.get("/internal/memory/failures")
+            return local, remote, unsigned
+
+    local, remote, unsigned = asyncio.run(_exercise())
+
+    assert local.status_code == remote.status_code == unsigned.status_code == 200
+    assert calls == [
+        ("failures", "u-local-principal"),
+        ("maintenance", "u-remote-principal"),
+        ("failures", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "extra": True},
+    ],
+)
+def test_memory_final_flush_rejects_invalid_payloads(payload: dict[str, object]) -> None:
+    controller = _build_controller_double()
+    controller.final_flush_memory_cli_session = AsyncMock(return_value=True)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/final-flush", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.final_flush_memory_cli_session.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------
@@ -633,6 +881,31 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
+
+
+def test_dispatch_context_does_not_restore_memory_admission_from_transient_payload(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_memory_classification",
+    )
+
+    _text, context = asyncio.run(
+        internal_server._build_dispatch_payload(
+            {
+                "session_id": session["id"],
+                "text": "remember this",
+                "memory_cli_admitted": True,
+                "is_ordinary_text": True,
+            }
+        )
+    )
+
+    assert context.is_ordinary_text is None
+    assert "memory_cli_admitted" not in (context.platform_specific or {})
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():

@@ -141,11 +141,14 @@ class MemoryInsightReader:
             capture_available=capture_section["status"] == "available",
             runs_available=runs_section["status"] == "available",
         )
-        sections = {
-            "everos": _combine_everos_section(everos_section, runs_section),
-            "capture": capture_section,
-            "calls": call_section,
-        }
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(everos_section, runs_section),
+                "capture": capture_section,
+                "calls": call_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
         if memcells is None:
             return {
                 "status": "ok",
@@ -206,11 +209,14 @@ class MemoryInsightReader:
             runs_available=runs_section["status"] == "available",
         )
 
-        sections = {
-            "everos": _combine_everos_section(everos_section, runs_section),
-            "capture": capture_section,
-            "calls": call_section,
-        }
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(everos_section, runs_section),
+                "capture": capture_section,
+                "calls": call_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
         if memcells is None:
             return {
                 "status": "ok",
@@ -289,11 +295,14 @@ class MemoryInsightReader:
                 return {"status": "not_found"}
             return {
                 "status": "not_found",
-                "sections": {
-                    "everos": everos_section,
-                    "capture": _source_status(self._paths.capture_db_path),
-                    "calls": _source_status(self._paths.call_log_db_path),
-                },
+                "sections": _observed_sections(
+                    {
+                        "everos": everos_section,
+                        "capture": _source_status(self._paths.capture_db_path),
+                        "calls": _source_status(self._paths.call_log_db_path),
+                    },
+                    observed_at=_utc_observed_at(),
+                ),
             }
         queues, capture_section = self._read_detail_capture_rows(
             row,
@@ -325,7 +334,6 @@ class MemoryInsightReader:
         )
         steps = _steps_projection(
             row,
-            capture,
             selected_runs,
             base_urls=self._provider_base_urls,
             exact_values=self._exact_redaction_values,
@@ -351,11 +359,14 @@ class MemoryInsightReader:
             "omitted_call_count": max(0, owned_call_count - len(selected_calls)),
             "omitted_step_count": max(0, owned_run_count - len(selected_runs)),
             "current_state": current_state,
-            "sections": {
-                "everos": _combine_everos_section(everos_section, runs_section),
-                "capture": capture_section,
-                "calls": call_section,
-            },
+            "sections": _observed_sections(
+                {
+                    "everos": _combine_everos_section(everos_section, runs_section),
+                    "capture": capture_section,
+                    "calls": call_section,
+                },
+                observed_at=_utc_observed_at(),
+            ),
         }
         if _encoded_size(result) > _MAX_RESPONSE_BYTES:
             raise AssertionError("memory insight detail exceeded its fixed response budget")
@@ -533,8 +544,19 @@ class MemoryInsightReader:
         try:
             with _read_only(self._paths.capture_db_path) as conn:
                 conn.execute(
-                    "SELECT session_id, principal_id, project_ref, provider_timestamp_ms, "
-                    "add_request_id, flush_request_id FROM memory_capture_queue LIMIT 1"
+                    """
+                    SELECT queue.session_id, queue.provider_session_ref, queue.epoch,
+                           queue.generation, queue.principal_id, queue.project_ref,
+                           queue.provider_timestamp_ms, queue.add_request_id,
+                           settlement.request_id
+                    FROM memory_capture_queue AS queue
+                    LEFT JOIN memory_flush_settlements AS settlement
+                      ON settlement.provider_session_ref = queue.provider_session_ref
+                     AND settlement.epoch = queue.epoch
+                     AND settlement.generation = queue.generation
+                     AND settlement.operation_kind = 'flush'
+                    LIMIT 1
+                    """
                 ).fetchone()
             return {"status": "available"}
         except _Unavailable as unavailable:
@@ -674,15 +696,17 @@ class MemoryInsightReader:
                     """,
                 ]
                 if capture_available:
-                    capture_links = " UNION ".join(
-                        f"""
-                        SELECT page.memcell_id, owned_queue.{request_column} AS request_id
+                    ctes.append(
+                        """
+                        capture_candidates AS MATERIALIZED (
+                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                               owned_queue.add_request_id AS request_id
                         FROM page
                         JOIN capture.memory_capture_queue AS owned_queue
                           ON owned_queue.principal_id = page.owner_id
                          AND owned_queue.project_ref = page.project_id
-                        WHERE typeof(owned_queue.{request_column}) = 'text'
-                          AND owned_queue.{request_column} != ''
+                        WHERE typeof(owned_queue.add_request_id) = 'text'
+                          AND owned_queue.add_request_id != ''
                           AND EXISTS (
                               SELECT 1 FROM json_each(page.message_ids_json) AS message_id
                               WHERE message_id.type = 'text'
@@ -690,20 +714,60 @@ class MemoryInsightReader:
                                     'm_' || owned_queue.session_id || '_'
                                     || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
                           )
-                          AND NOT EXISTS (
+
+                        UNION
+
+                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                               owned_settlement.request_id AS request_id
+                        FROM page
+                        JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = page.owner_id
+                         AND owned_queue.project_ref = page.project_id
+                        JOIN capture.memory_flush_settlements AS owned_settlement
+                          ON owned_settlement.provider_session_ref =
+                                owned_queue.provider_session_ref
+                         AND owned_settlement.epoch = owned_queue.epoch
+                         AND owned_settlement.generation = owned_queue.generation
+                         AND owned_settlement.operation_kind = 'flush'
+                        WHERE typeof(owned_settlement.request_id) = 'text'
+                          AND owned_settlement.request_id != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text'
+                                AND message_id.value =
+                                    'm_' || owned_queue.session_id || '_'
+                                    || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                        ),
+                        capture_links AS MATERIALIZED (
+                        SELECT candidate.memcell_id, candidate.request_id
+                        FROM capture_candidates AS candidate
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                              WHERE (
-                                  any_queue.add_request_id = owned_queue.{request_column}
-                                  OR any_queue.flush_request_id = owned_queue.{request_column}
-                              ) AND (
-                                  any_queue.principal_id IS NOT page.owner_id
-                                  OR any_queue.project_ref IS NOT page.project_id
+                              WHERE any_queue.add_request_id = candidate.request_id
+                                AND (
+                                  any_queue.principal_id IS NOT candidate.owner_id
+                                  OR any_queue.project_ref IS NOT candidate.project_id
                               )
                           )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM capture.memory_flush_settlements AS any_settlement
+                              JOIN capture.memory_capture_queue AS any_queue
+                                ON any_queue.provider_session_ref =
+                                      any_settlement.provider_session_ref
+                               AND any_queue.epoch = any_settlement.epoch
+                               AND any_queue.generation = any_settlement.generation
+                              WHERE any_settlement.operation_kind = 'flush'
+                                AND any_settlement.request_id = candidate.request_id
+                                AND (
+                                    any_queue.principal_id IS NOT candidate.owner_id
+                                    OR any_queue.project_ref IS NOT candidate.project_id
+                                )
+                          )
+                        )
                         """
-                        for request_column in ("add_request_id", "flush_request_id")
                     )
-                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
                     call_branches.append(
                         """
                         SELECT capture_links.memcell_id, pc.id AS call_id
@@ -830,30 +894,68 @@ class MemoryInsightReader:
                     """,
                 ]
                 if capture_available:
-                    capture_links = " UNION ".join(
-                        f"""
-                        SELECT owned_queue.{column} AS request_id
+                    ctes.append(
+                        """
+                        capture_candidates AS MATERIALIZED (
+                        SELECT owned_queue.add_request_id AS request_id
                         FROM page JOIN capture.memory_capture_queue AS owned_queue
                           ON owned_queue.principal_id = :owner_id
                          AND owned_queue.project_ref = :project_id
-                        WHERE typeof(owned_queue.{column}) = 'text' AND owned_queue.{column} != ''
+                        WHERE typeof(owned_queue.add_request_id) = 'text'
+                          AND owned_queue.add_request_id != ''
                           AND EXISTS (
                               SELECT 1 FROM json_each(page.message_ids_json) AS message_id
                               WHERE message_id.type = 'text' AND message_id.value =
                                   'm_' || owned_queue.session_id || '_'
                                   || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
                           )
-                          AND NOT EXISTS (
+
+                        UNION
+
+                        SELECT owned_settlement.request_id AS request_id
+                        FROM page JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = :owner_id
+                         AND owned_queue.project_ref = :project_id
+                        JOIN capture.memory_flush_settlements AS owned_settlement
+                          ON owned_settlement.provider_session_ref =
+                                owned_queue.provider_session_ref
+                         AND owned_settlement.epoch = owned_queue.epoch
+                         AND owned_settlement.generation = owned_queue.generation
+                         AND owned_settlement.operation_kind = 'flush'
+                        WHERE typeof(owned_settlement.request_id) = 'text'
+                          AND owned_settlement.request_id != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text' AND message_id.value =
+                                  'm_' || owned_queue.session_id || '_'
+                                  || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                        ),
+                        capture_links AS MATERIALIZED (
+                        SELECT candidate.request_id
+                        FROM capture_candidates AS candidate
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                              WHERE (any_queue.add_request_id = owned_queue.{column}
-                                     OR any_queue.flush_request_id = owned_queue.{column})
+                              WHERE any_queue.add_request_id = candidate.request_id
                                 AND (any_queue.principal_id IS NOT :owner_id
                                      OR any_queue.project_ref IS NOT :project_id)
                           )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM capture.memory_flush_settlements AS any_settlement
+                              JOIN capture.memory_capture_queue AS any_queue
+                                ON any_queue.provider_session_ref =
+                                      any_settlement.provider_session_ref
+                               AND any_queue.epoch = any_settlement.epoch
+                               AND any_queue.generation = any_settlement.generation
+                              WHERE any_settlement.operation_kind = 'flush'
+                                AND any_settlement.request_id = candidate.request_id
+                                AND (any_queue.principal_id IS NOT :owner_id
+                                     OR any_queue.project_ref IS NOT :project_id)
+                          )
+                        )
                         """
-                        for column in ("add_request_id", "flush_request_id")
                     )
-                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
                     branches.append(
                         """
                         SELECT pc.id AS call_id FROM capture_links
@@ -1023,7 +1125,7 @@ class MemoryInsightReader:
                 rows = list(conn.execute(
                     """
                     SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
-                           state, occurred_at_ms, add_request_id, flush_request_id
+                           state, occurred_at_ms, add_request_id
                     FROM memory_capture_queue
                     WHERE principal_id = :owner_id AND project_ref = :project_id
                       AND EXISTS (
@@ -1134,6 +1236,32 @@ def _combine_everos_section(
     if runs["status"] != "available":
         return {"status": "partial", "reason": f"runs_{runs['reason']}"}
     return {"status": "available"}
+
+
+def _observed_sections(
+    sections: dict[str, dict[str, str]],
+    *,
+    observed_at: str,
+) -> dict[str, dict[str, str | None]]:
+    return {
+        name: {
+            **section,
+            "observed_at": (
+                observed_at
+                if section["status"] in {"available", "partial"}
+                else None
+            ),
+        }
+        for name, section in sections.items()
+    }
+
+
+def _utc_observed_at() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:
@@ -1389,24 +1517,12 @@ def _capture_projection(
 
 def _steps_projection(
     memcell: sqlite3.Row,
-    capture: dict[str, Any],
     runs: list[sqlite3.Row],
     *,
     base_urls: tuple[str, ...],
     exact_values: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
-    if capture.get("status") == "available":
-        delivery_states = capture.get("delivery_states")
-        capture_status = (
-            delivery_states[0]
-            if isinstance(delivery_states, list) and len(delivery_states) == 1
-            else "mixed"
-        )
-        steps.append({"type": "capture", "status": capture_status})
-    else:
-        steps.append({"type": "capture", **capture})
-    steps.append(
+    steps: list[dict[str, Any]] = [
         {
             "type": "memcell",
             "status": "created",
@@ -1416,7 +1532,7 @@ def _steps_projection(
                 _MAX_MEMCELL_ID_BYTES,
             ),
         }
-    )
+    ]
     steps.extend(
         _run_projection(
             run,

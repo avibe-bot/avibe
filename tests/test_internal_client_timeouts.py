@@ -14,8 +14,6 @@ import re
 from pathlib import Path
 
 from core.memory.module import (
-    CLEAR_CLEANUP_TIMEOUT_SECONDS,
-    CLEAR_DRAIN_TIMEOUT_SECONDS,
     PROVIDER_READ_TIMEOUT_SECONDS,
 )
 from core.memory.process import (
@@ -25,12 +23,17 @@ from core.memory.process import (
 )
 from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
-    MEMORY_CLEAR_TIMEOUT_SECONDS,
+    MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
+    MEMORY_SEARCH_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
+    memory_archive_session,
+    memory_clear,
+    memory_clear_recovery,
     memory_profile,
+    memory_final_flush,
     memory_profile_sync,
     memory_restart,
     memory_search,
@@ -72,6 +75,31 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
         assert inspect.signature(read).parameters["timeout"].default > PROVIDER_READ_TIMEOUT_SECONDS
 
 
+def test_search_clients_outlast_capability_probe_and_provider_search() -> None:
+    assert MEMORY_SEARCH_TIMEOUT_SECONDS > 2 * PROVIDER_READ_TIMEOUT_SECONDS
+    for search in (memory_search, memory_search_sync):
+        assert (
+            inspect.signature(search).parameters["timeout"].default
+            == MEMORY_SEARCH_TIMEOUT_SECONDS
+        )
+
+
+def test_final_flush_client_outlasts_the_controller_deadline() -> None:
+    assert MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS > 5.0
+    assert (
+        inspect.signature(memory_final_flush).parameters["timeout"].default
+        == MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS
+    )
+
+
+def test_session_archive_client_has_no_reporting_timeout() -> None:
+    # Scope resolution and the cancellation-safe archive commit include
+    # unbounded local filesystem/SQLite work. The controller keeps the provider
+    # final-flush deadline, but the reporting transport must await its terminal
+    # result instead of returning a retryable-looking failure mid-commit.
+    assert "timeout" not in inspect.signature(memory_archive_session).parameters
+
+
 def _reconcile_lifecycle_budget_seconds() -> float:
     return (
         _PROCESSING_PROBE_TIMEOUT_SECONDS
@@ -89,13 +117,12 @@ def test_restart_client_has_no_reporting_timeout() -> None:
     assert "timeout" not in inspect.signature(memory_restart).parameters
 
 
-def test_clear_client_outlasts_clear_and_enabled_reconciliation() -> None:
-    clear_lifecycle_budget = (
-        CLEAR_DRAIN_TIMEOUT_SECONDS
-        + CLEAR_CLEANUP_TIMEOUT_SECONDS
-        + _reconcile_lifecycle_budget_seconds()
-    )
-    assert MEMORY_CLEAR_TIMEOUT_SECONDS > clear_lifecycle_budget
+def test_clear_clients_have_no_reporting_timeout() -> None:
+    # Snapshot and restore copy user-owned trees whose size has no runtime
+    # bound. A transport deadline would report failure while the controller's
+    # journaled operation continues and make a destructive retry possible.
+    for operation in (memory_clear, memory_clear_recovery):
+        assert "timeout" not in inspect.signature(operation).parameters
 
 
 def test_install_client_covers_the_dependency_job_budget() -> None:

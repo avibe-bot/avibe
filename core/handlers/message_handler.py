@@ -67,7 +67,12 @@ class MessageHandler(BaseHandler):
         """Set reference to session handler"""
         self.session_handler = session_handler
 
-    def _track_memory_capture_task(self, task: asyncio.Task[Any]) -> None:
+    def _track_memory_capture_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        lifecycle_admission: Any = None,
+    ) -> None:
         """Retain a best-effort capture until asyncio reports its completion."""
 
         self._memory_capture_tasks.add(task)
@@ -80,6 +85,9 @@ class MessageHandler(BaseHandler):
             except Exception:
                 logger.warning("Memory capture task failed", exc_info=True)
             finally:
+                release = getattr(lifecycle_admission, "release", None)
+                if callable(release):
+                    release()
                 self._memory_capture_tasks.discard(done_task)
 
         task.add_done_callback(_on_done)
@@ -163,6 +171,11 @@ class MessageHandler(BaseHandler):
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
+        payload = context.platform_specific or {}
+        turn_lifecycle_admission = payload.pop(
+            "_turn_lifecycle_admission",
+            None,
+        )
         dispatch_evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
         # Tracks whether we actually dispatched an agent turn (whose reply
         # streams in asynchronously). If we leave this method WITHOUT having
@@ -284,7 +297,11 @@ class MessageHandler(BaseHandler):
                         capture_memory(context, control_message, base_session_id),
                         name="memory-capture",
                     )
-                    self._track_memory_capture_task(capture_task)
+                    self._track_memory_capture_task(
+                        capture_task,
+                        lifecycle_admission=turn_lifecycle_admission,
+                    )
+                    turn_lifecycle_admission = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -873,6 +890,13 @@ class MessageHandler(BaseHandler):
             )
             return str(e)
         finally:
+            release_lifecycle_admission = getattr(
+                turn_lifecycle_admission,
+                "release",
+                None,
+            )
+            if callable(release_lifecycle_admission):
+                release_lifecycle_admission()
             if not agent_dispatched:
                 # Synchronous completion — no async agent reply is coming, so
                 # release any live streaming SSE waiter for this turn now

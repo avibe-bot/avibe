@@ -52,6 +52,15 @@ class _Runtime:
 
     def __init__(self, module) -> None:
         self.module = module
+        self.final_flush_calls: list[dict[str, object]] = []
+        self.final_flush_result = True
+        self.final_flush_error: Exception | None = None
+        self.session_lifecycle_calls: list[dict[str, object]] = []
+        self.session_lifecycle_error: Exception | None = None
+        self.recovered_scope: tuple[str, str] | None = None
+        self.recovered_scopes: tuple[tuple[str, str], ...] = ()
+        self.scope_recovery_calls: list[str] = []
+        self.scopes_recovery_calls: list[str] = []
 
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
@@ -60,6 +69,37 @@ class _Runtime:
     def project_for_workdir(self, workdir: str) -> str:
         assert workdir == "/tmp/project"
         return PROJECT
+
+    async def resolve_current_session_scope(self, raw_session_id: str) -> tuple[str, str] | None:
+        self.scope_recovery_calls.append(raw_session_id)
+        return self.recovered_scope
+
+    async def resolve_current_session_scopes(
+        self,
+        raw_session_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        self.scopes_recovery_calls.append(raw_session_id)
+        return self.recovered_scopes
+
+    async def final_flush(self, **kwargs) -> bool:
+        self.final_flush_calls.append(kwargs)
+        if self.final_flush_error is not None:
+            raise self.final_flush_error
+        return self.final_flush_result
+
+    async def run_session_lifecycle(self, **kwargs):
+        operation = kwargs.pop("operation")
+        self.session_lifecycle_calls.append(kwargs)
+        if self.session_lifecycle_error is not None:
+            raise self.session_lifecycle_error
+        return await operation()
+
+    async def run_session_scopes_lifecycle(self, **kwargs):
+        operation = kwargs.pop("operation")
+        self.session_lifecycle_calls.append(kwargs)
+        if self.session_lifecycle_error is not None:
+            raise self.session_lifecycle_error
+        return await operation()
 
 
 class _CaptureModule:
@@ -197,6 +237,446 @@ def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None
     assert request.provenance == "user_input"
     assert request.text == "/memory status"
     assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
+
+
+def test_final_flush_memory_session_reuses_capture_scope_and_raw_anchor() -> None:
+    controller = _controller()
+
+    result = asyncio.run(controller.final_flush_memory_session(_context("telegram"), "telegram_dm-1"))
+
+    assert result is True
+    assert controller.memory_runtime.final_flush_calls == [
+        {
+            "principal_id": "u-" + ("1" * 32),
+            "project_id": PROJECT,
+            "raw_session_id": "telegram_dm-1",
+            "deadline_seconds": 5.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("enabled,admitted", [(False, True), (True, False)])
+def test_final_flush_memory_session_fails_closed_without_admitted_scope(enabled: bool, admitted: bool) -> None:
+    controller = _controller(user=SimpleNamespace(enabled=admitted, is_admin=False))
+    controller.config.memory.enabled = enabled
+
+    result = asyncio.run(controller.final_flush_memory_session(_context("slack"), "slack_dm-1"))
+
+    assert result is False
+    assert controller.memory_runtime.final_flush_calls == []
+
+
+def test_final_flush_memory_session_swallows_runtime_failure() -> None:
+    controller = _controller()
+    controller.memory_runtime.final_flush_error = RuntimeError("provider unavailable")
+
+    result = asyncio.run(controller.final_flush_memory_session(_context("wechat"), "wechat_dm-1"))
+
+    assert result is False
+    assert len(controller.memory_runtime.final_flush_calls) == 1
+
+
+def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
+    controller = _controller()
+    operation_calls = []
+
+    async def reset_session() -> str:
+        operation_calls.append("reset")
+        return "reset-complete"
+
+    result = asyncio.run(
+        controller.run_memory_session_lifecycle(
+            _context("wechat"),
+            "wechat_dm-1",
+            reset_session,
+            deadline_seconds=4.0,
+        )
+    )
+
+    assert result == "reset-complete"
+    assert operation_calls == ["reset"]
+    assert controller.memory_runtime.session_lifecycle_calls == [
+        {
+            "principal_id": "u-" + ("1" * 32),
+            "project_id": PROJECT,
+            "raw_session_id": "wechat_dm-1",
+            "deadline_seconds": 4.0,
+        }
+    ]
+
+
+def test_memory_session_lifecycle_does_not_reset_without_a_fence() -> None:
+    controller = _controller()
+    controller.memory_runtime.session_lifecycle_error = RuntimeError("fence unavailable")
+    operation_calls = []
+
+    async def reset_session() -> str:
+        operation_calls.append("reset")
+        return "reset-complete"
+
+    with pytest.raises(RuntimeError, match="fence unavailable"):
+        asyncio.run(
+            controller.run_memory_session_lifecycle(
+                _context("slack"),
+                "slack_dm-1",
+                reset_session,
+            )
+        )
+
+    assert operation_calls == []
+
+
+def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() -> None:
+    controller = _controller(user=SimpleNamespace(enabled=False, is_admin=False))
+    operation_calls = []
+
+    async def reset_session() -> str:
+        operation_calls.append("reset")
+        return "reset-complete"
+
+    result = asyncio.run(
+        controller.run_memory_session_lifecycle(
+            _context("slack"),
+            "slack_dm-1",
+            reset_session,
+        )
+    )
+
+    assert result == "reset-complete"
+    assert operation_calls == ["reset"]
+    assert controller.memory_runtime.session_lifecycle_calls == []
+
+
+def test_memory_session_lifecycle_does_not_repeat_failed_reset() -> None:
+    controller = _controller()
+    operation_calls = []
+
+    async def reset_session() -> None:
+        operation_calls.append("reset")
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        asyncio.run(
+            controller.run_memory_session_lifecycle(
+                _context("telegram"),
+                "telegram_dm-1",
+                reset_session,
+            )
+        )
+
+    assert operation_calls == ["reset"]
+
+
+def test_final_flush_memory_cli_session_uses_trusted_stored_scope() -> None:
+    controller = _controller()
+    principal_id = "u-" + ("2" * 32)
+    controller._memory_scopes_by_session = {
+        "ses-workbench": (principal_id, PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    result = asyncio.run(
+        controller.final_flush_memory_cli_session(
+            "ses-workbench",
+            deadline_seconds=4.0,
+        )
+    )
+
+    assert result is True
+    assert controller.memory_runtime.final_flush_calls == [
+        {
+            "principal_id": principal_id,
+            "project_id": PROJECT,
+            "raw_session_id": "ses-workbench",
+            "deadline_seconds": 4.0,
+        }
+    ]
+
+
+def test_final_flush_memory_cli_session_swallows_runtime_failure() -> None:
+    controller = _controller()
+    controller.memory_runtime.final_flush_error = RuntimeError("provider unavailable")
+    controller._memory_scopes_by_session = {
+        "ses-workbench": ("u-" + ("2" * 32), PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    result = asyncio.run(
+        controller.final_flush_memory_cli_session(
+            "ses-workbench",
+        )
+    )
+
+    assert result is False
+    assert len(controller.memory_runtime.final_flush_calls) == 1
+
+
+def test_final_flush_memory_cli_session_recovers_scope_after_controller_restart() -> None:
+    controller = _controller()
+    principal_id = "u-" + ("2" * 32)
+    controller._memory_scopes_by_session = {}
+    controller.memory_runtime.recovered_scope = (principal_id, PROJECT)
+
+    result = asyncio.run(controller.final_flush_memory_cli_session("ses-workbench"))
+
+    assert result is True
+    assert controller.memory_runtime.scope_recovery_calls == ["ses-workbench"]
+    assert controller.memory_runtime.final_flush_calls == [
+        {
+            "principal_id": principal_id,
+            "project_id": PROJECT,
+            "raw_session_id": "ses-workbench",
+            "deadline_seconds": 5.0,
+        }
+    ]
+
+
+def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
+    controller = _controller()
+    controller._memory_scopes_by_session = {}
+
+    result = asyncio.run(controller.final_flush_memory_cli_session("ses-absent"))
+
+    assert result is False
+    assert controller.memory_runtime.scope_recovery_calls == ["ses-absent"]
+    assert controller.memory_runtime.final_flush_calls == []
+
+
+def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.services import sessions as sessions_service
+    from storage import workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive me",
+        )["id"]
+
+    principal_id = "u-" + ("2" * 32)
+    admission_lock = asyncio.Lock()
+    capture_may_enter = asyncio.Event()
+    capture_entered = asyncio.Event()
+    release_capture = asyncio.Event()
+    flush_entered = asyncio.Event()
+    release_flush = asyncio.Event()
+    archive_lock_states: list[bool] = []
+
+    class LifecycleRuntime(_Runtime):
+        async def run_session_scopes_lifecycle(self, **kwargs):
+            operation = kwargs.pop("operation")
+            self.session_lifecycle_calls.append(kwargs)
+            async with admission_lock:
+                flush_entered.set()
+                await release_flush.wait()
+                return await operation()
+
+    controller = _controller()
+    controller.memory_runtime = LifecycleRuntime(controller.memory_module)
+    from core.session_turns import SessionTurnManager
+
+    controller.session_turns = SessionTurnManager()
+    controller._memory_scopes_by_session = {
+        session_id: (principal_id, PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    original_archive = sessions_service.archive_session
+
+    def archive_under_test(conn, actual_session_id):
+        archive_lock_states.append(admission_lock.locked())
+        return original_archive(conn, actual_session_id)
+
+    monkeypatch.setattr(sessions_service, "archive_session", archive_under_test)
+
+    async def run() -> None:
+        turn_admission = await controller.session_turns.acquire_lifecycle_admission(
+            session_id
+        )
+
+        async def old_capture() -> None:
+            await capture_may_enter.wait()
+            async with admission_lock:
+                capture_entered.set()
+                await release_capture.wait()
+            turn_admission.release()
+
+        capture = asyncio.create_task(old_capture())
+        archive = asyncio.create_task(
+            controller.archive_memory_cli_session(
+                session_id,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.sleep(0)
+
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        assert not archive.done()
+        assert not flush_entered.is_set()
+
+        # This turn was admitted before archive but had not reached capture yet.
+        # Archive must not take Memory admission ahead of it.
+        capture_may_enter.set()
+        await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
+        assert not flush_entered.is_set()
+
+        release_capture.set()
+        await capture
+        await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
+
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        assert not archive.done()
+
+        release_flush.set()
+        result = await archive
+
+        assert result["status"] == "archived"
+        assert archive_lock_states == [True]
+        assert controller.memory_runtime.session_lifecycle_calls == [
+            {
+                "scopes": ((principal_id, PROJECT),),
+                "raw_session_id": session_id,
+                "deadline_seconds": 2.0,
+            }
+        ]
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+
+    try:
+        asyncio.run(run())
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("state", ["missing", "reserved", "archived"])
+def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    state: str,
+) -> None:
+    from storage import workbench_sessions_service
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    session_id = "ses-missing"
+    if state == "reserved":
+        session_id = WORKSPACE_NOTICE_SESSION_ID
+    elif state == "archived":
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        with engine.begin() as conn:
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session_id = workbench_sessions_service.create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
+            workbench_sessions_service.archive_session(conn, session_id)
+
+    controller = _controller()
+    controller._memory_scopes_by_session = {
+        session_id: ("u-" + ("2" * 32), PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    async def archive() -> dict[str, object]:
+        return await controller.archive_memory_cli_session(session_id)
+
+    try:
+        if state == "missing":
+            with pytest.raises(LookupError):
+                asyncio.run(archive())
+        elif state == "reserved":
+            with pytest.raises(PermissionError):
+                asyncio.run(archive())
+        else:
+            assert asyncio.run(archive())["status"] == "archived"
+    finally:
+        engine.dispose()
+
+    assert controller.memory_runtime.session_lifecycle_calls == []
+    assert controller.memory_runtime.scope_recovery_calls == []
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_archive_memory_cli_session_flushes_every_cwd_scope_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    restarted: bool,
+) -> None:
+    from storage import workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive every Memory project",
+        )["id"]
+
+    first_scope = (
+        "u-11111111111111111111111111111111",
+        "p-11111111111111111111111111111111",
+    )
+    second_scope = (
+        "u-22222222222222222222222222222222",
+        "p-22222222222222222222222222222222",
+    )
+    controller = _controller()
+    controller._memory_scopes_by_session = (
+        {} if restarted else {session_id: second_scope}
+    )
+    controller._memory_cli_facts_by_session = {}
+    controller.memory_runtime.recovered_scopes = (second_scope, first_scope)
+
+    try:
+        result = asyncio.run(
+            controller.archive_memory_cli_session(
+                session_id,
+                deadline_seconds=3.0,
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert result["status"] == "archived"
+    assert controller.memory_runtime.scopes_recovery_calls == [session_id]
+    assert controller.memory_runtime.session_lifecycle_calls == [
+        {
+            "scopes": (first_scope, second_scope),
+            "raw_session_id": session_id,
+            "deadline_seconds": 3.0,
+        }
+    ]
 
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:

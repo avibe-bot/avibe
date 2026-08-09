@@ -93,6 +93,164 @@ def test_hfr_283_archive_run_cancellations_wake_runtime_consumers(monkeypatch):
     ]
 
 
+def test_session_archive_delegates_terminal_mutation_to_controller(
+    monkeypatch,
+    tmp_path,
+):
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage import workbench_sessions_service
+    from core.services import sessions as sessions_service
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive me",
+        )["id"]
+
+    events: list[str] = []
+    controller_call_active = False
+
+    async def _archive_via_controller(actual_session_id: str):
+        nonlocal controller_call_active
+        assert actual_session_id == session_id
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        events.append("controller")
+        controller_call_active = True
+        try:
+            with engine.begin() as conn:
+                session = sessions_service.archive_session(conn, session_id)
+        finally:
+            controller_call_active = False
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "session": session},
+        }
+
+    original_archive = sessions_service.archive_session
+
+    def _archive(conn, actual_session_id):
+        assert controller_call_active
+        events.append("archive")
+        return original_archive(conn, actual_session_id)
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(internal_client, "memory_archive_session", _archive_via_controller)
+    monkeypatch.setattr(sessions_service, "archive_session", _archive)
+    monkeypatch.setattr(ui_server, "_archive_cancel_turn", _noop)
+
+    client = app.test_client()
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert events == ["controller", "archive"]
+    with engine.connect() as conn:
+        assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+
+
+def test_session_archive_fails_closed_when_controller_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage import workbench_sessions_service
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Keep active",
+        )["id"]
+
+    async def _unavailable(_session_id: str):
+        raise internal_client.InternalServerUnavailable("controller unavailable")
+
+    monkeypatch.setattr(internal_client, "memory_archive_session", _unavailable)
+    client = app.test_client()
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "session_archive_unavailable"
+    with engine.connect() as conn:
+        assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+
+
+@pytest.mark.parametrize("session_kind", ["missing", "reserved", "archived"])
+def test_session_archive_preflight_skips_controller_lifecycle_for_ineligible_rows(
+    monkeypatch,
+    tmp_path,
+    session_kind,
+):
+    from unittest.mock import AsyncMock
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    session_id = "ses-missing"
+    with engine.begin() as conn:
+        if session_kind == "reserved":
+            session_id = WORKSPACE_NOTICE_SESSION_ID
+        elif session_kind == "archived":
+            project_dir = tmp_path / "project"
+            project_dir.mkdir()
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session_id = create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
+            archive_session(conn, session_id)
+
+    archive_session = AsyncMock()
+    monkeypatch.setattr(internal_client, "memory_archive_session", archive_session)
+    client = app.test_client()
+
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == {
+        "missing": 404,
+        "reserved": 403,
+        "archived": 200,
+    }[session_kind]
+    archive_session.assert_not_awaited()
+
+
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 

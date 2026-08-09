@@ -6,7 +6,8 @@ import json
 import logging
 import threading
 import time
-from typing import Optional, Dict, Any
+from collections.abc import Awaitable, Callable
+from typing import Optional, Dict, Any, TypeVar
 from config import paths
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import (
@@ -52,6 +53,7 @@ from vibe.i18n import get_supported_languages, t as i18n_t
 logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
+_MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
 
 
 class _SettingsUserBindings:
@@ -1553,6 +1555,277 @@ class Controller:
             session_key="memory-ui",
         )
         return self.memory_runtime.project_for_workdir(workdir)
+
+    async def final_flush_memory_session(
+        self,
+        context: MessageContext,
+        raw_session_id: str,
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> bool:
+        """Best-effort final Memory flush for a trusted IM session lifecycle event.
+
+        The raw anchor must come from ``SessionHandler.get_base_session_id``.  The
+        handler deliberately never constructs a provider session identifier: this
+        controller boundary reuses capture admission and lets Memory derive its
+        current epoch-scoped identity.
+        """
+
+        scope = self._memory_scope_for_im_session(context, raw_session_id)
+        if scope is None:
+            return False
+
+        return await self._final_flush_memory_scope(
+            raw_session_id,
+            scope[0],
+            scope[1],
+            deadline_seconds=deadline_seconds,
+        )
+
+    async def run_memory_session_lifecycle(
+        self,
+        context: MessageContext,
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[_MemorySessionLifecycleResult]],
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> _MemorySessionLifecycleResult:
+        """Run an IM session reset behind Memory's exact capture fence."""
+
+        scope = self._memory_scope_for_im_session(context, raw_session_id)
+        if scope is None:
+            return await operation()
+
+        runtime = getattr(self, "memory_runtime", None)
+        run_lifecycle = getattr(runtime, "run_session_lifecycle", None)
+        if not callable(run_lifecycle):
+            await self._final_flush_memory_scope(
+                raw_session_id,
+                scope[0],
+                scope[1],
+                deadline_seconds=deadline_seconds,
+            )
+            return await operation()
+
+        return await run_lifecycle(
+            principal_id=scope[0],
+            project_id=scope[1],
+            raw_session_id=raw_session_id,
+            operation=operation,
+            deadline_seconds=deadline_seconds,
+        )
+
+    def _memory_scope_for_im_session(
+        self,
+        context: MessageContext,
+        raw_session_id: object,
+    ) -> Optional[tuple[str, str]]:
+        """Resolve the same complete, admitted scope used by IM capture."""
+
+        from core.memory.store import is_principal_id, is_project_id
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            return None
+        facts = self._memory_turn_facts(context, session_id=raw_session_id)
+        if not facts.memory_enabled:
+            return None
+        admission = self._memory_admission()
+        try:
+            if not admission.admits(facts):
+                return None
+            principal_id = admission.principal_for(facts)
+            project_id = admission.project_for(facts)
+        except Exception:
+            logger.debug("Memory session lifecycle admission failed", exc_info=True)
+            return None
+        if not is_principal_id(principal_id) or not is_project_id(project_id):
+            return None
+        return principal_id, project_id
+
+    async def final_flush_memory_cli_session(
+        self,
+        raw_session_id: str,
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> bool:
+        """Best-effort final flush for a trusted Workbench session ID.
+
+        The controller owns the stored scope and resolves it here; callers must
+        not reconstruct one from a Workbench row or synthesize a
+        ``MessageContext``.
+        """
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            return False
+        scope = self.memory_scope_for_cli_session(raw_session_id)
+        if scope is None:
+            runtime = getattr(self, "memory_runtime", None)
+            resolve = getattr(runtime, "resolve_current_session_scope", None)
+            if callable(resolve):
+                try:
+                    scope = await resolve(raw_session_id)
+                except Exception:
+                    logger.debug("Memory session scope recovery failed", exc_info=True)
+                    return False
+        if scope is None:
+            return False
+        return await self._final_flush_memory_scope(
+            raw_session_id,
+            scope[0],
+            scope[1],
+            deadline_seconds=deadline_seconds,
+        )
+
+    async def archive_memory_cli_session(
+        self,
+        raw_session_id: str,
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Archive one Workbench session inside its exact Memory capture fence.
+
+        This is a closed controller-owned use case for the UI process. The UI
+        supplies only the durable Workbench session ID; canonical Memory identity
+        is resolved here, and the terminal database mutation stays inside the same
+        runtime lifecycle operation as final flush.
+        """
+
+        from core.memory.store import is_principal_id, is_project_id
+        from core.services import sessions as workbench_sessions_service
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+        from storage.db import create_sqlite_engine
+
+        if (
+            not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or raw_session_id != raw_session_id.strip()
+        ):
+            raise ValueError("invalid Workbench session ID")
+        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
+            raise workbench_sessions_service.ReservedSessionError(raw_session_id)
+
+        def read_session() -> dict[str, Any]:
+            engine = create_sqlite_engine()
+            try:
+                with engine.connect() as conn:
+                    return workbench_sessions_service.get_session(
+                        conn,
+                        raw_session_id,
+                    )
+            finally:
+                engine.dispose()
+
+        existing = await asyncio.to_thread(read_session)
+        if existing.get("status") == "archived":
+            return existing
+
+        def archive_session() -> dict[str, Any]:
+            engine = create_sqlite_engine()
+            try:
+                with engine.begin() as conn:
+                    return workbench_sessions_service.archive_session(
+                        conn,
+                        raw_session_id,
+                    )
+            finally:
+                engine.dispose()
+
+        async def archive_operation() -> dict[str, Any]:
+            # Cancelling the socket request must not release Memory admission
+            # while SQLite is still committing the terminal transition.
+            task = asyncio.create_task(asyncio.to_thread(archive_session))
+            cancellation: asyncio.CancelledError | None = None
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as error:
+                    cancellation = cancellation or error
+            result = task.result()
+            if cancellation is not None:
+                raise cancellation
+            return result
+
+        async def run_memory_lifecycle() -> dict[str, Any]:
+            live_scope = self.memory_scope_for_cli_session(raw_session_id)
+            runtime = getattr(self, "memory_runtime", None)
+            resolve_scopes = getattr(runtime, "resolve_current_session_scopes", None)
+            if not callable(resolve_scopes):
+                raise RuntimeError("Memory session scope recovery is unavailable")
+            durable_scopes = await resolve_scopes(raw_session_id)
+            if durable_scopes is None:
+                raise RuntimeError("Memory session scopes could not be recovered safely")
+
+            scopes = set(durable_scopes)
+            if live_scope is not None:
+                scopes.add(live_scope)
+            if not scopes:
+                return await archive_operation()
+            for scope in scopes:
+                if (
+                    not isinstance(scope, tuple)
+                    or len(scope) != 2
+                    or not is_principal_id(scope[0])
+                    or not is_project_id(scope[1])
+                ):
+                    raise RuntimeError("invalid canonical Memory session scope")
+            canonical_scopes = tuple(sorted(scopes))
+
+            run_lifecycle = getattr(runtime, "run_session_scopes_lifecycle", None)
+            if not callable(run_lifecycle):
+                raise RuntimeError("Memory session lifecycle is unavailable")
+            return await run_lifecycle(
+                scopes=canonical_scopes,
+                raw_session_id=raw_session_id,
+                operation=archive_operation,
+                deadline_seconds=deadline_seconds,
+            )
+
+        turn_manager = getattr(self, "session_turns", None)
+        turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
+        if callable(turn_lifecycle):
+            return await turn_lifecycle(
+                raw_session_id,
+                run_memory_lifecycle,
+                deadline_seconds=deadline_seconds,
+            )
+        return await run_memory_lifecycle()
+
+    async def _final_flush_memory_scope(
+        self,
+        raw_session_id: str,
+        principal_id: str,
+        project_id: str,
+        *,
+        deadline_seconds: float,
+    ) -> bool:
+        """Call the Runtime with one already-admitted canonical scope."""
+
+        from core.memory.store import is_principal_id, is_project_id
+
+        if (
+            not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or not is_principal_id(principal_id)
+            or not is_project_id(project_id)
+        ):
+            return False
+
+        runtime = getattr(self, "memory_runtime", None)
+        final_flush = getattr(runtime, "final_flush", None)
+        if not callable(final_flush):
+            return False
+        try:
+            return bool(
+                await final_flush(
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    raw_session_id=raw_session_id,
+                    deadline_seconds=deadline_seconds,
+                )
+            )
+        except Exception:
+            logger.debug("Memory final flush failed", exc_info=True)
+            return False
 
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.

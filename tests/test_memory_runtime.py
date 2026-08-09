@@ -17,6 +17,7 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +33,16 @@ from core.memory.artifact import (
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
 )
-from core.memory.everos import FakeMemoryProvider
+from core.memory.clear_journal import MemoryClearJournal
+from core.memory.attachments import AttachmentPinStore, attachment_pin_root
+from core.memory.everos import (
+    AddAck,
+    EverOSPort,
+    FakeMemoryProvider,
+    FlushSucceeded,
+    ProviderCapture,
+    ProviderHealthSnapshot,
+)
 import core.memory.process as memory_process
 import core.memory.runtime as memory_runtime
 from core.memory.process import (
@@ -49,15 +59,26 @@ from core.memory.process import (
     _signal_owned_processes,
     _snapshot_owned_processes,
 )
-from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
+from core.memory.runtime import (
+    MemoryRuntime,
+    MemorySessionLifecycleBusyError,
+    MemoryStoreUnavailableError,
+    create_memory_runtime,
+)
+from core.memory.sidecar import _request_rejection
 from core.memory.everos_insight.recorder import initialize_call_log
+from core.memory.snapshot import MemorySnapshotManager
 from core.memory.store import MemoryStore
 from core.memory.types import (
+    CaptureAccepted,
     MemoryItem,
     MemoryItems,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     OperationFailed,
+    CaptureAttachment,
+    CaptureRequest,
+    ProviderSessionRef,
 )
 from config.v2_config import (
     AgentsConfig,
@@ -125,6 +146,121 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     assert runtime.module._worker._boot_id != initial_boot_id
 
 
+def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
+        effective_home=tmp_path,
+    )
+    store = runtime._store
+    assert store is not None
+    accepted = store.enqueue_request(
+        source_message_id="flush-before-transient-drain-failure",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="settle this flush exactly once",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+    claimed = store.claim_due(
+        lease_owner="setup",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert store.settle_add_ack(
+        claimed,
+        AddAck(request_id="setup-add", status="accumulated"),
+        lease_owner="setup",
+        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        idle_timeout=timedelta(0),
+    ).settled
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        flush_entered = threading.Event()
+        flush_finished = threading.Event()
+        release_flush = asyncio.Event()
+
+        class BlockingProvider(FakeMemoryProvider):
+            async def flush(self, session_ref: ProviderSessionRef):
+                self.flushes.append(session_ref)
+                flush_entered.set()
+                await release_flush.wait()
+                flush_finished.set()
+                return FlushSucceeded(request_id="exact-flush", status="extracted")
+
+        provider = BlockingProvider()
+        runtime._provider = provider
+        runtime.module._replace_provider(provider)
+        worker = runtime.module._worker
+        coordinator = worker.coordinator
+
+        original_claim_due = store.claim_due
+        claim_failures = 0
+
+        def fail_foreground_claim_once(*, lease_owner: str, now: str):
+            nonlocal claim_failures
+            claim_failures += 1
+            if claim_failures == 1:
+                assert flush_entered.wait(timeout=1.0)
+                raise OSError("transient foreground store failure")
+            return original_claim_due(lease_owner=lease_owner, now=now)
+
+        monkeypatch.setattr(store, "claim_due", fail_foreground_claim_once)
+
+        original_recovery = store.recover_after_boot
+        recovery_calls = 0
+        recovery_overlapped_flush: list[bool] = []
+
+        def observe_recovery(*, lease_owner: str, clock):
+            nonlocal recovery_calls
+            recovery_calls += 1
+            result = original_recovery(lease_owner=lease_owner, clock=clock)
+            if recovery_calls == 2:
+                recovery_overlapped_flush.append(not flush_finished.is_set())
+                runtime._config = replace(runtime._config, enabled=False)
+                loop.call_soon_threadsafe(release_flush.set)
+            return result
+
+        monkeypatch.setattr(store, "recover_after_boot", observe_recovery)
+
+        original_pause_and_wait = worker.pause_and_wait
+
+        async def release_during_quiesce(*, timeout_seconds: float = 30.0) -> bool:
+            release_flush.set()
+            return await original_pause_and_wait(timeout_seconds=timeout_seconds)
+
+        monkeypatch.setattr(worker, "pause_and_wait", release_during_quiesce)
+
+        async def no_wait(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
+        runtime._ensure_worker()
+        assert runtime._worker_task is not None
+        await asyncio.wait_for(runtime._worker_task, timeout=2.0)
+        assert await coordinator.pause_and_wait(timeout_seconds=1.0)
+
+        state = store.get_session_flush_state(accepted.row.provider_session_ref)
+        assert recovery_calls == 2
+        assert recovery_overlapped_flush == [False]
+        assert provider.flushes == [accepted.row.provider_session_ref]
+        assert state is not None
+        assert (state.state, state.unflushed_count) == ("idle", 0)
+        assert store.has_manual_required_fence() is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def _settings() -> EverOSProcessSettings:
     return EverOSProcessSettings(
         llm_base_url="https://llm.example.test/v1",
@@ -149,7 +285,21 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     runtime = create_memory_runtime(MemoryConfig(enabled=True))
 
     assert runtime.available is False
-    assert asyncio.run(runtime.status_payload())["error"] == "memory_store_unavailable"
+    assert asyncio.run(runtime.status_payload()) == {
+        "status": "ok",
+        "source": {
+            "status": "unavailable",
+            "observed_at": None,
+            "reason": "memory_sidecar_unavailable",
+        },
+        "health": None,
+    }
+    assert asyncio.run(runtime.maintenance_payload()) == {
+        "status": "ok",
+        "data_exists": True,
+        "can_clear": False,
+        "clear_recovery": None,
+    }
 
 
 def test_memory_runtime_reopens_the_store_after_initialization_failure(
@@ -882,6 +1032,101 @@ def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: P
     assert runtime._provider._embedding_api_key is None
 
 
+@pytest.mark.parametrize(
+    "journal_attribute",
+    ["_clear_journal", "_backup_restore_journal"],
+)
+def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    journal_attribute: str,
+) -> None:
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1",
+            "embed",
+            "embed-key",
+        ),
+    )
+    enabled = MemoryConfig(enabled=True, processing=processing)
+    disabled = replace(enabled, enabled=False)
+    factory = FakeEverOSProcessFactory()
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            enabled,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert await runtime.reconcile(enabled) == {"ok": True, "state": "ready"}
+        sidecar = factory.supervised[0]
+        assert runtime._worker_task is not None
+        assert runtime._process_records_calls is True
+
+        terminal_gc = runtime._terminal_snapshot_gc_task
+        backup_reconcile = runtime._backup_stage_reconcile_task
+        if terminal_gc is not None:
+            await terminal_gc
+        if backup_reconcile is not None:
+            await backup_reconcile
+
+        journal = getattr(runtime, journal_attribute)
+        assert journal is not None
+
+        def unreadable_journal() -> None:
+            raise OSError("maintenance journal is unreadable")
+
+        async def recovery_must_not_run() -> bool:
+            raise AssertionError("disable must not mutate an unreadable journal")
+
+        monkeypatch.setattr(journal, "get_open_operation", unreadable_journal)
+        monkeypatch.setattr(runtime, "_recover_backup_restore_locked", recovery_must_not_run)
+
+        changed = replace(
+            enabled,
+            processing=replace(
+                processing,
+                llm=replace(processing.llm, model="changed-while-unreadable"),
+            ),
+        )
+        assert await runtime.reconcile(changed) == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        assert runtime._worker_task is not None
+        assert sidecar.stopped is False
+
+        from core.controller import Controller
+
+        controller = Controller.__new__(Controller)
+        controller.config = SimpleNamespace(memory=enabled)
+        controller.memory_runtime = runtime
+        controller.memory_module = runtime.module
+        assert await controller.reconcile_memory(disabled) == {
+            "ok": True,
+            "state": "disabled",
+        }
+        assert controller.config.memory is disabled
+        assert runtime._config is disabled
+        assert runtime._restart_config == disabled
+        assert runtime.module._worker._claims_paused is True
+        assert runtime._worker_task is None
+        assert runtime._process is None
+        assert runtime._process_records_calls is False
+        assert sidecar.stopped is True
+        assert sidecar.running is False
+        assert len(factory.supervised) == 1
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
     def _artifact() -> FakeMemoryArtifactManager:
         return FakeMemoryArtifactManager(
@@ -1241,15 +1486,656 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert environment["EVEROS_MULTIMODAL__BASE_URL"] == environment["EVEROS_LLM__BASE_URL"]
     assert environment["EVEROS_MULTIMODAL__MODEL"] == environment["EVEROS_LLM__MODEL"]
     assert environment["EVEROS_MULTIMODAL__API_KEY"] == "llm-secret"
-    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(tmp_path / "attachments" / "avibe")
+    assert environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
+        attachment_pin_root(tmp_path)
+    )
     assert environment["EVEROS_EMBEDDING__API_KEY"] == "embedding-secret"
     assert "HTTP_PROXY" not in environment
     assert "SSL_CERT_FILE" not in environment
     assert "llm-secret" not in generated
     assert "embedding-secret" not in generated
     assert "rerank" in generated
-    assert str(tmp_path / "attachments" / "avibe") in generated
+    assert str(attachment_pin_root(tmp_path)) in generated
     assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
+
+
+def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "avibe-home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    source_root = home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "diagram.png"
+    source.write_bytes(b"pinned image")
+    source.chmod(0o600)
+    pin_store = AttachmentPinStore(
+        root=attachment_pin_root(home),
+        source_root=source_root,
+    )
+    bundle = pin_store.pin(
+        (
+            CaptureAttachment(
+                kind="image",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="png",
+            ),
+        )
+    )
+    pinned = pin_store.provider_attachments(bundle)
+
+    process = EverOSProcess(sys.executable, effective_home=home, settings=_settings())
+    environment = process._child_environment()
+    allowed_root = Path(environment["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
+    assert allowed_root == attachment_pin_root(home)
+
+    request: dict[str, object] = {}
+
+    async def capture_request(
+        method: str,
+        route: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, bytes]:
+        request.update(method=method, route=route, payload=payload)
+        return 200, b'{"data":{"status":"accumulated"}}'
+
+    provider = EverOSPort(home / "memory" / ".rt" / "everos.sock")
+    monkeypatch.setattr(provider, "_sidecar_write", capture_request)
+    session_ref = ProviderSessionRef(
+        principal_id="u-11111111111111111111111111111111",
+        epoch=1,
+        project_ref=PROJECT,
+        session_id=f"src--{'1' * 64}--e1",
+    )
+    asyncio.run(
+        provider.add(
+            ProviderCapture(
+                session_ref=session_ref,
+                text="remember this diagram",
+                provider_timestamp_ms=1_725_000_001_234,
+                attachments=pinned,
+            )
+        )
+    )
+
+    body = json.dumps(request["payload"]).encode()
+    assert request["method"] == "POST"
+    assert request["route"] == "/api/v2/memory/add"
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/add",
+            body,
+            attachments_root=allowed_root,
+        )
+        is None
+    )
+
+    outside = home / "outside.png"
+    outside.write_bytes(b"outside")
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    content = messages[0]["content"]
+    assert isinstance(content, list)
+    content[-1]["uri"] = outside.as_uri()
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v2/memory/add",
+            json.dumps(payload).encode(),
+            attachments_root=allowed_root,
+        )
+        == "add"
+    )
+
+
+def test_runtime_effective_home_owns_the_attachment_pipeline(
+    monkeypatch, tmp_path: Path
+) -> None:
+    global_home = tmp_path / "global-home"
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("AVIBE_HOME", str(runtime_home))
+    store = MemoryStore()
+    monkeypatch.setenv("AVIBE_HOME", str(global_home))
+    source_root = runtime_home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "notes.txt"
+    source.write_bytes(b"runtime-owned attachment")
+    source.chmod(0o600)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=runtime_home,
+    )
+    expected_pin_root = attachment_pin_root(runtime_home)
+    assert runtime.module._effective_home == runtime_home
+    assert runtime.module._attachment_store._effective_home == runtime_home
+    assert runtime.module._attachment_store._root == expected_pin_root
+    assert runtime.module._attachment_store._source_root == source_root
+    assert runtime._snapshot_manager is not None
+    assert runtime._snapshot_manager.effective_home == runtime_home
+    assert any(
+        surface.path == "memory/attachments"
+        for surface in runtime._snapshot_manager.surfaces
+    )
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=runtime_home,
+        settings=_settings(),
+    )
+    assert process._child_environment()["AVIBE_MEMORY_ATTACHMENTS_ROOT"] == str(
+        expected_pin_root
+    )
+
+    async def run() -> object:
+        try:
+            return await runtime.module.capture(
+                CaptureRequest(
+                    source_message_id="source-1",
+                    session_id="session-1",
+                    principal_id="u-11111111111111111111111111111111",
+                    project_id=PROJECT,
+                    provenance="user_input",
+                    text="remember the notes",
+                    occurred_at_ms=1_725_000_001_234,
+                    attachments=(
+                        CaptureAttachment(
+                            kind="doc",
+                            name=source.name,
+                            uri=source.as_uri(),
+                            ext="txt",
+                        ),
+                    ),
+                )
+            )
+        finally:
+            await runtime.close()
+
+    assert isinstance(asyncio.run(run()), CaptureAccepted)
+    pinned_files = tuple((expected_pin_root / "bundles").glob("*/*"))
+    assert len(pinned_files) == 1
+    assert pinned_files[0].read_bytes() == b"runtime-owned attachment"
+    assert not attachment_pin_root(global_home).exists()
+
+
+def test_final_flush_fences_capture_before_queue_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("AVIBE_HOME", str(runtime_home))
+    store = MemoryStore()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=runtime_home,
+    )
+    flush_entered = threading.Event()
+    release_flush = threading.Event()
+
+    class BlockingFlushProvider(FakeMemoryProvider):
+        async def flush(self, session_ref: ProviderSessionRef):
+            self.flushes.append(session_ref)
+            flush_entered.set()
+            assert await asyncio.to_thread(release_flush.wait, 2.0)
+            return FlushSucceeded(request_id="old-session-flush", status="extracted")
+
+    provider = BlockingFlushProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+
+    source_root = runtime_home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "old.txt"
+    source.write_bytes(b"old session attachment")
+    source.chmod(0o600)
+    old_request = CaptureRequest(
+        source_message_id="old-source",
+        session_id="shared-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_id=PROJECT,
+        provenance="user_input",
+        text="old session message",
+        occurred_at_ms=1_725_000_001_234,
+        attachments=(
+            CaptureAttachment(
+                kind="doc",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="txt",
+            ),
+        ),
+    )
+    later_request = replace(
+        old_request,
+        source_message_id="later-source",
+        text="later session message",
+        occurred_at_ms=1_725_000_001_235,
+        attachments=(),
+    )
+
+    pin_entered = threading.Event()
+    release_pin = threading.Event()
+    original_pin = runtime.module._attachment_store.pin
+
+    def blocking_pin(attachments):
+        pin_entered.set()
+        assert release_pin.wait(timeout=2.0)
+        return original_pin(attachments)
+
+    monkeypatch.setattr(runtime.module._attachment_store, "pin", blocking_pin)
+
+    async def run() -> None:
+        old_capture = asyncio.create_task(runtime.module.capture(old_request))
+        assert await asyncio.to_thread(pin_entered.wait, 1.0)
+
+        final_flush = asyncio.create_task(
+            runtime.final_flush(
+                principal_id=old_request.principal_id,
+                project_id=old_request.project_id,
+                raw_session_id=old_request.session_id,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.sleep(0)
+        later_capture = asyncio.create_task(runtime.module.capture(later_request))
+        await asyncio.sleep(0)
+        assert not final_flush.done()
+        assert not later_capture.done()
+
+        release_pin.set()
+        assert isinstance(await old_capture, CaptureAccepted)
+        drain = asyncio.create_task(runtime.module._worker.drain())
+
+        assert await asyncio.to_thread(flush_entered.wait, 1.0)
+        assert [capture.text for capture in provider.captures] == [
+            "old session message"
+        ]
+        assert len(provider.flushes) == 1
+        assert not final_flush.done()
+        assert not later_capture.done()
+        assert all(
+            row.payload_text != "later session message"
+            for row in store.list_queue_rows()
+        )
+
+        release_flush.set()
+        assert await final_flush
+
+        assert isinstance(await later_capture, CaptureAccepted)
+        await drain
+        later_rows = [
+            row
+            for row in store.list_queue_rows()
+            if row.payload_text == "later session message"
+        ]
+        assert len(later_rows) == 1
+        assert later_rows[0].state == "pending"
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_session_lifecycle_fences_capture_through_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = MemoryStore()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    provider = FakeMemoryProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = "lifecycle-session"
+    admission_lock = runtime.module._capture_admission_lock(
+        principal_id=principal_id,
+        project_id=PROJECT,
+        session_id=session_id,
+    )
+
+    async def failed_flush(**_kwargs) -> bool:
+        assert admission_lock.locked()
+        return False
+
+    monkeypatch.setattr(runtime, "_final_flush_under_admission", failed_flush)
+    request = CaptureRequest(
+        source_message_id="after-reset-source",
+        session_id=session_id,
+        principal_id=principal_id,
+        project_id=PROJECT,
+        provenance="user_input",
+        text="message after reset",
+        occurred_at_ms=1_725_000_001_234,
+        attachments=(),
+    )
+
+    async def run() -> None:
+        reset_entered = asyncio.Event()
+        release_reset = asyncio.Event()
+        order: list[str] = []
+
+        async def reset_session() -> str:
+            order.append("reset-entered")
+            reset_entered.set()
+            await release_reset.wait()
+            order.append("reset-committed")
+            return "reset-complete"
+
+        lifecycle = asyncio.create_task(
+            runtime.run_session_lifecycle(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                operation=reset_session,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        capture = asyncio.create_task(runtime.module.capture(request))
+        await asyncio.sleep(0)
+
+        assert not capture.done()
+        assert all(
+            row.payload_text != request.text
+            for row in store.list_queue_rows()
+        )
+
+        release_reset.set()
+        assert await lifecycle == "reset-complete"
+        assert isinstance(await capture, CaptureAccepted)
+        order.append("capture-enqueued")
+        assert order == [
+            "reset-entered",
+            "reset-committed",
+            "capture-enqueued",
+        ]
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_multi_scope_session_lifecycle_holds_every_fence_through_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    first_scope = (
+        "u-11111111111111111111111111111111",
+        "p-11111111111111111111111111111111",
+    )
+    second_scope = (
+        "u-22222222222222222222222222222222",
+        "p-22222222222222222222222222222222",
+    )
+    session_id = "multi-scope-lifecycle-session"
+    locks = [
+        runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        for principal_id, project_id in (first_scope, second_scope)
+    ]
+    flushes: list[tuple[str, str]] = []
+
+    async def flush_under_fence(*, principal_id, project_id, **_kwargs) -> bool:
+        assert all(lock.locked() for lock in locks)
+        flushes.append((principal_id, project_id))
+        return True
+
+    monkeypatch.setattr(runtime, "_final_flush_under_admission", flush_under_fence)
+
+    async def run() -> None:
+        async def archive_session() -> str:
+            assert all(lock.locked() for lock in locks)
+            return "archived"
+
+        assert await runtime.run_session_scopes_lifecycle(
+            scopes=(second_scope, first_scope, second_scope),
+            raw_session_id=session_id,
+            operation=archive_session,
+            deadline_seconds=2.0,
+        ) == "archived"
+        assert flushes == [first_scope, second_scope]
+        assert all(not lock.locked() for lock in locks)
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    scopes = (
+        (
+            "u-11111111111111111111111111111111",
+            "p-11111111111111111111111111111111",
+        ),
+        (
+            "u-22222222222222222222222222222222",
+            "p-22222222222222222222222222222222",
+        ),
+    )
+    session_id = "cancelled-multi-scope-lifecycle"
+
+    async def run() -> None:
+        first_lock, second_lock = [
+            runtime.module._capture_admission_lock(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
+            for principal_id, project_id in scopes
+        ]
+        await second_lock.acquire()
+
+        async def archive_session() -> None:
+            raise AssertionError("archive must not run before every fence is held")
+
+        lifecycle = asyncio.create_task(
+            runtime.run_session_scopes_lifecycle(
+                scopes=scopes,
+                raw_session_id=session_id,
+                operation=archive_session,
+                deadline_seconds=2.0,
+            )
+        )
+        for _ in range(20):
+            if first_lock.locked():
+                break
+            await asyncio.sleep(0)
+        assert first_lock.locked()
+        # Let ``wait_for`` return the acquired first lock and enter the wait for
+        # the already-held second lock before cancelling the outer lifecycle.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not lifecycle.done()
+
+        lifecycle.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifecycle
+        assert not first_lock.locked()
+        second_lock.release()
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = "busy-lifecycle-session"
+
+    async def run() -> None:
+        admission_lock = runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            session_id=session_id,
+        )
+        await admission_lock.acquire()
+        operation_called = False
+
+        async def reset_session() -> None:
+            nonlocal operation_called
+            operation_called = True
+
+        try:
+            with pytest.raises(
+                MemorySessionLifecycleBusyError,
+                match="did not quiesce",
+            ):
+                await runtime.run_session_lifecycle(
+                    principal_id=principal_id,
+                    project_id=PROJECT,
+                    raw_session_id=session_id,
+                    operation=reset_session,
+                    deadline_seconds=0.01,
+                )
+            assert operation_called is False
+        finally:
+            admission_lock.release()
+            await runtime.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("outcome", ["exception", "cancellation"])
+def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    provider = FakeMemoryProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = f"aborted-{outcome}-session"
+    request = CaptureRequest(
+        source_message_id=f"after-{outcome}-source",
+        session_id=session_id,
+        principal_id=principal_id,
+        project_id=PROJECT,
+        provenance="user_input",
+        text=f"message after {outcome}",
+        occurred_at_ms=1_725_000_001_234,
+        attachments=(),
+    )
+
+    async def run() -> None:
+        reset_entered = asyncio.Event()
+        keep_reset_open = asyncio.Event()
+
+        async def abort_reset() -> None:
+            reset_entered.set()
+            if outcome == "exception":
+                raise RuntimeError("reset failed")
+            await keep_reset_open.wait()
+
+        lifecycle = asyncio.create_task(
+            runtime.run_session_lifecycle(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                operation=abort_reset,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        if outcome == "exception":
+            with pytest.raises(RuntimeError, match="reset failed"):
+                await lifecycle
+        else:
+            lifecycle.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await lifecycle
+
+        receipt = await asyncio.wait_for(runtime.module.capture(request), timeout=1.0)
+        assert isinstance(receipt, CaptureAccepted)
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_final_flush_deadline_includes_capture_admission_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = "deadline-session"
+
+    async def run() -> None:
+        admission_lock = runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            session_id=session_id,
+        )
+        await admission_lock.acquire()
+        try:
+            started = asyncio.get_running_loop().time()
+            assert not await runtime.final_flush(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                deadline_seconds=0.02,
+            )
+            assert asyncio.get_running_loop().time() - started < 0.5
+        finally:
+            admission_lock.release()
+            await runtime.close()
+
+    asyncio.run(run())
 
 
 def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
@@ -1662,7 +2548,7 @@ def test_explicit_sidecar_retry_keeps_crash_budget_until_observed_health(monkeyp
     assert process.consecutive_failures == 5
 
 
-def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Path) -> None:
     started: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -1675,6 +2561,13 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
+    journal = MemoryClearJournal(tmp_path)
+    journal.start(
+        operation_id="interrupted-clear",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(),
@@ -1682,16 +2575,15 @@ def test_runtime_recovers_interrupted_clear_before_starting_sidecar(monkeypatch,
         effective_home=tmp_path,
     )
 
-    async def interrupted_clear() -> OperationFailed:
-        return OperationFailed(error="memory_clear_failed")
-
-    monkeypatch.setattr(runtime.module, "_recover_interrupted_clear_locked", interrupted_clear)
-
     async def run() -> None:
         assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
 
     asyncio.run(run())
     assert started == []
+    recovery = runtime._clear_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.operation_id == "interrupted-clear"
+    assert recovery.state == "recovery_needed"
 
 
 def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
@@ -2425,7 +3317,7 @@ def test_legacy_disabled_diagnostics_still_records_provider_calls(
     asyncio.run(run())
 
 
-def test_recorder_corruption_stays_degraded_until_clear(
+def test_status_preserves_recorder_degradation_episode_timestamp(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2444,40 +3336,119 @@ def test_recorder_corruption_stays_degraded_until_clear(
             effective_home=tmp_path,
         )
         assert (await runtime.reconcile(config))["ok"] is True
-        calls = 0
+        health = iter(
+            (
+                {"state": "degraded", "reason": "writer_failures"},
+                {"state": "degraded", "reason": "writer_failures"},
+                {"state": "active", "reason": None},
+                {"state": "degraded", "reason": "writer_failures"},
+                {"state": "degraded", "reason": "call_log_corrupt"},
+            )
+        )
+        observed_at = iter(
+            (
+                "2026-08-09T00:00:01.000Z",
+                "2026-08-09T00:00:02.000Z",
+                "2026-08-09T00:00:03.000Z",
+                "2026-08-09T00:00:04.000Z",
+                "2026-08-09T00:00:05.000Z",
+            )
+        )
 
-        async def recorder_health() -> dict[str, str | None]:
-            nonlocal calls
-            calls += 1
-            return (
-                {"state": "degraded", "reason": "call_log_corrupt"}
-                if calls == 1
-                else {"state": "active", "reason": None}
+        async def health_snapshot() -> ProviderHealthSnapshot:
+            return ProviderHealthSnapshot(
+                status="ok",
+                version="1.2.3",
+                capabilities={
+                    "llm": True,
+                    "embed": True,
+                    "rerank": True,
+                    "multimodal_llm": True,
+                    "parser": True,
+                },
+                disabled_features=(),
+                cascade=None,
+                recorder=next(health),
             )
 
-        async def ready_status():
-            return memory_runtime.MemoryStatus(state="ready")
-
-        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
-        monkeypatch.setattr(runtime.module, "status", ready_status)
+        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+        monkeypatch.setattr(memory_runtime, "_utc_observed_at", lambda: next(observed_at))
+        episode_ids = iter((f"ma_{digit * 64}" for digit in ("1", "2", "3")))
+        monkeypatch.setattr(
+            memory_runtime,
+            "_new_recorder_episode_id",
+            lambda: next(episode_ids),
+        )
 
         first = await runtime.status_payload()
+        first_anomalies = await runtime.failure_log_payload()
         second = await runtime.status_payload()
+        second_anomalies = await runtime.failure_log_payload()
+        recovered = await runtime.status_payload()
+        recovered_anomalies = await runtime.failure_log_payload()
+        recovered_observed_at = runtime._recorder_health_observed_at
 
-        assert first["recorder"] == {
+        assert first["health"]["recorder"] == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        assert first_anomalies["items"][0] == {
+            "id": f"ma_{'1' * 64}",
+            "kind": "recorder_degraded",
+            "state": "degraded",
+            "operation": "record",
+            "occurred_at": "2026-08-09T00:00:01.000Z",
+            "error_code": "memory_processing_failed",
+            "attempts": 0,
+            "generation": 0,
+            "request_id": None,
+        }
+        assert second["source"]["observed_at"] == "2026-08-09T00:00:02.000Z"
+        assert second_anomalies["items"][0]["occurred_at"] == (
+            "2026-08-09T00:00:01.000Z"
+        )
+        assert (
+            second_anomalies["items"][0]["id"]
+            == first_anomalies["items"][0]["id"]
+        )
+        assert recovered["health"]["recorder"] == {
+            "state": "active",
+            "reason": None,
+        }
+        assert recovered_anomalies["items"] == []
+        assert recovered_observed_at is None
+        new_episode = await runtime.status_payload()
+        new_episode_anomalies = await runtime.failure_log_payload()
+        assert new_episode["health"]["recorder"] == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        assert new_episode_anomalies["items"][0]["occurred_at"] == (
+            "2026-08-09T00:00:04.000Z"
+        )
+        assert new_episode_anomalies["items"][0]["id"] == f"ma_{'2' * 64}"
+        changed_reason = await runtime.status_payload()
+        changed_reason_anomalies = await runtime.failure_log_payload()
+        assert changed_reason["health"]["recorder"] == {
             "state": "degraded",
             "reason": "call_log_corrupt",
         }
-        assert second["recorder"] == first["recorder"]
-        assert calls == 1
+        assert changed_reason_anomalies["items"][0]["occurred_at"] == (
+            "2026-08-09T00:00:05.000Z"
+        )
+        assert (
+            changed_reason_anomalies["items"][0]["id"] == f"ma_{'3' * 64}"
+        )
         await runtime._stop_sidecar_for_clear()
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
+        assert runtime._recorder_health_observed_at is None
+        assert runtime._recorder_health_episode_id is None
         await runtime.close()
 
     asyncio.run(run())
 
 
-def test_live_sidecar_with_unexpectedly_disabled_recorder_reports_writer_failure(
+def test_status_preserves_everos_disabled_recorder_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2497,17 +3468,28 @@ def test_live_sidecar_with_unexpectedly_disabled_recorder_reports_writer_failure
         )
         assert (await runtime.reconcile(config))["ok"] is True
 
-        async def recorder_health() -> dict[str, str | None]:
-            return {"state": "disabled", "reason": None}
+        snapshot = ProviderHealthSnapshot(
+            status="ok",
+            version="1.2.3",
+            capabilities={
+                "llm": True,
+                "embed": True,
+                "rerank": True,
+                "multimodal_llm": True,
+                "parser": True,
+            },
+            disabled_features=(),
+            cascade=None,
+            recorder={"state": "disabled", "reason": None},
+        )
 
-        async def ready_status() -> memory_runtime.MemoryStatus:
-            return memory_runtime.MemoryStatus(state="ready")
+        async def health_snapshot() -> ProviderHealthSnapshot:
+            return snapshot
 
-        monkeypatch.setattr(runtime._provider, "recorder_health", recorder_health)
-        monkeypatch.setattr(runtime.module, "status", ready_status)
-        assert (await runtime.status_payload())["recorder"] == {
-            "state": "degraded",
-            "reason": "writer_failures",
+        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+        assert (await runtime.status_payload())["health"]["recorder"] == {
+            "state": "disabled",
+            "reason": None,
         }
         await runtime.close()
 
@@ -2649,10 +3631,8 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
                 break
             await asyncio.sleep(0)
         payload = await runtime.status_payload()
-        assert payload["recorder"] == {
-            "state": "degraded",
-            "reason": "call_log_corrupt",
-        }
+        assert payload["health"] is None
+        assert payload["source"]["reason"] == "memory_disabled"
         await asyncio.wait_for(asyncio.shield(task), timeout=1)
         assert maintenance_calls == 1
         assert runtime._call_log_retention_task is None
@@ -2697,7 +3677,7 @@ def test_runtime_close_waits_for_active_call_log_maintenance(
     asyncio.run(run())
 
 
-def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
+def test_clear_quiesce_does_not_delete_call_log_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2713,7 +3693,7 @@ def test_clear_stops_call_log_maintenance_and_removes_only_owned_database_files(
         runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
         await runtime._stop_sidecar_for_clear()
 
-        assert not db_path.exists()
+        assert db_path.exists()
         assert unexpected.read_text(encoding="utf-8") == "keep"
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
         await runtime.close()
@@ -2876,7 +3856,7 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     assert "profile_warning" not in payload
 
 
-def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
+def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2888,7 +3868,8 @@ def test_status_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
     async def run() -> None:
-        assert (await runtime.status_payload())["data_exists"] is False
+        assert (await runtime.maintenance_payload())["data_exists"] is False
+        assert "data_exists" not in await runtime.status_payload()
         await runtime.close()
 
     asyncio.run(run())
@@ -3045,6 +4026,141 @@ def _processing_config() -> MemoryProcessingConfig:
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
     )
+
+
+async def _retain_terminal_clear_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+) -> Path:
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=home)
+    manager = runtime._snapshot_manager
+    assert manager is not None
+
+    def retain(_permit) -> None:
+        raise OSError("retain terminal snapshot for startup GC")
+
+    monkeypatch.setattr(manager, "remove", retain)
+    completed = await runtime.clear(operator_ref="user:owner")
+    snapshot_path = manager.snapshot_path(completed["operation_id"])
+    assert completed["status"] == "completed"
+    assert snapshot_path.is_dir()
+    await runtime.close()
+    return snapshot_path
+
+
+def test_terminal_snapshot_gc_does_not_block_construction_or_ready_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    synchronous_calls: list[str] = []
+    original_remove = MemorySnapshotManager.remove
+
+    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            synchronous_calls.append(permit.snapshot_id)
+            raise AssertionError("terminal snapshot GC ran on the activation loop")
+        entered.set()
+        assert release.wait(timeout=2)
+        try:
+            original_remove(manager, permit)
+        finally:
+            finished.set()
+
+    async def run() -> None:
+        snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+        monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+        factory = FakeEverOSProcessFactory()
+        runtime = MemoryRuntime(
+            MemoryConfig(enabled=True, processing=_processing_config()),
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+
+        assert synchronous_calls == []
+        assert await runtime.reconcile(runtime._config) == {
+            "ok": True,
+            "state": "ready",
+        }
+        assert factory.supervised[0].running is True
+        assert entered.is_set() is False
+
+        gc_task = runtime._terminal_snapshot_gc_task
+        assert gc_task is not None
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not gc_task.done()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(gc_task), timeout=1)
+
+        assert finished.is_set()
+        assert not snapshot_path.exists()
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_terminal_snapshot_gc_shutdown_owns_cancelled_io_until_it_settles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_remove = MemorySnapshotManager.remove
+
+    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        try:
+            original_remove(manager, permit)
+        finally:
+            finished.set()
+
+    async def run() -> None:
+        snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+        monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+        assert await runtime.reconcile(MemoryConfig()) == {
+            "ok": True,
+            "state": "disabled",
+        }
+        gc_task = runtime._terminal_snapshot_gc_task
+        assert gc_task is not None
+        assert await asyncio.to_thread(entered.wait, 1)
+
+        stop_entered = asyncio.Event()
+        original_stop = runtime._stop_terminal_snapshot_gc
+
+        async def observed_stop() -> None:
+            stop_entered.set()
+            await original_stop()
+
+        monkeypatch.setattr(runtime, "_stop_terminal_snapshot_gc", observed_stop)
+        closing = asyncio.create_task(runtime.close())
+        await stop_entered.wait()
+        assert not closing.done()
+        closing.cancel()
+        await asyncio.sleep(0)
+        assert not closing.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, timeout=1)
+
+        assert finished.is_set()
+        assert gc_task.done()
+        assert runtime._terminal_snapshot_gc_task is None
+        assert not snapshot_path.exists()
+
+    asyncio.run(run())
 
 
 def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:
@@ -3221,7 +4337,7 @@ def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
+def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3236,6 +4352,7 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     )
     old = FakeEverOSProcess()
     runtime._process = old
+    old_provider = runtime._provider
     store = runtime._store
     assert store is not None
     worker = runtime.module._worker
@@ -3276,24 +4393,22 @@ def test_restart_waits_for_cancelled_worker_store_call_before_process_handoff(
     async def run() -> None:
         runtime._worker_task = asyncio.create_task(worker.drain_once())
         assert await asyncio.to_thread(entered.wait, 1.0)
-        restarting = asyncio.create_task(runtime.restart())
-        await asyncio.sleep(0.05)
-        assert restarting.done() is False
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_restart_failed",
+        }
         assert old.stops == 0
+        assert runtime._process is old
+        assert runtime._provider is old_provider
         assert factory.created == []
+        assert worker._claims_paused is False
 
         release.set()
-        assert await restarting == {"ok": True, "state": "ready"}
-        assert old.stops == 1
-        assert len(factory.created) == 1
-        assert worker._boot_id != old_lease
+        assert await runtime._worker_task == 0
+        assert old.stops == 0
+        assert factory.created == []
+        assert worker._boot_id == old_lease
         assert store.list_queue_rows()[0].state == "processing"
-
-        # The first tick under the replacement lease must fence old claimed
-        # work before claims can resume.
-        worker.pause_claims()
-        assert await worker.drain_once() == 0
-        assert store.list_queue_rows()[0].state == "manual_required"
         await runtime.close()
 
     asyncio.run(run())
@@ -3529,7 +4644,6 @@ def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
 
 
 def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     marked_factory = FakeEverOSProcessFactory()
@@ -3551,13 +4665,12 @@ def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery
         effective_home=tmp_path / "recovery",
     )
 
-    async def failed_recovery() -> OperationFailed:
-        return OperationFailed(error="memory_clear_failed")
-
-    monkeypatch.setattr(
-        recovering.module,
-        "_recover_interrupted_clear_locked",
-        failed_recovery,
+    meta = recovering._store.ensure_meta()
+    recovering._clear_journal.start(
+        operation_id="restart-recovery",
+        operator_ref="user:owner",
+        pre_epoch=meta.epoch,
+        target_epoch=meta.epoch + 1,
     )
 
     async def run() -> None:
@@ -3683,13 +4796,13 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
         if lifecycle == "clear":
-            async def blocked_clear():
+            async def blocked_prepare(_operation, **_kwargs):
                 entered.set()
                 await release.wait()
-                return OperationFailed(error="memory_clear_failed")
+                raise RuntimeError("injected clear pause")
 
-            monkeypatch.setattr(runtime.module, "clear", blocked_clear)
-            operation = asyncio.create_task(runtime.clear())
+            monkeypatch.setattr(runtime, "_prepare_clear", blocked_prepare)
+            operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
         elif lifecycle == "reconcile":
             async def blocked_reconcile(*_args, **_kwargs):
                 entered.set()
@@ -3734,7 +4847,7 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
         ready_task = runtime._ready_activation_task
         if ready_task is not None:
             await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
-        assert activations == ([] if lifecycle == "artifact" else [None])
+        assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
         await runtime.close()
 
     asyncio.run(run())

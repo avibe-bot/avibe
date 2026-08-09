@@ -3568,10 +3568,9 @@
       "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"
     },
     "tabs": {
-      "status": "状态",
+      "processingRecord": "处理记录",
       "profile": "画像",
       "search": "搜索",
-      "log": "日志",
       "settings": "设置"
     },
     "remoteUnavailable": {
@@ -3636,10 +3635,143 @@
         "errorCode": "错误代码",
         "attempts": "尝试次数",
         "kind": {
+          "boot_recovery": "启动恢复",
           "delivery_abandoned": "投递已放弃",
           "distillation_rejected": "提炼被拒绝",
+          "recorder_degraded": "记录器已降级",
           "result_unknown": "处理结果未知"
         }
+      }
+    },
+    "processingRecord": {
+      "title": "处理记录",
+      "description": "查看运行时观测、来源新鲜度、恢复证据和有界处理诊断。",
+      "refresh": "刷新",
+      "runtime": {
+        "title": "运行时与能力",
+        "loading": "正在读取运行时健康状态…",
+        "unavailable": "当前没有可用的运行时健康快照。",
+        "healthStatus": {
+          "ok": "正常"
+        },
+        "version": "版本",
+        "capabilities": "能力",
+        "noCapabilities": "运行时未报告能力。",
+        "disabledFeatures": "已禁用功能",
+        "noneDisabled": "运行时未报告已禁用功能。",
+        "cascade": "级联处理",
+        "recorder": "记录器",
+        "noFacts": "未报告相关事实。",
+        "fact": {
+          "capability": {
+            "llm": "LLM",
+            "embed": "Embedding",
+            "rerank": "重排序",
+            "multimodalLlm": "多模态 LLM",
+            "parser": "解析器"
+          },
+          "cascade": {
+            "healthy": "健康",
+            "reasons": "原因",
+            "pending": "待处理",
+            "failedPermanent": "永久失败",
+            "failedRetryable": "可重试失败",
+            "drainConsecutiveFailures": "连续排空失败",
+            "unrecoverableTotal": "不可恢复总数",
+            "optimizeFailureStreak": "连续优化失败",
+            "pruneStaleSeconds": "过期数据清理阈值（秒）"
+          },
+          "recorder": {
+            "state": "状态",
+            "reason": "原因"
+          },
+          "boolean": {
+            "true": "是",
+            "false": "否"
+          },
+          "cascadeReason": {
+            "drainFailures": "排空失败",
+            "optimizeStuck": "优化停滞",
+            "pruneStale": "过期数据清理停滞",
+            "healthProbeFailed": "健康探测失败",
+            "unknown": "未知"
+          },
+          "recorderState": {
+            "active": "活跃",
+            "degraded": "已降级",
+            "disabled": "已禁用"
+          },
+          "recorderReason": {
+            "writerFailures": "写入失败",
+            "serializationFailed": "序列化失败",
+            "callLogCorrupt": "调用日志损坏"
+          }
+        }
+      },
+      "source": {
+        "health": "运行时健康状态"
+      },
+      "sourceState": {
+        "available": "可用",
+        "partial": "部分可用",
+        "stale": "已过期",
+        "unknown": "未知",
+        "unavailable": "不可用"
+      },
+      "sourceReason": "原因：{{reason}}",
+      "sourceNotObserved": "未观测",
+      "sources": {
+        "title": "来源可用性",
+        "description": "每个来源独立观测；单个来源不可用不代表运行时存在全局状态。"
+      },
+      "anomalies": {
+        "title": "异常与恢复",
+        "description": "查看本机保留的有界处理与恢复证据。",
+        "loading": "正在读取异常…",
+        "empty": "没有保留的异常。",
+        "loadFailed": "无法加载记忆异常。"
+      },
+      "manualRequiredReadOnly": "需要人工检查。此记录只读，不提供操作。",
+      "anomalyState": {
+        "dead": "已放弃",
+        "degraded": "已降级",
+        "manualRequired": "需要人工检查",
+        "rejected": "已拒绝"
+      },
+      "anomalyOperation": {
+        "add": "添加",
+        "flush": "提交批次",
+        "record": "记录"
+      },
+      "field": {
+        "operation": "操作",
+        "operationId": "操作 ID",
+        "state": "状态",
+        "occurredAt": "发生时间",
+        "errorCode": "错误代码",
+        "attempts": "尝试次数",
+        "generation": "代次",
+        "requestId": "请求 ID"
+      },
+      "clearRecovery": {
+        "title": "中断的清除操作需要处理",
+        "description": "可从日志记录处继续删除，或中止并恢复已捕获的快照。",
+        "state": {
+          "preparing": "正在准备快照",
+          "prepared": "快照已准备完成",
+          "deleting": "正在删除记忆数据",
+          "recoveryNeeded": "需要恢复处理"
+        },
+        "resume": "继续清除",
+        "abort": "中止并恢复",
+        "abortUnavailable": "初始快照完整后才能中止并恢复。",
+        "resumeSuccess": "清除操作已继续并完成。",
+        "abortSuccess": "清除操作已中止，快照已恢复。",
+        "actionFailed": "无法更新清除恢复状态。",
+        "loadFailed": "无法加载清除维护状态。"
+      },
+      "timeline": {
+        "title": "最近处理时间线"
       }
     },
     "profile": {
@@ -3692,6 +3824,8 @@
       "clearAction": "打开「清除全部」",
       "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
       "sectionPartial": "{{section}}部分可用（{{reason}}）。",
+      "sectionStale": "{{section}}的数据已过期（{{reason}}）。",
+      "sectionUnknown": "{{section}}的可用性未知（{{reason}}）。",
       "section": {
         "everos": "时间线数据",
         "capture": "捕获关联",
@@ -3780,7 +3914,8 @@
       "apiKeyPlaceholder": "sk-…",
       "apiKeyClearHint": "密钥仅可写入——Avibe 不会把已保存的密钥回显给你。",
       "embeddingLocked": "已有记忆数据时无法更改 Embedding 端点或模型，请先执行「清除全部」。",
-      "embeddingStatusPending": "正在确认记忆状态……确认没有数据后，Embedding 端点将解锁。",
+      "embeddingStatusPending": "正在读取本地维护状态……确认没有数据后，Embedding 端点将解锁。",
+      "maintenanceLoadFailed": "无法加载本地记忆维护状态。",
       "save": "保存设置",
       "saving": "保存中…",
       "saveFailed": "无法保存记忆设置。",

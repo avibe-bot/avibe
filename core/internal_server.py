@@ -940,6 +940,105 @@ def create_app(
             return scope
         return None
 
+    @app.post("/internal/memory/final-flush")
+    async def _memory_final_flush(request: Request) -> Any:
+        """Flush one admitted Workbench session before terminal archive."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        session_id = payload["session_id"].strip()
+        final_flush = getattr(controller, "final_flush_memory_cli_session", None)
+        if not callable(final_flush):
+            return {"ok": True, "flushed": False}
+        try:
+            flushed = await final_flush(
+                session_id,
+                deadline_seconds=5.0,
+            )
+        except Exception:
+            logger.debug(
+                "internal Memory final flush failed for %s",
+                session_id,
+                exc_info=True,
+            )
+            flushed = False
+        return {"ok": True, "flushed": bool(flushed)}
+
+    @app.post("/internal/memory/archive-session")
+    async def _memory_archive_session(request: Request) -> Any:
+        """Archive one Workbench session through the controller lifecycle."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"]
+            or payload["session_id"] != payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        archive_session = getattr(controller, "archive_memory_cli_session", None)
+        if not callable(archive_session):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        try:
+            session = await archive_session(
+                payload["session_id"],
+                deadline_seconds=5.0,
+            )
+        except LookupError:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "session_not_found"},
+            )
+        except PermissionError as error:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": getattr(error, "code", "forbidden"),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            from core.memory.runtime import MemorySessionLifecycleBusyError
+
+            code = (
+                error.code
+                if isinstance(error, MemorySessionLifecycleBusyError)
+                else "session_archive_unavailable"
+            )
+            logger.debug(
+                "internal Workbench session archive failed for %s",
+                payload["session_id"],
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": code},
+            )
+        if not isinstance(session, dict):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        return {"ok": True, "session": session}
+
     def _verified_memory_ui_user_key(request: Request) -> str | None:
         from core.memory.http_headers import (
             CALLER_SESSION_HEADER,
@@ -966,6 +1065,14 @@ def create_app(
         ):
             return None
         return user_key
+
+    def _memory_ui_operator_ref(request: Request, runtime: Any) -> str | None:
+        """Resolve a signed browser identity to its opaque Memory principal."""
+
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
+            return None
+        return runtime.principal_for_user_key(user_key)
 
     def _memory_read_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import MEMORY_USER_KEY_HEADER
@@ -1015,15 +1122,33 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
     @app.get("/internal/memory/failures")
-    async def _memory_failures() -> Any:
+    async def _memory_failures(request: Request) -> Any:
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.failure_log_payload()
+            return await runtime.failure_log_payload(
+                operator_ref=_memory_ui_operator_ref(request, runtime)
+            )
         except Exception:
             logger.warning("internal memory failure log failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/maintenance")
+    async def _memory_maintenance(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.maintenance_payload(
+                operator_ref=_memory_ui_operator_ref(request, runtime)
+            )
+        except Exception:
+            logger.warning("internal memory maintenance read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
 
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
@@ -1166,15 +1291,26 @@ def create_app(
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"query", "limit"}
+            or set(payload) != {"query", "policy"}
             or not isinstance(payload.get("query"), str)
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        limit = payload.get("limit")
-        if not isinstance(limit, int) or isinstance(limit, bool):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+        from core.memory.types import RecallPolicy
+
         try:
-            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
+            policy = RecallPolicy.from_payload(payload.get("policy"))
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
+        try:
+            return await runtime.search_payload(
+                payload["query"],
+                policy,
+                principal_id,
+                project_id,
+                current_session_id=current_session_id,
+            )
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
@@ -1234,7 +1370,8 @@ def create_app(
 
     @app.post("/internal/memory/clear")
     async def _memory_clear(request: Request) -> Any:
-        if _verified_memory_ui_user_key(request) is None:
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
@@ -1243,7 +1380,9 @@ def create_app(
         if payload != {"confirm": True}:
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         try:
-            return await runtime.clear()
+            return await runtime.clear(
+                operator_ref=runtime.principal_for_user_key(user_key)
+            )
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
@@ -1252,6 +1391,41 @@ def create_app(
         except Exception:
             logger.warning("internal memory clear failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
+    async def _memory_clear_recovery(request: Request, *, abort: bool) -> Any:
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"operation_id"}
+            or not isinstance(payload.get("operation_id"), str)
+            or not 1 <= len(payload["operation_id"]) <= 128
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            operator_ref = runtime.principal_for_user_key(user_key)
+            operation = runtime.abort_clear if abort else runtime.resume_clear
+            return await operation(payload["operation_id"], operator_ref=operator_ref)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        except MemoryStoreUnavailableError:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        except Exception:
+            logger.warning("internal memory clear recovery failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
+    @app.post("/internal/memory/clear/resume")
+    async def _memory_clear_resume(request: Request) -> Any:
+        return await _memory_clear_recovery(request, abort=False)
+
+    @app.post("/internal/memory/clear/abort")
+    async def _memory_clear_abort(request: Request) -> Any:
+        return await _memory_clear_recovery(request, abort=True)
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
@@ -1683,8 +1857,6 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         thread_id=payload.get("thread_id"),
         message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
-        memory_cli_admitted=payload.get("memory_cli_admitted") is True,
-        is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
     if context.platform_specific is None:
         context.platform_specific = {}
@@ -1711,8 +1883,6 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
-    memory_cli_admitted: bool = False,
-    is_ordinary_text: bool = False,
 ) -> MessageContext:
     """Rebuild a Session's routing context from its durable scope and target.
 
@@ -1744,8 +1914,6 @@ def _build_session_context(
     }
     if resolved_platform == "avibe":
         platform_specific["workbench_session_id"] = session_id
-    if memory_cli_admitted:
-        platform_specific["memory_cli_admitted"] = True
     session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {
@@ -1778,7 +1946,6 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
-        is_ordinary_text=is_ordinary_text,
     )
 
 
