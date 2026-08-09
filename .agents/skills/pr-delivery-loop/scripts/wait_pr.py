@@ -228,6 +228,16 @@ def _current_pr_status(pr: dict[str, Any] | None) -> str:
     return state or "unknown"
 
 
+def _current_pr_head_sha(pr: dict[str, Any] | None) -> str:
+    if not isinstance(pr, dict):
+        return "unknown"
+    head = pr.get("head")
+    if not isinstance(head, dict):
+        return "unknown"
+    sha = str(head.get("sha") or "").strip()
+    return sha or "unknown"
+
+
 def _describe_pr_status_change(previous_status: str, current_status: str) -> str:
     if previous_status == "draft" and current_status == "open":
         return "Pull request is ready for review."
@@ -248,6 +258,16 @@ def _format_pr_status_event(pr: dict[str, Any], previous_status: str, current_st
     return (
         f"- pr_status #{pr_number} {previous_status} -> {current_status}\n"
         f"  {_describe_pr_status_change(previous_status, current_status)}\n"
+        f"  {url}"
+    )
+
+
+def _format_pr_head_event(pr: dict[str, Any], previous_head: str, current_head: str) -> str:
+    pr_number = pr.get("number")
+    url = pr.get("html_url") or ""
+    return (
+        f"- pr_head #{pr_number} {previous_head} -> {current_head}\n"
+        "  Pull request head changed; confirm or trigger Codex review for the new exact head.\n"
         f"  {url}"
     )
 
@@ -342,12 +362,13 @@ def _render_activity(
     *,
     repo: str,
     pr_number: int,
-    state: dict[str, list[dict[str, Any]]],
+    state: dict[str, Any],
     review_cursor: int,
     review_comment_cursor: int,
     issue_comment_cursor: int,
     reaction_cursor: int,
     pr_status: str,
+    head_sha: str,
     event_limit: int,
     viewer_login: str | None = None,
     ignore_self_comments: bool = True,
@@ -355,10 +376,11 @@ def _render_activity(
     ignored_authors: set[str] | None = None,
     ignore_patterns: list[re.Pattern[str]] | None = None,
     review_fingerprints: dict[str, str] | None = None,
-) -> tuple[str | None, int, int, int, int, str]:
+) -> tuple[str | None, int, int, int, int, str, str]:
     ignored_authors = ignored_authors or set()
     ignore_patterns = ignore_patterns or []
     current_pr_status = _current_pr_status(state.get("pull_request"))
+    current_head_sha = _current_pr_head_sha(state.get("pull_request"))
     new_reviews = _filter_review_changes(state["reviews"], review_cursor, review_fingerprints or {})
     new_review_comments = filter_new(state["review_comments"], review_comment_cursor)
     new_issue_comments = filter_new(state["issue_comments"], issue_comment_cursor)
@@ -386,21 +408,40 @@ def _render_activity(
         if _is_codex_pass_reaction(reaction)
     ]
     has_pr_status_event = current_pr_status != pr_status
+    has_head_event = current_head_sha != head_sha
 
-    if not (new_reviews or new_review_comments or new_issue_comments or new_reactions or has_pr_status_event):
-        return None, review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
+    if not (
+        new_reviews
+        or new_review_comments
+        or new_issue_comments
+        or new_reactions
+        or has_pr_status_event
+        or has_head_event
+    ):
+        return (
+            None,
+            review_cursor,
+            review_comment_cursor,
+            issue_comment_cursor,
+            reaction_cursor,
+            pr_status,
+            head_sha,
+        )
 
     next_review_cursor = max(review_cursor, max_id(new_reviews))
     next_review_comment_cursor = max(review_comment_cursor, max_id(new_review_comments))
     next_issue_comment_cursor = max(issue_comment_cursor, max_id(new_issue_comments))
     next_reaction_cursor = max(reaction_cursor, max_id(state["reactions"]))
     next_pr_status = current_pr_status
+    next_head_sha = current_head_sha
 
     render_pr_status_event = has_pr_status_event and (
         not actionable_only or current_pr_status in ACTIONABLE_PR_STATUSES
     )
 
     rendered_events: list[str] = []
+    if has_head_event and isinstance(state.get("pull_request"), dict):
+        rendered_events.append(_format_pr_head_event(state["pull_request"], head_sha, current_head_sha))
     if render_pr_status_event and isinstance(state.get("pull_request"), dict):
         rendered_events.append(_format_pr_status_event(state["pull_request"], pr_status, current_pr_status))
     rendered_events.extend(_format_review(review) for review in visible_reviews)
@@ -416,6 +457,7 @@ def _render_activity(
             next_issue_comment_cursor,
             next_reaction_cursor,
             next_pr_status,
+            next_head_sha,
         )
 
     lines = [f"GitHub PR activity detected for {repo}#{pr_number}"]
@@ -435,6 +477,7 @@ def _render_activity(
         next_issue_comment_cursor,
         next_reaction_cursor,
         next_pr_status,
+        next_head_sha,
     )
 
 
@@ -472,6 +515,7 @@ def _write_cursor_output(
     issue_comment_cursor: int,
     reaction_cursor: int,
     pr_status: str,
+    head_sha: str,
 ) -> None:
     if not path:
         return
@@ -482,6 +526,7 @@ def _write_cursor_output(
         "issue_comment_cursor": issue_comment_cursor,
         "reaction_cursor": reaction_cursor,
         "pr_status": pr_status,
+        "head_sha": head_sha,
     }
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
@@ -578,6 +623,7 @@ def _owner_conflict(
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
+    allow_cursorless_watch_identity_change: bool = False,
 ) -> str | None:
     """Why ``owner`` is somebody else's claim on the path, or ``None`` when it is ours.
 
@@ -599,6 +645,8 @@ def _owner_conflict(
     if saved_repo != repo or saved_pr != pr_number:
         return f"belongs to {saved_repo}#{saved_pr}, not {repo}#{pr_number}"
     if saved_watch is not None and watch_identity is not None and saved_watch != watch_identity:
+        if allow_cursorless_watch_identity_change and saved_owner == watch_id:
+            return None
         return (
             f"belongs to another watch on {saved_repo}#{saved_pr} with different "
             "reporting filters"
@@ -611,6 +659,26 @@ def _owner_conflict(
             )
         return f"belongs to watch {saved_owner}, not watch {watch_id}"
     return None
+
+
+def _cursorless_state_file(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return not any(
+        key in payload
+        for key in (
+            *STATE_CURSOR_KEYS,
+            "pr_cursor",
+            "pr_status",
+            "head_sha",
+            REVIEW_FINGERPRINTS_KEY,
+            STAGED_KEY,
+        )
+    )
 
 
 def _load_state_file(
@@ -661,6 +729,7 @@ def _load_state_file(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        allow_cursorless_watch_identity_change=_cursorless_state_file(Path(path)) if path else False,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} {conflict}")
@@ -918,6 +987,7 @@ def _verify_state_file_writable(
             pr_number=pr_number,
             watch_identity=watch_identity,
             watch_id=watch_id,
+            allow_cursorless_watch_identity_change=watch_id is not None and _cursorless_state_file(target),
         )
         if conflict is not None:
             return
@@ -988,6 +1058,7 @@ def _write_state_file(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        allow_cursorless_watch_identity_change=watch_id is not None and _cursorless_state_file(target),
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} now {conflict}")
@@ -1066,26 +1137,27 @@ def _resolve_staged_state(
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
-) -> dict[str, Any]:
-    """Promote or drop the cursors staged for an earlier cycle's report.
+) -> tuple[dict[str, Any], str | None]:
+    """Promote an acknowledged transaction or replay its persisted output.
 
     Promoted when the supervisor's last-delivery stamp has moved since the report was
-    staged: the report was queued, so polling may start after it. Dropped when the
-    stamp is unchanged, which replays the report -- one repeated Agent turn, against
-    an event lost for good. Comparing stamps rather than consuming a one-shot ack is
-    what makes this survive a restart, and makes a ``once`` watch resumed long after
-    its one report promote instead of replaying. Either way the decision is written
-    down before polling, so it is taken once.
+    staged: the report was queued, so polling may start after it. When the stamp is
+    unchanged, return the stored rendered report without touching the pending block.
+    Persisting both halves makes replay independent of mutable GitHub objects.
     """
 
     staged = saved.get(STAGED_KEY)
     if not isinstance(staged, dict):
-        return saved
+        return saved, None
     cursors = staged.get("cursors")
-    # A staged block this waiter cannot read is dropped, not guessed at: replaying
-    # the report it covered costs a turn, promoting cursors of unknown reach loses
-    # whatever they skip.
-    delivered = isinstance(cursors, dict) and staged.get("delivered_after") != delivery
+    if not isinstance(cursors, dict):
+        raise StateFileUnusableError("Pending waiter transaction has no usable cursor state")
+    output = staged.get("output")
+    delivered = staged.get("delivered_after") != delivery
+
+    if not delivered and isinstance(output, str) and output:
+        print("An earlier report was never delivered; replaying its persisted output.", file=sys.stderr)
+        return saved, output
 
     resolved = {key: value for key, value in saved.items() if key != STAGED_KEY}
     if delivered:
@@ -1094,7 +1166,7 @@ def _resolve_staged_state(
         (
             "An earlier report was delivered; advancing past it."
             if delivered
-            else "An earlier report was never delivered; reporting it again."
+            else "Legacy pending state has no report payload; reconstructing from committed cursors."
         ),
         file=sys.stderr,
     )
@@ -1111,7 +1183,7 @@ def _resolve_staged_state(
         watch_id=watch_id,
         **fields,
     )
-    return resolved
+    return resolved, None
 
 
 def _deliver(output: str) -> None:
@@ -1253,24 +1325,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    _verify_state_file_writable(
-        args.state_file,
-        repo=args.repo,
-        pr_number=args.pr,
-        watch_identity=watch_identity,
-        watch_id=watch_id,
-    )
+    # Read-only state may supply the cached viewer login, but no path is claimed
+    # until every authentication precondition below has passed.
     saved = _load_state_file(
         args.state_file,
-        repo=args.repo,
-        pr_number=args.pr,
-        watch_identity=watch_identity,
-        watch_id=watch_id,
-    )
-    saved = _resolve_staged_state(
-        args.state_file,
-        saved,
-        delivery=delivery_stamp,
         repo=args.repo,
         pr_number=args.pr,
         watch_identity=watch_identity,
@@ -1319,6 +1377,35 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+
+    _verify_state_file_writable(
+        args.state_file,
+        repo=args.repo,
+        pr_number=args.pr,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+    )
+    # Reload after the atomic claim/adoption so the cycle starts from the state
+    # that actually owns the path, not the read-only preflight snapshot.
+    saved = _load_state_file(
+        args.state_file,
+        repo=args.repo,
+        pr_number=args.pr,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+    )
+    saved, replay_output = _resolve_staged_state(
+        args.state_file,
+        saved,
+        delivery=delivery_stamp,
+        repo=args.repo,
+        pr_number=args.pr,
+        watch_identity=watch_identity,
+        watch_id=watch_id,
+    )
+    if replay_output is not None:
+        _deliver(replay_output)
+        return 0
 
     effective_interval = base_interval
     settle_seconds = max(args.settle, 0.0)
@@ -1450,10 +1537,14 @@ def main() -> int:
             or (_saved_str(saved, "pr_status") if resumed else None)
             or _current_pr_status(state.get("pull_request"))
         )
+        head_sha = (
+            (_saved_str(saved, "head_sha") if resumed else None)
+            or _current_pr_head_sha(state.get("pull_request"))
+        )
 
         print(
             (
-                "Watching GitHub PR %s#%s from cursors: review=%s review_comment=%s issue_comment=%s reaction=%s pr_status=%s catch_up=%s resumed=%s"
+                "Watching GitHub PR %s#%s from cursors: review=%s review_comment=%s issue_comment=%s reaction=%s pr_status=%s head=%s catch_up=%s resumed=%s"
                 % (
                     args.repo,
                     args.pr,
@@ -1462,6 +1553,7 @@ def main() -> int:
                     issue_comment_cursor,
                     reaction_cursor,
                     pr_status,
+                    head_sha,
                     args.catch_up,
                     resumed,
                 )
@@ -1469,9 +1561,10 @@ def main() -> int:
             file=sys.stderr,
         )
 
-        def _render(cursors: tuple[int, int, int, int, str]) -> tuple[str | None, int, int, int, int, str]:
-            nonlocal review_fingerprints
-            result = _render_activity(
+        def _render(
+            cursors: tuple[int, int, int, int, str, str],
+        ) -> tuple[str | None, int, int, int, int, str, str]:
+            return _render_activity(
                 repo=args.repo,
                 pr_number=args.pr,
                 state=state,
@@ -1480,6 +1573,7 @@ def main() -> int:
                 issue_comment_cursor=cursors[2],
                 reaction_cursor=cursors[3],
                 pr_status=cursors[4],
+                head_sha=cursors[5],
                 event_limit=args.event_limit,
                 viewer_login=viewer_login,
                 ignore_self_comments=not args.include_self_comments,
@@ -1488,8 +1582,6 @@ def main() -> int:
                 ignore_patterns=ignore_patterns,
                 review_fingerprints=review_fingerprints,
             )
-            review_fingerprints = _review_fingerprint_map(state["reviews"])
-            return result
 
         def _advance_since() -> None:
             nonlocal review_comment_since, issue_comment_since
@@ -1503,6 +1595,7 @@ def main() -> int:
                 "issue_comment_cursor": issue_comment_cursor,
                 "reaction_cursor": reaction_cursor,
                 "pr_status": pr_status,
+                "head_sha": head_sha,
                 REVIEW_FINGERPRINTS_KEY: review_fingerprints,
                 "review_comment_since": review_comment_since,
                 "issue_comment_since": issue_comment_since,
@@ -1510,7 +1603,11 @@ def main() -> int:
                 "token_fingerprint": token_fingerprint,
             }
 
-        def _persist_pr_state(*, previous: dict[str, Any] | None = None) -> None:
+        def _persist_pr_state(
+            *,
+            previous: dict[str, Any] | None = None,
+            output: str | None = None,
+        ) -> None:
             fields = _pr_state_fields()
             if previous is not None:
                 # Committed state stays where the reported event is still unseen; the
@@ -1518,7 +1615,11 @@ def main() -> int:
                 # waiter started from so a later cycle can tell whether it has moved.
                 fields = {
                     **previous,
-                    STAGED_KEY: {"delivered_after": delivery_stamp, "cursors": fields},
+                    STAGED_KEY: {
+                        "delivered_after": delivery_stamp,
+                        "output": output,
+                        "cursors": fields,
+                    },
                 }
             _write_state_file(
                 args.state_file,
@@ -1539,16 +1640,16 @@ def main() -> int:
             """
 
             if two_phase:
-                _persist_pr_state(previous=previous)
+                _persist_pr_state(previous=previous, output=output)
                 _deliver(output)
                 return
             _deliver(output)
             _persist_pr_state()
 
         def _settle(
-            first: tuple[str | None, int, int, int, int, str],
-            pending: tuple[int, int, int, int, str],
-        ) -> tuple[str | None, int, int, int, int, str]:
+            first: tuple[str | None, int, int, int, int, str, str],
+            pending: tuple[int, int, int, int, str, str],
+        ) -> tuple[str | None, int, int, int, int, str, str]:
             """Re-poll while a batch is still landing so it costs one Agent turn."""
 
             nonlocal state
@@ -1605,11 +1706,13 @@ def main() -> int:
             issue_comment_cursor,
             reaction_cursor,
             pr_status,
+            head_sha,
         )
         pre_event_fields = _pr_state_fields()
         initial_result = _render(pending_cursors)
         if initial_result[0] is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
+        review_fingerprints = _review_fingerprint_map(state["reviews"])
         (
             initial_output,
             review_cursor,
@@ -1617,6 +1720,7 @@ def main() -> int:
             issue_comment_cursor,
             reaction_cursor,
             pr_status,
+            head_sha,
         ) = initial_result
         _advance_since()
         if initial_output is None:
@@ -1631,6 +1735,7 @@ def main() -> int:
                 issue_comment_cursor=issue_comment_cursor,
                 reaction_cursor=reaction_cursor,
                 pr_status=pr_status,
+                head_sha=head_sha,
             )
             _report_pr(initial_output, pre_event_fields)
             return 0
@@ -1647,13 +1752,18 @@ def main() -> int:
             pr_cursor=pr_cursor,
             event_limit=args.event_limit,
         )
-        def _persist_new_pr_state(*, previous: int | None = None) -> None:
+        def _persist_new_pr_state(
+            *,
+            previous: int | None = None,
+            output: str | None = None,
+        ) -> None:
             fields: dict[str, Any] = {"pr_cursor": pr_cursor}
             if previous is not None:
                 fields = {
                     "pr_cursor": previous,
                     STAGED_KEY: {
                         "delivered_after": delivery_stamp,
+                        "output": output,
                         "cursors": {"pr_cursor": pr_cursor},
                     },
                 }
@@ -1670,7 +1780,7 @@ def main() -> int:
             """Same staging contract as ``_report_pr``, over the single new-PR cursor."""
 
             if two_phase:
-                _persist_new_pr_state(previous=previous)
+                _persist_new_pr_state(previous=previous, output=output)
                 _deliver(output)
                 return
             _deliver(output)
@@ -1765,11 +1875,13 @@ def main() -> int:
                 issue_comment_cursor,
                 reaction_cursor,
                 pr_status,
+                head_sha,
             )
             pre_event_fields = _pr_state_fields()
             result = _render(pending_cursors)
             if result[0] is not None:
                 result = _settle(result, pending_cursors)
+            review_fingerprints = _review_fingerprint_map(state["reviews"])
             (
                 output,
                 review_cursor,
@@ -1777,6 +1889,7 @@ def main() -> int:
                 issue_comment_cursor,
                 reaction_cursor,
                 pr_status,
+                head_sha,
             ) = result
             _advance_since()
             if output is None:
@@ -1793,6 +1906,7 @@ def main() -> int:
                 issue_comment_cursor=issue_comment_cursor,
                 reaction_cursor=reaction_cursor,
                 pr_status=pr_status,
+                head_sha=head_sha,
             )
             report = partial(_report_pr, previous=pre_event_fields)
         else:

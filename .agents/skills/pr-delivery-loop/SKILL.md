@@ -15,6 +15,11 @@ description: The implementation-lane standard for delivering a PR across the Avi
 - The bundled watcher set is `scripts/wait_pr.py`,
   `scripts/wait_action.py`, and `scripts/_github_wait_common.py`; keep these
   files synchronized with the skill text.
+- This PR deliberately maintains only the repo-local bundle under
+  `.agents/skills/pr-delivery-loop/scripts/`. The existing
+  `skills/background-watch-hook/scripts/` copy remains a separate distribution
+  surface; document its relationship and any differences in the PR body, and
+  leave unification to a separate orchestrator decision.
 - In the multi-repo workspace, the project-level skill entry is a symlink to
   the Avibe copy. Update the canonical copy first, then sync every repository
   copy in the same change.
@@ -199,11 +204,13 @@ turn ends because you armed a watch and are waiting, say exactly that.
   lane watch.
 - Every managed waiter must pass an owner/concern-specific `--state-file
   <path>`. The state file records the repository, PR/filter, and watch
-  identity; claim it under a lock and treat a foreign, corrupt, or unwritable
-  file as terminal. The waiter stages detected cursors under a pending record
-  and promotes them only after `AVIBE_WATCH_LAST_DELIVERY` changes. A delivery
-  failure therefore replays the event instead of silently advancing the
-  baseline, while concurrent watches cannot share a cursor accidentally.
+  identity; resolve PR viewer identity before claiming it, claim it under a lock,
+  and treat a foreign, corrupt, or unwritable file as terminal. A PR state also
+  persists the head SHA and review fingerprints. Each detected batch stages its
+  rendered output together with the next cursors under one pending record, then
+  promotes both only after `AVIBE_WATCH_LAST_DELIVERY` changes. An unchanged
+  delivery stamp replays the stored output, so deleted GitHub activity cannot
+  erase a notification; a head change is itself review-loop activity.
 - A first managed cycle with an unseeded state file must explicitly use
   `--catch-up` or fail closed; the normal PR-delivery path seeds the complete
   cursor baseline before pushing, then starts the post-push waiter from that
@@ -213,6 +220,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `--pr` restores the saved review/comment/reaction cursors before polling.
   Use `--settle 20` for review batches so a Codex review envelope and its inline
   comments are observed together when GitHub writes them in separate requests.
+  Every settle candidate is computed from the same committed cursor and review-
+  fingerprint snapshot; only the final candidate updates the next state.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and
