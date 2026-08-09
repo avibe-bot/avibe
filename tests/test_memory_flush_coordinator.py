@@ -638,10 +638,16 @@ def test_server_rejected_add_is_terminal_but_opens_processing_fault(tmp_path: Pa
         assert [event[:2] for event in events] == [("fault", "credential")]
         failures = store.failure_log()
         assert len(failures) == 1
-        assert (failures[0].operation, failures[0].state, failures[0].request_id) == (
+        assert (
+            failures[0].operation,
+            failures[0].state,
+            failures[0].request_id,
+            failures[0].attempts,
+        ) == (
             "add",
             "rejected",
             "server-rejection",
+            1,
         )
 
         provider.processing_healthy_flag = True

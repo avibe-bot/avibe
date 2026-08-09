@@ -333,6 +333,7 @@ def test_memory_archive_session_round_trip_uses_only_session_identity(socket_pat
         captured["method"] = request.method
         captured["path"] = request.url.path
         captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions["timeout"]
         return httpx.Response(
             200,
             json={
@@ -355,6 +356,12 @@ def test_memory_archive_session_round_trip_uses_only_session_identity(socket_pat
         "method": "POST",
         "path": "/internal/memory/archive-session",
         "payload": {"session_id": "ses-memory"},
+        "timeout": {
+            "connect": 5.0,
+            "read": None,
+            "write": None,
+            "pool": None,
+        },
     }
     assert result == {
         "status_code": 200,

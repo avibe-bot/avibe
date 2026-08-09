@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 import logging
 import os
+import secrets
 import stat
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
@@ -78,6 +79,10 @@ ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 _RECORDER_DISABLED = {"state": "disabled", "reason": None}
 _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
+
+
+def _new_recorder_episode_id() -> str:
+    return f"ma_{secrets.token_hex(32)}"
 
 
 class MemoryStoreUnavailableError(RuntimeError):
@@ -201,6 +206,7 @@ class MemoryRuntime:
         self._process_records_calls = False
         self._recorder_health: dict[str, str | None] = dict(_RECORDER_DISABLED)
         self._recorder_health_observed_at: str | None = None
+        self._recorder_health_episode_id: str | None = None
         self._last_health_snapshot: ProviderHealthSnapshot | None = None
         self._last_health_observed_at: str | None = None
         self._open_store(store)
@@ -768,12 +774,15 @@ class MemoryRuntime:
         current = dict(health)
         if current.get("state") != "degraded":
             self._recorder_health_observed_at = None
+            self._recorder_health_episode_id = None
         elif (
             previous.get("state") != "degraded"
             or previous.get("reason") != current.get("reason")
             or self._recorder_health_observed_at is None
+            or self._recorder_health_episode_id is None
         ):
             self._recorder_health_observed_at = observed_at or _utc_observed_at()
+            self._recorder_health_episode_id = _new_recorder_episode_id()
         self._recorder_health = current
 
     async def failure_log_payload(
@@ -788,10 +797,12 @@ class MemoryRuntime:
         if (
             self._recorder_health.get("state") == "degraded"
             and self._recorder_health_observed_at is not None
+            and self._recorder_health_episode_id is not None
         ):
             items.insert(
                 0,
                 {
+                    "id": self._recorder_health_episode_id,
                     "kind": "recorder_degraded",
                     "state": "degraded",
                     "operation": "record",
@@ -2656,6 +2667,7 @@ class MemoryRuntime:
     def _set_recorder_health_disabled(self) -> None:
         self._recorder_health = dict(_RECORDER_DISABLED)
         self._recorder_health_observed_at = None
+        self._recorder_health_episode_id = None
 
     async def _drain_loop(self) -> None:
         while self._config.enabled:

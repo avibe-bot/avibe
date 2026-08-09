@@ -531,7 +531,7 @@ export const MemoryStatusPanel: React.FC<{
               </div>
             ) : failures.map((entry) => (
               <FailureRow
-                key={`${entry.kind}:${entry.operation}:${entry.generation}:${entry.request_id ?? entry.occurred_at}`}
+                key={entry.id}
                 entry={entry}
               />
             ))}

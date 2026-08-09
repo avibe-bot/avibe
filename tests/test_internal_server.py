@@ -336,7 +336,7 @@ def test_memory_final_flush_delegates_identity_to_controller() -> None:
     controller.memory_scope_for_cli_session.assert_not_called()
 
 
-def test_memory_archive_session_delegates_only_raw_session_identity() -> None:
+def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
     controller = _build_controller_double()
     controller.memory_scope_for_cli_session = Mock(
         side_effect=AssertionError("the endpoint must not resolve identity")
@@ -364,6 +364,8 @@ def test_memory_archive_session_delegates_only_raw_session_identity() -> None:
         "ok": True,
         "session": {"id": "ses-memory", "status": "archived"},
     }
+    # The UI transport waits without a reporting deadline, while the controller
+    # still bounds provider lifecycle work before its shielded archive commit.
     controller.archive_memory_cli_session.assert_awaited_once_with(
         "ses-memory",
         deadline_seconds=5.0,

@@ -147,6 +147,12 @@ CREATE TABLE IF NOT EXISTS memory_flush_settlements (
     observed_at TEXT NOT NULL,
     error_code TEXT,
     recovery_origin TEXT CHECK (recovery_origin IS NULL OR recovery_origin = 'boot'),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    CHECK (
+        (operation_kind = 'add' AND observation = 'rejected' AND attempts >= 1)
+        OR
+        (NOT (operation_kind = 'add' AND observation = 'rejected') AND attempts = 0)
+    ),
     UNIQUE (
         provider_session_ref, epoch, generation, operation_kind, operation_token
     )

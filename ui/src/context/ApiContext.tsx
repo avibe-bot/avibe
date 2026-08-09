@@ -1785,6 +1785,7 @@ export type MemoryStatus = {
 export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
 
 export type MemoryFailureLogEntry = {
+  id: string;
   kind: string;
   state: string;
   operation: string;

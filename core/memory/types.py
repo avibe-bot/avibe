@@ -437,6 +437,7 @@ RecallResult: TypeAlias = RecallItems | OperationFailed
 class MemoryFailureLogEntry:
     """One sanitized terminal failure observation retained by Avibe."""
 
+    id: str
     kind: MemoryFailureKind
     occurred_at: str
     error_code: str | None = None

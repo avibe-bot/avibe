@@ -79,7 +79,13 @@ _MEMORY_STORE_REQUIRED_COLUMNS = {
         }
     ),
     "memory_flush_settlements": frozenset(
-        {"provider_session_ref", "generation", "operation_token", "recovery_origin"}
+        {
+            "provider_session_ref",
+            "generation",
+            "operation_token",
+            "recovery_origin",
+            "attempts",
+        }
     ),
 }
 _MEMORY_STORE_INDEXES = frozenset(
@@ -2029,8 +2035,8 @@ class MemoryStore:
                         INSERT INTO memory_flush_settlements (
                             provider_session_ref, epoch, generation, operation_kind,
                             operation_token, observation, request_id,
-                            confirmed_watermark_ms, observed_at, error_code
-                        ) VALUES (?, ?, ?, 'add', ?, 'rejected', ?, NULL, ?, ?)
+                            confirmed_watermark_ms, observed_at, error_code, attempts
+                        ) VALUES (?, ?, ?, 'add', ?, 'rejected', ?, NULL, ?, ?, ?)
                         """,
                         (
                             row.provider_session_ref.serialize(),
@@ -2042,6 +2048,7 @@ class MemoryStore:
                             _bounded_opaque_text(
                                 rejection.error_code or "memory_processing_failed"
                             ),
+                            attempts,
                         ),
                     )
                     if rejection.server_fault:
@@ -2259,10 +2266,13 @@ class MemoryStore:
             self._compact_terminal_tombstones_in_connection(conn, datetime.now(timezone.utc))
             rows = conn.execute(
                 """
-                SELECT kind, state, operation, generation,
+                SELECT anomaly_namespace, anomaly_evidence,
+                       kind, state, operation, generation,
                        occurred_at, error_code, request_id, attempts
                 FROM (
                     SELECT
+                        'queue' AS anomaly_namespace,
+                        source_message_digest AS anomaly_evidence,
                         CASE
                             WHEN state = 'dead' THEN 'delivery_abandoned'
                             WHEN EXISTS (
@@ -2306,6 +2316,8 @@ class MemoryStore:
                     UNION ALL
 
                     SELECT
+                        'settlement' AS anomaly_namespace,
+                        CAST(settlement_id AS TEXT) AS anomaly_evidence,
                         CASE
                             WHEN recovery_origin = 'boot' THEN 'boot_recovery'
                             WHEN observation = 'rejected' AND operation_kind = 'flush'
@@ -2319,7 +2331,7 @@ class MemoryStore:
                         observed_at AS occurred_at,
                         error_code,
                         request_id,
-                        0 AS attempts,
+                        attempts,
                         printf('%020d', settlement_id) AS sort_key
                     FROM memory_flush_settlements
                     WHERE epoch = ? AND (
@@ -2335,6 +2347,11 @@ class MemoryStore:
             ).fetchall()
         return tuple(
             MemoryFailureLogEntry(
+                id=_failure_anomaly_id(
+                    meta.scope_key,
+                    str(row["anomaly_namespace"]),
+                    str(row["anomaly_evidence"]),
+                ),
                 kind=str(row["kind"]),
                 occurred_at=str(row["occurred_at"]),
                 error_code=(str(row["error_code"]) if row["error_code"] is not None else None),
@@ -3196,6 +3213,13 @@ def _is_bundle_id(value: object) -> bool:
 
 def _keyed_digest(scope_key: bytes, value: str) -> str:
     return hmac.new(scope_key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _failure_anomaly_id(scope_key: bytes, namespace: str, evidence: str) -> str:
+    """Hide one immutable internal evidence key behind an install-local ID."""
+
+    domain_value = f"memory-failure-anomaly:v1\0{namespace}\0{evidence}"
+    return f"ma_{_keyed_digest(scope_key, domain_value)}"
 
 
 def derive_principal_id(scope_key: bytes, user_key: str) -> str:

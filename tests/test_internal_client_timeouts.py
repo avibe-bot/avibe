@@ -28,7 +28,6 @@ from vibe.internal_client import (
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_SEARCH_TIMEOUT_SECONDS,
-    MEMORY_SESSION_ARCHIVE_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
     memory_archive_session,
     memory_clear,
@@ -93,12 +92,12 @@ def test_final_flush_client_outlasts_the_controller_deadline() -> None:
     )
 
 
-def test_session_archive_client_outlasts_lifecycle_and_sqlite_lock_deadlines() -> None:
-    assert MEMORY_SESSION_ARCHIVE_TIMEOUT_SECONDS > 10.0
-    assert (
-        inspect.signature(memory_archive_session).parameters["timeout"].default
-        == MEMORY_SESSION_ARCHIVE_TIMEOUT_SECONDS
-    )
+def test_session_archive_client_has_no_reporting_timeout() -> None:
+    # Scope resolution and the cancellation-safe archive commit include
+    # unbounded local filesystem/SQLite work. The controller keeps the provider
+    # final-flush deadline, but the reporting transport must await its terminal
+    # result instead of returning a retryable-looking failure mid-commit.
+    assert "timeout" not in inspect.signature(memory_archive_session).parameters
 
 
 def _reconcile_lifecycle_budget_seconds() -> float:

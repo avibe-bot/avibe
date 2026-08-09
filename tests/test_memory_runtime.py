@@ -3252,6 +3252,12 @@ def test_status_preserves_recorder_degradation_episode_timestamp(
 
         monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
         monkeypatch.setattr(memory_runtime, "_utc_observed_at", lambda: next(observed_at))
+        episode_ids = iter((f"ma_{digit * 64}" for digit in ("1", "2", "3")))
+        monkeypatch.setattr(
+            memory_runtime,
+            "_new_recorder_episode_id",
+            lambda: next(episode_ids),
+        )
 
         first = await runtime.status_payload()
         first_anomalies = await runtime.failure_log_payload()
@@ -3266,6 +3272,7 @@ def test_status_preserves_recorder_degradation_episode_timestamp(
             "reason": "writer_failures",
         }
         assert first_anomalies["items"][0] == {
+            "id": f"ma_{'1' * 64}",
             "kind": "recorder_degraded",
             "state": "degraded",
             "operation": "record",
@@ -3278,6 +3285,10 @@ def test_status_preserves_recorder_degradation_episode_timestamp(
         assert second["source"]["observed_at"] == "2026-08-09T00:00:02.000Z"
         assert second_anomalies["items"][0]["occurred_at"] == (
             "2026-08-09T00:00:01.000Z"
+        )
+        assert (
+            second_anomalies["items"][0]["id"]
+            == first_anomalies["items"][0]["id"]
         )
         assert recovered["health"]["recorder"] == {
             "state": "active",
@@ -3294,6 +3305,7 @@ def test_status_preserves_recorder_degradation_episode_timestamp(
         assert new_episode_anomalies["items"][0]["occurred_at"] == (
             "2026-08-09T00:00:04.000Z"
         )
+        assert new_episode_anomalies["items"][0]["id"] == f"ma_{'2' * 64}"
         changed_reason = await runtime.status_payload()
         changed_reason_anomalies = await runtime.failure_log_payload()
         assert changed_reason["health"]["recorder"] == {
@@ -3303,9 +3315,13 @@ def test_status_preserves_recorder_degradation_episode_timestamp(
         assert changed_reason_anomalies["items"][0]["occurred_at"] == (
             "2026-08-09T00:00:05.000Z"
         )
+        assert (
+            changed_reason_anomalies["items"][0]["id"] == f"ma_{'3' * 64}"
+        )
         await runtime._stop_sidecar_for_clear()
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
         assert runtime._recorder_health_observed_at is None
+        assert runtime._recorder_health_episode_id is None
         await runtime.close()
 
     asyncio.run(run())

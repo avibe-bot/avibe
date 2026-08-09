@@ -164,7 +164,17 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "processing_recovery_pending_at",
             "last_error_at",
         }.issubset(meta_columns)
-        assert "recovery_origin" in settlement_columns
+        assert {"attempts", "recovery_origin"}.issubset(settlement_columns)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO memory_flush_settlements (
+                    provider_session_ref, epoch, generation, operation_kind,
+                    operation_token, observation, observed_at
+                ) VALUES ('missing-attempt-evidence', 0, 1, 'add',
+                          'missing-attempt-evidence', 'rejected', 'now')
+                """
+            )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -1457,7 +1467,8 @@ def test_session_state_pruning_preserves_active_and_retained_evidence(tmp_path: 
 
 
 def test_rejected_add_evidence_survives_terminal_tombstone_compaction(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
+    store_path = _store_path(tmp_path)
+    store = MemoryStore(store_path)
     _enqueue(store, "rejected-add")
     row = store.claim_due(lease_owner="boot", now="2099-01-01T00:00:00.000Z")
     assert row is not None
@@ -1479,7 +1490,7 @@ def test_rejected_add_evidence_survives_terminal_tombstone_compaction(tmp_path: 
         settlement = conn.execute(
             """
             SELECT operation_kind, operation_token, observation, request_id,
-                   observed_at, error_code
+                   observed_at, error_code, attempts
             FROM memory_flush_settlements
             """
         ).fetchone()
@@ -1490,27 +1501,245 @@ def test_rejected_add_evidence_survives_terminal_tombstone_compaction(tmp_path: 
         "rejected-request",
         "2099-01-01T00:00:01.000Z",
         "INTERNAL_ERROR",
+        1,
     )
     failures = store.failure_log()
     assert len(failures) == 1
+    assert failures[0].id.startswith("ma_")
+    assert len(failures[0].id) == 67
+    assert row.source_message_digest not in failures[0].id
+    assert row.provider_session_ref.serialize() not in failures[0].id
     assert (
         failures[0].kind,
         failures[0].state,
         failures[0].operation,
         failures[0].error_code,
         failures[0].request_id,
+        failures[0].attempts,
     ) == (
         "delivery_abandoned",
         "rejected",
         "add",
         "INTERNAL_ERROR",
         "rejected-request",
+        1,
     )
 
     reference = observed_at + TERMINAL_TOMBSTONE_RETENTION + timedelta(seconds=1)
     assert store.compact_terminal_tombstones(now=reference) == 1
     assert _row_for_source(store, "rejected-add") is None
-    assert store.failure_log() == failures
+    assert MemoryStore(store_path).failure_log() == failures
+
+
+def test_failure_log_ids_disambiguate_duplicate_shapes_without_exposing_evidence(
+    tmp_path: Path,
+) -> None:
+    store_path = _store_path(tmp_path)
+    store = MemoryStore(store_path)
+    observed_at = _dt("2099-01-01T00:00:01.000Z")
+    raw_sources = ("private-source-one", "private-source-two")
+    raw_sessions = ("private-session-one", "private-session-two")
+    internal_evidence: set[str] = {
+        *raw_sources,
+        *raw_sessions,
+        "u-11111111111111111111111111111111",
+        PROJECT,
+    }
+
+    for source, session in zip(raw_sources, raw_sessions, strict=True):
+        accepted = store.enqueue_request(
+            source_message_id=source,
+            session_id=session,
+            principal_id="u-11111111111111111111111111111111",
+            project_ref=PROJECT,
+            provenance="user_input",
+            payload_text="queued payload",
+            occurred_at_ms=1_000,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert accepted.row is not None
+        claimed = store.claim_due(
+            lease_owner=f"worker-{source}",
+            now="2099-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+        assert store.settle(
+            claimed,
+            MessageFailure(error="memory_processing_failed", retryable=False),
+            lease_owner=f"worker-{source}",
+            now=observed_at,
+        ) == SettleResult(settled=True, state="dead", attempts=1)
+        internal_evidence.update(
+            {
+                claimed.source_message_digest,
+                claimed.provider_session_ref.serialize(),
+            }
+        )
+
+    settlement = store.enqueue_request(
+        source_message_id="private-settlement-source",
+        session_id="private-settlement-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert settlement.row is not None
+    claimed = store.claim_due(
+        lease_owner="settlement-worker",
+        now="2099-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert store.settle(
+        claimed,
+        AddRejected(request_id=None, error_code="INTERNAL_ERROR", server_fault=False),
+        lease_owner="settlement-worker",
+        now=observed_at,
+    ) == SettleResult(settled=True, state="dead", attempts=1)
+    internal_evidence.update(
+        {
+            "private-settlement-source",
+            "private-settlement-session",
+            claimed.source_message_digest,
+            claimed.provider_session_ref.serialize(),
+            f"add:{claimed.source_message_digest}:{claimed.lease_token}",
+        }
+    )
+
+    first = store.failure_log()
+    refreshed = store.failure_log()
+    reopened = MemoryStore(store_path).failure_log()
+
+    assert len(first) == 3
+    assert first == refreshed == reopened
+    assert len({failure.id for failure in first}) == len(first)
+    public_projection = repr(first)
+    assert all(value not in public_projection for value in internal_evidence)
+    duplicate_queue_shapes = [
+        (
+            failure.kind,
+            failure.state,
+            failure.operation,
+            failure.occurred_at,
+            failure.error_code,
+            failure.request_id,
+            failure.attempts,
+            failure.generation,
+        )
+        for failure in first
+        if failure.state == "dead"
+    ]
+    assert duplicate_queue_shapes[0] == duplicate_queue_shapes[1]
+    for failure in first:
+        assert failure.id.startswith("ma_")
+        assert len(failure.id) == 67
+        assert all(character in "0123456789abcdef" for character in failure.id[3:])
+
+
+def test_rejected_add_attempt_evidence_is_exact_across_sessions_and_prior_retries(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    retried_acceptance = store.enqueue_request(
+        source_message_id="retried-session",
+        session_id="retried-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert retried_acceptance.row is not None
+
+    for attempt, clock in enumerate(("00:00:00", "00:01:00"), start=1):
+        row = store.claim_due(
+            lease_owner="retry-worker",
+            now=f"2099-01-01T{clock}.000Z",
+        )
+        assert row is not None
+        assert row.provider_session_ref == retried_acceptance.row.provider_session_ref
+        result = store.settle(
+            row,
+            MessageFailure(error="memory_processing_failed"),
+            lease_owner="retry-worker",
+            now=_dt(f"2099-01-01T{clock}.500Z"),
+        )
+        assert result == SettleResult(settled=True, state="pending", attempts=attempt)
+
+    retried = store.claim_due(
+        lease_owner="retry-worker",
+        now="2099-01-01T00:05:00.000Z",
+    )
+    assert retried is not None
+    assert retried.provider_session_ref == retried_acceptance.row.provider_session_ref
+    assert store.settle(
+        retried,
+        AddRejected(
+            request_id="rejected-after-retries",
+            error_code="INTERNAL_ERROR",
+            server_fault=False,
+        ),
+        lease_owner="retry-worker",
+        now=_dt("2099-01-01T00:05:00.500Z"),
+    ) == SettleResult(settled=True, state="dead", attempts=3)
+
+    first_acceptance = store.enqueue_request(
+        source_message_id="first-attempt-session",
+        session_id="first-attempt-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=2_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert first_acceptance.row is not None
+    first = store.claim_due(
+        lease_owner="first-worker",
+        now="2099-01-01T00:06:00.000Z",
+    )
+    assert first is not None
+    assert first.provider_session_ref == first_acceptance.row.provider_session_ref
+    assert store.settle(
+        first,
+        AddRejected(
+            request_id="rejected-first-attempt",
+            error_code="INVALID_ARGUMENT",
+            server_fault=False,
+        ),
+        lease_owner="first-worker",
+        now=_dt("2099-01-01T00:06:00.500Z"),
+    ) == SettleResult(settled=True, state="dead", attempts=1)
+
+    with sqlite3.connect(store.path) as conn:
+        evidence = conn.execute(
+            """
+            SELECT provider_session_ref, request_id, attempts
+            FROM memory_flush_settlements
+            WHERE operation_kind = 'add' AND observation = 'rejected'
+            ORDER BY request_id
+            """
+        ).fetchall()
+    session_labels = {
+        retried_acceptance.row.provider_session_ref.serialize(): "retried-session",
+        first_acceptance.row.provider_session_ref.serialize(): "first-attempt-session",
+    }
+    assert [
+        (session_labels[session_ref], request_id, attempts)
+        for session_ref, request_id, attempts in evidence
+    ] == [
+        ("retried-session", "rejected-after-retries", 3),
+        ("first-attempt-session", "rejected-first-attempt", 1),
+    ]
+    assert {
+        failure.request_id: failure.attempts for failure in store.failure_log()
+    } == {
+        "rejected-after-retries": 3,
+        "rejected-first-attempt": 1,
+    }
 
 
 def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

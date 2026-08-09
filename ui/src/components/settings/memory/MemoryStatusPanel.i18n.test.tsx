@@ -19,6 +19,7 @@ const renderAnomaly = (language: 'en' | 'zh', errorCode: string) => {
     interpolation: { escapeValue: false },
   });
   const failure: MemoryFailureLogEntry = {
+    id: 'ma_3333333333333333333333333333333333333333333333333333333333333333',
     kind: 'result_unknown',
     state: 'manual_required',
     operation: 'add',

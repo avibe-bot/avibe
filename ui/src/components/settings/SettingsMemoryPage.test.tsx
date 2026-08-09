@@ -183,6 +183,7 @@ describe('SettingsMemoryPage Processing Record', () => {
       status: 'ok',
       recovery: null,
       items: [{
+        id: 'ma_4444444444444444444444444444444444444444444444444444444444444444',
         kind: 'attachment_release',
         state: 'manual_required',
         operation: 'flush',

@@ -37,6 +37,7 @@ const STATUS: MemoryStatus = {
 };
 
 const MANUAL_FAILURE: MemoryFailureLogEntry = {
+  id: 'ma_1111111111111111111111111111111111111111111111111111111111111111',
   kind: 'result_unknown',
   state: 'manual_required',
   operation: 'flush',
@@ -214,6 +215,34 @@ describe('MemoryStatusPanel', () => {
     expect(screen.getByText('memory.processingRecord.anomalyOperation.flush')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' })).toBeNull();
+  });
+
+  it('renders concurrent duplicate-shaped anomalies under distinct backend IDs', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const duplicateShape = {
+      ...MANUAL_FAILURE,
+      request_id: null,
+      occurred_at: '2026-08-08T12:01:00.000Z',
+    };
+
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        failures={[
+          duplicateShape,
+          {
+            ...duplicateShape,
+            id: 'ma_2222222222222222222222222222222222222222222222222222222222222222',
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getAllByTestId('memory-anomaly-result_unknown')).toHaveLength(2);
+    expect(consoleError.mock.calls.flat().join(' ')).not.toContain(
+      'Encountered two children with the same key',
+    );
+    consoleError.mockRestore();
   });
 
   it('localizes the boot recovery anomaly kind', () => {

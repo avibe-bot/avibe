@@ -420,6 +420,7 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
                 "status": "ok",
                 "items": [
                     {
+                        "id": f"ma_{'5' * 64}",
                         "kind": "delivery_abandoned",
                         "state": "manual_required",
                         "operation": "add",
@@ -450,7 +451,17 @@ def test_memory_failures_proxy_is_direct_loopback_only_and_no_store(monkeypatch,
     )
 
     assert response.status_code == 200
-    assert response.get_json()["items"][0]["kind"] == "delivery_abandoned"
+    assert response.get_json()["items"][0] == {
+        "id": f"ma_{'5' * 64}",
+        "kind": "delivery_abandoned",
+        "state": "manual_required",
+        "operation": "add",
+        "occurred_at": "2026-01-01T00:00:00.000Z",
+        "error_code": "memory_provider_timeout",
+        "request_id": None,
+        "attempts": 3,
+        "generation": 1,
+    }
     assert response.headers["cache-control"] == "no-store"
     assert forwarded.status_code == 403
     assert user_keys == ["avibe:local"]

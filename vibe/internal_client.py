@@ -59,9 +59,6 @@ MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
 # The controller bounds final flush at 5s. Keep the transport outside that
 # bound so the UI does not archive while a timed-out controller call still runs.
 MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS = 7.0
-# Session archive includes that 5s lifecycle bound and one SQLite write-lock
-# wait (also 5s). The UI must not give up while the controller can still commit.
-MEMORY_SESSION_ARCHIVE_TIMEOUT_SECONDS = 12.0
 
 
 class InternalServerUnavailable(Exception):
@@ -381,16 +378,15 @@ async def memory_archive_session(
     session_id: str,
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_SESSION_ARCHIVE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Run the closed Workbench archive use case in the controller process."""
+    """Await the closed Workbench archive use case without a reporting deadline."""
 
     return await _memory_request(
         "POST",
         "/internal/memory/archive-session",
         payload={"session_id": session_id},
         socket_path=socket_path,
-        timeout=timeout,
+        timeout=None,
     )
 
 
