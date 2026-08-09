@@ -25,6 +25,7 @@ from config.v2_config import (
 )
 from core.services.settings import default_config
 from scripts.check_model_hub_authorities import check as check_model_hub_authorities
+from scripts.check_model_hub_ui_states import check as check_model_hub_ui_states
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -291,6 +292,74 @@ def test_model_hub_authority_closure_is_generated_from_live_files():
     assert result["input_mode"] == "same_run_live_files"
     assert result["input_fingerprint"]
     assert result["ok"], result["findings"]
+
+
+def test_model_hub_ui_state_completeness_is_generated_from_live_files():
+    result = check_model_hub_ui_states(Path.cwd())
+    assert result["input_mode"] == "same_run_live_files"
+    assert result["input_fingerprint"]
+    # A gate that scans nothing reports green. Assert the extractors reached the
+    # document before trusting the verdict they produce.
+    assert not result["empty_inventories"], result["empty_inventories"]
+    assert result["input_scale"]["register rows"] > 50
+    assert result["ok"], result["findings"]
+
+
+@pytest.mark.parametrize(
+    "label,before,after,expect",
+    [
+        # The defect this gate was built for: a state issues a call and no row
+        # states what happens when it fails. This is the shape that survived
+        # review at f22c2a59 and had to be found by a human.
+        (
+            "treatment removed",
+            "F4 — `POST /api/models/oauth/cancel` is issued as the dialog",
+            "—",
+            "A",
+        ),
+        # The same row, treatment misnamed rather than missing.
+        ("treatment misnamed", "| F4 — `POST /api/models/oauth", "| F9 — `POST /api/models/oauth", "A"),
+        # A register row pointing at copy nobody wrote.
+        ("key cited, never defined", "`shell.notStarted` | Run pill", "`shell.notStartd` | Run pill", "B"),
+        # A key that would ship with no English string.
+        (
+            "English column dropped",
+            "| `install.progress` `[derived]` | 正在安装… | Installing… |",
+            "| `install.progress` `[derived]` | 正在安装… |  |",
+            "B",
+        ),
+        # A slot promised by a string with nothing declaring what fills it.
+        (
+            "undeclared slot",
+            "| `install.retry` `[derived]` | 重试 | Try again |",
+            "| `install.retry` `[derived]` | 重试 {{attempt}} | Try again {{attempt}} |",
+            "B",
+        ),
+        # A state a user can enter and not leave.
+        (
+            "exit removed",
+            "| 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |",
+            "| — |",
+            "C",
+        ),
+    ],
+)
+def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, label, before, after, expect):
+    """A gate nobody has watched fail is a gate that reports green.
+
+    Each case reintroduces one defect class into the live spec and asserts the
+    checker names it. Without this, `ok is True` above proves only that the
+    script ran.
+    """
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    assert spec.count(before) == 1, f"{label}: anchor no longer unique in the spec"
+
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+    result = check_model_hub_ui_states(mutated)
+
+    assert not result["ok"], f"{label}: the gate did not notice"
+    assert expect in {f["class"] for f in result["findings"]}, (label, result["findings"])
 
 
 def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
