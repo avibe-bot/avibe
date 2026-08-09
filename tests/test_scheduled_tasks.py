@@ -10648,7 +10648,11 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
 
     from core.internal_server import create_app
     from core.message_output import terminal_output_for
-    from core.session_turns import SessionTurnManager, emit_matches_active_turn
+    from core.session_turns import (
+        TURN_LIFECYCLE_ADMISSION_KEY,
+        SessionTurnManager,
+        emit_matches_active_turn,
+    )
     from modules.agents.base import AgentRequest
     from modules.agents.service import AgentService
 
@@ -10788,18 +10792,26 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         del parsed_session_key
-        await controller.agent_service.handle_message(
-            "claude",
-            AgentRequest(
-                context=context,
-                message=message,
-                user_message=message,
-                working_path=str(tmp_path),
-                base_session_id=session_id,
-                composite_session_id=f"{session_id}:{tmp_path}",
-                session_key=controller._get_session_key(context),
-            ),
+        lifecycle_admission = (context.platform_specific or {}).pop(
+            TURN_LIFECYCLE_ADMISSION_KEY,
+            None,
         )
+        try:
+            await controller.agent_service.handle_message(
+                "claude",
+                AgentRequest(
+                    context=context,
+                    message=message,
+                    user_message=message,
+                    working_path=str(tmp_path),
+                    base_session_id=session_id,
+                    composite_session_id=f"{session_id}:{tmp_path}",
+                    session_key=controller._get_session_key(context),
+                ),
+            )
+        finally:
+            if lifecycle_admission is not None:
+                lifecycle_admission.release()
 
     controller.message_handler = SimpleNamespace(
         handle_scheduled_message=_handle_scheduled_message,

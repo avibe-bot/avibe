@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import sys
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,9 @@ from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessin
 from core.controller import Controller
 from core.handlers.message_handler import MessageHandler
 from core.memory import CaptureAccepted, CaptureDuplicate
+from core.memory.artifact import FakeMemoryArtifactManager
+from core.memory.runtime import MemoryRuntime
+from core.memory.store import MemoryStore
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
     is_ordinary_discord_text,
@@ -677,6 +681,84 @@ def test_archive_memory_cli_session_flushes_every_cwd_scope_deterministically(
             "deadline_seconds": 3.0,
         }
     ]
+
+
+def test_archive_memory_cli_session_skips_flush_when_memory_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.session_turns import SessionTurnManager
+    from storage import workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive with Memory disabled",
+        )["id"]
+
+    principal_id = "u-" + ("2" * 32)
+    store = MemoryStore(tmp_path / "memory.sqlite")
+    accepted = store.enqueue_request(
+        source_message_id="persisted-scope",
+        session_id=session_id,
+        principal_id=principal_id,
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="persist this scope",
+        occurred_at_ms=1_725_000_001_234,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert accepted.row is not None
+
+    disabled = MemoryConfig(enabled=False)
+    runtime = MemoryRuntime(
+        disabled,
+        store=store,
+        artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)),
+        effective_home=tmp_path / "runtime",
+    )
+    assert runtime.available is True
+    assert runtime._maintenance_open() is False
+
+    async def flush_must_not_run(**_kwargs) -> bool:
+        raise AssertionError("disabled Memory must not flush during archive")
+
+    monkeypatch.setattr(runtime, "_final_flush_under_admission", flush_must_not_run)
+    controller = _controller()
+    controller.config.memory = disabled
+    controller.memory_runtime = runtime
+    controller.memory_module = runtime.module
+    controller.session_turns = SessionTurnManager(controller)
+    controller._memory_scopes_by_session = {}
+    controller._memory_cli_facts_by_session = {}
+
+    async def run() -> dict[str, object]:
+        try:
+            return await controller.archive_memory_cli_session(session_id)
+        finally:
+            await runtime.close()
+
+    try:
+        result = asyncio.run(run())
+        assert result["status"] == "archived"
+        assert store.resolve_current_session_scopes(session_id) == (
+            (principal_id, PROJECT),
+        )
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+    finally:
+        engine.dispose()
 
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
