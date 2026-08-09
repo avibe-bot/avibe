@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createRef } from 'react';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
@@ -87,5 +87,56 @@ describe('MentionEditor voice preview', () => {
       expect(ref.current?.restoreVoicePreview()).toBe(true);
     });
     await waitFor(() => expect(editor.querySelector('[data-beautiful-mention="@Alice"]')).not.toBeNull());
+  });
+
+  it('treats previews as transient while keeping the final transcript undoable', async () => {
+    const { ref } = renderEditor('Plan today');
+    const editor = screen.getByLabelText('Message');
+    await waitFor(() => expect(editor.textContent).toBe('Plan today'));
+    const snapshot = voiceInsertionSnapshot('Plan today', 5, 5);
+
+    act(() => {
+      ref.current?.showVoicePreview(snapshot, 'the lau');
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan the lau today'));
+    act(() => {
+      ref.current?.showVoicePreview(snapshot, 'the launch');
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan the launch today'));
+    act(() => {
+      ref.current?.commitVoicePreview(snapshot, 'The launch is tomorrow.');
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan The launch is tomorrow. today'));
+
+    const apple = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+    fireEvent.keyDown(editor, {
+      key: 'z',
+      code: 'KeyZ',
+      ctrlKey: !apple,
+      metaKey: apple,
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan today'));
+  });
+
+  it('restores the captured draft when a realtime hypothesis is retracted', async () => {
+    const { ref } = renderEditor('Plan today');
+    const editor = screen.getByLabelText('Message');
+    await waitFor(() => expect(editor.textContent).toBe('Plan today'));
+    const snapshot = voiceInsertionSnapshot('Plan today', 5, 5);
+
+    act(() => {
+      ref.current?.showVoicePreview(snapshot, 'the lau');
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan the lau today'));
+
+    act(() => {
+      expect(ref.current?.restoreVoicePreview()).toBe(true);
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan today'));
+
+    act(() => {
+      expect(ref.current?.showVoicePreview(snapshot, 'the launch')).toBe(true);
+    });
+    await waitFor(() => expect(editor.textContent).toBe('Plan the launch today'));
   });
 });

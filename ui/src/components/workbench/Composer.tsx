@@ -416,6 +416,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [realtimeAnnouncement, setRealtimeAnnouncement] = useState('');
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
@@ -543,6 +544,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
+    setRealtimeAnnouncement('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
       sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
@@ -663,10 +665,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // Replace the active preview (or the original captured range when realtime
     // never produced one) with the finalized transcript as one draft edit.
     if (useMentions) {
-      return mentionRef.current?.commitVoicePreview(
+      const inserted = mentionRef.current?.commitVoicePreview(
         session.insertion,
         session.transcript ?? '',
       ) ?? false;
+      if (inserted) setRealtimeAnnouncement('');
+      return inserted;
     }
     const current = valueRef.current;
     const snapshot = session.previewInsertion ?? session.insertion;
@@ -679,34 +683,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     session.previewInsertion = undefined;
     valueRef.current = next;
     setValue(next);
+    setRealtimeAnnouncement('');
     onDraftChange?.(next);
     const caret = session.insertion.start + insertion.length;
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
     return true;
   }, [onDraftChange, useMentions]);
 
-  const showRealtimePreview = useCallback((
-    session: VoiceRecordingSession,
-    preview: string,
-  ): void => {
-    if (!preview.trim()) return;
-    if (useMentions) {
-      mentionRef.current?.showVoicePreview(session.insertion, preview);
-      return;
-    }
-    const current = valueRef.current;
-    const result = applyVoiceInsertionWithSnapshot(
-      current,
-      session.previewInsertion ?? session.insertion,
-      preview,
-    );
-    if (result === null) return;
-    session.previewInsertion = result.snapshot;
-    valueRef.current = result.text;
-    setValue(result.text);
-  }, [useMentions]);
-
   const restoreRealtimePreview = useCallback((session: VoiceRecordingSession): void => {
+    setRealtimeAnnouncement('');
     if (useMentions) {
       mentionRef.current?.restoreVoicePreview();
       return;
@@ -717,6 +702,34 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     valueRef.current = session.insertion.text;
     setValue(session.insertion.text);
   }, [useMentions]);
+
+  const showRealtimePreview = useCallback((
+    session: VoiceRecordingSession,
+    preview: string,
+  ): void => {
+    const normalized = preview.trim();
+    if (!normalized) {
+      restoreRealtimePreview(session);
+      return;
+    }
+    if (useMentions) {
+      if (mentionRef.current?.showVoicePreview(session.insertion, normalized)) {
+        setRealtimeAnnouncement(normalized);
+      }
+      return;
+    }
+    const current = valueRef.current;
+    const result = applyVoiceInsertionWithSnapshot(
+      current,
+      session.previewInsertion ?? session.insertion,
+      normalized,
+    );
+    if (result === null) return;
+    session.previewInsertion = result.snapshot;
+    valueRef.current = result.text;
+    setValue(result.text);
+    setRealtimeAnnouncement(normalized);
+  }, [restoreRealtimePreview, useMentions]);
 
   const queueVoiceSegment = (
     session: VoiceRecordingSession,
@@ -781,10 +794,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'failed') {
+      restoreRealtimePreview(session);
       setVoiceRetainedSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
-  }, [insertVoiceTranscript, sessionId, showToast, t]);
+  }, [insertVoiceTranscript, restoreRealtimePreview, sessionId, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
     const activeHere = !unmountedRef.current && sessionId === session.sessionId;
@@ -1256,6 +1270,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ))}
         </div>
       )}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {realtimeAnnouncement
+          ? `${t('chat.compose.voicePreview')}: ${realtimeAnnouncement}`
+          : ''}
+      </div>
       <div
         className={cn(
           'flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',

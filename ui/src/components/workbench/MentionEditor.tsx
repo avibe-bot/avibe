@@ -27,6 +27,8 @@ import {
   $isTextNode,
   $setSelection,
   COMMAND_PRIORITY_HIGH,
+  HISTORIC_TAG,
+  HISTORY_PUSH_TAG,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
   type EditorState,
@@ -466,7 +468,7 @@ function BootstrapPlugin({
       const replaceCapturedSelection = (
         snapshot: VoiceInsertionSnapshot,
         text: string,
-        tag?: string,
+        tag?: string | string[],
       ): VoiceInsertionSnapshot | null => {
         let inserted: VoiceInsertionSnapshot | null = null;
         editor.update(() => {
@@ -537,7 +539,7 @@ function BootstrapPlugin({
           const insertion = replaceCapturedSelection(
             active?.insertion ?? snapshot,
             text,
-            VOICE_PREVIEW_TAG,
+            [VOICE_PREVIEW_TAG, HISTORIC_TAG],
           );
           if (insertion === null) {
             voicePreviewRef.current = null;
@@ -548,7 +550,11 @@ function BootstrapPlugin({
         },
         commitVoicePreview: (snapshot, text) => {
           const active = voicePreviewRef.current;
-          const inserted = replaceCapturedSelection(active?.insertion ?? snapshot, text);
+          const inserted = replaceCapturedSelection(
+            active?.insertion ?? snapshot,
+            text,
+            HISTORY_PUSH_TAG,
+          );
           voicePreviewRef.current = null;
           return inserted !== null;
         },
@@ -558,7 +564,7 @@ function BootstrapPlugin({
           const current = editor.getEditorState().read(() => serializeCurrentEditor().text);
           voicePreviewRef.current = null;
           if (current !== active.insertion.text) return false;
-          editor.setEditorState(active.originalState, { tag: VOICE_PREVIEW_TAG });
+          editor.setEditorState(active.originalState, { tag: HISTORIC_TAG });
           return true;
         },
         setText: (text: string) => {
