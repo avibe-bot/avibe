@@ -1313,6 +1313,22 @@ def test_processing_record_source_observation_degrades_sources_independently(
     assert observation.calls.status == "available"
 
 
+def test_processing_record_source_observation_validates_capture_detail_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.capture_db_path) as connection:
+        connection.execute(
+            "ALTER TABLE memory_capture_queue DROP COLUMN occurred_at_ms"
+        )
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "unavailable"
+    assert observation.capture.reason == "malformed"
+    assert observation.calls.status == "available"
+
+
 def test_processing_record_source_observation_validates_run_columns(
     insight_paths: MemoryInsightPaths,
 ) -> None:

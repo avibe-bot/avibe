@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
+from core.memory.maintenance import MemoryStoreUnavailableError
 from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
@@ -573,6 +574,67 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
         ("maintenance", "u-remote-principal"),
         ("failures", None),
     ]
+
+
+def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    operator_refs: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise MemoryStoreUnavailableError("Memory store is unavailable")
+
+        async def processing_record_payload(
+            self,
+            *,
+            operator_ref: str | None = None,
+        ) -> dict[str, object]:
+            operator_refs.append(operator_ref)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "unavailable"}, "items": []},
+                "maintenance": {
+                    "source": {"status": "unavailable"},
+                    "can_clear": False,
+                    "clear_recovery": None,
+                },
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert operator_refs == [None]
 
 
 @pytest.mark.parametrize(

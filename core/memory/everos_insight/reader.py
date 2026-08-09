@@ -578,7 +578,8 @@ class MemoryInsightReader:
                     """
                     SELECT queue.session_id, queue.provider_session_ref, queue.epoch,
                            queue.generation, queue.principal_id, queue.project_ref,
-                           queue.provider_timestamp_ms, queue.add_request_id,
+                           queue.provider_timestamp_ms, queue.state,
+                           queue.occurred_at_ms, queue.add_request_id,
                            settlement.request_id
                     FROM memory_capture_queue AS queue
                     LEFT JOIN memory_flush_settlements AS settlement

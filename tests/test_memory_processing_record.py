@@ -5,6 +5,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -377,6 +378,98 @@ async def test_disabled_runtime_status_is_authoritative_when_store_is_unavailabl
         },
         "health": None,
     }
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_health_probe_releases_reconcile_lock_and_discards_stale_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    original_process = SimpleNamespace(running=True)
+    runtime._process = original_process
+    probe_entered = asyncio.Event()
+    release_probe = asyncio.Event()
+
+    async def blocked_health() -> ProviderHealthSnapshot:
+        probe_entered.set()
+        await release_probe.wait()
+        return _health({"state": "degraded", "reason": "writer_failures"})
+
+    monkeypatch.setattr(runtime._provider, "health_snapshot", blocked_health)
+    probing = asyncio.create_task(runtime._processing_record_health())
+    await asyncio.wait_for(probe_entered.wait(), timeout=0.2)
+
+    async with asyncio.timeout(0.2):
+        async with runtime._reconcile_lock:
+            runtime._process = SimpleNamespace(running=True)
+    release_probe.set()
+    observation = await probing
+
+    assert observation == RuntimeHealthObservation(
+        snapshot=None,
+        unavailable_reason="memory_sidecar_unavailable",
+    )
+    assert runtime._recorder_health == {"state": "disabled", "reason": None}
+    runtime._process = None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    maintenance = runtime._maintenance
+    assert maintenance is not None
+    journal = maintenance._clear_journal
+    assert journal is not None
+    maintenance._backup_active = True
+    assert maintenance.observation_block_reason() == "busy"
+    maintenance._backup_active = False
+    restore_journal = maintenance._backup_restore_journal
+    assert restore_journal is not None
+    with monkeypatch.context() as restore_patch:
+        restore_patch.setattr(
+            restore_journal,
+            "get_open_operation",
+            lambda: object(),
+        )
+        assert maintenance.observation_block_reason() == "busy"
+    operation = journal.start(
+        operation_id="processing-observation-clear",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+
+    busy_health = await runtime._processing_record_health()
+    busy_sources = await runtime._processing_record_sources()
+    recovery = journal.mark_recovery_needed(
+        operation.operation_id,
+        expected_revision=operation.revision,
+        execution_token=operation.execution_token,
+    )
+    failed_health = await runtime._processing_record_health()
+    failed_sources = await runtime._processing_record_sources()
+
+    assert busy_health.unavailable_reason == "busy"
+    assert {source.reason for source in (
+        busy_sources.everos,
+        busy_sources.capture,
+        busy_sources.calls,
+    )} == {"busy"}
+    assert recovery.closed_error == "memory_clear_failed"
+    assert failed_health.unavailable_reason == "memory_clear_failed"
+    assert {source.reason for source in (
+        failed_sources.everos,
+        failed_sources.capture,
+        failed_sources.calls,
+    )} == {"memory_clear_failed"}
     await runtime.close()
 
 

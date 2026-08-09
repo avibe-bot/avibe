@@ -365,6 +365,12 @@ class MemoryRuntime:
         maintenance = self._maintenance
         return maintenance is None or maintenance.is_open()
 
+    def _maintenance_observation_reason(self) -> str | None:
+        maintenance = self._maintenance
+        if maintenance is None:
+            return "memory_store_unavailable"
+        return maintenance.observation_block_reason()
+
     def _can_disable_without_maintenance_authority(self, config: MemoryConfig) -> bool:
         """Allow only a pure disable when the journal authority is unreadable."""
 
@@ -791,38 +797,45 @@ class MemoryRuntime:
                 snapshot=None,
                 unavailable_reason="memory_disabled",
             )
-        if not self.available:
+        maintenance_reason = self._maintenance_observation_reason()
+        if maintenance_reason is not None:
             return RuntimeHealthObservation(
                 snapshot=None,
-                unavailable_reason="memory_sidecar_unavailable",
-            )
-        if self._maintenance_open():
-            return RuntimeHealthObservation(
-                snapshot=None,
-                unavailable_reason="memory_clear_failed",
+                unavailable_reason=maintenance_reason,
             )
         async with self._reconcile_lock:
-            can_read = bool(
-                self._config.enabled
-                and self._process is not None
-                and self._process.running
-            )
-            if can_read:
-                try:
-                    snapshot = await self._provider.health_snapshot()
-                except MemoryProviderFailure as failure:
-                    reason = failure.error
-                except Exception:
-                    reason = "memory_sidecar_unavailable"
-            else:
-                reason = (
-                    "memory_disabled"
-                    if not self._config.enabled
-                    else self._runtime_error or "memory_sidecar_unavailable"
+            reason = self._processing_record_state_reason()
+            process = self._process
+        if reason is not None:
+            return RuntimeHealthObservation(snapshot=None, unavailable_reason=reason)
+        try:
+            snapshot = await self._provider.health_snapshot()
+        except MemoryProviderFailure as failure:
+            reason = failure.error
+        except Exception:
+            reason = "memory_sidecar_unavailable"
+        async with self._reconcile_lock:
+            current_reason = self._processing_record_state_reason()
+            if self._process is not process or current_reason is not None:
+                return RuntimeHealthObservation(
+                    snapshot=None,
+                    unavailable_reason=current_reason or "memory_sidecar_unavailable",
                 )
             if snapshot is not None:
                 self._update_recorder_health(snapshot.recorder)
         return RuntimeHealthObservation(snapshot=snapshot, unavailable_reason=reason)
+
+    def _processing_record_state_reason(self) -> str | None:
+        if not self._config.enabled:
+            return "memory_disabled"
+        if not self.available:
+            return "memory_sidecar_unavailable"
+        maintenance_reason = self._maintenance_observation_reason()
+        if maintenance_reason is not None:
+            return maintenance_reason
+        if self._process is None or not self._process.running:
+            return self._runtime_error or "memory_sidecar_unavailable"
+        return None
 
     async def _processing_record_failure_log(
         self,
@@ -832,10 +845,11 @@ class MemoryRuntime:
         return await self.module.failure_log()
 
     async def _processing_record_sources(self) -> ProcessingSourceObservations:
-        if self._maintenance_open():
+        maintenance_reason = self._maintenance_observation_reason()
+        if maintenance_reason is not None:
             unavailable = SourceObservation(
                 "unavailable",
-                reason="memory_clear_failed",
+                reason=maintenance_reason,
             )
             return ProcessingSourceObservations(
                 everos=unavailable,

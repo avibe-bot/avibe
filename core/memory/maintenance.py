@@ -154,6 +154,32 @@ class MemoryMaintenance:
         except Exception:
             return True
 
+    def observation_block_reason(self) -> str | None:
+        """Describe why read-only provider observations are currently fenced."""
+
+        if self._backup_active:
+            return "busy"
+        restore_journal = self._backup_restore_journal
+        if restore_journal is None or self._initialization_error is not None:
+            return "memory_store_unavailable"
+        try:
+            if restore_journal.get_open_operation() is not None:
+                return "busy"
+        except Exception:
+            return "memory_store_unavailable"
+        clear_journal = self._clear_journal
+        if clear_journal is None:
+            return "memory_store_unavailable"
+        try:
+            operation = clear_journal.get_open_operation()
+        except Exception:
+            return "memory_store_unavailable"
+        if operation is None:
+            return None
+        if operation.state == "recovery_needed":
+            return operation.closed_error or "memory_clear_failed"
+        return "busy"
+
     def can_disable_without_authority(self) -> bool:
         restore_journal = self._backup_restore_journal
         clear_journal = self._clear_journal

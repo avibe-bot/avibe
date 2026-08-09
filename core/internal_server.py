@@ -1074,6 +1074,24 @@ def create_app(
             return None
         return runtime.principal_for_user_key(user_key)
 
+    def _memory_ui_processing_operator_ref(
+        request: Request,
+        runtime: Any,
+    ) -> str | None:
+        """Resolve optional read capabilities without hiding a degraded summary."""
+
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
+            return None
+        try:
+            return runtime.principal_for_user_key(user_key)
+        except Exception:
+            logger.debug(
+                "Memory Processing Record operator lookup unavailable",
+                exc_info=True,
+            )
+            return None
+
     def _memory_read_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import MEMORY_USER_KEY_HEADER
 
@@ -1128,7 +1146,7 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
             return await runtime.processing_record_payload(
-                operator_ref=_memory_ui_operator_ref(request, runtime)
+                operator_ref=_memory_ui_processing_operator_ref(request, runtime)
             )
         except Exception:
             logger.warning("internal memory Processing Record read failed")
