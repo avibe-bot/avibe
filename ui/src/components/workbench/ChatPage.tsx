@@ -1400,12 +1400,15 @@ export const ChatPage: React.FC = () => {
   // load/subscribe — so the previous conversation / queue / draft never leak in
   // and the merge in ``refresh`` only ever unions same-session rows.
   useEffect(() => {
+    // The gate is session-scoped. A PATCH for the previous chat may still be
+    // pending after navigation, but it must never hold the new chat's bootstrap
+    // or recovery reads hostage.
+    sessionRowRefreshGateRef.current = createSessionRowRefreshGate();
     // Clear ``session`` too (not just messages/queue/draft): otherwise the header
     // keeps rendering the previous chat's title + agent picker until the new load
     // finishes, and a rename / agent change would patch() the STALE session.id
     // while the URL is already on the new chat (Codex P2). Nulling it shows the
     // loading state until refresh() resolves the new session.
-    sessionRowRefreshGateRef.current.invalidate();
     setSession(null);
     setMessages([]);
     setVaultResolvedSourceIds(new Map());
@@ -2265,6 +2268,10 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return;
       sessionRowRefreshGateRef.current.invalidate();
       setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev));
+      // Pin updates only carry the changed sidebar field. A successful PATCH can
+      // race a turn-end row read, so re-read the complete durable projection to
+      // keep any newly materialized route in the header.
+      void refreshSessionRow();
     },
     archiveHint: ARCHIVE_SHORTCUT_LABEL,
   });
