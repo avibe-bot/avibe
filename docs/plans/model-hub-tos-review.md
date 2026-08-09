@@ -418,3 +418,25 @@ the turn still reports the existing truthful failure; if streamed output prevent
 transparent retry, the existing retry copy remains. Page state and recorded switching
 evidence also remain. This amendment removes a message and setting, not routing,
 failure reporting, or observability.
+
+## 15. Owner addendum — 2026-08-09 (configured-chain architecture)
+
+This ruling supersedes only the routing-policy language in §§12–14 that describes
+`Follow`, `Custom`, an effective chain, or a runtime-selected candidate. Their risk
+evidence, vendor-specific custody recommendation, single Claude Hub warning, silent
+successful fallback, truthful terminal failure, and pull-only observability remain in
+force.
+
+Every `(backend, menu model)` has one visible persisted chain of exact Source/model
+hops. Add Source performs matching once and writes the resulting hops; the user then
+adds, removes, reorders, or remaps those same entries. Runtime walks the stored order,
+checks whether each exact hop can run now, and applies the classified fallthrough rule.
+It does not derive another provider list, insert native supply, or choose a substitute
+model. A user-configured cross-vendor or cross-model mapping is authoritative and needs
+no warning beyond the existing Claude Hub add warning.
+
+Vendor custody recommendations affect only Add Source's initial placement. A new
+automatic match appends visibly to the relevant configured chain and never silently
+changes existing priority. Takeover remains a derived execution fact: a later stored
+hop is current while the first stored hop is unavailable for a recoverable quota or
+cooldown reason. It is not a routing policy or persisted state.

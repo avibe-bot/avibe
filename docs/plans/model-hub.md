@@ -7,8 +7,9 @@ the v3 interaction draft for the two-module information architecture is owner-ap
 as the implementation baseline (2026-08-07 afternoon). The design lane still owes
 production-complete desktop/mobile states.
 Contracts: `model-hub-contracts/` remain unchanged by this docs-only revision.
-`model-hub-implementation.md` records the exhaustive final-shape handoff that the first
-implementation lane must land atomically with every contract consumer and test.
+`model-hub-implementation.md` records the exhaustive final-shape handoff. Its mechanical
+closure must coexist on one tested PR head; all remaining consumers and evidence must
+land before release.
 
 ## 0. Revision note — why v3 replaces v2
 
@@ -21,19 +22,25 @@ Its end-to-end product model is:
    retry, and recovery;
 3. downstream Agents — consumers of the Gateway, not owners of upstream credentials.
 
-v2's per-backend source order remains the default routing policy. v3 adds the missing
-precision above it: every `(backend, menu model)` may instead own a **custom ordered
-route chain**, and every hop names the exact `(source_id, model_id)` to call. This
-formally supersedes v2 §9's “No per-model ordering” non-goal on 2026-08-07. §4.3 is
-the only normative resolution algorithm for both policies; no mapping pipeline or
-second derivation survives elsewhere in this document.
+Every `(backend, menu model)` owns one persisted ordered route chain, and every hop
+names the exact `(source_id, model_id)` to call. This formally supersedes v2 §9's “No
+per-model ordering” non-goal on 2026-08-07.
 
-The final product has no fixed-menu `mappings` structure beside route chains. A
-single-target choice is simply the degenerate Custom-chain case in which the hops use
-the same `model_id`; richer chains may choose a different model per Source. The final
-shape and its rationale are in §4.6 and are **owner-vetoable (2026-08-07)**. Model Hub
-has not shipped, so no compatibility layer, data conversion, or second routing
-authority is part of the implementation.
+**Configured-chain ruling (owner 2026-08-09, S-1).** Matching happens when a Source is
+added and writes the resulting exact hops. From then on the Gateway screen is the
+configuration and the configuration is what executes: users add, remove, reorder, or
+edit a hop's explicit model mapping, while runtime only walks those hops and classifies
+live availability and fallthrough. There is no `follow | custom` state, no runtime
+Source/model matching, and no second projection from a backend order. §4.3 is the only
+normative execution algorithm for this stored chain.
+
+The final product has no separate fixed-menu `mappings` structure beside route chains.
+A same-model choice is simply a hop whose `model_id` equals the menu model; a mapped
+choice is a hop whose explicit `model_id` differs. Both are ordinary configured hops.
+The final shape and its rationale are in §4.6 and are **owner-vetoable (2026-08-07,
+amended by S-1 on 2026-08-09)**. Model Hub has not shipped, so no compatibility layer,
+data conversion, policy transition, or second routing authority is part of the
+implementation.
 
 **Subscription ruling (owner 2026-08-07, amended later the same day).** Recommended
 custody is vendor-specific. Claude subscriptions stay in Claude Code's local login by
@@ -47,7 +54,7 @@ remains a first-class product story, not an escape hatch or hidden pre-pass; §4
 defines its exact runtime behavior.
 
 A user may explicitly add either subscription as a Gateway-held upstream, and a
-Gateway-held subscription may participate in a cross-vendor custom chain. The only
+Gateway-held subscription may participate in a cross-vendor configured chain. The only
 warning is one factual sentence shown when the user chooses the Claude-as-Gateway
 path: Anthropic explicitly prohibits it, enforces server-side blocks, real account
 bans have occurred, and the path may fail intermittently. Native Claude, ChatGPT in
@@ -56,7 +63,7 @@ per-source consent record exists in the final specification.
 
 **Surface ruling (owner 2026-08-07).** The Models page has two product modules:
 Sources and **Gateway**. Sources answer what upstream access the user owns. Gateway is
-the main work surface for pairing, allocation, backend order, and per-model chains.
+the main work surface for exact pairing, model mapping, and per-model chain order.
 The line between them visualizes current state; it is not a configurable object. A
 third “Configure Agents” module — adding models, reasoning effort, and related Agent
 settings to Agent definitions — is explicitly deferred; v3 records the intent and
@@ -93,15 +100,14 @@ base URLs, protocol conversion, account pools or routers.
    Claude recommends its compliant native login; ChatGPT recommends a Gateway-held
    Source. Each backend has at most one native Source. §4.3 defines the complete
    native-to-Gateway handoff, recovery, and no-replay behavior without placing a hidden
-   native attempt ahead of a user-owned Custom chain.
-3. **Routing has two explicit grains.** Each backend owns a global Source order.
-   Each menu model follows the chain projected from that order by default, or the
-   user gives that `(backend, menu model)` an exact custom ordered chain of
-   `(source_id, model_id)` hops.
-4. **The user owns every custom order.** No health score, learned ranking, or cost
-   heuristic silently rewrites a backend order or custom model chain. Avibe may
-   skip an unrunnable hop for the current turn; it never mutates the configured
-   order as a side effect.
+   native attempt ahead of a user-owned configured chain.
+3. **Every route is visible configuration.** Each `(backend, menu model)` stores one
+   exact ordered chain of `(source_id, model_id)` hops. Adding a Source proposes and
+   persists its matches once; afterward the user edits that same chain directly.
+4. **The user owns every configured order and mapping.** No health score, learned
+   ranking, vendor label, or runtime inventory walk silently rewrites the chain. Avibe
+   may skip an unrunnable hop for the current turn; it never mutates configured order
+   or model ids as a side effect.
 5. **Adaptation stays local and invisible.** The Gateway performs protocol
    conversion, retry, failover, and recovery. Agents consume a stable model menu;
    users never configure an engine plugin or account pool.
@@ -119,9 +125,8 @@ operations console.
 | Upstream module | 来源 | Sources | Inventory of access the user owns; never an ordering surface |
 | Local adaptation and routing module | 网关 | Gateway | First-class product noun, owner-locked 2026-08-07; pairing, allocation, ordering, retry, failover, recovery |
 | Where tokens come from | 来源 | Source | Two kinds only: 订阅账号 (OAuth) and API Key (key + editable Base URL); a relay is the latter, not a third kind |
-| Backend-wide fallback order | 来源顺序 | Source order | Ordered subset of sources eligible for one backend; never product-global |
 | Per-model route | 路由链 | Route chain | Ordered hops for one `(backend, menu model)`; every hop is an exact Source + upstream model pair |
-| Route policy | 跟随来源顺序 / 自定义链 | Follow source order / Custom chain | §4.3 resolves both policies; Custom is user-owned and frozen |
+| Explicit model mapping | 型号映射 | Model mapping | A configured hop whose upstream `model_id` differs from its menu model; the system never invents one at runtime |
 | Per-backend path | 网关 / 直连 | Gateway / Direct | Wire values are `hub | direct`; Gateway is the default product path, Direct is the diagnostic/self-managed path |
 | Gateway hop using the official CLI login | 原生 | Native | Required for a `native_cli` hop inside Gateway mode; it is not Direct mode |
 | Per-backend health rollup | 供给状态 | Supply status | 正常 / 降级 / 暂时全部在冷却 / 无可用来源 (§4.5) |
@@ -138,7 +143,7 @@ apply to UI nouns, not precise technical prose in this specification.
 | Provider (as a UI noun) | **Banned** | The UI manages concrete Sources; vendor may appear as metadata, and “upstream provider” remains valid architecture prose |
 | 账号池 / account pool | **Banned** | It implies operator tooling and multi-tenant pooling that Avibe does not ship |
 | 中转站 / relay station as a category | **Banned** | It is an API Key Source with a custom Base URL; helper copy may use it as an example |
-| 优先级 / priority as a standalone global noun | **Banned** | Name the owning backend Source order or model Route chain; ordinal copy such as “first upstream” is allowed |
+| 优先级 / priority as a standalone global noun | **Banned** | Name the owning model Route chain; ordinal copy such as “first upstream” is allowed |
 
 **Copy-density rule (owner-approved interaction baseline, 2026-08-07 afternoon).**
 Use the glossary nouns in controls and status. Put explanations behind a compact info
@@ -182,7 +187,7 @@ The Source workflow is complete at both entry points:
   `POST /api/models/sources/<id>/refresh` operation. It is intentionally mutating: it
   tests the stored protocol, rediscovers inventory, updates Source health, and clears a
   `needs_action` or `error` blocker only when current evidence proves recovery. Before
-  committing a smaller inventory it runs §4.5's Custom-hop and Follow-supply guards.
+  committing a smaller inventory it runs §4.5's configured-hop and supply-gap guards.
   This is the **only saved-Source test/discovery mutation and the only corresponding
   Source-details button**, labelled “Refresh models” / 「重新拉取」. Its request,
   guarded refusal, and success are exactly the refresh row of §4.5's authoritative
@@ -235,7 +240,7 @@ response before Save. A failed observation therefore stores nothing rather than 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
 the stored adapter and never rewrite it. Changing protocol means creating a new Source,
-so a later operation cannot silently reinterpret existing inventory or Custom hops.
+so a later operation cannot silently reinterpret existing inventory or configured hops.
 The stored shape carries no manual/automatic provenance marker and no unverified
 protocol state: manual and automatic probe ordering become indistinguishable after the
 same response-backed conclusion. “Add anyway” is available only after protocol has been
@@ -262,7 +267,7 @@ for reading convenience, never a spend order.
   is the default for API keys and the recommended add-flow path for ChatGPT
   subscriptions. It is an explicit opt-in for Claude subscriptions. A hub-held
   subscription is a normal Gateway upstream and may appear in a cross-vendor
-  custom chain (§4.4).
+  configured chain (§4.4).
 
 **Native Source singleton (orchestrator ruling, owner-vetoable 2026-08-08).** Each
 backend may own at most one `native_cli` Source. The official CLI exposes one current
@@ -287,156 +292,116 @@ adding **Claude as a hub-held Source**:
 That sentence does not appear for native Claude, ChatGPT in either channel, or when
 the user later places an already-added Source in a cross-vendor chain.
 
-The same model may be supplied by multiple Sources; §4.3 alone resolves the backend
-Source order and per-model policy.
+The same model may be supplied by multiple Sources; §4.3 alone executes the exact
+stored route for that model.
 
-### 4.2 Gateway strategy — backend order plus per-model policy
+### 4.2 Gateway strategy — add-time defaults, then explicit configuration
 
-One record per agent backend. It owns:
+One record per Agent backend owns `mode`, its menu, and one stored Route chain for each
+menu model. There is no backend Source-order policy and no per-model route policy. The
+only order runtime can execute is the hop order stored for that model.
 
-- `mode` — Gateway (`hub` on the wire) | Direct (`direct`).
-- `menu_kind` plus the menu itself: fixed for Claude Code / Codex, open for
-  OpenCode. Menu enrollment is distinct from Gateway routing.
-- **the backend's Source order** — an ordered subset of the sources eligible for
-  this backend (§4.4), plus an order-ownership policy. This order is the input to
-  `follow` routes; it is not a second filter on a model's exact custom chain.
-- **one route policy per menu model** — `follow` the backend order (default), or use
-  an exact custom chain. §4.3 is the only normative resolver for either policy.
+Matching is an **Add Source write-time operation**. After connectivity, protocol, and
+inventory have been observed, the add transaction proposes exact Source/model matches,
+writes the accepted hops, and returns their visible positions. A later refresh,
+restart, health change, catalog change, or turn never repeats matching. Users maintain
+the persisted chains directly: add or remove a hop, move it, or edit its explicit
+upstream `model_id` mapping.
 
-The backend Source order itself has this ownership policy:
+**Add-time recommendation rule (deterministic; owner 2026-08-09 S-1).** When an empty
+route is seeded from Sources added in one setup/import transaction, its default order
+is:
 
-| Policy | zh | Behavior |
-| --- | --- | --- |
-| `follow` (default) | 跟随推荐 | Order is server-computed by the recommendation rule below. A newly added eligible source **joins automatically** at its recommended position. |
-| `custom` | 自定义 | A user-owned, frozen ordered subset. A newly added eligible source does **not** join; the UI hints 「有新来源未启用」 and offers one-tap enable. |
+1. own-vendor subscriptions in the recommended custody form — Claude `native_cli`,
+   ChatGPT `hub` — by `created_at` ascending;
+2. own-vendor subscriptions in the supported non-recommended form — Claude `hub`,
+   ChatGPT `native_cli` — by `created_at` ascending;
+3. other hub-held subscriptions, by `created_at` ascending;
+4. API-key Sources, by `created_at` ascending;
+5. ties by Source `id` ascending.
 
-State machine: `follow` --any manual edit--> `custom` --「恢复推荐顺序」--> `follow`.
-Forking to `custom` is implicit and immediate: reordering, enabling, or removing a
-source while in `follow` freezes the current order as the user's own. Returning to
-`follow` discards the frozen subset and recomputes.
+This table supplies an **initial value**, not a continuing rule. Once a route contains
+any hop, an automatically matched hop from a newly added Source is appended to the
+tail, its position is shown immediately, and existing priority is never changed. This
+append-only default is **owner-vetoable (orchestrator ruling 2026-08-09)**. The user may
+then move or remove it. There is no “new Source not enabled” state or prompt.
 
-Independently, each menu model's route policy is `follow` or `custom` as stored in
-§4.6. Changing one model's route never changes the backend Source-order policy, and a
-Source omitted from that order may still be named explicitly by an eligible custom
-hop. Omission means “not used by Follow routes,” not “globally disabled.”
+The table never decides runtime capability. `created_at` remains required and immutable
+so a multi-Source initial setup is reproducible, with Source `id` as its total-order
+tie-break. No health score, latency, cost, usage, vendor label, or later inventory result
+reorders an existing chain.
 
-**Recommendation rule (deterministic; document verbatim, implement verbatim).**
-For a given backend, the recommended order is:
+**Routing configuration is per backend and per model; health is Source-global.** Quota
+and reachability belong to the Source, not the Agent that touched it. §4.3 reads the
+stored chain and annotates its live execution state; it does not construct another
+chain.
 
-1. all eligible **own-vendor subscriptions in the recommended form**, by
-   `created_at` ascending — Claude Code has at most its singleton Claude `native_cli`;
-   Codex uses ChatGPT `hub` Sources;
-2. then own-vendor subscriptions in the supported but non-recommended form, by
-   `created_at` ascending — Claude `hub`, or the singleton ChatGPT `native_cli` when
-   present;
-3. then other eligible hub-held subscription Sources, by `created_at` ascending;
-4. then all eligible API-key Sources, by `created_at` ascending;
-5. tie-break anywhere above by Source `id` ascending.
+### 4.3 The only normative configured-chain execution algorithm
 
-The rule is *exhaustive over eligible sources*: nothing eligible can fall outside
-it, which is what makes 跟随推荐 safe to auto-join. Enrollment in this order does not
-mean a Source is adopted by any effective route; §4.3 alone derives that result.
-This table decides **priority**, not capability: own-vendor subscription supply leads
-when it is eligible and capable, while §4.3 admits a Follow hop from observed exact
-model inventory regardless of vendor label.
+For backend `B` and menu model `M`, let `C` be the exact persisted hop array at
+`B.routes[M].hops`. Every hop is `{source_id, model_id}` and its `model_id` is the exact
+upstream value to invoke. Configuration writes validate Source existence, channel
+binding, and that the Source can call the submitted model; any alias resolution or
+suggested mapping is completed before the hop is stored. Runtime never matches by
+vendor or inventory, inserts a Source, substitutes a model, or reorders `C`.
 
-Nothing else participates: no health score, no latency, no cost heuristic, no
-usage-based reordering. This rule is the *entire* content of 跟随推荐, and it is
-stable — the same set of sources always yields the same order.
+The following pseudocode is normative and exhaustive:
 
-The rule preserves the own-vendor-first principle while making the vendor split
-visible: a ChatGPT subscription added through the recommended Hub path leads Codex,
-while a user who keeps a native Codex login still gets a deterministic supported
-fallback position. Claude native remains the recommended lead for Claude Code; a
-Claude Hub Source never outranks it merely because it was added later.
+```text
+if B.mode == "direct":
+    return DIRECT
 
-Two obligations follow, and both are contract, not implementation detail:
+attempted = false
+for hop in C, in stored order:
+    live = inspect_exact_hop(hop)
+    annotate hop with live.runnable, live.reason, and live.retry_at
+    if not live.runnable:
+        continue
 
-- **Creation order must be persisted**, as required immutable `created_at` on the source
-  (`source.schema.json`). Insertion order in the config file is not a contract and
-  the sources array is explicitly unordered (`api.md`), so without a stored stamp
-  rules 1 through 4 are not reproducible.
-- **Rule 5 is not decoration.** Sources created or imported in the same operation may
-  share a timestamp; Source `id` orders those ties. Every Source is stamped before it
-  becomes visible, so the two keys define a total order without relying on array order.
+    attempted = true
+    result = invoke_exact(hop.source_id, hop.model_id, exact_reasoning_effort(hop))
+    if result == served: return SERVED(hop)
+    if result == canceled: return CANCELED
+    if result is terminal_request_error: return FAILED_TERMINAL(result)
+    if result is engine_down_at_any_request_phase: return FAILED_TERMINAL(engine_down)
 
-**Routing configuration is per backend and per model; health is source-global.** Quota
-and reachability belong to the Source, not the Agent that touched it. §4.3 is the only
-normative place that turns that shared state into candidate and execution behavior.
+    persist_attributable_source_state(result)
+    if result.output_started: return FAILED_TERMINAL(result)
+    if result is fallback_class: continue
+    return FAILED_TERMINAL(result)
 
-### 4.3 The only normative resolution algorithm
+return NO_CANDIDATE(classify_blockers(C)) if not attempted
+else EXHAUSTED(classify_blockers(C))
+```
 
-This section alone derives the capability chain, channel choice, execution order,
-probe result, route-adoption projection, event correlation, provenance, menu counts,
-and Gateway rendering for backend `B` and caller-facing menu model `M`. Every consumer
-uses this result; no other section, schema, service, or UI may restate or independently
-derive source/model pairing, order, or fallthrough.
+`inspect_exact_hop` checks only whether that configured hop can run now. `healthy` and
+an elapsed cooldown are runnable. An unelapsed cooldown, `needs_action`, `error`, a
+missing/deleted Source, a configured model no longer callable by that Source, or an
+unavailable native CLI process is not runnable; the hop stays at its configured
+position. The canonical reasons are respectively the existing classified Source reason,
+`source_missing`, `model_unsupported`, and `native_cli_unavailable`. A normal turn never
+repairs or rewrites configuration.
 
-If `B.mode == "direct"`, use Direct behavior and stop. Otherwise run these phases in
-order on the Source catalog, `B`'s effective Source order `O`, and `M`'s stored route
-policy:
+`invoke_exact` preserves chain order. A `native_cli` hop uses the sanctioned backend's
+singleton local login; a `hub` hop uses the local Gateway and may be cross-vendor. The
+system never prepends native supply or chooses a model. If the requested reasoning
+effort exactly appears in the configured hop model's `reasoning_efforts`, pass that one
+value; otherwise pass `null`, with no approximation or downgrade.
 
-1. **Construct one capability chain.**
-   - For `custom`, read the stored exact `{source_id, model_id}` hops verbatim and in
-     order. A write accepts only an existing Source eligible for `B` whose inventory
-     advertises that model, or a fixed-menu native Source whose adapter proves a
-     sanctioned compatible family/version alias. Exact pairs are unique; one Source
-     may appear again with another model. A later inventory change that invalidates a
-     stored pair retains it at the same position as `runnable: false`,
-     `reason: "model_unsupported"`, and `retry_at: null` until explicit repair.
-   - For `follow`, walk `O` once and emit at most one capable hop per Source. First
-     apply §4.4 eligibility. For OpenCode, parse `M` as `provider/model`, normalize the
-     Source vendor with the same provider-id function used by its runtime overlay, and
-     compare normalized ids: a recognized vendor keeps its standard id and every
-     unrecognized vendor maps to `custom`; the bare model is the upstream id. For a
-     fixed-menu backend, a native Source may retain a sanctioned compatible CLI alias
-     even when that literal alias is absent from inventory. A fixed-menu Hub Source
-     resolves a built-in alias only against that Source's own inventory. Every other
-     case requires advertised exact model identity, independent of the Source's vendor
-     label. Follow never invents a foreign-vendor substitution: admission of an exact
-     same-id model is not permission to substitute another model.
-   - Whenever a sanctioned native alias is admitted under either policy, retain the
-     concrete inventory entry that proved the alias as that hop's capability evidence.
-   - Annotate every emitted hop from the current Source inventory, source-global
-     health, and current process availability. `healthy` and an elapsed cooldown are
-     health-ready; `needs_action`, `error`, an unelapsed cooldown, unavailable native
-     process, and `model_unsupported` are not. Blocked hops remain in place. The
-     runnable view is only a filter over this chain, never a second chain.
+Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
+A local Gateway start, listener, or process loss at **any** request phase is terminal
+`engine_down`: it mutates no Source, does not replay output, and does not walk another
+hop. Credential failures follow the authoritative matrix below. Before output starts,
+explicit quota exhaustion, 429, transient 5xx, or attributable upstream network failure
+persists its classified Source-global blocker and continues to the next configured hop.
+After output starts, no failure is replayed; attributable Source state is still
+persisted for the next turn.
 
-2. **Dispatch the leading currently runnable hop.** Preserve chain order and select
-   the first hop that is runnable now. A `native_cli` hop uses the sanctioned backend's
-   singleton local login with no Gateway credential injection; a `hub` hop uses the
-   local Gateway and may be cross-vendor. Never prepend a native attempt outside the
-   chain: a Custom Hub-first chain stays Hub-first even while native is healthy.
-
-3. **Execute hops with live revalidation.** Immediately before **every** attempted
-   hop, re-read its Source inventory, source-global health, `retry_at`, and current
-   process availability and re-evaluate the phase-1 capability and runnability
-   predicates. Never trust the snapshot used to construct the chain. If an earlier
-   hop placed a Source into cooldown, every later hop naming that same Source is
-   skipped immediately unless it has become runnable again. For an attempted hop,
-   resolve the hop to its phase-1 capability-evidence inventory entry: the literal
-   entry for an exact model id, or the concrete entry retained for a sanctioned native
-   alias. If the turn-requested reasoning effort is an exact member of that entry's
-   `reasoning_efforts`, pass that one value to the adapter; otherwise pass `null` and
-   let the upstream use its own default. The list never selects a value, and resolution
-   performs no approximate mapping or downgrade fallback. Parameter, protocol, and
-   tool-compatibility errors surface without fallback. A local Gateway start/listener/
-   process failure is `engine_down`: it surfaces as a terminal local-runtime error,
-   mutates no Source health, and does not walk another Hub hop because no upstream was
-   attempted. Credential failures follow the authoritative matrix below; neither status
-   code alone nor prose outside that matrix may create a refresh branch.
-   Before output starts, explicit quota exhaustion, 429, transient 5xx, or attributable
-   upstream network failure sets the classified source-global cooldown and continues to
-   the next hop. A non-self-healing credential/account result handled by the matrix does
-   not prevent another configured Source from serving the turn before output.
-   After any output starts, never replay the request. Still classify and persist any
-   attributable Source failure: self-healing failures set their cooldown and non-self-
-   healing failures set `needs_action`, so the next turn does not immediately retry a
-   hop known to be unavailable. Record the interrupted turn and let the next turn run
-   this entire algorithm again. If no hop can complete, report the existing truthful
-   terminal failure. Every switch is recorded for the pull surfaces; a successful
-   handoff emits no conversation notice or setting.
+The read projection is `C` with live annotations plus `current`, never a reconstructed
+provider list. Takeover remains derived: the current hop is not `C[0]` and `C[0]` is
+unavailable for a recoverable quota/cooldown reason. Recovery changes current execution
+position on the next turn without changing `C`. Every switch is recorded for pull
+surfaces; a successful handoff emits no conversation notice or setting.
 
 **Credential-failure decision matrix (authoritative and exhaustive; owner ruling
 2026-08-09).** The refresh branch is selected by the credential's actual refresh
@@ -458,12 +423,12 @@ row and fails any extra retry or unlisted remedy.
 
 Because health is source-global, a cooldown created through one backend affects every
 route using that Source. Because every turn runs the algorithm again, an elapsed
-cooldown naturally restores the configured leading Follow hop without mutating order.
+cooldown naturally restores the configured leading hop without mutating order.
 The Model Gateway and Usage pages remain the pull surfaces for takeover state,
 connector color, recent switches, and usage; provenance remains a debug affordance.
 
-**Takeover projection.** The current resolved route is in **takeover** exactly when its
-current hop is not the first chain hop and that first hop is unavailable for a
+**Takeover projection.** A configured route is in **takeover** exactly when its current
+hop is not the first stored hop and that first hop is unavailable for a
 self-healing quota/cooldown reason. This is computed from the resolved chain's current
 hop and live runnability; it is never a stored boolean or a second routing field. A
 chain with no runnable hop is not takeover: it reaches §4.5's truthful `exhausted`
@@ -481,10 +446,10 @@ semantics remain the functional floor; the observed Messages-direction system/tu
 distortion stays recorded as relay behavior, does not block the product direction, and
 creates no new acceptance criterion.
 
-### 4.4 Eligibility is server-authoritative (v3)
+### 4.4 Configuration eligibility is server-authoritative (v3)
 
-Which sources a backend may consume at all — independent of order and model
-capability — follows the channel-aware matrix:
+Which Sources may be written into a backend's configured chain follows the
+channel-aware matrix:
 
 | Source | claude | codex | opencode |
 | --- | --- | --- | --- |
@@ -493,11 +458,12 @@ capability — follows the channel-aware matrix:
 | `subscription`, vendor `openai`, channel `native_cli` | ✗ | ✅ | ✗ |
 | `subscription`, any vendor, channel `hub` | ✅ | ✅ | ✅ |
 
-`allowed_origins` enforces **channel semantics**, not a product-risk gate. For
+`allowed_origins` enforces **configuration-time channel semantics**, not a product-risk gate. For
 `native_cli`, it contains only the sanctioned backend because the credential remains
 inside that CLI. For `hub`, it may contain any supported backend selected by Gateway
 configuration, including a cross-vendor consumer. No flag or consent record changes
-either result.
+either result. Runtime does not re-run this matrix to choose or reject a provider; a
+validated stored hop is its authority.
 
 The agents payload
 now carries a per-source eligibility signal (`eligible` + `reason_key`) computed
@@ -512,17 +478,18 @@ The final vocabulary contains neither `consent_required` nor `opencode_api_key_o
 Hub-held subscriptions are eligible for OpenCode, and risk copy is not eligibility. Native
 wrong-client use retains `subscription_wrong_client`.
 
-**Server-validated invariants** (07-29, review round 6). Eligibility is not the only
-rule the server owns rather than the schema. These hold on every agents payload and
-each is enforced by the route that writes it, because JSON Schema draft-07 cannot
-state them at all — the full list with the reason per item is in `api.md` →
-「Mechanical guards the schemas cannot carry」, and the boundary itself is
-`model-hub-contracts/README.md` → required-vs-optional:
+**Server-validated invariants** (07-29, review round 6; replaced for configured chains
+by S-1 on 2026-08-09). These hold on every agents payload and each route that writes
+configuration:
 
-- **`sources.order`** — every id exists, is eligible for this backend, appears once,
-  and the whole list is a subset of the eligible set (omitting one is how the user
-  excludes it from Follow routes). Rejected as `invalid_source_order`, naming the
-  first offending id.
+- **`routes`** — exactly one row per menu model; every row owns one ordered `hops`
+  array. Exact `(source_id, model_id)` pairs are unique within a route, while one Source
+  may intentionally appear again with another model. Every new/edited hop names an
+  existing Source allowed by the matrix above and an exact callable model validated at
+  write time. Runtime may annotate a later-invalid hop but cannot remove or replace it.
+- **Source deletion** — the transaction removes every hop naming the deleted Source
+  from every backend route, preserves survivor order, reports the resulting gaps, and
+  leaves a configuration that passes the same canonical validator used on reload.
 - **`model_supply`** — exactly **one row per menu model**: `model_id` values are
   unique, and the set covers that backend's whole menu. Duplicates are the dangerous
   direction: two rows for one model let `chain_length: 0` sit beside `chain_length: 2`
@@ -531,13 +498,9 @@ state them at all — the full list with the reason per item is in `api.md` →
   drawer unable to say anything about a model the menu offers. Neither half is
   expressible — `uniqueItems` compares whole items, so rows differing only in
   `chain_length` pass, and coverage is a relation to a different document.
-- **`AgentChain.chain`** — default-policy entries preserve the relative order of
-  `sources.order`; custom-policy entries preserve the exact configured hop order.
-  A default chain contains at most one hop per Source. In a custom chain each exact
-  `(source_id, model_id)` pair appears at most once; one Source may intentionally
-  appear with different models. Every custom hop's Source exists, is eligible, and
-  supplies its exact `model_id` when the mutation commits. It need not appear in
-  `sources.order`, because that order belongs to Follow routes.
+- **`AgentChain.chain`** — preserves the exact stored hop order and model ids. Its only
+  additional fields are live annotations and current execution position; no consumer
+  performs another Source/model walk.
 
 ### 4.5 State taxonomy — classified by "does it heal itself"
 
@@ -548,7 +511,7 @@ Three classes, because the action owed by the user differs in each.
 | Status | zh (UI) | Heals itself | Meaning |
 | --- | --- | --- | --- |
 | `active` | 使用中 | — | currently serving |
-| `standby` | 备用 | — | healthy, not at the head of some order |
+| `standby` | 备用 | — | healthy, but not currently serving any configured route |
 | `cooldown` | 暂不可用 (gold) | **yes** | quota/rate/network; `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
 | `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |
@@ -582,11 +545,9 @@ Two of those three taps use routes frozen by the current contract:
 `PUT /api/models/sources/<id>/credential` replaces an api_key in place and
 `POST /api/models/sources/<id>/reauth` re-runs OAuth bound to the existing source
 (`api.md`; the adapter already exposes `start_oauth(source_id)`). Both are
-**replacement, not re-creation** — deliberately, because "add a new source and
-delete the old one" is not the same operation from the user's side: it loses the
-source's `created_at` and its slot in every backend's order, so 跟随推荐 quietly
-reshuffles as a side effect of fixing a key, and any `custom` order that named the
-old id silently shortens. Recovery must not be a reorder. (Top-up is the third tap
+**replacement, not re-creation** — deliberately, because "add a new Source and delete
+the old one" loses its `created_at` and invalidates every configured hop that names its
+id. Recovery must preserve the Source and every stored route position. (Top-up is the third tap
 and needs no *replacement* route of ours — no credential of ours changes; it is a
 link out to the vendor.)
 
@@ -607,7 +568,7 @@ splits — on whether the user owes an action:
 | `ok` | 正常 | — | serving from the intended head of the chain |
 | `degraded` | 降级 | — | serving via a fallback, and/or some sources in the chain are down |
 | `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is a cooldown — recovers unattended at the earliest `retry_at` |
-| `interrupted` | 无可用来源 | **no** | nothing runnable and at least one blocker needs the user, or the capability chain is structurally empty |
+| `interrupted` | 无可用来源 | **no** | nothing runnable and the stored chain is empty or at least one hop has a non-self-healing blocker: `needs_action`, `error`, `source_missing`, `model_unsupported`, or `native_cli_unavailable` |
 
 These four values are the **only backend-level supply-health wording**. The Gateway
 backend-group subtitle and the Usage page render this projection directly; neither
@@ -617,9 +578,11 @@ persisted field. A mechanical mirror/locale guard keeps the four status labels a
 takeover label synchronized across both locale sets.
 
 `interrupted` is the honest name for the state v1 could not express: the source
-list looks populated, yet *this* agent has nothing left to call. The UI shows
+list or configured chain can look populated, yet *this* Agent has nothing left to call. The UI shows
 「当前无可用来源」 with a cause breakdown and exactly two exits — fix the
-`needs_action` items, or add a source.
+classified items, or edit the route. `native_cli_unavailable` uses its own mirrored
+detail/remedy copy for restoring the sanctioned local CLI; it is never presented as an
+upstream Source cooldown.
 
 `waiting` exists to keep the surfacing rule below consistent. An agent whose
 sources are *all* mid-cooldown has nothing runnable, but nothing is owed either —
@@ -700,7 +663,7 @@ What survives the cut, so the removed text is not read back in:
   `system` when nothing discovered it — and nothing in the record claims a set of
   affected backends. Source health is a property of the source, so the fan-out was
   never information the record held; it is a **live derivation** the consumers already
-  have to do anyway, because backend orders and per-model chains change after the event is written and a
+  have to do anyway, because configured per-model chains change after the event is written and a
   frozen set would go stale the moment one does. The feed renders those state lines
   unattributed (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already
   show them). **The TRAFFIC kinds are outside this rule and must not be swept into it**
@@ -714,7 +677,7 @@ What survives the cut, so the removed text is not read back in:
   renders source events as unattributed lines」 was too wide: read over the traffic
   family it contradicted a frozen example this PR does not touch.
   The status surfaces answer 「what is affected」 by asking the current question
-  against current orders — **at two grains, which must not be collapsed** (corrected
+  against current configured chains — **at two grains, which must not be collapsed** (corrected
   07-29, review round 9). The SOURCE grain: **a backend has affected supply when a
   source that is blocking *now* appears in the capability chain of at least one of its
   protected models** — the (backend, model) test `api.md`'s supply guard already
@@ -728,7 +691,7 @@ What survives the cut, so the removed text is not read back in:
   round 12 — the round-10 wording claimed not to restate the predicate and then restated
   it, as 「nothing runnable and at least one blocker needs the user」, which silently
   dropped the OR-branch's other half: a **structurally empty** chain has no blocker at
-  all, so a forced deletion or an emptied order would have fallen out of `interrupted`
+  all, so a forced deletion or an emptied chain would have fallen out of `interrupted`
   and lost the 需处理 state and the in-turn explanation the user is owed. The table and
   `agent-chain.schema.json` both carry the empty-chain case; a restatement that has to be
   kept in sync with two of them is the defect, not the wording). **Read the class off the
@@ -742,13 +705,13 @@ What survives the cut, so the removed text is not read back in:
   which is exactly the case AC-9's Case A forbids (`model-hub-implementation.md`, AC-9). Both halves are
   current-state reads, and both are load-bearing
   (07-29, review round 3): chain membership alone folds a *historical* event against a
-  *current* chain, and since a recovered source normally stays in the same orders and
-  chains, and the failure event stays in the bounded feed, that predicate would pin the
+  *current* chain, and since a recovered source normally stays in the same configured
+  chains while the failure event stays in the bounded feed, that predicate would pin the
   pill to 「affected」 for as long as the event is retained — a recovery could never
   clear it. The event is what the **feed** renders; it is not what the **pill** reads.
   The pill reads the source's live blocking state — the same **contracted** facts the
-  resolver consults when it picks a candidate: `state.status` and, for a cooling-down
-  source, `state.retry_at` (`source.schema.json`), surfaced per chain entry as
+  configured-chain executor checks before invoking each stored hop: `state.status` and,
+  for a cooling-down source, `state.retry_at` (`source.schema.json`), surfaced per chain entry as
   `runnable` (`agent-chain.schema.json`). **No `blocked_until` field exists anywhere in
   the contracts** (corrected 07-29, review round 9: the earlier
   `blocked_until` / disabled / credential-invalid wording named a field the frozen
@@ -761,12 +724,11 @@ What survives the cut, so the removed text is not read back in:
   stops contributing to any pill on the next render, with no event written to say so and
   none needed. That test is the
   consumer's, evaluated at render time; it is not a field.
-  Note that the chain grain is what makes it right: a `follow` order holds every
-  eligible source — an API-key source is eligible for every backend — so a GLM-only key
-  sits in Codex's order while appearing in no chain Codex can run, and treating order
-  membership as impact would mark a backend degraded over supply it could never have
-  used. A **backend-scoped** kind (`supply_interrupted`, whose cause is that backend's
-  own order or selection) still names exactly the one backend it is about, because
+  Note that the configured-chain grain is what makes it right: Source inventory alone
+  does not mean a backend uses that Source. Only an exact stored hop creates impact, so
+  an unrelated Source failure cannot mark a backend degraded. A **backend-scoped** kind
+  (`supply_interrupted`, whose cause is that backend's configured route) still names
+  exactly the one backend it is about, because
   there the backend *is* the subject of the event rather than a consequence of it.
   If some later consumer genuinely needs a recorded affected-set, it gets a field then,
   with the evidence that derivation was insufficient — not speculatively now.
@@ -794,9 +756,10 @@ switch, remedy, or message branch absent from it.
 | `served` | any, including a transparent fallback | the turn completed; any switch is only a pull-surface record | silent: no Error, warning, info notice, or appended action tail |
 | `exhausted` | final model `supply_state` from the §4.5 taxonomy | fallback walked to the end; no attempt completed | `waiting` renders `models.launch.waiting`; `interrupted` renders `models.launch.interrupted` with the classified blockers |
 | `failed_terminal` | request-scoped parameter, protocol, or tool-compatibility failure | the attempted Source remains runnable and no switch occurred | `models.launch.request_incompatible`: this request is incompatible; switching Sources will not help |
-| `failed_terminal` | local `engine_down` before an upstream attempt | no Source was attempted or mutated | `models.errors.engine_down` |
+| `failed_terminal` | local `engine_down` at any request phase, including after an upstream attempt or streamed output | no Source is blamed or mutated; no replay or next-hop walk occurs | `models.errors.engine_down` |
 | `failed_terminal` | streamed fallback-class Source failure; its cooldown or `needs_action` was persisted | replay is forbidden; render `models.launch.retry` only when a fresh §4.3 projection now selects a different runnable hop; otherwise no switch exists | different current hop: “The next turn has switched Sources; retry.” No runnable hop: use the same `waiting`/`interrupted` rendering selected for `exhausted` |
-| `no_candidate` | model `supply_state` is `waiting` or `interrupted` | no Source was attempted | `waiting` uses `models.launch.waiting`; `interrupted` uses the cause-specific `models.launch.no_enabled_source | models.launch.no_eligible_source | models.launch.model_unsupported` form, naming the requested model and pointing to Models |
+| `no_candidate` | configured chain is empty | no Source was attempted because no hop is configured | `models.launch.route_unconfigured`, naming the requested model and pointing to Models |
+| `no_candidate` | configured chain is nonempty and model `supply_state` is `waiting` or `interrupted` | no Source was attempted because every exact hop is currently blocked | `waiting` uses `models.launch.waiting`; `interrupted` uses `models.launch.interrupted` with every exact hop's classified blocker and applicable remedy |
 | `canceled` | the turn FSM, never a transport inference, settled Stop/cancel | no Source failure or route switch is fabricated | no Model Hub supply copy; the existing turn-canceled surface owns the message |
 
 The matrix supersedes the earlier unconditional 「下一回合已自动换线」 sentence. Its
@@ -805,39 +768,34 @@ checked mechanically against both `vibe/i18n` locale files. A new outcome, discr
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
 
-One asymmetry has to be named, because it is easy to implement wrong: an agent can
-enter `interrupted` with **no source changing state at all** — its last enabled
-source is dropped from its order, or its selected model stops being supplied by
-anything left in that order. Every other entry in the feed is keyed on a source, so
-that transition gets its own agent-scoped event kind (`supply_interrupted`, with
-`reason: no_enabled_source | no_eligible_source | model_unsupported` naming which
-one-tap fix applies) instead of borrowing a credential or quota reason that would
-misstate the cause. It fires once, on the transition — never once per starved turn.
-Its counterpart guard is on delete: refusing to remove a source that is the last
-enabled supplier of some **selected model** for some backend (`api.md`) is
-what keeps this event rare rather than routine. Note the grain — per (backend,
-model), not per backend. A backend with four enabled sources is not safe by
-inspection: if only one of them supplies `claude-haiku-4-5`, deleting it starves
-that model while the backend still looks well supplied, and the user learns about it
-from a failed turn. Backend-level emptiness is just the case where every selected
-model hits zero at once. **"Selected" is deliberately wider than 「已勾选」**: it is
-the union of an open menu's checked entries, every menu model that owns a custom route
-chain, `agents.<backend>.default_model`, and each enabled Vibe Agent's own `model`.
+One asymmetry has to be named, because it is easy to implement wrong: an Agent can enter
+`interrupted` with **no Source changing state at all** — its route is unconfigured, a
+configured Source was deleted, its exact model stopped being callable, or its native
+CLI process is unavailable. Every other entry in the feed is keyed on a Source, so that
+transition gets its own Agent-scoped event kind (`supply_interrupted`) with the exact
+`route_unconfigured | source_missing | model_unsupported | native_cli_unavailable`
+reason instead of borrowing a credential or quota reason. It fires once on the
+transition, never once per starved turn. Its counterpart guard is on every explicit
+route mutation: the response reports every selected model whose configured chain would
+be emptied. Note the grain — per `(backend, model)`, not per backend. **"Selected" is
+deliberately wider than 「已勾选」**: it is the union of an open menu's checked entries,
+every menu model with a configured route, `agents.<backend>.default_model`, and each
+enabled Vibe Agent's own `model`.
 The protected identifier is always the **menu model**, never a hop's upstream
 `model_id`, because the menu model is what an Agent can run and what the chain query
-addresses. A custom chain that no Agent currently selects still represents deliberate
+addresses. A configured chain that no Agent currently selects still represents deliberate
 configuration and remains protected from a silent Source deletion; its
 `SupplyGap.agents` list may correctly be empty. `api.md` → DELETE carries the full set
 and the confirm copy names affected Agents when any exist.
 
 Exact-hop referential integrity is a separate guard from the supply-gap calculation.
-A non-forced Source DELETE refuses whenever any Custom chain names that Source, even
-when a later hop still supplies the menu model, and returns `source_in_custom_chain`
+A non-forced Source DELETE refuses whenever any configured chain names that Source, even
+when a later hop still supplies the menu model, and returns `source_in_route_chain`
 plus ordered `would_remove_hops` entries naming each `(backend, menu_model,
 source_id, model_id)` reference. `force=true` is an explicit cascade confirmation:
-the same transaction deletes the Source and every exact hop that names it, while the
-identity and relative order of all surviving hops remain unchanged. The route stays
-`custom` even if no hop survives, so deletion never silently changes it to Follow.
+the same transaction deletes the Source and every exact hop that names it across every
+backend route, while the identity and relative order of all surviving hops remain
+unchanged. An emptied route remains an explicit empty configuration.
 Any resulting protected-model gap is reported through the existing
 `would_interrupt` projection alongside `would_remove_hops`. This explicit cascade is
 not the silent side effect prohibited by §2; without the confirmation, neither the
@@ -847,17 +805,15 @@ The same invariant applies to **every Source-inventory mutation**, not only Sour
 deletion. Reversible or transactional changes — API-key Base URL replacement, API-key
 credential replacement, explicit refresh/recovery, and manual-model deletion — first
 stage the resulting inventory and run **both** guards: compare it with every exact
-Custom hop using the §4.3 phase-1 capability predicate, and recompute `would_interrupt`
-for every protected Follow or Custom menu model. Either the literal model remains
-advertised or a sanctioned native alias retains compatible family/version evidence. If
-an exact hop would cease to satisfy that predicate, the non-forced mutation is refused
-with `source_model_in_custom_chain` and ordered `would_remove_hops`; another Source
+configured hop and recompute `would_interrupt` for every protected menu model. If an
+exact configured model would cease to be callable, the non-forced mutation is refused
+with `source_model_in_route_chain` and ordered `would_remove_hops`; another Source
 supplying the same menu model does not make that exact reference disposable. If no
 exact hop is lost but a protected route loses its last supplier, it is refused with
 `source_last_supplier`. When both apply, the exact-hop error leads and the response
 still carries both complete arrays. A confirmed `force=true` applies the inventory
 change and removes only those invalidated hops in one transaction, preserving the
-identity and relative order of all survivors and keeping an empty route `custom`.
+identity and relative order of all survivors and keeping an empty route configured.
 It also reports every resulting supply gap; force is confirmation, not a claim that
 the mutation is interruption-free.
 
@@ -873,7 +829,7 @@ false; every array is present even when empty.
 | replace API key | `PUT /api/models/sources/<id>/credential` with `{key, force?: boolean}` | same guarded `409` | same Source success envelope |
 | refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean}` | same guarded `409` | same Source success envelope |
 | delete manual model | `DELETE /api/models/custom-models` with `{source_id, model_id, force?: boolean}` | same guarded `409` | same Source success envelope |
-| delete Source | `DELETE /api/models/sources/<id>?force=<bool>` | same guarded `409` | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the deleted Source is not returned and legacy `{ok}` is invalid |
+| delete Source | `DELETE /api/models/sources/<id>?force=<bool>` | same guarded `409` | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend route and preserving survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
 
 No query-parameter variant exists for the first four mutations. The final `api.md`,
 server/client envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
@@ -890,7 +846,7 @@ resulting credential and any inventory it can establish. Exact hops whose source
 pair is no longer present remain visible but non-runnable with exactly
 `reason: "model_unsupported"` and `retry_at: null`, and the response reports the
 resulting gaps and `needs_action` work for a later explicit edit or force cascade. It never silently
-converts the route to Follow or claims that the old supply is intact. Thus no
+replaces the configured model or claims that the old supply is intact. Thus no
 credential lifecycle event or inventory drift silently calls a model the Source no
 longer advertises or rewrites the user's chain.
 
@@ -972,46 +928,45 @@ reconstructible by appending. That is a shape decision rather than a validation 
 it makes 「两个成功者」, 「成功者不在最后」 and 「摘要指向列表里没有的来源」 impossible to
 write down, instead of invariants prose asks every implementer to respect.
 
-### 4.6 Route-policy storage and mutation
+### 4.6 Configured-chain storage and mutation
 
-§4.3 is the sole normative derivation. This section defines only its persisted input
-and mutation boundary. Route-policy storage is sparse: for each `(backend, menu model)`,
-an absent row means `{policy: "follow"}`. A stored row is either `{policy: "follow"}`
-or `{policy: "custom", hops: [{source_id, model_id}, ...]}`. A newly introduced bundled
-menu model therefore follows the backend Source order automatically, while an existing
-Custom row remains untouched. Custom hop order and exact pair identity are user-owned.
-Writes use the capability predicate defined in §4.3 phase 1; reads return the §4.3
-result and never project a second chain here.
+This section defines §4.3's persisted input and mutation boundary. Every known
+`(backend, menu model)` has one row:
 
-Source deletion has one defined Custom state. A non-forced delete refuses while any
-Custom hop names that Source. A confirmed forced delete removes every exact hop naming
-it atomically, preserves all survivor order, and leaves the route `custom` even when no
-hop survives. Inventory loss without Source deletion instead retains the hop in place as
-§4.3's visible `model_unsupported` entry. A deleted Source is never represented by a
-different stale-hop reason or silently converted to Follow.
+```json
+{"hops": [{"source_id": "src_...", "model_id": "upstream-model-id"}]}
+```
 
-There is no `mappings` field, mapping mutation, mapping resolver, or mapping diagnostic
-in the final product. A single-target override is a Custom chain whose hops use that
-target `model_id`; it is not a parallel data structure. This is smaller and more honest
-than coexistence: one route owner answers both “which Source?” and “which upstream
-model?”, one §4.3 result powers runtime and UI, and every validation applies to one
-shape. Keeping mappings would preserve an implicit Source choice beside an explicit
-Source choice and make precedence depend on which consumer happened to read first.
-This final-shape decision is **owner-vetoable (2026-08-07)**.
+`hops` may be empty and is always present. A newly introduced menu model starts with an
+empty route; catalog expansion and inventory refresh do not retroactively match it.
+Only Add Source's one-time match or an explicit user edit changes the array. Hop order,
+Source identity, and model mapping are user-visible configuration.
 
-The chain resource is
-`GET /api/models/agents/<backend>/chain?model=<id>`, with a matching `PUT` carrying
-`{policy: "follow"}` or
-`{policy: "custom", hops: [{source_id, model_id}, ...]}`. The read projection carries
-the policy plus the §4.3 result.
+A write validates each exact pair before commit. A later inventory or process change
+retains that pair at the same position with a live non-runnable reason until an explicit
+edit or guarded cascade changes it. Source deletion follows §4.5's transaction: a
+non-forced delete refuses while any route names the Source; a confirmed delete removes
+all such hops across all backends and preserves survivor order.
+
+There is no separate `mappings` field, Source order, policy discriminator, matching
+resolver, or mapping diagnostic. `model_id == menu_model` is an identity mapping;
+another explicit `model_id` is a user-configured substitution and must be invoked as
+written. **The system never invents a substitution; user-configured mappings are legal
+and authoritative.** This final-shape decision is **owner-vetoable (2026-08-07,
+amended by S-1 on 2026-08-09)**.
+
+The chain resource is `GET /api/models/agents/<backend>/chain?model=<id>`, with a
+matching `PUT` carrying `{hops: [{source_id, model_id}, ...]}`. The read projection
+returns the same stored array, in the same order, with only §4.3 live annotations and
+current execution position added.
 
 ### 4.7 Downstream — Agents
 
 | Agent | Menu | Notes |
 | --- | --- | --- |
-| Claude Code | fixed (built-in model IDs) | each built-in menu model follows the backend Source order or owns an exact custom route chain; adding new menu entries belongs to the deferred Configure Agents module |
+| Claude Code | fixed (built-in model IDs) | each built-in menu model owns one exact configured route chain; adding new menu entries belongs to the deferred Configure Agents module |
 | Codex | fixed | same |
-| OpenCode + future in-house agents | open | follows upstream model lists; supports user-defined custom model entries |
+| OpenCode + future in-house agents | open | uses exact configured route chains; supports user-defined model entries |
 
 ### 4.8 OpenCode identifier scheme (locked 07-23, retained in v3)
 
@@ -1020,12 +975,12 @@ OpenCode models are `provider/model-id`. Rules:
 - The provider segment uses the **standard vendor id** (`anthropic/`,
   `openai/`, `zhipuai/`, …) — identical to native OpenCode usage. No
   `avibe-` namespace (owner: keep it simple). Unrecognizable vendors fall
-  back to a single `custom/` provider. §4.3 phase 1 uses this same normalized id
-  when matching a Source to an OpenCode menu model.
+  back to a single `custom/` provider. Add Source may use this normalized id when it
+  proposes a one-time match; runtime reads only the stored exact hop.
 - Gateway mode merely redirects those providers' transport to the local Gateway in
   the generated runtime config overlay. Therefore **identifiers are stable
   across Gateway/Direct switches, across source add/remove/failover, and — new in
-  v3 — across any backend-order or per-model-chain edit**; never encode a concrete source into
+  v3 — across any configured-chain edit**; never encode a concrete Source into
   the provider segment.
 - Users never hand-assemble the string. Menu checkboxes pick models; the
   custom-model form generates and previews the identifier (source + model ID
@@ -1046,16 +1001,16 @@ The Models page has exactly two top-level product modules:
 
 | Module | Owns | Does not own |
 | --- | --- | --- |
-| **Sources** | Add/edit subscription and API-key Sources; credential location; discovered/manual model inventory; usage and source-global health | Source order, model pairing, fallback policy |
-| **Gateway** | Backend mode; backend Source order; per-menu-model follow/custom route chains; exact Source + model pairing; runnability, current hop, retry/failover/recovery state; probe and diagnostics entry | Credential entry, Agent-definition settings |
+| **Sources** | Add/edit subscription and API-key Sources; credential location; discovered/manual model inventory; usage and source-global health | Route-chain order or model mapping |
+| **Gateway** | Backend mode; exact per-menu-model configured chains; Source + model pairing; runnability, current hop, retry/failover/recovery state; probe and diagnostics entry | Credential entry, Agent-definition settings |
 
-The visual connection between a Source and Gateway answers only current facts: enrolled,
-used by N routes, serving now, cooling, or needs action. It has no id, CRUD route,
+The visual connection between a Source and Gateway answers only current facts: configured
+in N routes, serving now, cooling, or needs action. It has no id, CRUD route,
 drag handle, or persisted policy. Configuration lives at one of the two real owners:
 the Source or the Gateway chain.
 
 A Source card's “Supplying …” line consumes the existing
-`adopted_by: [{backend, menu_model, route_policy}]` projection: group its effective rows
+`adopted_by: [{backend, menu_model}]` projection: group its configured rows
 by backend, de-duplicate backend names, and combine them with the current §4.3
 runnability projection. No parallel “supplying backends” field is stored. If this
 projection proves insufficient in implementation, the lane reports the exact missing
@@ -1065,11 +1020,10 @@ Required interaction rules:
 
 - Sources remains an unordered asset inventory; there is no reorder affordance in that
   module.
-- Gateway is the primary editing surface. Backend Source order and per-model chains
-  live together so the user never edits a fallback list in one place and its model
-  pairing in another.
-- A model row shows whether it follows backend Source order or owns a Custom chain.
-  Opening it renders the exact §4.3 result; blocked hops remain in place and dim.
+- Gateway is the primary editing surface. Each model row shows the exact stored order
+  and mapping that runtime will execute; blocked hops remain in place and dim.
+- Add Source writes its one-time matches into those rows and appends to any existing
+  chain tail. The new positions are visible immediately and remain user-editable.
 - Each Gateway backend group renders §4.5's exact `supply_status` value in its subtitle.
   This is the sole backend-health line; explanatory prose cannot compete with it.
 - Adding Claude selects `native_cli` by default and presents Gateway custody as the
@@ -1101,8 +1055,8 @@ Required interaction rules:
 The existing V6 frames remain a visual baseline for row density, health states, and
 mobile treatment, but their Agent-card grouping and mapping drawer are not v3 product
 authority. The owner-approved v3 interaction draft is the implementation baseline for
-the two modules, native → Gateway takeover → native recovery, default versus custom
-model chains, and the Claude hub-add warning. The design lane adds production-complete
+the two modules, native → Gateway takeover → native recovery, configured model chains,
+and the Claude hub-add warning. The design lane adds production-complete
 desktop/mobile states without reopening the approved information
 architecture.
 
@@ -1148,8 +1102,8 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
 
 | Action | Eligible detected item | Default / apply behavior |
 | --- | --- | --- |
-| `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store and create the backend's singleton `native_cli` Source; reject a duplicate native Source before OAuth or partial commit |
-| `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source while leaving the original file byte-identical |
+| `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store, create the backend's singleton `native_cli` Source, and run the same one-time route match/visible append as Add Source; reject a duplicate native Source before OAuth or partial commit |
+| `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source, run the same one-time route match/visible append as Add Source, and leave the original file byte-identical |
 | `reauth` | detected material that cannot be safely copied or retained as a usable native login | not auto-applied as import; direct the user into the explicit authentication flow |
 | `controlled_import` | future engine-owned OAuth-import capability that can preserve refresh semantics | reserved and not selectable/applicable in v3; explicit OAuth add is the only hub-held subscription path |
 
@@ -1161,13 +1115,13 @@ The `keep_native` default prevents silent credential movement and does not repla
 §4.1's ChatGPT add-flow recommendation. A hub-held subscription is established only
 through explicit OAuth add, not native-file import. The import entry points are first
 open after upgrade, the setup wizard, and the backend-page banner.
-- **Add-source closing loop (v3).** Creating a Source reports two different facts.
-  `order_enrolled_by: [{backend, order_policy}]` means the Source entered a backend's
-  Follow Source order. `adopted_by: [{backend, menu_model, route_policy}]` means at
-  least one effective route produced by §4.3 phase 1 contains a capable hop using that
-  Source. Transient health and process availability do not change adoption. Enrollment
-  alone never yields “adopted” success copy; Custom backends may still offer one-tap
-  enable without claiming a route already uses the Source.
+- **Add-source closing loop (v3).** Creating a Source returns
+  `added_to: [{backend, menu_model, source_id, model_id, position}]` for every exact hop
+  written by the one-time match. `adopted_by: [{backend, menu_model}]` is the stable
+  Source-card projection of those persisted references; transient health and process
+  availability do not change it. A Source with no automatic match reports an empty
+  `added_to` and remains available for an explicit route edit, without a separate “not
+  enabled” state.
 
 ## 7. Security boundaries
 
@@ -1196,19 +1150,19 @@ UI are **not** product surface.
 **v3 routing requires no new engine policy.** Failover is ours, not the engine's: the engine
 runs as a single global instance with its own cooling and request-retry disabled
 (`vibe/model_hub_runtime/config.py`), model prefixes pin the source, and Python
-owns candidate walking and error classification. That boundary was chosen because
+owns configured-hop walking and error classification. That boundary was chosen because
 the engine's blind switching is broader than our signed error taxonomy
-(`model-hub-engine-survey.md`, P0). Per-model custom chains sit above that line:
-Python projects and walks exact `(source_id, model_id)` hops; the engine executes the
+(`model-hub-engine-survey.md`, P0). Per-model configured chains sit above that line:
+Python walks exact `(source_id, model_id)` hops; the engine executes the
 one pinned hop it receives.
 
 ## 9. Explicit non-goals (v3)
 
-- **No product-global priority list.** Ordering exists only as one backend's
-  Source order or one `(backend, menu model)` Route chain.
+- **No product-global or backend-wide priority list.** Execution ordering exists only
+  inside one `(backend, menu model)` Route chain.
 - **Per-model ordering is explicitly in scope.** Owner ruling 2026-08-07
   supersedes v2's “No per-model ordering” non-goal. The scope is exactly §4.3 and
-  §4.6's stored route-policy input;
+  §4.6's stored configured-chain input;
   there is no session-level or request-level editor.
 - **No native CLI account selector or multiple native slots.** A backend has one
   `native_cli` Source because its official CLI has one current local login. Additional
@@ -1220,10 +1174,10 @@ one pinned hop it receives.
 - **No session-level source pinning.** "Run just this turn on that source" is a
   diagnostic need, served by Direct mode plus the dry-run probe — not by a
   per-session override that would make spending unpredictable.
-- **No automatic model substitution.** Follow policy never invents a different
-  upstream model for a foreign vendor. Cross-vendor supply is explicit through a
-  custom Source + model hop; that hop may use an API key or a hub-held subscription
-  and requires no additional warning.
+- **No automatic model substitution.** The system never changes a configured hop's
+  `model_id`. A user-configured mapping to another model or vendor is legal and is
+  executed exactly; that hop may use an API key or a hub-held subscription and requires
+  no additional warning.
 - **No protocol guessing or post-save backfill.** A stored protocol comes from a real
   pre-save upstream response, never a vendor/Base-URL string heuristic. If observation
   fails, the product may ask once for a manual probe-order hint, but the hinted adapter
@@ -1285,17 +1239,17 @@ directions into questions that later lanes must answer before writing mechanical
       with no persistent provenance marker or protocol-level unverified value.
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
       Completions, and shows protocol choices only after observation cannot decide.
-- [ ] §4.2 keeps own-vendor subscription supply first in the vendor-recommended form
-      and never reorders a custom backend order or custom model chain; this priority
-      rule does not decide exact-model capability.
+- [ ] §4.2 uses the vendor recommendation only to seed an empty route during Add Source,
+      appends later matches visibly at the tail, and never re-runs matching or reorders
+      an existing chain.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
       native CLI's sanctioned-backend binding.
-- [ ] §4.3 is the document's only resolution derivation, including normalized
-      OpenCode matching, vendor-independent exact-model admission for Follow, per-hop
-      live runnability checks, and the non-persisted takeover projection; §4.6 only
-      stores and mutates exact `(source_id, model_id)` pairs.
-- [ ] The owner-vetoable final route shape is acceptable: sparse route rows default to
-      Follow, Custom owns exact pairs, and no mapping or dual routing authority exists.
+- [ ] §4.3 is the document's only configured-chain execution algorithm: it reads stored
+      hops verbatim, checks only live runnability and error fallthrough, and derives the
+      non-persisted takeover projection; §4.6 stores the same exact pairs the UI shows.
+- [ ] The owner-vetoable final route shape is acceptable: every menu model has one
+      explicit `hops` array, and no `follow | custom`, Source order, separate mapping,
+      or runtime matching authority exists.
 - [ ] §4.5 keeps state source-global, status live-derived, and every successful
       takeover silent; `supply_status` is the sole backend-health line, and a no-runnable-
       hop exhaustion never borrows takeover semantics; terminal in-turn errors plus
@@ -1304,12 +1258,12 @@ directions into questions that later lanes must answer before writing mechanical
       Configure Agents is deferred without a placeholder design. Source-card supply
       attribution reuses `adopted_by`, and saved Source details has only guarded
       「重新拉取」 with no latency or “last checked” copy.
-- [ ] §6 distinguishes Source-order enrollment from actual route adoption and never
-      calls enrollment alone “adopted.”
+- [ ] §6 reports the exact hops Add Source wrote through `added_to`, and Source-card
+      `adopted_by` reflects only persisted route references.
 - [ ] §6 reserves Direct for `mode: direct`, labels a `native_cli` Gateway hop Native,
       and defines a visible, reversible Direct ↔ Gateway action for every backend.
-- [ ] §9 explicitly supersedes the old no-per-model-ordering non-goal and keeps
-      automatic model invention out of Follow policy.
+- [ ] §9 explicitly supersedes the old no-per-model-ordering non-goal and states that
+      only users configure model substitution.
 - [ ] §10 records the owner-waived official-API fidelity re-test, preserves M0 evidence,
       and does not expand GA scope.
 - [ ] The implementation plan appends AC-22 onward and gives I1 an exhaustive final
