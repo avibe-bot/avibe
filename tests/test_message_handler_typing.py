@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from modules.im import MessageContext
+from modules.sessions_facade import SessionsFacade
 from core.processing_indicator import ProcessingIndicatorService
 
 
@@ -1082,11 +1083,15 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(request.vibe_agent_reasoning_effort)
 
     async def test_workbench_inherited_route_materializes_at_turn_start(self):
-        """A workbench session created on an inherited default (empty model /
+        """HFR-462: a workbench session created on an inherited default (empty model /
         effort) gets the resolved Agent defaults pinned onto its row when the
         turn STARTS, so the chat-header picker keeps showing the full route."""
         controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
-        controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
+        sessions_store = Mock()
+        sessions_store.is_message_in_processed_set.return_value = False
+        sessions_store.try_add_to_processed_set.return_value = True
+        sessions_store.materialize_agent_session_route = Mock(return_value=True)
+        controller.settings_manager.sessions = SessionsFacade(sessions_store)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -1107,7 +1112,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_user_message(context, "hello")
 
-        controller.settings_manager.sessions.materialize_agent_session_route.assert_called_once_with(
+        sessions_store.materialize_agent_session_route.assert_called_once_with(
             "ses_wb", model="gpt-5.4", reasoning_effort="high"
         )
 

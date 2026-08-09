@@ -103,6 +103,19 @@ class SessionsFacade:
             )
         return self.get_agent_session_row_id(user_key, thread_id, agent_name)
 
+    def materialize_agent_session_route(
+        self,
+        agent_session_id: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> bool:
+        return self.sessions_store.materialize_agent_session_route(
+            agent_session_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
     def bind_agent_session(
         self,
         user_id: Union[int, str],
