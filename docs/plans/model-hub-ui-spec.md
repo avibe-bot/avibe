@@ -220,6 +220,8 @@ than in a moving one.
 | G-15 | 06 source detail, a source's own name and Base URL | any affordance that edits them | `api.md` contracts `PATCH /api/models/sources/<id>` with `{display_name?, base_url?}`, and no frame draws a control that sends it: 06's inventory edits model rows only, and 05 sets both fields at creation and never again. So the route is named in §1.5 as evidence of what it *cannot* carry, never as a call this spec places on a screen |
 | G-16 | 01 upstream card and 06 source detail | any affordance that removes a **source** | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除 any of these ten frames draws is 06's row menu, which sends `DELETE /api/models/sources/<id>/models/<model_id>` — one manual model, not the source. So a source added by mistake, or left behind by a flow the user abandoned, can be seen on 01 and not removed from it. §1.4 said the opposite until this round: it told the reader 移除 was one press away, which was reading the model-row menu as if it removed the source |
 | G-17 | 04 add-subscription, a flow that expects something pasted back | the field that takes it, and the control that sends it | `oauth-flow.schema.json`'s `presentation.expects` runs `none · paste_code · paste_callback_url`, and `api.md` contracts `POST /api/models/oauth/submit` with `{flow_id, value}` for the second and third. Frame 04's foot is 取消 / 去登录 and draws no input, so only `expects: none` — the browser round trip — has a surface. §1.4 states the declaration rather than the browser assumption it carried before, and states this absence rather than describing a field no frame draws |
+| G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves | the route that carries a non-persisting observation of a source that does not exist yet | **The behaviour is contracted and the route is not**, so this row registers a gap *inside* the contract rather than an undecided question. AC-26 states the operation outright — 「Add Source exposes one non-persisting submission that combines connectivity classification with response-backed protocol observation」, returning classified reachability, authentication and a protocol 「without persisting a Source」 — and `model-hub.md`'s protocol-observation ruling of 2026-08-09 requires every stored `protocol` to trace back to a real response taken *before* Save, so an observation that saves nothing is not optional to the design. None of `api.md`'s 28 route rows accepts one: `POST /api/models/agents/<backend>/probe` is backend-scoped (`{model?}`) and reports on the configured chain, `POST /api/models/sources/<id>/refresh` needs an `id` only Save produces, and `POST /api/models/sources` persists on success. §1.5 keeps every Pull-origin state, because the operation is contracted and 05 draws it; what is missing is the way to invoke it |
+| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight | what the server is left holding when the cancel lands after the transient phase | **Cancellation is contracted everywhere except the persisting half.** AC-26 requires an API-key test's success, authentication failure, adapter error, timeout **and cancellation** each to 「revoke the transient provisioned ref before the operation settles」, with a durable pending-revocation record and reconciliation behind a fault-injected revoke failure, and repeats that guarantee for unsaved model discovery; `api.md` contracts `POST /api/models/oauth/cancel` for the subscription branch. No artefact states the outcome once `POST /api/models/sources` has crossed out of that transient phase into persistence — whether a cancel there yields a Source or nothing. §1.5 states the guarantee for the phase that has one and stops at that seam rather than extending AC-26 over a boundary AC-26 does not cross |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -1852,6 +1854,16 @@ implemented the opposite decision.
 dialog has no Loading state, because nothing is fetched before it opens, and no Empty
 state, because a form has none.
 
+**Every state past the form is an observation this dialog has no route to run**
+`[contract-gap]` G-18. The operation itself is contracted — AC-26 declares one
+non-persisting submission that classifies reachability and authentication and reports a
+protocol only a real upstream response proved, and the protocol-observation ruling makes
+an unsaved observation load-bearing for every Save that follows it — but no row in
+`api.md` accepts it. So the states below stay fully specified, because a contracted
+operation that a frame draws is not a state this file may drop; what is registered is the
+absence of the route, and §0.5 owns that. Nothing below invents a payload, a status code
+or a path for it.
+
 **Origin is an axis, not a state, and it is the whole reason this table has primed
 twins** `[derived]`. 添加 and 拉取型号 run the *same* probe, so every outcome the probe
 can produce is reachable from either button, and the diagnosis it renders — the
@@ -1866,8 +1878,12 @@ time:
   the form's values intact; an add is what the dialog is for, so its 取消 dismisses. This
   holds for the in-flight states exactly as it does for the outcome states: ② dismisses,
   ②′ returns to ①. A cancelled in-flight add has its transient credential revoked
-  server-side (`[contract]` AC-26); a cancelled pull has nothing to revoke, because a
-  pull writes no credential.
+  server-side **for as long as the operation is still the non-persisting submission**
+  (`[contract]` AC-26, which requires that revocation on every way the submission can
+  settle, cancellation included); what a cancel yields once the add has crossed into
+  persistence is `[contract-gap]` G-19, and this file states the guarantee for the phase
+  that has one instead of extending it past the seam. A cancelled pull has nothing to
+  revoke at either phase, because a pull writes no credential.
 - **A pull-origin state can never persist.** Where a state's Add-origin form offers a
   persisting exit, the pull-origin form does not offer it at all: ④′ reports its result
   inline instead of saving, and ⑤′ drops 仍要添加 and keeps the ordinary two-button foot.
