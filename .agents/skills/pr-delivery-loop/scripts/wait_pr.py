@@ -32,9 +32,9 @@ from _github_wait_common import (  # noqa: E402
     get_token,
     github_get,
     github_graphql,
+    InitialRequestRetriesExhausted,
     is_retryable_http_error,
     LAST_DELIVERY_ENV,
-    later_since,
     list_paginated,
     list_paginated_with_count,
     max_id,
@@ -43,6 +43,7 @@ from _github_wait_common import (  # noqa: E402
     requests_per_poll,
     resolve_authenticated_login,
     ResponseCache,
+    retry_initial_request,
     squash,
     WATCH_ID_ENV,
 )
@@ -83,6 +84,7 @@ REVIEW_FINGERPRINTS_KEY = "review_fingerprints"
 REVIEW_COMMENT_FINGERPRINTS_KEY = "review_comment_fingerprints"
 ISSUE_COMMENT_FINGERPRINTS_KEY = "issue_comment_fingerprints"
 REVIEW_THREAD_STATES_KEY = "review_thread_states"
+PR_SNAPSHOT_KEY = "snapshot"
 PR_FINGERPRINT_KEYS = (
     REVIEW_FINGERPRINTS_KEY,
     REVIEW_COMMENT_FINGERPRINTS_KEY,
@@ -219,6 +221,26 @@ def _keep_item(
     return not _is_ignored_author(item, ignored_authors) and not _matches_ignored_pattern(item, ignore_patterns)
 
 
+def _visible_activity_items(
+    items: list[dict[str, Any]],
+    *,
+    viewer_login: str | None,
+    ignore_self_comments: bool,
+    ignored_authors: set[str],
+    ignore_patterns: list[re.Pattern[str]],
+) -> list[dict[str, Any]]:
+    kept = (
+        items
+        if not ignore_self_comments
+        else [item for item in items if not _is_self_authored_comment(item, viewer_login)]
+    )
+    return [
+        item
+        for item in kept
+        if _keep_item(item, ignored_authors=ignored_authors, ignore_patterns=ignore_patterns)
+    ]
+
+
 def _is_codex_pass_reaction(reaction: dict[str, Any]) -> bool:
     author = ((reaction.get("user") or {}).get("login")) or ""
     content = str(reaction.get("content") or "")
@@ -298,12 +320,18 @@ def _format_pr_head_event(pr: dict[str, Any], previous_head: str, current_head: 
 def _format_review_thread_event(
     pr: dict[str, Any],
     thread_id: str,
-    previous_resolved: bool,
-    current_resolved: bool,
+    previous_resolved: bool | None,
+    current_resolved: bool | None,
 ) -> str:
     url = pr.get("html_url") or ""
-    previous = "resolved" if previous_resolved else "unresolved"
-    current = "resolved" if current_resolved else "unresolved"
+
+    def _label(value: bool | None) -> str:
+        if value is None:
+            return "absent"
+        return "resolved" if value else "unresolved"
+
+    previous = _label(previous_resolved)
+    current = _label(current_resolved)
     return (
         f"- review_thread {thread_id} {previous} -> {current}\n"
         "  Review thread state changed; re-evaluate unresolved threads across the entire PR.\n"
@@ -318,13 +346,6 @@ def _format_pull_request(pr: dict[str, Any]) -> str:
     title = squash(pr.get("title") or "")
     url = pr.get("html_url") or ""
     return f"- pull_request #{pr_number} by {author} ({state})\n  {title}\n  {url}"
-
-
-def _with_since(url: str, since: str | None) -> str:
-    if not since:
-        return url
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}since={urllib.parse.quote(since)}"
 
 
 def _fetch_review_threads(
@@ -379,8 +400,6 @@ def _fetch_state(
     token: str | None,
     *,
     cache: ResponseCache | None = None,
-    review_comment_since: str | None = None,
-    issue_comment_since: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
     base_url = f"https://api.github.com/repos/{encoded_repo}"
@@ -394,13 +413,16 @@ def _fetch_state(
         token,
         cache=cache,
     )
+    # Snapshot equality is the wake gate, so every mutable collection must be a
+    # complete current view. A `since` slice cannot prove that an older item was
+    # removed and would turn the normalized snapshot into an append-only cache.
     review_comments, review_comment_requests = list_paginated_with_count(
-        _with_since(f"{base_url}/pulls/{pr_number}/comments", review_comment_since),
+        f"{base_url}/pulls/{pr_number}/comments",
         token,
         cache=cache,
     )
     issue_comments, issue_comment_requests = list_paginated_with_count(
-        _with_since(f"{base_url}/issues/{pr_number}/comments", issue_comment_since),
+        f"{base_url}/issues/{pr_number}/comments",
         token,
         cache=cache,
     )
@@ -463,6 +485,7 @@ def _render_activity(
     reaction_cursor: int,
     pr_status: str,
     head_sha: str,
+    snapshot: dict[str, Any],
     event_limit: int,
     viewer_login: str | None = None,
     ignore_self_comments: bool = True,
@@ -473,9 +496,20 @@ def _render_activity(
     review_comment_fingerprints: dict[str, str] | None = None,
     issue_comment_fingerprints: dict[str, str] | None = None,
     review_thread_states: dict[str, bool] | None = None,
-) -> tuple[str | None, int, int, int, int, str, str]:
+    review_threads_available: bool = True,
+) -> tuple[str | None, int, int, int, int, str, str, dict[str, Any]]:
     ignored_authors = ignored_authors or set()
     ignore_patterns = ignore_patterns or []
+    current_snapshot = _normalized_pr_snapshot(
+        state,
+        viewer_login=viewer_login,
+        ignore_self_comments=ignore_self_comments,
+        actionable_only=actionable_only,
+        ignored_authors=ignored_authors,
+        ignore_patterns=ignore_patterns,
+        committed_snapshot=snapshot,
+        review_threads_available=review_threads_available,
+    )
     current_pr_status = _current_pr_status(state.get("pull_request"))
     current_head_sha = _current_pr_head_sha(state.get("pull_request"))
     review_threads = state.get("review_threads")
@@ -499,16 +533,13 @@ def _render_activity(
     )
 
     def _visible(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        # Cursors advance over everything new; only the rendering is filtered, so a
-        # dropped item is dropped once and never re-examined on the next poll.
-        kept = items if not ignore_self_comments else [
-            item for item in items if not _is_self_authored_comment(item, viewer_login)
-        ]
-        return [
-            item
-            for item in kept
-            if _keep_item(item, ignored_authors=ignored_authors, ignore_patterns=ignore_patterns)
-        ]
+        return _visible_activity_items(
+            items,
+            viewer_login=viewer_login,
+            ignore_self_comments=ignore_self_comments,
+            ignored_authors=ignored_authors,
+            ignore_patterns=ignore_patterns,
+        )
 
     visible_reviews = _visible(new_reviews)
     if actionable_only:
@@ -523,31 +554,27 @@ def _render_activity(
     has_pr_status_event = current_pr_status != pr_status
     has_head_event = current_head_sha != head_sha
 
-    if not (
-        new_reviews
-        or new_review_comments
-        or new_issue_comments
-        or new_reactions
-        or review_thread_changes
-        or has_pr_status_event
-        or has_head_event
-    ):
-        return (
-            None,
-            review_cursor,
-            review_comment_cursor,
-            issue_comment_cursor,
-            reaction_cursor,
-            pr_status,
-            head_sha,
-        )
-
-    next_review_cursor = max(review_cursor, max_id(new_reviews))
-    next_review_comment_cursor = max(review_comment_cursor, max_id(new_review_comments))
-    next_issue_comment_cursor = max(issue_comment_cursor, max_id(new_issue_comments))
+    next_review_cursor = max(review_cursor, max_id(state["reviews"]))
+    next_review_comment_cursor = max(review_comment_cursor, max_id(state["review_comments"]))
+    next_issue_comment_cursor = max(issue_comment_cursor, max_id(state["issue_comments"]))
     next_reaction_cursor = max(reaction_cursor, max_id(state["reactions"]))
     next_pr_status = current_pr_status
     next_head_sha = current_head_sha
+
+    # This is the only wake decision. Per-field comparisons below are descriptors:
+    # they explain a changed canonical snapshot but cannot suppress one or create a
+    # wake on their own.
+    if current_snapshot == snapshot:
+        return (
+            None,
+            next_review_cursor,
+            next_review_comment_cursor,
+            next_issue_comment_cursor,
+            next_reaction_cursor,
+            next_pr_status,
+            next_head_sha,
+            current_snapshot,
+        )
 
     render_pr_status_event = has_pr_status_event and (
         not actionable_only or current_pr_status in ACTIONABLE_PR_STATUSES
@@ -571,14 +598,10 @@ def _render_activity(
     optional_events.extend(_format_issue_comment(comment) for comment in visible_issue_comments)
 
     if not (required_events or optional_events):
-        return (
-            None,
-            next_review_cursor,
-            next_review_comment_cursor,
-            next_issue_comment_cursor,
-            next_reaction_cursor,
-            next_pr_status,
-            next_head_sha,
+        required_events.append(
+            "- pr_snapshot changed\n"
+            "  Gate-relevant PR state changed; re-evaluate the exact head, review verdict, "
+            "and all unresolved threads."
         )
 
     lines = [f"GitHub PR activity detected for {repo}#{pr_number}"]
@@ -601,6 +624,7 @@ def _render_activity(
         next_reaction_cursor,
         next_pr_status,
         next_head_sha,
+        current_snapshot,
     )
 
 
@@ -686,15 +710,6 @@ def _comment_fingerprint_map(comments: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
-def _merge_fingerprint_map(
-    baseline: dict[str, str],
-    observed: dict[str, str],
-) -> dict[str, str]:
-    """Retain fingerprints omitted by a later updated-since fetch."""
-
-    return {**baseline, **observed}
-
-
 def _review_thread_state_map(threads: list[dict[str, Any]]) -> dict[str, bool]:
     return {
         str(thread["id"]): bool(thread["isResolved"])
@@ -703,14 +718,95 @@ def _review_thread_state_map(threads: list[dict[str, Any]]) -> dict[str, bool]:
     }
 
 
+def _normalized_item_map(
+    items: list[dict[str, Any]],
+    *,
+    fields: tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in items:
+        item_id = item.get("id")
+        if not isinstance(item_id, (int, str)) or isinstance(item_id, bool):
+            continue
+        author = ((item.get("user") or {}).get("login")) or ""
+        normalized[str(item_id)] = {
+            "author": str(author),
+            **{field: item.get(field) for field in fields},
+        }
+    return normalized
+
+
+def _normalized_pr_snapshot(
+    state: dict[str, Any],
+    *,
+    viewer_login: str | None = None,
+    ignore_self_comments: bool = True,
+    actionable_only: bool = False,
+    ignored_authors: set[str] | None = None,
+    ignore_patterns: list[re.Pattern[str]] | None = None,
+    committed_snapshot: dict[str, Any] | None = None,
+    review_threads_available: bool = True,
+) -> dict[str, Any]:
+    """Return the complete gate-relevant PR snapshot without volatile fields."""
+
+    ignored_authors = ignored_authors or set()
+    ignore_patterns = ignore_patterns or []
+
+    def _visible(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return _visible_activity_items(
+            items,
+            viewer_login=viewer_login,
+            ignore_self_comments=ignore_self_comments,
+            ignored_authors=ignored_authors,
+            ignore_patterns=ignore_patterns,
+        )
+
+    reviews = _visible(state["reviews"])
+    if actionable_only:
+        reviews = [review for review in reviews if _is_actionable_review(review)]
+    review_comments = _visible(state["review_comments"])
+    issue_comments = _visible(state["issue_comments"])
+    reactions = [reaction for reaction in state["reactions"] if _is_codex_pass_reaction(reaction)]
+    normalized_reactions = _normalized_item_map(reactions, fields=("content",))
+    for reaction in normalized_reactions.values():
+        reaction["author"] = "chatgpt-codex-connector"
+
+    if review_threads_available:
+        review_threads = _review_thread_state_map(state["review_threads"])
+    else:
+        saved_threads = (committed_snapshot or {}).get("review_threads")
+        review_threads = saved_threads if isinstance(saved_threads, dict) else {}
+    pr_status = _current_pr_status(state.get("pull_request"))
+    if actionable_only and pr_status not in ACTIONABLE_PR_STATUSES:
+        pr_status = "open"
+
+    return {
+        "pull_request": {
+            "status": pr_status,
+            "head_sha": _current_pr_head_sha(state.get("pull_request")),
+        },
+        "reviews": _normalized_item_map(
+            reviews,
+            fields=("state", "body", "commit_id"),
+        ),
+        "review_comments": _normalized_item_map(
+            review_comments,
+            fields=("body", "path"),
+        ),
+        "issue_comments": _normalized_item_map(issue_comments, fields=("body",)),
+        "reactions": normalized_reactions,
+        "review_threads": review_threads,
+    }
+
+
 def _review_thread_state_changes(
     current: dict[str, bool],
     baseline: dict[str, bool],
-) -> list[tuple[str, bool, bool]]:
+) -> list[tuple[str, bool | None, bool | None]]:
     return [
-        (thread_id, baseline[thread_id], resolved)
-        for thread_id, resolved in current.items()
-        if thread_id in baseline and baseline[thread_id] != resolved
+        (thread_id, baseline.get(thread_id), current.get(thread_id))
+        for thread_id in sorted(current.keys() | baseline.keys())
+        if baseline.get(thread_id) != current.get(thread_id)
     ]
 
 
@@ -862,6 +958,7 @@ def _cursorless_state_file(path: Path) -> bool:
             "head_sha",
             *PR_FINGERPRINT_KEYS,
             REVIEW_THREAD_STATES_KEY,
+            PR_SNAPSHOT_KEY,
             STAGED_KEY,
         )
     )
@@ -1315,6 +1412,11 @@ def _saved_review_thread_states(saved: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def _saved_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
+    value = saved.get(PR_SNAPSHOT_KEY)
+    return value if isinstance(value, dict) else {}
+
+
 def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
     missing = []
     if _saved_str(saved, "head_sha") is None:
@@ -1328,6 +1430,8 @@ def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
         not isinstance(item, bool) for item in thread_states.values()
     ):
         missing.append(REVIEW_THREAD_STATES_KEY)
+    if not isinstance(saved.get(PR_SNAPSHOT_KEY), dict):
+        missing.append(PR_SNAPSHOT_KEY)
     return missing
 
 
@@ -1449,8 +1553,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to a JSON file holding this watch's cursors between runs. Strongly recommended for "
             "--forever watches: each cycle resumes where the previous one stopped instead of "
-            "re-baselining, so activity arriving between cycles is not lost, and the next fetch only "
-            "asks GitHub for what is new."
+            "re-baselining, so activity arriving between cycles is not lost and the next cycle can "
+            "compare a complete ETag-revalidated gate snapshot."
         ),
     )
     parser.add_argument(
@@ -1577,32 +1681,21 @@ def main() -> int:
         # account's comments and let the new account's own comments wake the Agent.
         if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
             viewer_login = _saved_str(saved, "viewer_login")
-        while viewer_login is None:
+        if viewer_login is None:
             try:
-                viewer_login = resolve_authenticated_login(token)
-            except urllib.error.HTTPError as err:
-                if not is_retryable_http_error(err):
-                    print(f"GitHub viewer lookup failed: {err.code} {err.reason}", file=sys.stderr)
-                    return 1
-                print(
-                    f"Retryable GitHub viewer lookup error: {err.code} {err.reason}; continuing in this watch",
-                    file=sys.stderr,
+                viewer_login = retry_initial_request(
+                    partial(resolve_authenticated_login, token),
+                    description="GitHub viewer lookup",
                 )
-            except urllib.error.URLError as err:
-                print(f"GitHub viewer lookup failed: {err.reason}; continuing in this watch", file=sys.stderr)
+            except urllib.error.HTTPError as err:
+                print(f"GitHub viewer lookup failed: {err.code} {err.reason}", file=sys.stderr)
+                return 1
+            except InitialRequestRetriesExhausted as err:
+                print(str(err), file=sys.stderr)
+                return 1
             except Exception as err:  # noqa: BLE001
                 print(f"GitHub viewer lookup failed: {err}", file=sys.stderr)
                 return 1
-            if viewer_login is not None:
-                break
-            if args.timeout > 0:
-                remaining_timeout = args.timeout - (time.monotonic() - start)
-                if remaining_timeout <= 0:
-                    print("Timed out while resolving GitHub viewer identity", file=sys.stderr)
-                    return 124
-                time.sleep(min(base_interval, remaining_timeout))
-            else:
-                time.sleep(base_interval)
         if not viewer_login:
             print(
                 "GitHub viewer identity could not be resolved; pass --include-self-comments explicitly to continue.",
@@ -1666,20 +1759,6 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
-    # An explicit --since-*-comment-id asks for a replay from that id. The saved
-    # `since` timestamp is only ever a shortcut for the saved cursor, so keeping it
-    # would narrow the fetch to comments newer than the last poll and hide exactly
-    # the history the flag asked to see.
-    review_comment_since = (
-        _saved_str(saved, "review_comment_since")
-        if resumed and args.since_review_comment_id is None
-        else None
-    )
-    issue_comment_since = (
-        _saved_str(saved, "issue_comment_since")
-        if resumed and args.since_issue_comment_id is None
-        else None
-    )
     # --catch-up asks for existing activity to count as pending, and it already
     # overrides the saved cursors above. The new-PR cursor follows the same rule:
     # inheriting it would filter the fully fetched history right back down to what
@@ -1688,53 +1767,39 @@ def main() -> int:
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
 
-    while True:
-        try:
-            if args.pr is not None:
-                state, requests_per_poll_count = _fetch_state(
-                    args.repo,
-                    args.pr,
-                    token,
-                    cache=cache,
-                    review_comment_since=review_comment_since,
-                    issue_comment_since=issue_comment_since,
-                )
-            else:
-                initial_pr_stop_after_id = None
-                initial_pr_max_pages = None
-                if since_pr_id is not None and not args.catch_up:
-                    initial_pr_stop_after_id = since_pr_id
-                elif not args.catch_up:
-                    initial_pr_max_pages = 1
-                state, requests_per_poll_count = _fetch_new_pr_state(
+    try:
+        if args.pr is not None:
+            state, requests_per_poll_count = retry_initial_request(
+                partial(_fetch_state, args.repo, args.pr, token, cache=cache),
+                description="initial GitHub PR state request",
+            )
+        else:
+            initial_pr_stop_after_id = None
+            initial_pr_max_pages = None
+            if since_pr_id is not None and not args.catch_up:
+                initial_pr_stop_after_id = since_pr_id
+            elif not args.catch_up:
+                initial_pr_max_pages = 1
+            state, requests_per_poll_count = retry_initial_request(
+                partial(
+                    _fetch_new_pr_state,
                     args.repo,
                     token,
                     stop_after_id=initial_pr_stop_after_id,
                     max_pages=initial_pr_max_pages,
                     cache=cache,
-                )
-            break
-        except urllib.error.HTTPError as err:
-            if not is_retryable_http_error(err):
-                print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
-                return 1
-            print(
-                f"Retryable GitHub API error: {err.code} {err.reason}; continuing in this watch",
-                file=sys.stderr,
+                ),
+                description="initial GitHub pull-request list request",
             )
-        except urllib.error.URLError as err:
-            print(f"GitHub network error: {err.reason}; continuing in this watch", file=sys.stderr)
-        except Exception as err:  # noqa: BLE001
-            print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
-            return 1
-        if args.timeout > 0:
-            remaining_timeout = args.timeout - (time.monotonic() - start)
-            if remaining_timeout <= 0:
-                print("Timed out while fetching initial GitHub PR state", file=sys.stderr)
-                return 124
-            time.sleep(min(base_interval, remaining_timeout))
-        else:
-            time.sleep(base_interval)
+    except urllib.error.HTTPError as err:
+        print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
+        return 1
+    except InitialRequestRetriesExhausted as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    except Exception as err:  # noqa: BLE001
+        print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
+        return 1
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -1793,6 +1858,30 @@ def main() -> int:
             (_saved_str(saved, "head_sha") if resumed else None)
             or _current_pr_head_sha(state.get("pull_request"))
         )
+        explicit_replay = any(
+            value is not None
+            for value in (
+                args.since_review_id,
+                args.since_review_comment_id,
+                args.since_issue_comment_id,
+                args.since_reaction_id,
+                args.since_pr_status,
+            )
+        )
+        if resumed:
+            snapshot = _saved_snapshot(saved)
+        elif args.catch_up or explicit_replay:
+            snapshot = {}
+        else:
+            snapshot = _normalized_pr_snapshot(
+                state,
+                viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+                actionable_only=args.actionable_only,
+                ignored_authors=ignored_authors,
+                ignore_patterns=ignore_patterns,
+                review_threads_available=token is not None,
+            )
 
         print(
             (
@@ -1814,8 +1903,8 @@ def main() -> int:
         )
 
         def _render(
-            cursors: tuple[int, int, int, int, str, str],
-        ) -> tuple[str | None, int, int, int, int, str, str]:
+            cursors: tuple[int, int, int, int, str, str, dict[str, Any]],
+        ) -> tuple[str | None, int, int, int, int, str, str, dict[str, Any]]:
             return _render_activity(
                 repo=args.repo,
                 pr_number=args.pr,
@@ -1826,6 +1915,7 @@ def main() -> int:
                 reaction_cursor=cursors[3],
                 pr_status=cursors[4],
                 head_sha=cursors[5],
+                snapshot=cursors[6],
                 event_limit=args.event_limit,
                 viewer_login=viewer_login,
                 ignore_self_comments=not args.include_self_comments,
@@ -1836,12 +1926,8 @@ def main() -> int:
                 review_comment_fingerprints=review_comment_fingerprints,
                 issue_comment_fingerprints=issue_comment_fingerprints,
                 review_thread_states=review_thread_states,
+                review_threads_available=token is not None,
             )
-
-        def _advance_since() -> None:
-            nonlocal review_comment_since, issue_comment_since
-            review_comment_since = later_since(review_comment_since, state["review_comments"])
-            issue_comment_since = later_since(issue_comment_since, state["issue_comments"])
 
         def _pr_state_fields() -> dict[str, Any]:
             return {
@@ -1855,8 +1941,7 @@ def main() -> int:
                 REVIEW_COMMENT_FINGERPRINTS_KEY: review_comment_fingerprints,
                 ISSUE_COMMENT_FINGERPRINTS_KEY: issue_comment_fingerprints,
                 REVIEW_THREAD_STATES_KEY: review_thread_states,
-                "review_comment_since": review_comment_since,
-                "issue_comment_since": issue_comment_since,
+                PR_SNAPSHOT_KEY: snapshot,
                 "viewer_login": viewer_login,
                 "token_fingerprint": token_fingerprint,
             }
@@ -1905,9 +1990,9 @@ def main() -> int:
             _persist_pr_state()
 
         def _settle(
-            first: tuple[str | None, int, int, int, int, str, str],
-            pending: tuple[int, int, int, int, str, str],
-        ) -> tuple[str | None, int, int, int, int, str, str]:
+            first: tuple[str | None, int, int, int, int, str, str, dict[str, Any]],
+            pending: tuple[int, int, int, int, str, str, dict[str, Any]],
+        ) -> tuple[str | None, int, int, int, int, str, str, dict[str, Any]]:
             """Re-poll while a batch is still landing so it costs one Agent turn."""
 
             nonlocal state
@@ -1939,8 +2024,6 @@ def main() -> int:
                         args.pr,
                         token,
                         cache=cache,
-                        review_comment_since=review_comment_since,
-                        issue_comment_since=issue_comment_since,
                     )
                 except Exception as err:  # noqa: BLE001
                     print(
@@ -1965,23 +2048,15 @@ def main() -> int:
             reaction_cursor,
             pr_status,
             head_sha,
+            snapshot,
         )
         pre_event_fields = _pr_state_fields()
         initial_result = _render(pending_cursors)
         if initial_result[0] is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
-        review_fingerprints = _merge_fingerprint_map(
-            review_fingerprints,
-            _review_fingerprint_map(state["reviews"]),
-        )
-        review_comment_fingerprints = _merge_fingerprint_map(
-            review_comment_fingerprints,
-            _comment_fingerprint_map(state["review_comments"]),
-        )
-        issue_comment_fingerprints = _merge_fingerprint_map(
-            issue_comment_fingerprints,
-            _comment_fingerprint_map(state["issue_comments"]),
-        )
+        review_fingerprints = _review_fingerprint_map(state["reviews"])
+        review_comment_fingerprints = _comment_fingerprint_map(state["review_comments"])
+        issue_comment_fingerprints = _comment_fingerprint_map(state["issue_comments"])
         if token is not None:
             review_thread_states = _review_thread_state_map(state["review_threads"])
         (
@@ -1992,8 +2067,8 @@ def main() -> int:
             reaction_cursor,
             pr_status,
             head_sha,
+            snapshot,
         ) = initial_result
-        _advance_since()
         if initial_output is None:
             # Persisted even with nothing to report: the baseline this cycle
             # established is exactly what the next cycle must resume from.
@@ -2083,8 +2158,6 @@ def main() -> int:
                     args.pr,
                     token,
                     cache=cache,
-                    review_comment_since=review_comment_since,
-                    issue_comment_since=issue_comment_since,
                 )
             else:
                 state, requests_per_poll_count = _fetch_new_pr_state(
@@ -2147,23 +2220,15 @@ def main() -> int:
                 reaction_cursor,
                 pr_status,
                 head_sha,
+                snapshot,
             )
             pre_event_fields = _pr_state_fields()
             result = _render(pending_cursors)
             if result[0] is not None:
                 result = _settle(result, pending_cursors)
-            review_fingerprints = _merge_fingerprint_map(
-                review_fingerprints,
-                _review_fingerprint_map(state["reviews"]),
-            )
-            review_comment_fingerprints = _merge_fingerprint_map(
-                review_comment_fingerprints,
-                _comment_fingerprint_map(state["review_comments"]),
-            )
-            issue_comment_fingerprints = _merge_fingerprint_map(
-                issue_comment_fingerprints,
-                _comment_fingerprint_map(state["issue_comments"]),
-            )
+            review_fingerprints = _review_fingerprint_map(state["reviews"])
+            review_comment_fingerprints = _comment_fingerprint_map(state["review_comments"])
+            issue_comment_fingerprints = _comment_fingerprint_map(state["issue_comments"])
             if token is not None:
                 review_thread_states = _review_thread_state_map(state["review_threads"])
             (
@@ -2174,8 +2239,8 @@ def main() -> int:
                 reaction_cursor,
                 pr_status,
                 head_sha,
+                snapshot,
             ) = result
-            _advance_since()
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.

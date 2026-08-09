@@ -17,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _github_wait_common import (  # noqa: E402
+    InitialRequestRetriesExhausted,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
     get_token,
@@ -24,6 +25,7 @@ from _github_wait_common import (  # noqa: E402
     is_retryable_http_error,
     min_interval_for_unauthenticated,
     no_event,
+    retry_initial_request,
 )
 
 DEFAULT_SUCCESS_CONCLUSIONS = {"success", "skipped", "neutral"}
@@ -249,13 +251,28 @@ def main() -> int:
         first_poll = poll_attempt == 0
         poll_attempt += 1
         try:
-            runs, request_count = _fetch_workflow_runs(
-                args.repo,
-                token,
-                branch=args.branch,
-                head_sha=args.sha,
-                max_pages=args.max_pages,
-            )
+            if first_poll:
+                runs, request_count = retry_initial_request(
+                    lambda: _fetch_workflow_runs(
+                        args.repo,
+                        token,
+                        branch=args.branch,
+                        head_sha=args.sha,
+                        max_pages=args.max_pages,
+                    ),
+                    description="initial GitHub Actions request",
+                )
+            else:
+                runs, request_count = _fetch_workflow_runs(
+                    args.repo,
+                    token,
+                    branch=args.branch,
+                    head_sha=args.sha,
+                    max_pages=args.max_pages,
+                )
+        except InitialRequestRetriesExhausted as err:
+            print(str(err), file=sys.stderr)
+            return 1
         except urllib.error.HTTPError as err:
             if token is None and err.code in {403, 429}:
                 print(

@@ -9,10 +9,10 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 
 RETRY_EXIT_CODE = 75
@@ -44,14 +44,48 @@ LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
 # is allowed to block for 30.
 REQUEST_TIMEOUT_SECONDS = 30
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+INITIAL_REQUEST_MAX_ATTEMPTS = 3
+INITIAL_REQUEST_BACKOFF_SECONDS = 1.0
 NOT_MODIFIED_STATUS = 304
-# GitHub compares timestamps at one-second resolution, and a bot that posts a
-# review as a batch stamps several comments within the same second. Rewinding the
-# `since` filter re-fetches the newest item or two, which the id cursors then
-# drop, rather than risking a sibling that lands on the boundary second.
-SINCE_REWIND_SECONDS = 2
 
 _MISSING = object()
+_T = TypeVar("_T")
+
+
+class InitialRequestRetriesExhausted(RuntimeError):
+    """A bounded initial GitHub request exhausted its transient retries."""
+
+
+def retry_initial_request(
+    operation: Callable[[], _T],
+    *,
+    description: str,
+) -> _T:
+    """Retry initial network/5xx failures with a bounded exponential backoff."""
+
+    for attempt in range(1, INITIAL_REQUEST_MAX_ATTEMPTS + 1):
+        try:
+            return operation()
+        except urllib.error.HTTPError as err:
+            if not is_retryable_http_error(err):
+                raise
+            failure = f"HTTP {err.code} {err.reason}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
+            failure = str(getattr(err, "reason", err))
+
+        if attempt == INITIAL_REQUEST_MAX_ATTEMPTS:
+            raise InitialRequestRetriesExhausted(
+                f"{description} failed after {INITIAL_REQUEST_MAX_ATTEMPTS} attempts: {failure}"
+            )
+        delay = INITIAL_REQUEST_BACKOFF_SECONDS * (2 ** (attempt - 1))
+        print(
+            f"Transient {description} failure on attempt {attempt}/{INITIAL_REQUEST_MAX_ATTEMPTS}: "
+            f"{failure}; retrying in {delay:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
 def no_event(summary: str = "") -> int:
@@ -109,9 +143,9 @@ class ResponseCache:
     every interval.
 
     The cache lives for one waiter process. A 304 is only useful while the body it
-    stands for is still in memory, so it is deliberately not persisted; the
-    savings across cycles come from the cursor state file, which keeps the
-    ``since`` filters narrow enough that a fresh fetch is small.
+    stands for is still in memory, so it is deliberately not persisted. PR polling
+    still requests complete collections because deletion detection requires them;
+    ETag revalidation keeps unchanged pages free of rate-limit cost.
     """
 
     __slots__ = ("_entries", "revalidated", "downloaded")
@@ -191,47 +225,6 @@ def github_graphql(query: str, variables: dict[str, Any], token: str) -> dict[st
     if not isinstance(data, dict):
         raise RuntimeError("GitHub GraphQL response has no data object")
     return data
-
-
-def latest_timestamp(items: list[dict[str, Any]]) -> str | None:
-    """Newest ``updated_at``/``created_at`` across items.
-
-    GitHub emits a fixed-width UTC form (``2026-08-04T06:47:12Z``), so a string
-    comparison orders these correctly without parsing every candidate.
-    """
-
-    newest = ""
-    for item in items:
-        for key in ("updated_at", "created_at"):
-            value = item.get(key)
-            if isinstance(value, str) and value > newest:
-                newest = value
-    return newest or None
-
-
-def since_param(items: list[dict[str, Any]]) -> str | None:
-    """A ``since`` value for the next poll that cannot skip an item."""
-
-    newest = latest_timestamp(items)
-    if not newest:
-        return None
-    try:
-        parsed = datetime.fromisoformat(newest.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    rewound = parsed - timedelta(seconds=SINCE_REWIND_SECONDS)
-    return rewound.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def later_since(previous: str | None, items: list[dict[str, Any]]) -> str | None:
-    """Advance a ``since`` filter, never rewinding it."""
-
-    candidate = since_param(items)
-    if not candidate:
-        return previous
-    if previous and previous >= candidate:
-        return previous
-    return candidate
 
 
 def is_retryable_http_error(err: urllib.error.HTTPError) -> bool:

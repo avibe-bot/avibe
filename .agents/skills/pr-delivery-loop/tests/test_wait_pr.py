@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import urllib.error
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "wait_pr.py"
@@ -13,6 +14,14 @@ assert SPEC and SPEC.loader
 wait_pr = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = wait_pr
 SPEC.loader.exec_module(wait_pr)
+
+ACTION_SCRIPT = Path(__file__).parents[1] / "scripts" / "wait_action.py"
+ACTION_SPEC = importlib.util.spec_from_file_location("repo_local_wait_action", ACTION_SCRIPT)
+assert ACTION_SPEC and ACTION_SPEC.loader
+wait_action = importlib.util.module_from_spec(ACTION_SPEC)
+sys.modules[ACTION_SPEC.name] = wait_action
+ACTION_SPEC.loader.exec_module(wait_action)
+github_wait_common = sys.modules["_github_wait_common"]
 
 
 def _pr_state(
@@ -23,12 +32,15 @@ def _pr_state(
     reactions=None,
     review_threads=None,
     head="head",
+    status="open",
+    draft=False,
 ):
     return {
         "pull_request": {
             "number": 1213,
-            "state": "open",
-            "draft": False,
+            "state": status,
+            "draft": draft,
+            "merged_at": "2026-08-10T00:00:00Z" if status == "merged" else None,
             "head": {"sha": head},
             "html_url": "https://github.com/avibe-bot/avibe/pull/1213",
         },
@@ -40,7 +52,15 @@ def _pr_state(
     }
 
 
-def _seeded_state(path: Path, *, review_fingerprints=None, head="head"):
+def _snapshot(state, **options):
+    return wait_pr._normalized_pr_snapshot(
+        state,
+        ignore_self_comments=False,
+        **options,
+    )
+
+
+def _seeded_state(path: Path, *, review_fingerprints=None, head="head", snapshot=None):
     path.write_text(
         json.dumps(
             {
@@ -59,6 +79,7 @@ def _seeded_state(path: Path, *, review_fingerprints=None, head="head"):
                 "review_comment_fingerprints": {},
                 "issue_comment_fingerprints": {},
                 "review_thread_states": {},
+                "snapshot": snapshot or {},
             }
         )
     )
@@ -326,6 +347,7 @@ def test_resume_requires_all_persisted_activity_baselines(monkeypatch, tmp_path)
         "review_comment_fingerprints",
         "issue_comment_fingerprints",
         "review_thread_states",
+        "snapshot",
     }
 
 
@@ -355,6 +377,10 @@ def test_cursor_covered_comment_edits_are_reported():
         "updated_at": "2026-08-10T00:01:00Z",
         "body": "new conversation request",
     }
+    old_state = _pr_state(
+        review_comments=[old_review_comment],
+        issue_comments=[old_issue_comment],
+    )
 
     result = wait_pr._render_activity(
         repo="avibe-bot/avibe",
@@ -369,6 +395,7 @@ def test_cursor_covered_comment_edits_are_reported():
         reaction_cursor=0,
         pr_status="open",
         head_sha="head",
+        snapshot=_snapshot(old_state),
         event_limit=10,
         ignore_self_comments=False,
         review_comment_fingerprints={"5": wait_pr._comment_fingerprint(old_review_comment)},
@@ -406,6 +433,7 @@ def test_event_limit_never_omits_codex_pass_reaction():
         reaction_cursor=0,
         pr_status="open",
         head_sha="head",
+        snapshot=_snapshot(_pr_state()),
         event_limit=1,
         ignore_self_comments=False,
     )
@@ -461,6 +489,14 @@ def test_review_thread_state_changes_are_paginated_and_reported(monkeypatch):
         reaction_cursor=0,
         pr_status="open",
         head_sha="head",
+        snapshot=_snapshot(
+            _pr_state(
+                review_threads=[
+                    {"id": "thread-1", "isResolved": False},
+                    {"id": "thread-2", "isResolved": False},
+                ]
+            )
+        ),
         event_limit=1,
         ignore_self_comments=False,
         review_thread_states={"thread-1": False, "thread-2": False},
@@ -480,10 +516,255 @@ def test_head_change_is_reported_as_pr_activity():
         reaction_cursor=0,
         pr_status="open",
         head_sha="old-head",
+        snapshot=_snapshot(_pr_state(head="old-head")),
         event_limit=10,
         ignore_self_comments=False,
     )
 
     assert result[0] is not None
     assert "pr_head #1213 old-head -> new-head" in result[0]
-    assert result[-1] == "new-head"
+    assert result[6] == "new-head"
+
+
+def test_snapshot_diff_wakes_on_review_edit():
+    review = {
+        "id": 1,
+        "state": "COMMENTED",
+        "body": "please fix",
+        "commit_id": "head",
+        "user": {"login": "reviewer"},
+    }
+
+    assert _snapshot(_pr_state(reviews=[review])) != _snapshot(
+        _pr_state(reviews=[{**review, "state": "DISMISSED"}])
+    )
+
+
+def test_snapshot_diff_wakes_on_inline_and_conversation_comment_edits():
+    inline = {
+        "id": 2,
+        "body": "old inline request",
+        "path": "wait_pr.py",
+        "user": {"login": "reviewer"},
+    }
+    conversation = {
+        "id": 3,
+        "body": "old conversation request",
+        "user": {"login": "reviewer"},
+    }
+    baseline = _snapshot(
+        _pr_state(review_comments=[inline], issue_comments=[conversation])
+    )
+
+    assert baseline != _snapshot(
+        _pr_state(
+            review_comments=[{**inline, "body": "new inline request"}],
+            issue_comments=[conversation],
+        )
+    )
+    assert baseline != _snapshot(
+        _pr_state(
+            review_comments=[inline],
+            issue_comments=[{**conversation, "body": "new conversation request"}],
+        )
+    )
+
+
+def test_snapshot_diff_wakes_on_codex_pass_reaction():
+    reaction = {
+        "id": 4,
+        "content": "+1",
+        "user": {"login": "chatgpt-codex-connector"},
+    }
+
+    assert _snapshot(_pr_state()) != _snapshot(_pr_state(reactions=[reaction]))
+
+
+def test_snapshot_diff_wakes_on_every_review_thread_transition():
+    absent = _snapshot(_pr_state())
+    unresolved = _snapshot(
+        _pr_state(review_threads=[{"id": "thread-1", "isResolved": False}])
+    )
+    resolved = _snapshot(
+        _pr_state(review_threads=[{"id": "thread-1", "isResolved": True}])
+    )
+
+    assert absent != unresolved  # added
+    assert unresolved != resolved  # resolved
+    assert resolved != unresolved  # reopened
+    assert unresolved != absent  # removed
+
+
+def test_removed_review_thread_wakes_with_a_descriptor():
+    baseline_state = _pr_state(
+        review_threads=[{"id": "thread-1", "isResolved": False}]
+    )
+    result = wait_pr._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=1213,
+        state=_pr_state(),
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        head_sha="head",
+        snapshot=_snapshot(baseline_state),
+        event_limit=10,
+        ignore_self_comments=False,
+        review_thread_states={"thread-1": False},
+    )
+
+    assert result[0] is not None
+    assert "review_thread thread-1 unresolved -> absent" in result[0]
+
+
+def test_snapshot_diff_wakes_on_pr_status_change():
+    assert _snapshot(_pr_state()) != _snapshot(_pr_state(draft=True))
+
+
+def test_timestamp_only_changes_are_silent():
+    old_comment = {
+        "id": 5,
+        "body": "unchanged",
+        "updated_at": "2026-08-10T00:00:00Z",
+        "user": {"login": "reviewer"},
+    }
+    changed_timestamp = {**old_comment, "updated_at": "2026-08-10T00:01:00Z"}
+    baseline_state = _pr_state(issue_comments=[old_comment])
+    result = wait_pr._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=1213,
+        state=_pr_state(issue_comments=[changed_timestamp]),
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=5,
+        reaction_cursor=0,
+        pr_status="open",
+        head_sha="head",
+        snapshot=_snapshot(baseline_state),
+        event_limit=10,
+        ignore_self_comments=False,
+        issue_comment_fingerprints={"5": wait_pr._comment_fingerprint(old_comment)},
+    )
+
+    assert result[0] is None
+
+
+def test_actionable_snapshot_ignores_trigger_envelopes_and_draft_toggles():
+    patterns = wait_pr._compile_ignore_patterns(None, actionable_only=True)
+    baseline = _snapshot(
+        _pr_state(),
+        actionable_only=True,
+        ignore_patterns=patterns,
+    )
+    noise = _pr_state(
+        draft=True,
+        reviews=[
+            {
+                "id": 6,
+                "state": "COMMENTED",
+                "body": "",
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+            }
+        ],
+        issue_comments=[
+            {
+                "id": 7,
+                "body": "@codex review",
+                "user": {"login": "maintainer"},
+            }
+        ],
+    )
+
+    assert baseline == _snapshot(
+        noise,
+        actionable_only=True,
+        ignore_patterns=patterns,
+    )
+
+
+def test_initial_pr_request_retries_transient_timeout_then_succeeds(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    attempts = 0
+    activity = _pr_state(
+        issue_comments=[
+            {
+                "id": 1,
+                "body": "actionable",
+                "user": {"login": "reviewer"},
+                "html_url": "https://example.invalid/comment/1",
+            }
+        ]
+    )
+
+    def _fetch(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("socket timed out")
+        if attempts == 2:
+            raise urllib.error.HTTPError(
+                "https://api.github.com",
+                503,
+                "Service Unavailable",
+                None,
+                None,
+            )
+        return activity, 1
+
+    monkeypatch.setattr(wait_pr, "get_token", lambda: "token")
+    monkeypatch.setattr(wait_pr, "_fetch_state", _fetch)
+    monkeypatch.setattr(wait_pr.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "1213",
+            "--include-self-comments",
+            "--catch-up",
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    assert wait_pr.main() == 0
+    assert attempts == github_wait_common.INITIAL_REQUEST_MAX_ATTEMPTS
+    assert "issue_comment #1" in capsys.readouterr().out
+
+
+def test_initial_action_request_exits_after_transient_retry_budget(monkeypatch, capsys):
+    attempts = 0
+
+    def _fetch(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("socket timed out")
+
+    monkeypatch.setattr(wait_action, "get_token", lambda: "token")
+    monkeypatch.setattr(wait_action, "_fetch_workflow_runs", _fetch)
+    monkeypatch.setattr(wait_action.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ACTION_SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--sha",
+            "head",
+            "--workflow",
+            "lint",
+        ],
+    )
+
+    assert wait_action.main() == 1
+    assert attempts == github_wait_common.INITIAL_REQUEST_MAX_ATTEMPTS
+    assert "failed after 3 attempts" in capsys.readouterr().err

@@ -187,7 +187,9 @@ turn ends because you armed a watch and are waiting, say exactly that.
   its command or message when needed, then always run `vibe watch resume <id>`;
   update alone does not re-enable a completed one-shot watch. A CI-only wait may
   use the bundled `wait_action.py`. Both waiters keep retryable GitHub/network
-  errors inside the bounded one-shot timeout; only terminal errors stop the watch.
+  errors inside the bounded one-shot timeout. Their initial request gets three
+  attempts with exponential backoff; exhausting that budget is an explicit
+  terminal error rather than a silent wait.
 - The PR waiter filters your own reviews and comments by the authenticated
   GitHub viewer login. It must resolve that identity before polling; if `/user`
   is unavailable for `--pr`, fail closed or explicitly pass
@@ -206,8 +208,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   <path>`. The state file records the repository, PR/filter, and watch
   identity; resolve PR viewer identity before claiming it, claim it under a lock,
   and treat a foreign, corrupt, or unwritable file as terminal. A PR state also
-  persists the head SHA, review/comment fingerprints, and the full review-thread
-  resolution map. Each detected
+  persists the head SHA, review/comment fingerprints, the full review-thread
+  resolution map, and one normalized gate snapshot. The snapshot contains full
+  current review, comment, pass-reaction, thread, status, and head state after
+  reporting filters, but omits timestamps and other volatile fields. Each detected
   batch stages its rendered output together with the next cursors under one pending record, then
   promotes both only after `AVIBE_WATCH_LAST_DELIVERY` changes. An unchanged
   delivery stamp replays the stored output before GitHub polling or viewer
@@ -217,8 +221,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `--catch-up` or fail closed; the normal PR-delivery path seeds the complete
   cursor baseline before pushing, then starts the post-push waiter from that
   file so a review that lands during the handoff cannot become the baseline.
-- A resumed PR state without a persisted `head_sha` or any review/comment
-  fingerprint map is also treated as an unseeded baseline; pass `--catch-up`
+- A resumed PR state without the normalized snapshot, persisted `head_sha`, or
+  any review/comment fingerprint map is also treated as an unseeded baseline; pass `--catch-up`
   explicitly to establish every baseline rather than silently skipping an
   upgrade-era push or edit.
 - Both modes load saved cursors before deriving their initial baseline:
@@ -227,11 +231,14 @@ turn ends because you armed a watch and are waiting, say exactly that.
   Use `--settle 20` for review batches so a Codex review envelope and its inline
   comments are observed together when GitHub writes them in separate requests.
   Every settle candidate is computed from the same committed cursor and
-  review/comment-fingerprint snapshot; only the final candidate updates the
-  next state.
+  normalized snapshot; only the final candidate updates the next state.
 - Authenticated PR polling fetches every review-thread page through GraphQL
-  `endCursor`; resolving or reopening a cursor-covered thread is gate activity
-  even when no new comment object is created.
+  `endCursor` and fetches complete mutable REST collections rather than `since`
+  slices. The sole wake condition is inequality between the current normalized
+  snapshot and the committed snapshot. Per-field checks only describe that
+  difference, so additions, edits, removals, resolution changes, reactions,
+  status changes, and head changes cannot be silently omitted by an incomplete
+  trigger list.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and
