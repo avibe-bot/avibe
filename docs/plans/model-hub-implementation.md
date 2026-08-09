@@ -1081,6 +1081,63 @@ I1/I2/I3/I4 implementation while the default-off release gate remains in force.
 > cascade; return the contracted guarded-mutation envelope through the service, RPC,
 > and HTTP layers.
 
+#### Sealed contract-and-consumer findings — reviewed head `8287d41da3`
+
+This fourth reviewed head remains behind the same default-off release gate. Two findings
+identify final-contract closure still owed by I1 and two identify canonical consumer
+validation still owed by I1; none identifies two contradictory normative sentences.
+Under the sealed-ledger ruling, K1 records all four without changing contract or
+implementation files.
+
+| Review thread | AC / disposition | Landing point | Responsible lane |
+| --- | --- | --- | --- |
+| `3742980271` | AC-26 + AC-29; valid prelaunch identity-validation gap | Per-Source model-id uniqueness at config, Source-create, and discovery boundaries plus mutation fixtures | I1 |
+| `3742980274` | AC-22 + AC-33; valid prelaunch final-contract persistence gap | Final `agent-supply.schema.json` Route rows and V2 config serialize/reload boundary | I1 |
+| `3742980278` | AC-23 + AC-33; valid prelaunch final-contract rejection gap | Final OAuth/API failure envelope, pre-adapter singleton guard, and add-flow consumer | I1 + I3 + I4 |
+| `3742980279` | AC-26 + AC-29; valid prelaunch credential-boundary gap | Canonical reasoning-effort validator and create/persist/PATCH negative fixtures | I1 |
+
+> **Enforce unique model IDs within each Source**
+>
+> When a Source-create payload or discovery response contains the same model ID twice
+> with different metadata, this new uniqueness invariant is not enforced:
+> `ModelHubConfig.from_payload` checks duplicate Source IDs only, and
+> `_apply_discovered_models` appends one entry per discovery result. The persisted
+> inventory can therefore contain ambiguous identities;
+> `update_model_reasoning_efforts` updates only the first match while
+> `delete_custom_model` removes every match. Reject duplicate per-Source model IDs at
+> the V2 config boundary and deduplicate or reject discovery results.
+
+> **Add persisted routes to AgentSupply**
+>
+> When Add Source or the route PUT writes `B.routes[M].hops`, the claimed persistence
+> shape has nowhere to store it: `agent-supply.schema.json` has
+> `additionalProperties: false` but no `routes` property, and
+> `ModelHubAgentSupplyConfig` still persists the retired `mappings` list instead.
+> Consequently the exact chains required by §4.3 cannot survive serialization/reload,
+> and implementations cannot satisfy FC-05 without changing this supposedly final
+> schema. Add the per-menu Route rows to both the schema and the V2 config boundary.
+
+> **Contract duplicate-native OAuth rejection**
+>
+> When a backend already has its singleton `native_cli` Source, AC-23 requires OAuth
+> start to return `native_source_already_exists` with `existing_source_id` before
+> invoking the adapter, but neither `oauth-flow.schema.json` nor `api.md` defines that
+> error or response field; repo-wide occurrences are limited to this prose. A server
+> and client can therefore invent incompatible rejection envelopes—or begin the
+> irreversible login despite following every frozen contract. Define the exact failure
+> envelope in the authoritative API/schema and cover the pre-adapter rejection.
+
+> **Reject credentials in reasoning-effort values**
+>
+> When a Source-create body, persisted config, or reasoning-effort PATCH contains a
+> credential-looking value such as an API key, this validator accepts it as an ordinary
+> non-empty effort string and `to_payload` writes it back verbatim. The surrounding
+> create path explicitly rejects credential material in model IDs and display names,
+> but neither that scan nor `_validated_reasoning_efforts` checks the new list, so
+> plaintext credentials can enter config and API responses despite the contract's
+> no-plaintext-credentials invariant. Apply the same credential-material rejection to
+> every reasoning-effort entry at the canonical config boundary.
+
 After I1 lands, `model-hub-contracts/**` is read-only to I2–I5. An implementation-proven
 mismatch is reported to the orchestrator for a targeted decision; the discovering lane
 does not edit or reinterpret the contract locally.
