@@ -47,7 +47,9 @@ from _github_wait_common import (  # noqa: E402
     WATCH_ID_ENV,
 )
 
-CODEX_REVIEW_PASS_REACTION_USER = "chatgpt-codex-connector[bot]"
+CODEX_REVIEW_PASS_REACTION_USERS = frozenset(
+    {"chatgpt-codex-connector", "chatgpt-codex-connector[bot]"}
+)
 CODEX_REVIEW_PASS_REACTION_CONTENT = "+1"
 
 # Comments that only drive the review loop rather than report its result. On a
@@ -220,7 +222,7 @@ def _keep_item(
 def _is_codex_pass_reaction(reaction: dict[str, Any]) -> bool:
     author = ((reaction.get("user") or {}).get("login")) or ""
     content = str(reaction.get("content") or "")
-    return author == CODEX_REVIEW_PASS_REACTION_USER and content == CODEX_REVIEW_PASS_REACTION_CONTENT
+    return author in CODEX_REVIEW_PASS_REACTION_USERS and content == CODEX_REVIEW_PASS_REACTION_CONTENT
 
 
 def _format_reaction(reaction: dict[str, Any]) -> str:

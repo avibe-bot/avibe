@@ -414,6 +414,17 @@ def test_event_limit_never_omits_codex_pass_reaction():
     assert "2 additional event(s) omitted" in result[0]
 
 
+def test_codex_pass_reaction_accepts_both_api_login_forms_only():
+    for login in ("chatgpt-codex-connector", "chatgpt-codex-connector[bot]"):
+        assert wait_pr._is_codex_pass_reaction(
+            {"content": "+1", "user": {"login": login}}
+        )
+
+    assert not wait_pr._is_codex_pass_reaction(
+        {"content": "+1", "user": {"login": "another-reviewer"}}
+    )
+
+
 def test_review_thread_state_changes_are_paginated_and_reported(monkeypatch):
     cursors = []
 
