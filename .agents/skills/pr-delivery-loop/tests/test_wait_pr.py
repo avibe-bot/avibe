@@ -9,6 +9,8 @@ import sys
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).parents[1] / "scripts" / "wait_pr.py"
 SPEC = importlib.util.spec_from_file_location("repo_local_wait_pr", SCRIPT)
 assert SPEC and SPEC.loader
@@ -24,6 +26,11 @@ wait_action = importlib.util.module_from_spec(ACTION_SPEC)
 sys.modules[ACTION_SPEC.name] = wait_action
 ACTION_SPEC.loader.exec_module(wait_action)
 github_wait_common = sys.modules["_github_wait_common"]
+
+
+@pytest.fixture(autouse=True)
+def _stub_remote_target_validation(monkeypatch):
+    monkeypatch.setattr(wait_pr, "_validate_target", lambda *_args, **_kwargs: 1)
 
 
 def _pr_state(
@@ -274,6 +281,41 @@ def test_viewer_failure_does_not_claim_state_file(monkeypatch, tmp_path):
             str(state_file),
             "--timeout",
             "1",
+        ],
+    )
+
+    assert wait_pr.main() == 1
+    assert not state_file.exists()
+
+
+def test_target_failure_does_not_claim_state_file(monkeypatch, tmp_path):
+    state_file = tmp_path / "state.json"
+    monkeypatch.delenv("AVIBE_WATCH_ID", raising=False)
+    monkeypatch.setattr(wait_pr, "get_token", lambda: "token")
+    monkeypatch.setattr(
+        wait_pr,
+        "_validate_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            github_wait_common.GitHubProtocolError("target unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        wait_pr,
+        "_verify_state_file_writable",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "999999",
+            "--include-self-comments",
+            "--state-file",
+            str(state_file),
         ],
     )
 
@@ -621,6 +663,42 @@ def test_removed_review_thread_wakes_with_a_descriptor():
     assert "review_thread thread-1 unresolved -> absent" in result[0]
 
 
+def test_unavailable_graphql_preserves_thread_descriptors():
+    baseline_state = _pr_state(
+        review_threads=[{"id": "thread-1", "isResolved": False}]
+    )
+    current_state = _pr_state(
+        issue_comments=[
+            {
+                "id": 7,
+                "body": "REST-visible request",
+                "user": {"login": "reviewer"},
+                "html_url": "https://example.invalid/comment/7",
+            }
+        ]
+    )
+
+    result = wait_pr._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=1213,
+        state=current_state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        head_sha="head",
+        snapshot=_snapshot(baseline_state),
+        event_limit=10,
+        ignore_self_comments=False,
+        review_thread_states={"thread-1": False},
+        review_threads_available=False,
+    )
+
+    assert "issue_comment #7" in result[0]
+    assert "review_thread" not in result[0]
+
+
 def test_snapshot_diff_wakes_on_pr_status_change():
     assert _snapshot(_pr_state()) != _snapshot(_pr_state(draft=True))
 
@@ -684,6 +762,55 @@ def test_actionable_snapshot_ignores_trigger_envelopes_and_draft_toggles():
         actionable_only=True,
         ignore_patterns=patterns,
     )
+
+
+def test_explicit_replay_clears_the_committed_snapshot(monkeypatch, tmp_path, capsys):
+    review = {
+        "id": 7,
+        "state": "COMMENTED",
+        "body": "historical request",
+        "commit_id": "head",
+        "user": {"login": "reviewer"},
+        "html_url": "https://example.invalid/review/7",
+    }
+    state = _pr_state(reviews=[review])
+    state_file = tmp_path / "state.json"
+    _seeded_state(
+        state_file,
+        review_fingerprints={"7": wait_pr._review_fingerprint(review)},
+        snapshot=_snapshot(state),
+    )
+    monkeypatch.setattr(wait_pr, "get_token", lambda: "token")
+    monkeypatch.setattr(wait_pr, "_fetch_state", lambda *_args, **_kwargs: (state, 1))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "1213",
+            "--include-self-comments",
+            "--since-review-id",
+            "0",
+            "--state-file",
+            str(state_file),
+            "--settle",
+            "0",
+        ],
+    )
+
+    assert wait_pr.main() == 0
+    assert "review #7" in capsys.readouterr().out
+
+
+def test_skill_requires_actions_waiter_when_ci_is_the_only_gate():
+    skill = (Path(__file__).parents[1] / "SKILL.md").read_text()
+
+    assert "When CI is the sole" in skill
+    assert "must switch" in skill
+    assert "`wait_action.py`" in skill
 
 
 def test_initial_pr_request_retries_transient_timeout_then_succeeds(
@@ -890,6 +1017,7 @@ def test_github_request_taxonomy_is_the_only_exception_boundary():
         "_fetch_new_pr_state",
         "_fetch_state",
         "_fetch_workflow_runs",
+        "_validate_target",
         "resolve_authenticated_login",
     }
     policy_names = {"github_request", "retry_initial_request"}

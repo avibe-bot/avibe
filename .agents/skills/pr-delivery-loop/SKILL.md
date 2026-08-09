@@ -185,8 +185,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   self-contained with `_github_wait_common.py`. Use one-shot watches per phase,
   re-arm after each round with the same watch ID, and never `--forever`. Update
   its command or message when needed, then always run `vibe watch resume <id>`;
-  update alone does not re-enable a completed one-shot watch. A CI-only wait may
-  use the bundled `wait_action.py`. Every GitHub operation in both waiters crosses
+  update alone does not re-enable a completed one-shot watch. When CI is the sole
+  remaining merge gate, the lane **must switch** its one live watch to the bundled
+  `wait_action.py` and stop re-arming the PR waiter; PR activity cannot wake on a
+  check-only transition. Every GitHub operation in both waiters crosses
   one shared request taxonomy: only network failures and retryable HTTP statuses
   may remain inside the bounded one-shot timeout. GraphQL `errors` payloads,
   malformed protocol responses, non-retryable HTTP statuses, and unexpected

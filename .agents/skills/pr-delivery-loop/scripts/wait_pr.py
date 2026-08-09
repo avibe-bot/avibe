@@ -474,6 +474,25 @@ def _fetch_new_pr_state(
     return {"pull_requests": pull_requests}, request_count
 
 
+def _validate_target(
+    repo: str,
+    pr_number: int | None,
+    token: str | None,
+    *,
+    cache: ResponseCache | None = None,
+) -> int:
+    """Validate the remote target before a managed run claims local state."""
+
+    encoded_repo = urllib.parse.quote(repo, safe="/")
+    url = f"https://api.github.com/repos/{encoded_repo}"
+    if pr_number is not None:
+        url = f"{url}/pulls/{pr_number}"
+    payload = github_get(url, token, cache=cache)
+    if not isinstance(payload, dict):
+        raise GitHubProtocolError(f"Expected a GitHub target object from {url}")
+    return 1
+
+
 def _render_activity(
     *,
     repo: str,
@@ -513,9 +532,12 @@ def _render_activity(
     current_pr_status = _current_pr_status(state.get("pull_request"))
     current_head_sha = _current_pr_head_sha(state.get("pull_request"))
     review_threads = state.get("review_threads")
-    current_review_thread_states = _review_thread_state_map(
-        review_threads if isinstance(review_threads, list) else []
-    )
+    if review_threads_available:
+        current_review_thread_states = _review_thread_state_map(
+            review_threads if isinstance(review_threads, list) else []
+        )
+    else:
+        current_review_thread_states = dict(review_thread_states or {})
     review_thread_changes = _review_thread_state_changes(
         current_review_thread_states,
         review_thread_states or {},
@@ -1697,6 +1719,18 @@ def main() -> int:
             )
             return 1
 
+    target_result = retry_initial_request(
+        lambda: _validate_target(args.repo, args.pr, token, cache=cache),
+        description="GitHub target validation",
+    )
+    if target_result.error is not None:
+        print(f"GitHub target validation failed: {target_result.error}", file=sys.stderr)
+        return 1
+    if target_result.value is None:
+        print("GitHub target validation completed without a result", file=sys.stderr)
+        return 1
+    target_validation_requests = target_result.value
+
     _verify_state_file_writable(
         args.state_file,
         repo=args.repo,
@@ -1792,7 +1826,7 @@ def main() -> int:
     state, requests_per_poll_count = initial_request.value
 
     if token is None:
-        bootstrap_requests = requests_per_poll_count
+        bootstrap_requests = requests_per_poll_count + target_validation_requests
         unauthenticated_min = min_interval_for_unauthenticated(
             requests_per_poll_count,
             bootstrap_requests=bootstrap_requests,
@@ -1858,10 +1892,10 @@ def main() -> int:
                 args.since_pr_status,
             )
         )
-        if resumed:
-            snapshot = _saved_snapshot(saved)
-        elif args.catch_up or explicit_replay:
+        if args.catch_up or explicit_replay:
             snapshot = {}
+        elif resumed:
+            snapshot = _saved_snapshot(saved)
         else:
             snapshot = _normalized_pr_snapshot(
                 state,
