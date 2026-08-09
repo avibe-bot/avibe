@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyVoiceInsertion,
+  applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
   voiceInsertionText,
 } from './voiceCleanup';
@@ -145,6 +146,26 @@ describe('voice cleanup', () => {
     const snapshot = voiceInsertionSnapshot('original', 8, 8);
 
     expect(applyVoiceInsertion('changed', snapshot, 'voice')).toBeNull();
+  });
+
+  it('keeps successive realtime previews in one replaceable draft range', () => {
+    const original = voiceInsertionSnapshot('Plan today', 5, 5);
+    const first = applyVoiceInsertionWithSnapshot(original.text, original, 'the lau');
+    const second = first && applyVoiceInsertionWithSnapshot(first.text, first.snapshot, 'the launch');
+    const final = second && applyVoiceInsertionWithSnapshot(
+      second.text,
+      second.snapshot,
+      'The launch is tomorrow.',
+    );
+
+    expect(first?.text).toBe('Plan the lau today');
+    expect(second?.text).toBe('Plan the launch today');
+    expect(final?.text).toBe('Plan The launch is tomorrow. today');
+    expect(final?.snapshot).toMatchObject({
+      text: 'Plan The launch is tomorrow. today',
+      start: 5,
+      end: 29,
+    });
   });
 
 });

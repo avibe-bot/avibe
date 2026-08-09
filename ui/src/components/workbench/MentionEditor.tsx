@@ -48,8 +48,8 @@ import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard
 import { cn } from '../../lib/utils';
 import { dedupeReferences, type MentionReference } from '../../lib/mentions';
 import {
+  applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
-  voiceInsertionText,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import { useLatestRef } from '@/lib/useLatestRef';
@@ -73,6 +73,15 @@ export interface MentionEditorHandle {
   /** Replace a captured logical range while preserving untouched mention chips.
    *  Returns false if the draft changed or the range can no longer be mapped. */
   replaceSelection: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
+  /** Render a transient voice preview inside the captured range. Successive
+   *  previews replace one another without persisting as draft edits. */
+  showVoicePreview: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
+  /** Replace the active preview, or the original captured range, with the final
+   *  cleaned transcript as one ordinary draft edit. */
+  commitVoicePreview: (snapshot: VoiceInsertionSnapshot, text: string) => boolean;
+  /** Restore the rich editor state captured before the first voice preview.
+   *  Refuses to restore if the user has changed the draft since that preview. */
+  restoreVoicePreview: () => boolean;
   /** Replace the whole editor with plain text (restore on a failed send). */
   setText: (text: string) => void;
   /** Insert a mention chip at the current cursor — same node a picker-selected
@@ -95,7 +104,12 @@ export interface MentionEditorProps {
   /** ``isDraftSeed`` flags the change produced by the mount-time draft seed
    *  (BootstrapPlugin), so callers can mirror the value without treating the
    *  restore as a user edit (e.g. skip re-persisting it as a draft). */
-  onChange: (text: string, references: MentionReference[], isDraftSeed?: boolean) => void;
+  onChange: (
+    text: string,
+    references: MentionReference[],
+    isDraftSeed?: boolean,
+    isVoicePreview?: boolean,
+  ) => void;
   onSubmit: () => void;
   onSearchAgents: (query: string) => Promise<AgentSearchResult[]>;
   onSearchSessions: (query: string) => Promise<SessionSearchResult[]>;
@@ -427,6 +441,7 @@ function PasteFilesPlugin({ onPasteFiles }: { onPasteFiles?: (files: File[]) => 
 // Update tag for the mount-time draft seed, so OnChange can tell "restored a
 // saved draft" apart from a real user edit (restoring must not re-persist).
 const DRAFT_SEED_TAG = 'avibe-draft-seed';
+const VOICE_PREVIEW_TAG = 'avibe-voice-preview';
 
 function BootstrapPlugin({
   autoFocus,
@@ -440,56 +455,24 @@ function BootstrapPlugin({
   const [editor] = useLexicalComposerContext();
   const { insertMention: insertBeautifulMention } = useBeautifulMentions();
   const seeded = useRef(false);
+  const voicePreviewRef = useRef<{
+    originalState: EditorState;
+    insertion: VoiceInsertionSnapshot;
+  } | null>(null);
 
   useImperativeHandle(
     bridgeRef,
-    () => ({
-      focus: () => editor.focus(),
-      clear: () =>
-        editor.update(() => {
-          const root = $getRoot();
-          root.clear();
-          root.append($createParagraphNode());
-        }),
-      append: (text: string) =>
-        editor.update(() => {
-          const root = $getRoot();
-          const selection = root.selectEnd();
-          const prefix = root.getTextContent().length > 0 ? ' ' : '';
-          selection.insertText(`${prefix}${text}`);
-        }),
-      captureSelection: () => editor.getEditorState().read(() => {
-        const { text } = serializeCurrentEditor();
-        const snapshotAt = (start: number, end: number) => voiceInsertionSnapshot(
-          text,
-          start,
-          end,
-          {
-            left: visibleBoundaryAtOffset(start, 'left'),
-            right: visibleBoundaryAtOffset(end, 'right'),
-          },
-        );
-        const selection = $getSelection();
-        if ($isNodeSelection(selection)) {
-          const range = serializedRangeForNodes(selection.getNodes());
-          if (range) return snapshotAt(range.start, range.end);
-        }
-        if (!$isRangeSelection(selection)) {
-          return snapshotAt(text.length, text.length);
-        }
-        const anchor = serializedOffsetForPoint(selection.anchor);
-        const focus = serializedOffsetForPoint(selection.focus);
-        if (anchor === null || focus === null) {
-          return snapshotAt(text.length, text.length);
-        }
-        return snapshotAt(Math.min(anchor, focus), Math.max(anchor, focus));
-      }),
-      replaceSelection: (snapshot, text) => {
-        let replaced = false;
+    () => {
+      const replaceCapturedSelection = (
+        snapshot: VoiceInsertionSnapshot,
+        text: string,
+        tag?: string,
+      ): VoiceInsertionSnapshot | null => {
+        let inserted: VoiceInsertionSnapshot | null = null;
         editor.update(() => {
           const current = serializeCurrentEditor().text;
-          const insertion = voiceInsertionText(current, snapshot, text);
-          if (insertion === null) return;
+          const result = applyVoiceInsertionWithSnapshot(current, snapshot, text);
+          if (result === null) return;
           const start = serializedPointAtOffset(snapshot.start);
           const end = serializedPointAtOffset(snapshot.end);
           if (!start || !end) return;
@@ -497,25 +480,104 @@ function BootstrapPlugin({
           selection.anchor.set(start.key, start.offset, start.type);
           selection.focus.set(end.key, end.offset, end.type);
           $setSelection(selection);
-          selection.insertText(insertion);
-          replaced = true;
-        });
-        return replaced;
-      },
-      setText: (text: string) =>
-        editor.update(() => {
-          const root = $getRoot();
-          root.clear();
-          const paragraph = $createParagraphNode();
-          root.append(paragraph);
-          if (text) paragraph.selectStart().insertText(text);
+          selection.insertText(result.insertion);
+          inserted = result.snapshot;
+        }, tag ? { tag } : undefined);
+        return inserted;
+      };
+
+      return {
+        focus: () => editor.focus(),
+        clear: () => {
+          voicePreviewRef.current = null;
+          editor.update(() => {
+            const root = $getRoot();
+            root.clear();
+            root.append($createParagraphNode());
+          });
+        },
+        append: (text: string) =>
+          editor.update(() => {
+            const root = $getRoot();
+            const selection = root.selectEnd();
+            const prefix = root.getTextContent().length > 0 ? ' ' : '';
+            selection.insertText(`${prefix}${text}`);
+          }),
+        captureSelection: () => editor.getEditorState().read(() => {
+          const { text } = serializeCurrentEditor();
+          const snapshotAt = (start: number, end: number) => voiceInsertionSnapshot(
+            text,
+            start,
+            end,
+            {
+              left: visibleBoundaryAtOffset(start, 'left'),
+              right: visibleBoundaryAtOffset(end, 'right'),
+            },
+          );
+          const selection = $getSelection();
+          if ($isNodeSelection(selection)) {
+            const range = serializedRangeForNodes(selection.getNodes());
+            if (range) return snapshotAt(range.start, range.end);
+          }
+          if (!$isRangeSelection(selection)) {
+            return snapshotAt(text.length, text.length);
+          }
+          const anchor = serializedOffsetForPoint(selection.anchor);
+          const focus = serializedOffsetForPoint(selection.focus);
+          if (anchor === null || focus === null) {
+            return snapshotAt(text.length, text.length);
+          }
+          return snapshotAt(Math.min(anchor, focus), Math.max(anchor, focus));
         }),
-      // Insert at the live selection (Lexical keeps it across DOM blur), then
-      // focus so the user can keep typing. Produces the same node a typed
-      // `#`/`@` pick does, so serialization (#<id> + references) is identical.
-      insertMention: (trigger, value, data) =>
-        insertBeautifulMention({ trigger, value, data: data ?? {}, focus: true }),
-    }),
+        replaceSelection: (snapshot, text) => replaceCapturedSelection(snapshot, text) !== null,
+        showVoicePreview: (snapshot, text) => {
+          if (!text.trim()) return voicePreviewRef.current !== null;
+          const active = voicePreviewRef.current;
+          const originalState = active?.originalState ?? editor.getEditorState();
+          const insertion = replaceCapturedSelection(
+            active?.insertion ?? snapshot,
+            text,
+            VOICE_PREVIEW_TAG,
+          );
+          if (insertion === null) {
+            voicePreviewRef.current = null;
+            return false;
+          }
+          voicePreviewRef.current = { originalState, insertion };
+          return true;
+        },
+        commitVoicePreview: (snapshot, text) => {
+          const active = voicePreviewRef.current;
+          const inserted = replaceCapturedSelection(active?.insertion ?? snapshot, text);
+          voicePreviewRef.current = null;
+          return inserted !== null;
+        },
+        restoreVoicePreview: () => {
+          const active = voicePreviewRef.current;
+          if (active === null) return false;
+          const current = editor.getEditorState().read(() => serializeCurrentEditor().text);
+          voicePreviewRef.current = null;
+          if (current !== active.insertion.text) return false;
+          editor.setEditorState(active.originalState, { tag: VOICE_PREVIEW_TAG });
+          return true;
+        },
+        setText: (text: string) => {
+          voicePreviewRef.current = null;
+          editor.update(() => {
+            const root = $getRoot();
+            root.clear();
+            const paragraph = $createParagraphNode();
+            root.append(paragraph);
+            if (text) paragraph.selectStart().insertText(text);
+          });
+        },
+        // Insert at the live selection (Lexical keeps it across DOM blur), then
+        // focus so the user can keep typing. Produces the same node a typed
+        // `#`/`@` pick does, so serialization (#<id> + references) is identical.
+        insertMention: (trigger, value, data) =>
+          insertBeautifulMention({ trigger, value, data: data ?? {}, focus: true }),
+      };
+    },
     [editor, insertBeautifulMention],
   );
 
@@ -698,7 +760,12 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
   const handleChange = useCallback(
     (state: EditorState, _editor: unknown, tags: Set<string>) => {
       const { text, references } = serializeEditorState(state);
-      onChange(text, references, tags.has(DRAFT_SEED_TAG));
+      onChange(
+        text,
+        references,
+        tags.has(DRAFT_SEED_TAG),
+        tags.has(VOICE_PREVIEW_TAG),
+      );
     },
     [onChange],
   );

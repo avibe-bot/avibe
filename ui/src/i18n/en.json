@@ -3214,7 +3214,6 @@
       "voice": "Voice input",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
-      "voicePreview": "Live transcription preview",
       "voiceProcessing": "Processing recording",
       "voiceRetry": "Retry transcription",
       "voiceCopyTranscript": "Copy recovered transcript",

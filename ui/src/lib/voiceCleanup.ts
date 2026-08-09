@@ -11,6 +11,12 @@ export type VoiceInsertionSnapshot = {
   rightBoundary?: string;
 };
 
+export type VoiceInsertionResult = {
+  text: string;
+  insertion: string;
+  snapshot: VoiceInsertionSnapshot;
+};
+
 type VoiceInsertionBoundaries = {
   left?: string;
   right?: string;
@@ -131,12 +137,33 @@ export const voiceInsertionText = (
   }`;
 };
 
+export const applyVoiceInsertionWithSnapshot = (
+  currentText: string,
+  snapshot: VoiceInsertionSnapshot,
+  transcript: string,
+): VoiceInsertionResult | null => {
+  const insertion = voiceInsertionText(currentText, snapshot, transcript);
+  if (insertion === null) return null;
+  const text = `${currentText.slice(0, snapshot.start)}${insertion}${currentText.slice(snapshot.end)}`;
+  return {
+    text,
+    insertion,
+    snapshot: voiceInsertionSnapshot(
+      text,
+      snapshot.start,
+      snapshot.start + insertion.length,
+      {
+        left: snapshot.leftBoundary,
+        right: snapshot.rightBoundary,
+      },
+    ),
+  };
+};
+
 export const applyVoiceInsertion = (
   currentText: string,
   snapshot: VoiceInsertionSnapshot,
   transcript: string,
 ): string | null => {
-  const insertion = voiceInsertionText(currentText, snapshot, transcript);
-  if (insertion === null) return null;
-  return `${currentText.slice(0, snapshot.start)}${insertion}${currentText.slice(snapshot.end)}`;
+  return applyVoiceInsertionWithSnapshot(currentText, snapshot, transcript)?.text ?? null;
 };

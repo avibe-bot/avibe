@@ -3214,7 +3214,6 @@
       "voice": "语音输入",
       "stopRecording": "完成录音",
       "cancelRecording": "取消录音",
-      "voicePreview": "实时转写预览",
       "voiceProcessing": "正在处理录音",
       "voiceRetry": "重试转写",
       "voiceCopyTranscript": "复制已恢复的文字",
