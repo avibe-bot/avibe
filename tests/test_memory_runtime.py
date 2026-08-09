@@ -4918,6 +4918,16 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     )
     activations: list[None] = []
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
+    housekeeping_calls: list[tuple[str, bool]] = []
+
+    async def observe_terminal_gc() -> None:
+        housekeeping_calls.append(("terminal-gc", runtime._artifact_installing))
+
+    async def observe_backup_reconcile() -> None:
+        housekeeping_calls.append(("backup-reconcile", runtime._artifact_installing))
+
+    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", observe_terminal_gc)
+    monkeypatch.setattr(runtime, "_run_backup_stage_reconcile", observe_backup_reconcile)
 
     async def run() -> None:
         installing = asyncio.create_task(runtime.install_artifact())
@@ -4935,6 +4945,8 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
             "ok": False,
             "error": "memory_restart_failed",
         }
+        await asyncio.sleep(0)
+        assert housekeeping_calls == []
         assert installing.done() is False
         installing.cancel()
         await asyncio.sleep(0)
@@ -4948,6 +4960,11 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
         with pytest.raises(asyncio.CancelledError):
             await installing
         assert await runtime.restart() == {"ok": True, "state": "ready"}
+        await asyncio.sleep(0)
+        assert sorted(housekeeping_calls) == [
+            ("backup-reconcile", False),
+            ("terminal-gc", False),
+        ]
         assert activations == [None]
         await runtime.close()
 

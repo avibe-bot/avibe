@@ -1727,6 +1727,7 @@ class MemoryRuntime:
         task = self._terminal_snapshot_gc_task
         if (
             self._closing
+            or self._artifact_installing
             or self._clear_journal is None
             or self._snapshot_manager is None
             or self._clear_journal_error is not None
@@ -1751,6 +1752,7 @@ class MemoryRuntime:
         task = self._backup_stage_reconcile_task
         if (
             self._closing
+            or self._artifact_installing
             or not self.available
             or self._backup_manager is None
             or self._clear_journal is None
