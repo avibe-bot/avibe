@@ -413,6 +413,22 @@ async def memory_status(
     return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
 
 
+async def memory_processing_record(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record"
+    return await _memory_request(
+        "GET",
+        path,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_failures(
     *,
     user_key: str,

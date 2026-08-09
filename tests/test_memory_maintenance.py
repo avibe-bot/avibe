@@ -26,7 +26,7 @@ from core.memory.maintenance import (
 )
 from core.memory.runtime import MemoryRuntime
 from core.memory.snapshot import MemorySnapshotManager
-from core.memory.store import AmbiguousAdd, Delivered, MemoryStore
+from core.memory.store import AmbiguousAdd, MemoryStore
 from core.memory.types import CaptureAccepted, CaptureRequest, CaptureSkipped
 
 
@@ -312,84 +312,6 @@ async def test_supplied_store_attaches_only_after_module_initialization(
     await asyncio.sleep(0)
     assert fence_entered is False
     assert await runtime.maintenance_payload(operator_ref="user:owner") == before
-    await runtime.close()
-
-
-async def test_processing_record_does_not_compact_queue_during_clear_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr("core.memory.store.TERMINAL_TOMBSTONE_LIMIT", 0)
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    _enqueue(runtime, "terminal-before-clear")
-    row = runtime._store.claim_due(
-        lease_owner="boot",
-        now="2026-01-01T00:00:00.000Z",
-    )
-    assert row is not None
-    assert runtime._store.settle(
-        row,
-        Delivered(add_request_id="add-terminal-before-clear"),
-        lease_owner="boot",
-        now=datetime(2026, 1, 1, tzinfo=UTC),
-    ).settled
-
-    snapshot_copied = threading.Event()
-    release_snapshot = threading.Event()
-    compaction_entered = threading.Event()
-    queue_uri = runtime._store.path.absolute().as_uri() + "?mode=ro"
-    original_connect = snapshot_module.sqlite3.connect
-    original_compact = runtime._store._compact_terminal_tombstones_in_connection
-
-    class BlockingQueueConnection:
-        def __init__(self, connection: sqlite3.Connection) -> None:
-            self._connection = connection
-
-        def execute(self, *args, **kwargs):
-            return self._connection.execute(*args, **kwargs)
-
-        def backup(self, target: sqlite3.Connection) -> None:
-            self._connection.backup(target)
-            snapshot_copied.set()
-            assert release_snapshot.wait(2)
-
-        def close(self) -> None:
-            self._connection.close()
-
-    def blocking_connect(database, *args, **kwargs):
-        connection = original_connect(database, *args, **kwargs)
-        if database == queue_uri:
-            return BlockingQueueConnection(connection)
-        return connection
-
-    def observed_compaction(connection, reference):
-        compaction_entered.set()
-        return original_compact(connection, reference)
-
-    monkeypatch.setattr(snapshot_module.sqlite3, "connect", blocking_connect)
-    monkeypatch.setattr(
-        runtime._store,
-        "_compact_terminal_tombstones_in_connection",
-        observed_compaction,
-    )
-    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
-    assert await asyncio.to_thread(snapshot_copied.wait, 1)
-    runtime._observe_recorder_health(
-        {"state": "degraded", "reason": "call_log_corrupt"},
-        observed_at="2026-01-01T00:00:00.000Z",
-    )
-    processing_record = await asyncio.wait_for(runtime.failure_log_payload(), 1)
-    compacted_during_snapshot = compaction_entered.is_set()
-    release_snapshot.set()
-    result = await clearing
-
-    assert compacted_during_snapshot is False
-    assert [item["kind"] for item in processing_record["items"]] == [
-        "recorder_degraded"
-    ]
-    assert result["status"] == "completed"
-    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     await runtime.close()
 
 

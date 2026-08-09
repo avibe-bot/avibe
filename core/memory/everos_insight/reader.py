@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from core.memory.processing_record import (
+    ProcessingSourceObservations,
+    SourceObservation,
+)
+
 from .recorder import _scrub_json, _scrub_text
 
 MemoryReadScope: TypeAlias = tuple[str, str]
@@ -114,6 +119,32 @@ class MemoryInsightReader:
                 key=len,
                 reverse=True,
             )
+        )
+
+    def source_observation(self) -> ProcessingSourceObservations:
+        """Perform compact representative reads for each Processing Record source."""
+
+        _, system_section = self._read_admin_memcell_page(cursor_key=None, limit=1)
+        _, runs_section = self._read_run_summaries([])
+        capture_section = self._capture_status()
+        _, calls_section = self._read_call_counts(
+            [],
+            capture_available=False,
+            runs_available=False,
+        )
+        observed_at = _utc_observed_at()
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(system_section, runs_section),
+                "capture": capture_section,
+                "calls": calls_section,
+            },
+            observed_at=observed_at,
+        )
+        return ProcessingSourceObservations(
+            everos=_source_observation(sections["everos"]),
+            capture=_source_observation(sections["capture"]),
+            calls=_source_observation(sections["calls"]),
         )
 
     def list_entries(
@@ -1254,6 +1285,17 @@ def _observed_sections(
         }
         for name, section in sections.items()
     }
+
+
+def _source_observation(section: dict[str, str | None]) -> SourceObservation:
+    status = section["status"]
+    if status not in {"available", "partial", "unavailable"}:
+        status = "unavailable"
+    return SourceObservation(
+        status=status,
+        observed_at=section.get("observed_at"),
+        reason=section.get("reason"),
+    )
 
 
 def _utc_observed_at() -> str:

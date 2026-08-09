@@ -387,6 +387,10 @@ def test_memory_recovery_reads_round_trip_signed_operator(monkeypatch, socket_pa
             "vibe.internal_client.httpx.AsyncHTTPTransport",
             return_value=httpx.MockTransport(handler),
         ):
+            processing_record = await internal_client.memory_processing_record(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
             failures = await internal_client.memory_failures(
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
@@ -395,13 +399,15 @@ def test_memory_recovery_reads_round_trip_signed_operator(monkeypatch, socket_pa
                 user_key="avibe:remote:user-1",
                 socket_path=socket_path,
             )
-            return failures, maintenance
+            return processing_record, failures, maintenance
 
-    failures, maintenance = asyncio.run(_go())
+    processing_record, failures, maintenance = asyncio.run(_go())
 
+    assert processing_record == {"status_code": 200, "body": {"status": "ok"}}
     assert failures == {"status_code": 200, "body": {"status": "ok"}}
     assert maintenance == {"status_code": 200, "body": {"status": "ok"}}
     assert [request.url.path for request in captured] == [
+        "/internal/memory/processing-record",
         "/internal/memory/failures",
         "/internal/memory/maintenance",
     ]

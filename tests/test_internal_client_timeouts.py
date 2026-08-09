@@ -34,6 +34,7 @@ from vibe.internal_client import (
     memory_clear_recovery,
     memory_profile,
     memory_final_flush,
+    memory_processing_record,
     memory_profile_sync,
     memory_restart,
     memory_search,
@@ -66,6 +67,7 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
     assert MEMORY_READ_TIMEOUT_SECONDS > PROVIDER_READ_TIMEOUT_SECONDS
     for read in (
         memory_status,
+        memory_processing_record,
         memory_profile,
         memory_search,
         memory_status_sync,

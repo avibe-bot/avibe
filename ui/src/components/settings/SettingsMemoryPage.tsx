@@ -15,9 +15,8 @@ import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
 import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
 import type {
-  MemoryFailureLogResult,
-  MemoryLogSections,
-  MemoryMaintenanceResult,
+  MemoryMaintenance,
+  MemoryProcessingRecordResult,
   MemorySettingsResult,
   MemoryStatus,
 } from '../../context/ApiContext';
@@ -27,8 +26,7 @@ import { memoryErrorMessage } from '../../lib/memoryRead';
 type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
-type MemoryFailureLogOk = Extract<MemoryFailureLogResult, { status: 'ok' }>;
-type MemoryMaintenanceOk = Extract<MemoryMaintenanceResult, { status: 'ok' }>;
+type MemoryProcessingRecordOk = Extract<MemoryProcessingRecordResult, { status: 'ok' }>;
 
 export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
@@ -43,43 +41,39 @@ export const SettingsMemoryPage: React.FC = () => {
   const [restarting, setRestarting] = useState(false);
   const [logGeneration, setLogGeneration] = useState(0);
   const [logRefreshToken, setLogRefreshToken] = useState(0);
-  const [logSections, setLogSections] = useState<MemoryLogSections | null>(null);
   const [recoveryAction, setRecoveryAction] = useState<'resume' | 'abort' | null>(null);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
     failureMessageKey: 'memory.settings.loadFailed',
   });
-  const statusRead = useMemoryResource<MemoryStatus>({
-    read: api.getMemoryStatus,
+  const processingRecordRead = useMemoryResource<MemoryProcessingRecordOk>({
+    read: api.getMemoryProcessingRecord,
     failureMessageKey: 'memory.status.loadFailed',
-  });
-  const failuresRead = useMemoryResource<MemoryFailureLogOk>({
-    read: api.getMemoryFailures,
-    failureMessageKey: 'memory.processingRecord.anomalies.loadFailed',
-  });
-  const maintenanceRead = useMemoryResource<MemoryMaintenanceOk>({
-    read: api.getMemoryMaintenance,
-    failureMessageKey: 'memory.settings.maintenanceLoadFailed',
   });
 
   const { reload: loadSettings, setData: setSettings } = settingsRead;
-  const { reload: loadStatus } = statusRead;
-  const { reload: loadFailures } = failuresRead;
-  const { reload: loadMaintenance } = maintenanceRead;
+  const { reload: loadProcessingRecord } = processingRecordRead;
   const settings = settingsRead.data;
-  const status = statusRead.data;
-  const loadProcessingRecord = useCallback(async () => {
-    await loadStatus();
-    await loadFailures();
-  }, [loadFailures, loadStatus]);
+  const processingRecord = processingRecordRead.data;
+  const status: MemoryStatus | null = processingRecord ? {
+    status: 'ok',
+    source: processingRecord.runtime.source,
+    health: processingRecord.runtime.health,
+  } : null;
+  const maintenance: MemoryMaintenance | null = processingRecord ? {
+    status: 'ok',
+    data_exists: processingRecord.maintenance.data_exists,
+    can_clear: processingRecord.maintenance.can_clear,
+    clear_recovery: processingRecord.maintenance.clear_recovery,
+  } : null;
   const reloadRecoveryState = useCallback(async () => {
-    await Promise.all([loadProcessingRecord(), loadMaintenance()]);
-  }, [loadMaintenance, loadProcessingRecord]);
+    await loadProcessingRecord();
+  }, [loadProcessingRecord]);
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
-    settingsRead.forbidden || statusRead.forbidden || failuresRead.forbidden || maintenanceRead.forbidden;
+    settingsRead.forbidden || processingRecordRead.forbidden;
 
   // Dependency readiness comes from the authoritative Dependencies source. Processing Record
   // health is observational and never doubles as installation or enablement state.
@@ -105,32 +99,27 @@ export const SettingsMemoryPage: React.FC = () => {
   useEffect(() => {
     void loadSettings();
     void loadProcessingRecord();
-    void loadMaintenance();
     void loadDependency();
-  }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
+  }, [loadSettings, loadProcessingRecord, loadDependency]);
 
   const confirmClear = async () => {
     setClearing(true);
     // Clear can delete provider payloads before a failed receipt or a lost
     // response, so purge cached payloads for every confirmed attempt.
     setLogGeneration((generation) => generation + 1);
-    setLogSections(null);
     try {
       const res = await api.clearMemory();
       if (res.status === 'completed') {
         showToast(t('memory.clear.cleared'), 'success');
         setClearOpen(false);
         void loadProcessingRecord();
-        void loadMaintenance();
         void loadSettings();
       } else {
         void loadProcessingRecord();
-        void loadMaintenance();
         showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
       }
     } catch {
       void loadProcessingRecord();
-      void loadMaintenance();
       showToast(t('memory.clear.failed'), 'error');
     } finally {
       setClearing(false);
@@ -139,7 +128,6 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const refreshProcessingRecord = () => {
     void loadProcessingRecord();
-    void loadMaintenance();
     setLogRefreshToken((token) => token + 1);
   };
 
@@ -152,9 +140,7 @@ export const SettingsMemoryPage: React.FC = () => {
       if (res.status === 'completed' || res.status === 'aborted') {
         showToast(t(`memory.processingRecord.clearRecovery.${action}Success`), 'success');
         setLogGeneration((generation) => generation + 1);
-        setLogSections(null);
         void loadProcessingRecord();
-        void loadMaintenance();
         void loadSettings();
       } else {
         await reloadRecoveryState();
@@ -198,21 +184,24 @@ export const SettingsMemoryPage: React.FC = () => {
   const settingsPanel = settings ? (
     <MemorySettingsPanel
       settings={settings}
-      maintenance={maintenanceRead.data}
-      maintenanceError={maintenanceRead.error}
+      maintenance={maintenance}
+      maintenanceError={
+        processingRecord?.maintenance.source.status === 'unavailable'
+          ? memoryErrorMessage(t, processingRecord.maintenance.source.reason)
+          : processingRecordRead.error
+      }
       dependencyReady={dependencyReady}
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
         void loadProcessingRecord();
-        void loadMaintenance();
         void loadDependency();
       }}
       onReloadSettings={() => {
         void loadSettings();
       }}
       onReloadMaintenance={() => {
-        void loadMaintenance();
+        void loadProcessingRecord();
         void loadDependency();
       }}
       onClearAll={() => setClearOpen(true)}
@@ -283,14 +272,18 @@ export const SettingsMemoryPage: React.FC = () => {
             <div className="flex flex-col gap-6">
               <MemoryStatusPanel
                 status={status}
-                failures={failuresRead.data?.items ?? []}
-                recovery={failuresRead.data?.recovery ?? maintenanceRead.data?.clear_recovery ?? null}
-                logSections={logSections}
-                statusLoading={!statusRead.loaded || statusRead.loading}
-                failuresLoading={!failuresRead.loaded || failuresRead.loading}
-                statusError={statusRead.error}
-                failuresError={failuresRead.error}
-                refreshPending={statusRead.loading || failuresRead.loading}
+                failures={processingRecord?.anomalies.items ?? []}
+                recovery={processingRecord?.maintenance.clear_recovery ?? null}
+                logSections={processingRecord?.sources ?? null}
+                statusLoading={!processingRecordRead.loaded || processingRecordRead.loading}
+                failuresLoading={!processingRecordRead.loaded || processingRecordRead.loading}
+                statusError={processingRecordRead.error}
+                failuresError={
+                  processingRecord?.anomalies.source.status === 'unavailable'
+                    ? memoryErrorMessage(t, processingRecord.anomalies.source.reason)
+                    : processingRecordRead.error
+                }
+                refreshPending={processingRecordRead.loading}
                 recoveryAction={recoveryAction}
                 onRefresh={refreshProcessingRecord}
                 onResumeClear={(operationId) => void runClearRecovery('resume', operationId)}
@@ -303,7 +296,6 @@ export const SettingsMemoryPage: React.FC = () => {
                 <MemoryLogPanel
                   key={logGeneration}
                   refreshToken={logRefreshToken}
-                  onSectionsChange={setLogSections}
                 />
               </section>
             </div>

@@ -500,6 +500,16 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 "avibe:remote:subject-2": "u-remote-principal",
             }[user_key]
 
+        async def processing_record_payload(self, *, operator_ref: str | None = None):
+            calls.append(("processing-record", operator_ref))
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
         async def failure_log_payload(self, *, operator_ref: str | None = None):
             calls.append(("failures", operator_ref))
             return {"status": "ok", "items": [], "recovery": None}
@@ -531,6 +541,13 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
     async def _exercise():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            composite = await client.get(
+                "/internal/memory/processing-record",
+                headers=headers(
+                    "/internal/memory/processing-record",
+                    "avibe:remote:subject-2",
+                ),
+            )
             local = await client.get(
                 "/internal/memory/failures",
                 headers=headers("/internal/memory/failures", "avibe:local"),
@@ -543,12 +560,15 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 ),
             )
             unsigned = await client.get("/internal/memory/failures")
-            return local, remote, unsigned
+            return composite, local, remote, unsigned
 
-    local, remote, unsigned = asyncio.run(_exercise())
+    composite, local, remote, unsigned = asyncio.run(_exercise())
 
-    assert local.status_code == remote.status_code == unsigned.status_code == 200
+    assert composite.status_code == local.status_code == remote.status_code == unsigned.status_code == 200
+    assert "avibe:remote:subject-2" not in composite.text
+    assert "u-remote-principal" not in composite.text
     assert calls == [
+        ("processing-record", "u-remote-principal"),
         ("failures", "u-local-principal"),
         ("maintenance", "u-remote-principal"),
         ("failures", None),

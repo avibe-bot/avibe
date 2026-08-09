@@ -334,6 +334,64 @@ def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> Non
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_memory_processing_record_proxies_signed_operator_and_composite_payload(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    user_keys: list[str] = []
+
+    async def processing_record(*, user_key: str):
+        user_keys.append(user_key)
+        return {
+            "status_code": 200,
+            "body": {
+                "status": "ok",
+                "runtime": {
+                    "source": {
+                        "status": "unavailable",
+                        "observed_at": None,
+                        "reason": "memory_disabled",
+                    },
+                    "health": None,
+                },
+                "sources": {
+                    "everos": {"status": "available", "observed_at": "now", "reason": None},
+                    "capture": {"status": "unavailable", "observed_at": None, "reason": "busy"},
+                    "calls": {"status": "available", "observed_at": "now", "reason": None},
+                },
+                "anomalies": {
+                    "source": {"status": "available", "observed_at": "now", "reason": None},
+                    "items": [],
+                },
+                "maintenance": {
+                    "source": {"status": "available", "observed_at": "now", "reason": None},
+                    "data_exists": False,
+                    "can_clear": True,
+                    "clear_recovery": None,
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_processing_record", processing_record)
+    response = app.test_client().get(
+        "/api/memory/processing-record",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["sources"]["capture"] == {
+        "status": "unavailable",
+        "observed_at": None,
+        "reason": "busy",
+    }
+    assert response.headers["cache-control"] == "no-store"
+    assert user_keys == ["avibe:local"]
+
+
 def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

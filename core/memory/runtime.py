@@ -6,7 +6,6 @@ import asyncio
 from copy import deepcopy
 import logging
 import os
-import secrets
 import stat
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
@@ -14,7 +13,6 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -41,6 +39,7 @@ from core.memory.module import MemoryModule
 from core.memory.maintenance import (
     ClearRecoveryResult,
     ClearResult,
+    MaintenanceResult,
     MaintenanceRuntimeState,
     MemoryMaintenance,
     MemoryMaintenanceRuntimePort,
@@ -54,6 +53,17 @@ from core.memory.process import (
     SidecarOwnership,
     sidecar_record_path,
 )
+from core.memory.processing_record import (
+    AnomalyProjection,
+    MaintenanceProjection,
+    MemoryProcessingRecord,
+    MemoryProcessingRecordPort,
+    ProcessingRecordSummary,
+    ProcessingSourceObservations,
+    RuntimeHealthObservation,
+    RuntimeHealthProjection,
+    SourceObservation,
+)
 from core.memory.provider_root import (
     ProviderRoot,
     ProviderRootMetadata,
@@ -62,6 +72,7 @@ from core.memory.provider_root import (
 from core.memory.store import MemoryStore, is_principal_id, is_project_id
 from core.memory.snapshot import MemorySnapshot
 from core.memory.types import (
+    MemoryFailureLogEntry,
     MemoryItems,
     MemoryResult,
     OperationFailed,
@@ -83,10 +94,6 @@ ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 _RECORDER_DISABLED = {"state": "disabled", "reason": None}
 _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
-
-
-def _new_recorder_episode_id() -> str:
-    return f"ma_{secrets.token_hex(32)}"
 
 
 def _clear_recovery_payload(
@@ -115,6 +122,61 @@ def _clear_result_payload(result: ClearResult) -> dict[str, Any]:
         "status": result.status,
         "operation_id": result.operation_id,
         "epoch": result.epoch,
+    }
+
+
+def _source_observation_payload(source: SourceObservation) -> dict[str, Any]:
+    return {
+        "status": source.status,
+        "observed_at": source.observed_at,
+        "reason": source.reason,
+    }
+
+
+def _runtime_health_payload(result: RuntimeHealthProjection) -> dict[str, Any]:
+    health = None if result.health is None else result.health.payload()
+    if health is not None and health.get("cascade") is None:
+        health["cascade"] = {}
+    return {
+        "status": "ok",
+        "source": _source_observation_payload(result.source),
+        "health": health,
+    }
+
+
+def _anomaly_projection_payload(result: AnomalyProjection) -> dict[str, Any]:
+    return {
+        "source": _source_observation_payload(result.source),
+        "items": [asdict(entry) for entry in result.items],
+    }
+
+
+def _maintenance_projection_payload(
+    result: MaintenanceProjection,
+) -> dict[str, Any]:
+    return {
+        "source": _source_observation_payload(result.source),
+        "data_exists": result.data_exists,
+        "can_clear": result.can_clear,
+        "clear_recovery": _clear_recovery_payload(result.clear_recovery),
+    }
+
+
+def _processing_record_payload(summary: ProcessingRecordSummary) -> dict[str, Any]:
+    runtime = _runtime_health_payload(summary.runtime)
+    return {
+        "status": summary.status,
+        "runtime": {
+            "source": runtime["source"],
+            "health": runtime["health"],
+        },
+        "sources": {
+            "everos": _source_observation_payload(summary.sources.everos),
+            "capture": _source_observation_payload(summary.sources.capture),
+            "calls": _source_observation_payload(summary.sources.calls),
+        },
+        "anomalies": _anomaly_projection_payload(summary.anomalies),
+        "maintenance": _maintenance_projection_payload(summary.maintenance),
     }
 
 
@@ -214,14 +276,13 @@ class MemoryRuntime:
         self._call_log_retention_task: asyncio.Task[None] | None = None
         self._process_records_calls = False
         self._recorder_health: dict[str, str | None] = dict(_RECORDER_DISABLED)
-        self._recorder_health_observed_at: str | None = None
-        self._recorder_health_episode_id: str | None = None
-        self._last_health_snapshot: ProviderHealthSnapshot | None = None
-        self._last_health_observed_at: str | None = None
         self._maintenance = MemoryMaintenance(
             None,
             effective_home=self._effective_home,
             runtime=self._maintenance_runtime_port(),
+        )
+        self._processing_record = MemoryProcessingRecord(
+            self._processing_record_port()
         )
         self._open_store(store)
 
@@ -324,6 +385,15 @@ class MemoryRuntime:
             quiesce=self._quiesce_for_clear,
             resume=self._resume_after_clear,
             delete_surface=self._delete_clear_surface,
+        )
+
+    def _processing_record_port(self) -> MemoryProcessingRecordPort:
+        return MemoryProcessingRecordPort(
+            observe_health=self._processing_record_health,
+            failure_log=self._processing_record_failure_log,
+            recorder_health=lambda: dict(self._recorder_health),
+            observe_sources=self._processing_record_sources,
+            maintenance=self._processing_record_maintenance,
         )
 
     @asynccontextmanager
@@ -713,135 +783,108 @@ class MemoryRuntime:
         self._ensure_worker()
         return {"ok": True, "state": "ready"}
 
-    async def status_payload(self) -> dict[str, Any]:
-        """Project one public EverOS health read, retaining only a stale snapshot."""
-
+    async def _processing_record_health(self) -> RuntimeHealthObservation:
         snapshot: ProviderHealthSnapshot | None = None
         reason: str | None = None
-        can_read = bool(
-            self._config.enabled
-            and self._process is not None
-            and self._process.running
+        if not self.available:
+            return RuntimeHealthObservation(
+                snapshot=None,
+                unavailable_reason="memory_sidecar_unavailable",
+            )
+        if self._maintenance_open():
+            return RuntimeHealthObservation(
+                snapshot=None,
+                unavailable_reason="memory_clear_failed",
+            )
+        async with self._reconcile_lock:
+            can_read = bool(
+                self._config.enabled
+                and self._process is not None
+                and self._process.running
+            )
+            if can_read:
+                try:
+                    snapshot = await self._provider.health_snapshot()
+                except MemoryProviderFailure as failure:
+                    reason = failure.error
+                except Exception:
+                    reason = "memory_sidecar_unavailable"
+            else:
+                reason = (
+                    "memory_disabled"
+                    if not self._config.enabled
+                    else self._runtime_error or "memory_sidecar_unavailable"
+                )
+            if snapshot is not None:
+                self._recorder_health = dict(snapshot.recorder)
+        return RuntimeHealthObservation(snapshot=snapshot, unavailable_reason=reason)
+
+    async def _processing_record_failure_log(
+        self,
+    ) -> tuple[MemoryFailureLogEntry, ...]:
+        if not self.available:
+            raise self._unavailable()
+        return await self.module.failure_log()
+
+    async def _processing_record_sources(self) -> ProcessingSourceObservations:
+        if self._maintenance_open():
+            unavailable = SourceObservation(
+                "unavailable",
+                reason="memory_clear_failed",
+            )
+            return ProcessingSourceObservations(
+                everos=unavailable,
+                capture=unavailable,
+                calls=unavailable,
+            )
+        reader = self._insight_reader
+        if not self.available or reader is None:
+            raise self._unavailable()
+        return await self._run_insight_read(reader.source_observation)
+
+    async def _processing_record_maintenance(
+        self,
+        operator_ref: str | None,
+    ) -> MaintenanceResult:
+        return await self._require_maintenance().maintenance_payload(
+            operator_ref=operator_ref
         )
-        if can_read:
-            try:
-                snapshot = await self._provider.health_snapshot()
-            except MemoryProviderFailure as failure:
-                reason = failure.error
-            except Exception:
-                reason = "memory_sidecar_unavailable"
-        else:
-            reason = (
-                "memory_disabled"
-                if not self._config.enabled
-                else self._runtime_error or "memory_sidecar_unavailable"
-            )
 
-        if snapshot is not None:
-            observed_at = _utc_observed_at()
-            self._last_health_snapshot = snapshot
-            self._last_health_observed_at = observed_at
-            self._observe_recorder_health(
-                snapshot.recorder,
-                observed_at=observed_at,
-            )
-            source_status = "available"
-            health = snapshot.payload()
-        elif self._last_health_snapshot is not None:
-            observed_at = self._last_health_observed_at
-            source_status = "stale"
-            health = self._last_health_snapshot.payload()
-        else:
-            observed_at = None
-            source_status = "unavailable"
-            health = None
-        if health is not None and health.get("cascade") is None:
-            health["cascade"] = {}
-        return {
-            "status": "ok",
-            "source": {
-                "status": source_status,
-                "observed_at": observed_at,
-                "reason": reason,
-            },
-            "health": health,
-        }
-
-    async def _recorder_status_payload(self) -> dict[str, str | None]:
-        if self._recorder_health.get("reason") == "call_log_corrupt":
-            return dict(self._recorder_health)
-        if not self._config.enabled:
-            return dict(self._recorder_health)
-        if not (
-            self._process_records_calls
-            and self._process is not None
-            and self._process.running
-        ):
-            return dict(_RECORDER_DEGRADED)
-        try:
-            health = await self._provider.recorder_health()
-        except Exception:
-            health = dict(_RECORDER_DEGRADED)
-        if health.get("state") == "disabled":
-            # Recording is always enabled. A live sidecar with its recorder
-            # off is a writer failure, not an intentional state.
-            health = dict(_RECORDER_DEGRADED)
-        self._observe_recorder_health(health)
-        return dict(self._recorder_health)
-
-    def _observe_recorder_health(
+    def _update_recorder_health(
         self,
         health: dict[str, str | None],
         *,
         observed_at: str | None = None,
     ) -> None:
-        previous = self._recorder_health
-        current = dict(health)
-        if current.get("state") != "degraded":
-            self._recorder_health_observed_at = None
-            self._recorder_health_episode_id = None
-        elif (
-            previous.get("state") != "degraded"
-            or previous.get("reason") != current.get("reason")
-            or self._recorder_health_observed_at is None
-            or self._recorder_health_episode_id is None
-        ):
-            self._recorder_health_observed_at = observed_at or _utc_observed_at()
-            self._recorder_health_episode_id = _new_recorder_episode_id()
-        self._recorder_health = current
+        del observed_at
+        self._recorder_health = dict(health)
+
+    async def processing_record_payload(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> dict[str, Any]:
+        summary = await self._processing_record.read(operator_ref)
+        return _processing_record_payload(summary)
+
+    async def status_payload(self) -> dict[str, Any]:
+        summary = await self._processing_record.read(None)
+        return _runtime_health_payload(summary.runtime)
 
     async def failure_log_payload(
         self,
         *,
         operator_ref: str | None = None,
     ) -> dict[str, Any]:
-        if not self.available:
+        summary = await self._processing_record.read(operator_ref)
+        if summary.anomalies.source.status == "unavailable":
             raise self._unavailable()
-        entries = await self.module.failure_log()
-        items = [asdict(entry) for entry in entries]
-        if (
-            self._recorder_health.get("state") == "degraded"
-            and self._recorder_health_observed_at is not None
-            and self._recorder_health_episode_id is not None
-        ):
-            items.insert(
-                0,
-                {
-                    "id": self._recorder_health_episode_id,
-                    "kind": "recorder_degraded",
-                    "state": "degraded",
-                    "operation": "record",
-                    "occurred_at": self._recorder_health_observed_at,
-                    "error_code": "memory_processing_failed",
-                    "attempts": 0,
-                    "generation": 0,
-                    "request_id": None,
-                },
-            )
         return {
             "status": "ok",
-            "items": items[:50],
-            "recovery": self._clear_recovery_payload(operator_ref=operator_ref),
+            "items": [asdict(entry) for entry in summary.anomalies.items],
+            "recovery": _clear_recovery_payload(
+                summary.maintenance.clear_recovery
+            ),
         }
 
     async def maintenance_payload(
@@ -851,17 +894,8 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Return cheap local maintenance facts without probing or scanning EverOS."""
 
-        if not self.available:
-            return {
-                "status": "ok",
-                "data_exists": True,
-                "can_clear": False,
-                "clear_recovery": self._clear_recovery_payload(
-                    operator_ref=operator_ref
-                ),
-            }
-        maintenance = self._require_maintenance()
-        result = await maintenance.maintenance_payload(operator_ref=operator_ref)
+        summary = await self._processing_record.read(operator_ref)
+        result = summary.maintenance
         return {
             "status": "ok",
             "data_exists": result.data_exists,
@@ -1315,19 +1349,6 @@ class MemoryRuntime:
             self._restart_config = deepcopy(self._config)
         else:
             self._runtime_error = "memory_sidecar_unavailable"
-
-    def _clear_recovery_payload(
-        self,
-        *,
-        operator_ref: str | None = None,
-    ) -> dict[str, Any] | None:
-        maintenance = self._maintenance
-        recovery = (
-            None
-            if maintenance is None
-            else maintenance.recovery(operator_ref=operator_ref)
-        )
-        return _clear_recovery_payload(recovery)
 
     def _require_maintenance(self) -> MemoryMaintenance:
         maintenance = self._maintenance
@@ -1980,7 +2001,7 @@ class MemoryRuntime:
                 if not should_continue:
                     return
                 if reason is not None:
-                    self._observe_recorder_health(
+                    self._update_recorder_health(
                         {"state": "degraded", "reason": reason}
                     )
                     if reason == "call_log_corrupt":
@@ -2024,8 +2045,6 @@ class MemoryRuntime:
 
     def _set_recorder_health_disabled(self) -> None:
         self._recorder_health = dict(_RECORDER_DISABLED)
-        self._recorder_health_observed_at = None
-        self._recorder_health_episode_id = None
 
     async def _drain_loop(self) -> None:
         while self._config.enabled:
@@ -2220,7 +2239,3 @@ def _result_payload(result: MemoryResult | RecallResult) -> dict[str, Any]:
             "freshness": result.freshness,
         }
     return {"status": "failed", "error": "memory_processing_failed"}
-
-
-def _utc_observed_at() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")

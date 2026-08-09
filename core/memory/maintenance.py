@@ -61,6 +61,7 @@ class MaintenanceResult:
     data_exists: bool
     can_clear: bool
     clear_recovery: ClearRecoveryResult | None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ class MemoryMaintenance:
                 data_exists=True,
                 can_clear=False,
                 clear_recovery=self.recovery(operator_ref=operator_ref),
+                error="memory_store_unavailable",
             )
         recovery = self.recovery(operator_ref=operator_ref)
         return MaintenanceResult(

@@ -1288,6 +1288,31 @@ def test_source_sections_include_query_observation_time(
     assert detail["sections"] == expected
 
 
+def test_processing_record_source_observation_uses_representative_safe_reads(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+    assert observation.everos.observed_at is not None
+
+
+def test_processing_record_source_observation_degrades_sources_independently(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.capture_db_path) as connection:
+        connection.execute("DROP TABLE memory_capture_queue")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "unavailable"
+    assert observation.capture.reason == "malformed"
+    assert observation.calls.status == "available"
+
+
 def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     root = tmp_path / "missing"
     reader = MemoryInsightReader(

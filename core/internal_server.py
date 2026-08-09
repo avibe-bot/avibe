@@ -1121,6 +1121,22 @@ def create_app(
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
+    @app.get("/internal/memory/processing-record")
+    async def _memory_processing_record(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.processing_record_payload(
+                operator_ref=_memory_ui_operator_ref(request, runtime)
+            )
+        except Exception:
+            logger.warning("internal memory Processing Record read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
     @app.get("/internal/memory/failures")
     async def _memory_failures(request: Request) -> Any:
         runtime = _memory_runtime()

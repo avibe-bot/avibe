@@ -358,6 +358,20 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
+    @app.get("/api/memory/processing-record", include_in_schema=False)
+    async def memory_processing_record_get(starlette_request: FastAPIRequest):
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            from vibe import internal_client
+
+            return await _memory_internal_response(
+                lambda: internal_client.memory_processing_record(user_key=user_key)
+            )
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
     @app.get("/api/memory/failures", include_in_schema=False)
     async def memory_failures_get(starlette_request: FastAPIRequest):
         async def handler():
