@@ -96,7 +96,7 @@ describe('eligibleSources', () => {
       order: ['src_c'],
       eligibility: [
         { source_id: 'src_a', eligible: true, reason_key: null },
-        { source_id: 'src_b', eligible: false, reason_key: 'models.eligibility.opencode_api_key_only' },
+        { source_id: 'src_b', eligible: false, reason_key: 'models.eligibility.subscription_wrong_client' },
       ],
     });
     expect(eligibleSources(sources, a).map((s) => s.id)).toEqual(['src_a', 'src_c']);

@@ -870,6 +870,112 @@ collectively touch every applicable row and leave no downstream compatibility ta
 | `ui/src/components/settings/models/**/*.test.*` | No protocol control on the normal add flow, honest manual probe-order fallback, final inventory editing, visible and adjustable backend Source order plus policy-chosen Add Source placement, no position-based newness or bottom-only new section, exact configured-chain editing, one guarded saved refresh button, adopted/supply-status projection consumption, derived takeover versus exhausted rendering, reversible Direct mode, distinct Native copy, and no policy/not-enabled/latency/consent surface. I4 supplies a mechanical type-check gate that includes these test files despite `tsconfig.app.json` excluding them. |
 | `tests/scenarios/model_hub/**`, `tests/scenario_harness/model_hub_native_oauth.py` | End-to-end final-shape setup, all four native-import action rows, reversible Direct/Gateway onboarding, subscription custody, protocol observation, one-time add matching plus deterministic persisted placement, exact configured route execution and mapping, guarded saved refresh and Source-delete envelopes, silent successful takeover, truthful blocked/native/engine terminal copy, and exhaustion failure without takeover semantics. The I3-owned migration scenario validates each imported Source, serializes the full result, and reloads it through the same canonical validator. |
 
+#### Sealed current-consumer findings — reviewed head `5cffd3fff7`
+
+The exact-head review on 2026-08-09 found one premise superseded by the owner's
+zero-migration ruling and eight implementation consumers that still expose the pre-S-1
+shape. This is the review-loop circuit breaker's scope decision: K1 does not grow into
+the I1/I2/I4 implementation batch. The eight live defects below are binding release
+work under their existing ACs and landing rows; the default-off release gate remains in
+place until those lanes and I5 evidence merge. The review text is retained verbatim so
+the implementing lane receives the evidence rather than a paraphrase.
+
+| Review thread | AC / disposition | Landing point | Responsible lane |
+| --- | --- | --- | --- |
+| `3742846987` | Owner ruling 2026-08-09: no internal v4-to-v5 data migration; the finding's upgraded-install premise is superseded and no compatibility loader is permitted | Final-contract handoff and `config/v2_config.py` absence proof | K1 ruling only; no implementation lane |
+| `3742846989` | AC-22; valid prelaunch consumer gap | Agent projection/write flow in `service.py` and Models route editor | I1 + I4 |
+| `3742846991` | AC-26; valid prelaunch consumer gap | Source serializer plus all Models `SuppliedModel` consumers and mocks | I1 + I4 |
+| `3742846992` | AC-30; valid prelaunch consumer gap | No-candidate provenance producer, runtime blocker propagation, and pull-surface rendering | I1 + I2 + I4 |
+| `3742846996` | AC-33 / terminal-version handoff; valid prelaunch consumer gap | Outer Model Hub REST envelope and its contract/API tests | I1 |
+| `3742846998` | AC-22; valid prelaunch consumer gap | Source-order PUT/read projection and Models Source-order editor | I1 + I4 |
+| `3742847000` | AC-26; valid prelaunch consumer gap | Model-delete refusal/force/success envelope and confirmation consumer | I1 + I4 |
+| `3742847001` | AC-26; valid prelaunch consumer gap | Per-model reasoning-efforts inventory editor and UI evidence | I4 |
+| `3742847002` | AC-26; valid prelaunch consumer gap | Refresh merge implementation and API test | I1 |
+
+> **Preserve v4 model provenance when loading config**
+>
+> On any upgraded installation with saved Model Hub models, the existing JSON contains
+> `provenance` because the parent serializer wrote that key, but this loader now reads
+> only `origin`; every non-empty legacy model inventory therefore raises
+> `Config 'model_hub.sources.models.origin' is invalid` during `V2Config.load()`. Accept
+> and migrate the legacy key before requiring the v5 spelling so persisted Sources
+> remain usable after upgrade.
+
+> **Keep persisted mappings in the live UI projection**
+>
+> When Claude or Codex already has custom model mappings, removing them from every Agent
+> response makes `AgentCard` display those routes as Global because it reads
+> `agent.mappings`; more seriously, the next route edit in
+> `SettingsModelsPage.setModelRoute` reconstructs the total mapping write from that
+> now-empty projection and can overwrite all previously stored mappings with only the
+> newly edited one. Do not strip this field until the current Web UI is migrated to an
+> equivalent authoritative route read/write flow.
+
+> **Align the Source model discriminator with the current UI**
+>
+> For every Source returned by the live API, this serializer now emits `origin`, while
+> `ui/src/components/settings/models/types.ts::SuppliedModel`, `OpenCodeMenuDrawer`, and
+> the custom-model helpers still read `provenance`. Consequently manual models loaded
+> from the server are no longer recognized as editable/custom models, even though the
+> mock API continues using the old property and masks the regression. Update the Web UI
+> consumers in the same transition or retain a compatible projection.
+
+> **Populate blockers for blocked no-candidate turns**
+>
+> When a non-empty route has no runnable hop because Sources need re-auth, key
+> replacement, top-up, or native CLI repair, the v5 provenance record still writes
+> `blockers: []`, making it indistinguishable from an unconfigured route and preventing
+> consumers from rendering the required remedy. Fresh implementation evidence beyond
+> the earlier documentation thread is that both `mark_no_candidate` paths retain only
+> `supply_state`, and this new producer hardcodes the blocker array; carry the exact
+> blocked-hop identities and reasons into this record.
+
+> **Bump the outer REST envelope to contract version 5**
+>
+> Every Model Hub endpoint still builds its success and failure envelope from
+> `CONTRACT_VERSION`, which remains 3, even though this change declares the final REST
+> contract to be v5 and bumps the nested chain, probe, and runtime payloads to 5. Any
+> client that validates the advertised v5 envelope will therefore reject every response
+> before it can inspect the nested object; advance the outer constant with the rest of
+> the atomic contract transition.
+
+> **Complete the policy-free source-order transition**
+>
+> When a v5 caller follows the new API contract and sends
+> `PUT /agents/<backend>/sources` with `{order: [...]}`, `set_agent_sources` still
+> rejects it because the implementation accepts only the retired `policy` bodies; at
+> the same time this read projection now omits `policy`, causing the current
+> `SourceOrderDrawer` to default every persisted Custom order to Follow. Migrate the
+> write handler and Web UI together instead of removing only the read discriminator.
+
+> **Return the guarded cascade envelope for model deletion**
+>
+> When a manual model is referenced by configured routes, the non-forced delete returns
+> only the generic `mode_switch_blocked` error, so the UI receives neither
+> `would_remove_hops` nor `would_interrupt` and has no information with which to present
+> the required force confirmation. A forced delete then returns only the Source despite
+> pruning references, omitting the corresponding `removed_hops` and `interrupted`
+> result; implement the shared guarded-mutation envelope so the deletion can be
+> confirmed and reported without silently losing route information.
+
+> **Expose reasoning-effort editing in the Models UI**
+>
+> For every model created through the current Models page, this dialog hardcodes
+> `reasoning_efforts: []`, and repo-wide UI search finds no React caller of the newly
+> added `updateModelReasoningEfforts` API. Users therefore cannot declare any supported
+> reasoning effort for either discovered or manual inventory entries, despite the new
+> capability being persisted and exposed by the server; add the specified inventory
+> editor rather than shipping an unreachable PATCH method.
+
+> **Preserve per-model discovery timestamps on refresh**
+>
+> When refresh returns a model ID that was already in the discovered slice, the code
+> correctly preserves its edited display name and reasoning capabilities but always
+> replaces `discovered_at` with the refresh time. That destroys the model's original
+> discovery timestamp on every successful unchanged refresh and contradicts the
+> separate `last_discovered_at` field that records inventory freshness; copy
+> `existing.discovered_at` for retained IDs and stamp only newly discovered entries.
+
 After I1 lands, `model-hub-contracts/**` is read-only to I2–I5. An implementation-proven
 mismatch is reported to the orchestrator for a targeted decision; the discovering lane
 does not edit or reinterpret the contract locally.

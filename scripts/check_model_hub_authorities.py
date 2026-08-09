@@ -270,6 +270,14 @@ def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> s
     raise ValueError(f"assignment not found: {spec['name']}")
 
 
+def _json_object_keys(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
+    value = _json_pointer(source.json(spec["file"]), spec["path"])
+    if not isinstance(value, dict):
+        raise ValueError(f"JSON object not found: {spec['file']}#{spec['path']}")
+    prefix = spec.get("prefix", "")
+    return {f"{prefix}{key}" for key in value}
+
+
 def _extract(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
     kind = spec["kind"]
     if kind == "schema_vocabulary":
@@ -286,6 +294,8 @@ def _extract(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
         return _python_literal_annotation(source, spec)
     if kind == "python_string_assignment":
         return _python_string_assignment(source, spec)
+    if kind == "json_object_keys":
+        return _json_object_keys(source, spec)
     raise ValueError(f"unknown extractor: {kind}")
 
 

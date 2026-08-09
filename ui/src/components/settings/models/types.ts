@@ -143,9 +143,7 @@ export type SourcePolicy = 'follow' | 'custom';
 /** Why a source cannot serve this backend at all. A closed vocabulary — a new
  *  cause ships its enum member and its locale copy in the same change. */
 export type EligibilityReasonKey =
-  | 'models.eligibility.subscription_wrong_client'
-  | 'models.eligibility.opencode_api_key_only'
-  | 'models.eligibility.consent_required';
+  'models.eligibility.subscription_wrong_client';
 
 /** Why a source that MAY serve this backend still cannot be launched on this
  *  machine. Independent of eligibility and of the source's own health: the

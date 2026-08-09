@@ -1195,9 +1195,7 @@
   },
   "models": {
     "eligibility": {
-      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
-      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
-      "consent_required": "需要先同意实验性中枢供给"
+      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用"
     },
     "oauth": {
       "upstream_failed": "厂商没有完成这次登录，请重试",

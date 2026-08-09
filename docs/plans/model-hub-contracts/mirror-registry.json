@@ -415,6 +415,18 @@
           "paths": [
             "/properties/sources/properties/eligibility/items/allOf/0/then/properties/reason_key"
           ]
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/en.json",
+          "path": "/models/eligibility",
+          "prefix": "models.eligibility."
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/zh.json",
+          "path": "/models/eligibility",
+          "prefix": "models.eligibility."
         }
       ]
     }
