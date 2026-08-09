@@ -834,7 +834,8 @@ class SQLiteSessionsService:
         values — same lifecycle as the backend pin on native bind. Called at
         dispatch time (turn START). The writer reservation serializes the marker
         read with this write, while ``expected_route`` makes a stale turn a no-op
-        if the user has already switched the session to another Agent route.
+        if the user has already changed any Agent, model, effort, or explicit-pin
+        part of the route.
         COALESCE keeps each setting fill-if-empty. Returns True when a row was
         updated.
 
@@ -855,6 +856,13 @@ class SQLiteSessionsService:
                     {},
                 )
             )
+            if expected_route is not None and "explicit_overrides" in expected_route:
+                expected_pinned = {
+                    str(name)
+                    for name in (expected_route.get("explicit_overrides") or [])
+                }
+                if pinned != expected_pinned:
+                    return False
             values: dict[str, Any] = {}
             if model and "model" not in pinned:
                 values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
@@ -871,7 +879,14 @@ class SQLiteSessionsService:
                 .where(agent_sessions.c.status != "archived")
                 .values(**values)
             )
-            for field in ("agent_id", "agent_name", "agent_backend", "agent_variant"):
+            for field in (
+                "agent_id",
+                "agent_name",
+                "agent_backend",
+                "agent_variant",
+                "model",
+                "reasoning_effort",
+            ):
                 if expected_route is not None and field in expected_route:
                     statement = statement.where(
                         func.coalesce(getattr(agent_sessions.c, field), "")
@@ -992,16 +1007,23 @@ class SQLiteSessionsService:
                 adopt_values = dict(values)
                 adopt_values["agent_backend"] = requested_backend
                 adopt_values["agent_variant"] = requested_backend or "default"
-                adopt_values["model"] = None
-                adopt_values["reasoning_effort"] = None
-                adopt_values["metadata_json"] = json.dumps(
-                    reconcile_explicit_overrides(
-                        _json_loads((route_row or {}).get("metadata_json"), {}),
-                        cleared=OVERRIDABLE_SETTING_COLUMNS,
-                    ),
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                )
+                # A backend-less Workbench row has just inherited the global
+                # Agent route. Turn-start materialization may already have
+                # persisted that route, so initial adoption must keep it. A
+                # concrete backend-to-backend adoption is different: those
+                # settings belong to the old backend and must be cleared as one
+                # atomic route replacement (HFR-250).
+                if current_backend:
+                    adopt_values["model"] = None
+                    adopt_values["reasoning_effort"] = None
+                    adopt_values["metadata_json"] = json.dumps(
+                        reconcile_explicit_overrides(
+                            _json_loads((route_row or {}).get("metadata_json"), {}),
+                            cleared=OVERRIDABLE_SETTING_COLUMNS,
+                        ),
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 adopt_values["native_session_id"] = encoded_session_id
                 adopted = conn.execute(
                     agent_sessions.update()

@@ -1123,6 +1123,9 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                 "agent_name": None,
                 "agent_backend": None,
                 "agent_variant": None,
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": [],
             },
         )
 

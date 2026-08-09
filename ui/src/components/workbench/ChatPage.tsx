@@ -970,13 +970,12 @@ export const ChatPage: React.FC = () => {
     });
   }, []);
 
-  // The header's backend lock keys on ``native_session_id``, which the FIRST
-  // turn binds server-side with no dedicated event — so an open page wouldn't
-  // learn it until reload and the picker would keep offering switches the
-  // server now rejects (409). Until the native is known, refresh the row at
-  // the recovery points (turn end / reconnect / tab visible). No-op for the
-  // common already-bound session.
+  // The header's route and backend lock both come from the durable Session row.
+  // Every settled turn refreshes it because turn start may materialize inherited
+  // model / effort even on an already-bound legacy session. Reconnect recovery
+  // can stay native-only: route materialization itself always belongs to a Turn.
   const hasNativeRef = useRef(false);
+  const sessionMutationGenerationRef = useRef(0);
   useEffect(() => {
     hasNativeRef.current = Boolean(session?.native_session_id);
   }, [session]);
@@ -1002,12 +1001,20 @@ export const ChatPage: React.FC = () => {
   const refreshSessionRow = useCallback(async () => {
     const id = sessionIdRef.current;
     if (!id) return;
+    const mutationGeneration = sessionMutationGenerationRef.current;
     try {
       // cache:false — an earlier refresh (page open / reconnect) may have
       // cached a stale row; reusing it inside the read cache's TTL is exactly
       // what the callers are trying to escape.
       const row = await api.getSession(id, { cache: false });
-      setSession((prev) => (prev && prev.id === row.id && row.id === sessionIdRef.current ? row : prev));
+      setSession((prev) =>
+        mutationGeneration === sessionMutationGenerationRef.current &&
+        prev &&
+        prev.id === row.id &&
+        row.id === sessionIdRef.current
+          ? row
+          : prev,
+      );
     } catch {
       // Best-effort: the next recovery point retries.
     }
@@ -1531,11 +1538,10 @@ export const ChatPage: React.FC = () => {
             dispatchLive({ type: 'settle' });
             scheduleActivityRefresh(false);
           }
-          // The first turn binds the native; pick it up so the header's backend
-          // lock engages without a reload. A failed first turn leaves no native
-          // (the refresh confirms that), keeping the backend switchable so the
-          // user can recover by re-routing.
-          void refreshSessionRowUntilNativeBound();
+          // Turn start can materialize an inherited route even on an already-
+          // bound legacy session. Reload the authoritative row on every settle
+          // so the header picks up both that route and a first native bind.
+          void refreshSessionRow();
           void syncTurnState();
         }
       },
@@ -1585,7 +1591,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRow, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -2202,6 +2208,7 @@ export const ChatPage: React.FC = () => {
     async (changes: Partial<WorkbenchSession>) => {
       if (!session) return;
       const patchedId = session.id;
+      sessionMutationGenerationRef.current += 1;
       try {
         const updated = await api.updateSession(session.id, changes as any);
         // Drop a stale response after a chat switch: if the user navigated to a
@@ -2220,6 +2227,11 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
+      } finally {
+        // Invalidate a row refresh that started while this mutation was in
+        // flight. If it returned first, the PATCH response above still wins;
+        // if it returns later, it cannot restore the pre-PATCH route.
+        sessionMutationGenerationRef.current += 1;
       }
     },
     [api, session, t],

@@ -495,13 +495,13 @@ class MessageHandler(BaseHandler):
                             model=effective_model,
                             reasoning_effort=effective_reasoning_effort,
                             expected_route={
-                                key: session_target.get(key)
-                                for key in (
-                                    "agent_id",
-                                    "agent_name",
-                                    "agent_backend",
-                                    "agent_variant",
-                                )
+                                "agent_id": session_target.get("agent_id"),
+                                "agent_name": session_target.get("agent_name"),
+                                "agent_backend": session_target.get("agent_backend"),
+                                "agent_variant": session_target.get("agent_variant"),
+                                "model": session_target.get("model"),
+                                "reasoning_effort": session_target.get("reasoning_effort"),
+                                "explicit_overrides": sorted(explicit_overrides),
                             },
                         )
                     except Exception:
