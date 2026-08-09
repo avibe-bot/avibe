@@ -578,6 +578,25 @@ def test_runtime_env_payload_rejects_invalid_voice_realtime_flag(
         incus_regression.runtime_env_payload()
 
 
+def test_up_rejects_invalid_voice_realtime_flag_before_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "enabled")
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: calls.append("require_incus"))
+
+    with pytest.raises(
+        incus_regression.RegressionError,
+        match="REGRESSION_VOICE_REALTIME_ENABLED must be true or false",
+    ):
+        incus_regression.cmd_up(argparse.Namespace(env_file=None, dry_run=False))
+
+    assert calls == []
+
+
 def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", raising=False)
     monkeypatch.delenv("REGRESSION_SLACK_CHANNEL", raising=False)
@@ -2021,8 +2040,11 @@ def test_update_builds_ui_before_editable_install() -> None:
     assert build_index < install_index
 
 
-def test_force_ui_rebuilds_even_when_fingerprints_match() -> None:
+def test_force_ui_rebuilds_with_exported_voice_realtime_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     commands = []
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
 
     class RecordingRunner:
         def run(self, command, **kwargs):
@@ -2052,7 +2074,7 @@ def test_force_ui_rebuilds_even_when_fingerprints_match() -> None:
 
     joined = "\n".join(commands)
     assert "cd ui && npm ci" in joined
-    assert "cd ui && npm run build" in joined
+    assert "cd ui && VITE_VOICE_REALTIME_ENABLED=true npm run build" in joined
     assert "pip install -e ." not in joined
 
 
@@ -2128,7 +2150,7 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
 
     joined = "\n".join(commands)
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
-    assert "cd ui && npm run build" in joined
+    assert "VITE_VOICE_REALTIME_ENABLED=false npm run build" in joined
     assert "pip install -e ." not in joined
 
 

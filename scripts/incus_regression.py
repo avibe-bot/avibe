@@ -1222,7 +1222,14 @@ def update_dependencies_and_build(
             or ui_deps_changed
             or previous_fingerprints.get("ui_source") != next_fingerprints.get("ui_source")
         ):
-            runner.run(tenant_exec(target, "cd ui && npm run build", remote=remote))
+            realtime_enabled = voice_realtime_build_env()
+            runner.run(
+                tenant_exec(
+                    target,
+                    f"cd ui && VITE_VOICE_REALTIME_ENABLED={shlex.quote(realtime_enabled)} npm run build",
+                    remote=remote,
+                )
+            )
         else:
             print("UI source fingerprint unchanged; skipping npm run build.")
     if python_changed:
@@ -1417,6 +1424,7 @@ def cmd_build_base(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     loaded_env_file = load_env_file(repo_root, args.env_file)
+    voice_realtime_build_env()
     if not args.dry_run:
         require_incus()
     preflight_during_target_resolution = args.remote is None and args.target != MASTER_TARGET
