@@ -35,6 +35,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
+import { readPageActivity } from '../../lib/pageActivity';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
@@ -203,6 +204,22 @@ export const ChatPage: React.FC = () => {
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
+  const [pageActive, setPageActive] = useState(() => readPageActivity());
+  useEffect(() => {
+    const syncPageActivity = () => setPageActive(readPageActivity());
+    document.addEventListener('visibilitychange', syncPageActivity);
+    window.addEventListener('focus', syncPageActivity);
+    window.addEventListener('blur', syncPageActivity);
+    window.addEventListener('pageshow', syncPageActivity);
+    window.addEventListener('pagehide', syncPageActivity);
+    return () => {
+      document.removeEventListener('visibilitychange', syncPageActivity);
+      window.removeEventListener('focus', syncPageActivity);
+      window.removeEventListener('blur', syncPageActivity);
+      window.removeEventListener('pageshow', syncPageActivity);
+      window.removeEventListener('pagehide', syncPageActivity);
+    };
+  }, []);
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -2178,11 +2195,11 @@ export const ChatPage: React.FC = () => {
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
-    if (historicalWindow) return;
+    if (historicalWindow || !pageActive) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead, historicalWindow]);
+  }, [sessionId, unreadBySession, markInboxRead, historicalWindow, pageActive]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn
