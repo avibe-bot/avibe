@@ -36,6 +36,7 @@ import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
 import { canMarkConversationRead, readPageActivity } from '../../lib/pageActivity';
+import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
@@ -205,6 +206,7 @@ export const ChatPage: React.FC = () => {
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   const { focusedId: foregroundAppWindowId } = useWindowManager();
+  const isDesktop = useIsDesktop();
   const [pageActive, setPageActive] = useState(() => readPageActivity());
   useEffect(() => {
     const syncPageActivity = () => setPageActive(readPageActivity());
@@ -2213,7 +2215,7 @@ export const ChatPage: React.FC = () => {
       viewResolved: showPageViewResolved,
       historicalWindow,
       showPageActive,
-      foregroundAppWindow: foregroundAppWindowId !== null,
+      foregroundAppWindow: isDesktop && foregroundAppWindowId !== null,
     })) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
@@ -2228,6 +2230,7 @@ export const ChatPage: React.FC = () => {
     historicalWindow,
     pageActive,
     showPageActive,
+    isDesktop,
     foregroundAppWindowId,
   ]);
 
@@ -3427,7 +3430,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
     const pathLabel = recentPathLabel(target.path);
-    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    const desktop = isDesktopViewport();
     const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
       if (desktop) {
         openApp('preview', { title: name, params: { path: target.path, name } });

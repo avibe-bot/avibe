@@ -24,6 +24,7 @@ import {
 } from '../../lib/agentGraph';
 import { searchGraph, type GraphSearchResult } from '../../lib/graphSearch';
 import { readGraphShowDisabled, writeGraphShowDisabled } from '../../lib/graphViewPrefs';
+import { useIsDesktop } from '../../lib/useIsDesktop';
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
 import { AgentGraphDetail } from './AgentGraphDetail';
@@ -37,21 +38,6 @@ const POLL_INTERVAL_MS = 4000;
 const LIVENESS_POLL_INTERVAL_MS = 30000;
 
 type GraphPayload = AgentGraphResult & { live_unreachable?: boolean };
-
-// Desktop ⇒ React Flow canvas; mobile ⇒ grouped list (contract §4).
-function useIsDesktop(): boolean {
-  const [desktop, setDesktop] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia?.('(min-width: 768px)').matches,
-  );
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return;
-    const mql = window.matchMedia('(min-width: 768px)');
-    const onChange = () => setDesktop(mql.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-  return !!desktop;
-}
 
 // Desktop-only fill height for the canvas + detail panel (design.pen KfgtJ —
 // fill_container). The desktop app shell is document-flow (no bounded-height

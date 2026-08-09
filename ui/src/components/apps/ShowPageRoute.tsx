@@ -9,6 +9,7 @@ import { useWindowManager } from '../../context/WindowManagerContext';
 import { appTabHref } from '../../apps/appLaunch';
 import { showPageAvatar, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
+import { useIsDesktop } from '../../lib/useIsDesktop';
 
 // The `/apps/show/:sessionId` route — a pinned Show Page opened as an app on the
 // current surface. Desktop keeps windows (mirrors LibraryRoute): focus an
@@ -18,25 +19,6 @@ import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 // with a back affordance — the same private, same-origin-trusted surface the
 // desktop window uses. Opening only READS: a missing/archived page shows a
 // friendly placeholder, never a dead frame or an auto-created page.
-
-// Reactive desktop (≥ md) check — the same media query the whole shell splits on
-// (App.tsx's LibraryRoute uses the identical private hook).
-function useIsDesktop(): boolean {
-  const [isDesktop, setIsDesktop] = useState(
-    () =>
-      typeof window !== 'undefined' &&
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(min-width: 768px)').matches,
-  );
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mql = window.matchMedia('(min-width: 768px)');
-    const onChange = () => setIsDesktop(mql.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-  return isDesktop;
-}
 
 export const ShowPageRoute: React.FC = () => {
   const { sessionId = '' } = useParams();

@@ -10,6 +10,7 @@ import {
   type PersistedWindow,
 } from '../lib/workbenchPersistence';
 import { useLatestRef } from '@/lib/useLatestRef';
+import { DESKTOP_MEDIA_QUERY, isDesktopViewport } from '../lib/useIsDesktop';
 import {
   WindowManagerContext,
   type WindowBounds,
@@ -26,12 +27,6 @@ const CASCADE_WRAP = 6;
 // from the desktop-only launcher/Dock, so restoring windows below md would mount invisible bodies
 // and a `[]` save from a phone would clobber a real desktop layout. Read live (not frozen at mount)
 // so a desktop tab that starts narrow and is widened still restores/saves once it crosses md.
-function isDesktopViewport(): boolean {
-  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-    ? window.matchMedia('(min-width: 768px)').matches
-    : false;
-}
-
 /**
  * `standalone`: this document is a single-app tab (`appTabHref` + `isStandaloneAppTab`).
  * Such a tab neither RESTORES the saved layout — the app it was opened for must not
@@ -256,7 +251,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
   useEffect(() => {
     if (restoredRef.current) return;
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mql = window.matchMedia('(min-width: 768px)');
+    const mql = window.matchMedia(DESKTOP_MEDIA_QUERY);
     const restoreOnce = () => {
       if (restoredRef.current || !mql.matches) return;
       restoredRef.current = true;

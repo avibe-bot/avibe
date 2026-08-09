@@ -56,6 +56,7 @@ import {
     REMOTE_AUTH_REQUIRED_EVENT,
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
+import { useIsDesktop } from './lib/useIsDesktop';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -375,21 +376,6 @@ const AppsRouteFallback = () => {
   const { t } = useTranslation();
   return <div className="grid min-h-[40vh] place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
 };
-
-// Reactive desktop (≥ md) check for the mobile-vs-window split.
-function useIsDesktop(): boolean {
-  const [isDesktop, setIsDesktop] = useState(
-    () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(min-width: 768px)').matches,
-  );
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mql = window.matchMedia('(min-width: 768px)');
-    const onChange = () => setIsDesktop(mql.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-  return isDesktop;
-}
 
 // /apps/library — the App Library route and the redirect target for the retired
 // /admin/show-pages page. On desktop the Library is a workbench window, so open
