@@ -49,7 +49,7 @@ import { AgentationToggle } from './components/AgentationToggle';
 import { PwaLoopbackLinkGuard } from './components/PwaLoopbackLinkGuard';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { REMOTE_AUTH_REQUIRED_EVENT, shouldDeferRemoteAuthRedirect } from './lib/remoteAuth';
+import { remoteLoginPath, REMOTE_AUTH_REQUIRED_EVENT, shouldDeferRemoteAuthRedirect } from './lib/remoteAuth';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -100,10 +100,11 @@ const LOGIN_CHECK_PATHS = new Set(['/admin/logs', '/admin/settings/diagnostics']
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
     const requireUserAction = shouldDeferRemoteAuthRedirect();
+    const loginPath = remoteLoginPath(target);
 
     useEffect(() => {
-        if (!requireUserAction) window.location.assign(target);
-    }, [requireUserAction, target]);
+        if (!requireUserAction) window.location.assign(loginPath);
+    }, [loginPath, requireUserAction]);
 
     if (requireUserAction) {
         return (
@@ -114,7 +115,7 @@ const RemoteLoginGate = ({ target }: { target: string }) => {
                         <CardDescription>{t('remoteLogin.body')}</CardDescription>
                     </CardHeader>
                     <CardContent>
-                        <Button onClick={() => window.location.assign(target)}>{t('remoteLogin.action')}</Button>
+                        <Button onClick={() => window.location.assign(loginPath)}>{t('remoteLogin.action')}</Button>
                     </CardContent>
                 </Card>
             </main>

@@ -103,12 +103,38 @@ def _cloudflare_headers() -> dict[str, str]:
     return {"CF-Connecting-IP": "198.51.100.10", "CF-Ray": "test-ray"}
 
 
-def test_remote_host_redirects_to_vibe_cloud_login(monkeypatch, tmp_path):
+def _mock_ui_dist(monkeypatch, tmp_path):
+    ui_dist = tmp_path / "ui-dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<html><body>Avibe shell</body></html>", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+    return ui_dist
+
+
+@pytest.mark.parametrize("path", ["/", "/dashboard", "/chat/session-1"])
+def test_remote_spa_document_serves_shell_without_starting_login(monkeypatch, tmp_path, path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
+
+    response = app.test_client().get(
+        path,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("Location") is None
+    assert response.text == "<html><body>Avibe shell</body></html>"
+
+
+def test_remote_login_endpoint_redirects_to_vibe_cloud_login(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
 
     response = app.test_client().get(
-        "/dashboard",
+        "/auth/login?next=/dashboard",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
         follow_redirects=False,
@@ -121,6 +147,44 @@ def test_remote_host_redirects_to_vibe_cloud_login(monkeypatch, tmp_path):
     assert state_payload is not None
     assert state_payload["next"] == "/dashboard"
     assert state_payload["retry"] is False
+
+
+def test_remote_login_endpoint_sanitizes_external_next_target(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/auth/login?next=https://evil.example/path",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    state = httpx.URL(response.headers["Location"]).params["state"]
+    state_payload = ui_server._read_oauth_state(config.remote_access.vibe_cloud.session_secret, state)
+    assert state_payload is not None
+    assert state_payload["next"] == "/"
+
+
+def test_remote_login_endpoint_returns_authenticated_session_to_target(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/auth/login?next=/chat/session-1",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/chat/session-1"
 
 
 def test_login_redirect_sets_persistent_handshake_cookie(monkeypatch, tmp_path):
@@ -159,9 +223,10 @@ def test_login_redirect_sets_stable_device_binding_cookie(monkeypatch, tmp_path)
     assert "Secure" in device_cookies[0]
 
 
-def test_remote_setup_route_requires_vibe_cloud_login(monkeypatch, tmp_path):
+def test_remote_setup_route_serves_shell_before_login(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
 
     response = app.test_client().get(
         "/setup",
@@ -170,12 +235,9 @@ def test_remote_setup_route_requires_vibe_cloud_login(monkeypatch, tmp_path):
         follow_redirects=False,
     )
 
-    assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
-    state = httpx.URL(response.headers["Location"]).params["state"]
-    state_payload = ui_server._read_oauth_state(config.remote_access.vibe_cloud.session_secret, state)
-    assert state_payload is not None
-    assert state_payload["next"] == "/setup"
+    assert response.status_code == 200
+    assert response.headers.get("Location") is None
+    assert "Avibe shell" in response.text
 
 
 def test_remote_config_get_without_session_returns_login_required(monkeypatch, tmp_path):
@@ -231,24 +293,26 @@ def test_remote_host_strips_retry_marker_from_oauth_next(monkeypatch, tmp_path):
     assert state_payload["retry"] is True
 
 
-def test_remote_host_with_explicit_port_still_requires_login(monkeypatch, tmp_path):
+def test_remote_spa_document_with_explicit_port_still_serves_shell(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
 
     response = app.test_client().get("/dashboard", base_url="https://alex.avibe.bot:443", follow_redirects=False)
 
-    assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.status_code == 200
+    assert response.headers.get("Location") is None
 
 
-def test_remote_host_with_trailing_dot_still_requires_login(monkeypatch, tmp_path):
+def test_remote_spa_document_with_trailing_dot_still_serves_shell(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
 
     response = app.test_client().get("/dashboard", base_url="https://alex.avibe.bot.", follow_redirects=False)
 
-    assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.status_code == 200
+    assert response.headers.get("Location") is None
 
 
 def test_remote_health_does_not_require_remote_access_cookie(monkeypatch, tmp_path):
@@ -677,6 +741,7 @@ def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@exa
 def test_remote_host_does_not_renew_fresh_cookie(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -695,6 +760,7 @@ def test_remote_host_renews_cookie_past_half_ttl(monkeypatch, tmp_path):
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
     near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
     cookie = _forged_session_cookie(config, near_exp)
     client = app.test_client()
@@ -833,7 +899,8 @@ def test_cloudflare_forwarded_request_with_loopback_host_fails_closed(monkeypatc
 def test_trusted_proxy_forwarded_host_routes_remote_access(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
-    config = _save_config(tmp_path)
+    _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
 
     response = app.test_client().get(
         "/dashboard",
@@ -847,8 +914,8 @@ def test_trusted_proxy_forwarded_host_routes_remote_access(monkeypatch, tmp_path
         follow_redirects=False,
     )
 
-    assert response.status_code == 302
-    assert response.headers["Location"].startswith(config.remote_access.vibe_cloud.authorization_endpoint)
+    assert response.status_code == 200
+    assert response.headers.get("Location") is None
 
 
 def test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host(monkeypatch, tmp_path):
@@ -1603,8 +1670,8 @@ def test_oauth_handshake_cap_holds_under_concurrency(monkeypatch, tmp_path):
 
 
 def test_unauthenticated_auth_requests_are_rate_limited(monkeypatch, tmp_path):
-    # Root-level bound: a flood of unauthenticated login-start requests from one
-    # client is 429'd, instead of each one doing handshake/cookie/log work.
+    # A flood of explicit login-start requests from one client is 429'd, instead
+    # of each one doing handshake/cookie/log work.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_PER_WINDOW", 3)
@@ -1612,14 +1679,14 @@ def test_unauthenticated_auth_requests_are_rate_limited(monkeypatch, tmp_path):
 
     statuses = [
         client.get(
-            "/dashboard",
+            "/auth/login?next=/dashboard",
             base_url="https://alex.avibe.bot",
             environ_base={"REMOTE_ADDR": "203.0.113.77"},
             follow_redirects=False,
         ).status_code
         for _ in range(5)
     ]
-    assert statuses[:3] == [302, 302, 302]  # within budget -> redirect to login
+    assert statuses[:3] == [302, 302, 302]  # within budget -> redirect to OAuth
     assert statuses[3:] == [429, 429]  # over budget -> throttled
 
 
@@ -1634,7 +1701,7 @@ def test_auth_rate_limit_ignores_untrusted_forwarded_ip(monkeypatch, tmp_path):
 
     statuses = [
         client.get(
-            "/dashboard",
+            "/auth/login?next=/dashboard",
             base_url="https://alex.avibe.bot",
             environ_base={"REMOTE_ADDR": "203.0.113.90"},
             headers={"CF-Connecting-IP": f"9.9.9.{i}"},  # rotated each request
@@ -1657,7 +1724,7 @@ def test_auth_rate_limit_keys_trusted_proxy_by_forwarded_client(monkeypatch, tmp
 
     def get_status(client_ip: str) -> int:
         return client.get(
-            "/dashboard",
+            "/auth/login?next=/dashboard",
             base_url="http://127.0.0.1:5123",
             environ_base={"REMOTE_ADDR": "127.0.0.1"},
             headers={
@@ -1687,7 +1754,7 @@ def test_auth_rate_limit_table_is_bounded(monkeypatch, tmp_path):
 
     for i in range(10):  # 10 distinct peers
         client.get(
-            "/dashboard",
+            "/auth/login?next=/dashboard",
             base_url="https://alex.avibe.bot",
             environ_base={"REMOTE_ADDR": f"198.51.100.{i}"},
             follow_redirects=False,
