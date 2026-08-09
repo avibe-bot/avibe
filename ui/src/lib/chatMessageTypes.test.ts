@@ -4,7 +4,7 @@ import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from
 
 describe('isTranscriptMessage', () => {
   it('shows the rows the transcript has always shown, and hides process log', () => {
-    for (const type of ['user', 'harness', 'output', 'result', 'notify', 'error']) {
+    for (const type of ['user', 'harness', 'output', 'result', 'notify', 'vault', 'error']) {
       expect(isTranscriptMessage({ type }), type).toBe(true);
     }
     for (const type of ['assistant', 'tool_call', 'draft', 'pending', 'silent', 'future_type']) {

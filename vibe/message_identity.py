@@ -8,6 +8,7 @@ from vibe.message_types import input_author_type_pairs
 
 HARNESS_TYPE = "harness"
 NOTIFY_TYPE = "notify"
+VAULT_TYPE = "vault"
 INPUT_TURN_AUTHOR_TYPES = input_author_type_pairs()
 
 

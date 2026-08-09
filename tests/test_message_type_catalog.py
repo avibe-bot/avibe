@@ -93,6 +93,7 @@ def test_transcript_types_match_current_constant() -> None:
         "output",
         "result",
         "notify",
+        "vault",
         "error",
     )
     assert types_with("transcript") == expected
@@ -103,7 +104,7 @@ def test_searchable_types_match_current_default_query() -> None:
     connection = _CaptureConnection()
     messages_service.search_messages(connection, query="catalog-probe")
 
-    expected = ("user", "harness", "annotation", "output", "result")
+    expected = ("user", "harness", "annotation", "output", "result", "vault")
     assert types_with("searchable") == expected
     assert _message_type_sequences(connection.statements[-1]) == {expected}
 
@@ -117,6 +118,7 @@ def test_inbox_activity_types_match_current_constant() -> None:
         "output",
         "result",
         "notify",
+        "vault",
         "error",
         "assistant",
     )
@@ -129,7 +131,7 @@ def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     messages_service.list_inbox_sessions(connection)
     current_query_sets = _message_type_sequences(connection.statements[-1])
 
-    expected_preview = ("output", "result", "notify", "error")
+    expected_preview = ("output", "result", "notify", "vault", "error")
     expected_settlement = ("result", "notify", "error")
     expected_unread = ("result",)
     assert types_with("inboxPreview") == expected_preview

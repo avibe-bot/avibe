@@ -13,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
+from core.message_mirror import mirror_harness_inbound
+from modules.im import MessageContext
 from storage import vault_service as vs
+from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.models import metadata, vault_requests
 from storage.vault_crypto import Sealed
@@ -678,6 +681,17 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
                 last_active_at=now,
             )
         )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_vault_waiter",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="The previous Agent turn completed.",
+            native_message_id="agent:previous-result",
+        )
         vs.create_secret(
             conn,
             name="WAIT_RESULT_KEY",
@@ -723,11 +737,14 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
     with engine.connect() as conn:
         assert _callback_status(conn, req["id"]) == "sent"
         [message] = conn.execute(
-            select(messages).where(messages.c.session_id == "ses_vault_waiter")
+            select(messages).where(
+                messages.c.session_id == "ses_vault_waiter",
+                messages.c.type == messages_service.VAULT_TYPE,
+            )
         ).mappings().all()
     assert message["author"] == "harness"
     assert message["source"] == "harness"
-    assert message["type"] == messages_service.NOTIFY_TYPE
+    assert message["type"] == messages_service.VAULT_TYPE
     assert message["author_name"] == "vault"
     assert json.loads(message["metadata_json"]) == {
         "source_kind": "callback",
@@ -743,3 +760,26 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
             only_session="ses_vault_waiter",
         )
     assert inbox["sessions"][0]["replied"] is False
+
+    # A later direct/harness input remains unanswered: the Vault outcome is a
+    # transcript notification, not terminal evidence for an unrelated turn.
+    mirror_harness_inbound(
+        MessageContext(
+            user_id="scheduled",
+            channel_id="ses_vault_waiter",
+            platform="avibe",
+            message_id="harness:newer-input",
+            platform_specific={
+                "agent_session_id": "ses_vault_waiter",
+                "task_trigger_kind": "watch",
+            },
+        ),
+        "A newer harness input",
+    )
+    with engine.connect() as conn:
+        inbox = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+            only_session="ses_vault_waiter",
+        )
+    assert inbox["sessions"][0]["replied"] is True

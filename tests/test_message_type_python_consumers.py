@@ -13,6 +13,7 @@ def test_backend_failure_predicate_matches_legacy_type_and_event_pair() -> None:
         "output",
         "result",
         "notify",
+        "vault",
         "error",
         "assistant",
         "tool_call",
@@ -59,6 +60,7 @@ def test_fork_activity_sets_match_legacy_values() -> None:
         "output",
         "result",
         "notify",
+        "vault",
         "error",
     }
 
@@ -73,7 +75,7 @@ def test_show_git_input_message_types_match_legacy_values() -> None:
 
 
 def test_mirror_catalog_roles_match_legacy_type_sets() -> None:
-    assert set(types_with("inboxPreview")) == {"output", "result", "notify", "error"}
+    assert set(types_with("inboxPreview")) == {"output", "result", "notify", "vault", "error"}
     assert {
         message_type
         for message_type in types_with("activityRole")

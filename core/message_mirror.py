@@ -597,7 +597,7 @@ def mirror_harness_inbound(
     but the persisted row must not claim the human authored it. ``author``
     therefore uses the first-class harness role while ``source='harness'``
     preserves provenance. Callers that only need a transcript notification can
-    provide a non-input catalog type such as ``notify``.
+    provide a non-input catalog type such as ``notify`` or ``vault``.
     ``author_name`` carries the trigger kind (scheduled / watch / webhook / ...)
     and ``author_id`` the run-definition id, per the provenance spec.
 
@@ -731,7 +731,7 @@ def mirror_vault_waiter_outcome(
             },
         ),
         message,
-        message_type=messages_service.NOTIFY_TYPE,
+        message_type=messages_service.VAULT_TYPE,
     )
 
 

@@ -80,6 +80,13 @@
       ],
       "render": "status"
     },
+    "vault": {
+      "transcript": true,
+      "searchable": true,
+      "inboxActivity": true,
+      "inboxPreview": true,
+      "render": "harness"
+    },
     "error": {
       "transcript": true,
       "inboxActivity": true,

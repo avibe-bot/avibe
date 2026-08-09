@@ -46,6 +46,7 @@ const CANONICAL_MESSAGE_TYPES = [
   'output',
   'result',
   'notify',
+  'vault',
   'error',
   'assistant',
 ] as const;
@@ -64,6 +65,7 @@ const wasTranscript = (type: string): boolean =>
   type === 'annotation' ||
   type === 'output' ||
   type === 'result' ||
+  type === 'vault' ||
   type === 'error' ||
   type === 'notify';
 
