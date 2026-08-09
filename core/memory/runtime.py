@@ -2118,6 +2118,8 @@ class MemoryRuntime:
                         self._artifact_installing = False
                 except asyncio.CancelledError as error:
                     cancellation = cancellation or error
+            self._ensure_terminal_snapshot_gc()
+            self._ensure_backup_stage_reconcile()
         if cancellation is not None:
             raise cancellation
         if ensure_failed:
