@@ -1676,6 +1676,102 @@ class Controller:
             deadline_seconds=deadline_seconds,
         )
 
+    async def archive_memory_cli_session(
+        self,
+        raw_session_id: str,
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Archive one Workbench session inside its exact Memory capture fence.
+
+        This is a closed controller-owned use case for the UI process. The UI
+        supplies only the durable Workbench session ID; canonical Memory identity
+        is resolved here, and the terminal database mutation stays inside the same
+        runtime lifecycle operation as final flush.
+        """
+
+        from core.memory.store import is_principal_id, is_project_id
+        from core.services import sessions as workbench_sessions_service
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+        from storage.db import create_sqlite_engine
+
+        if (
+            not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or raw_session_id != raw_session_id.strip()
+        ):
+            raise ValueError("invalid Workbench session ID")
+        if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
+            raise workbench_sessions_service.ReservedSessionError(raw_session_id)
+
+        def read_session() -> dict[str, Any]:
+            engine = create_sqlite_engine()
+            try:
+                with engine.connect() as conn:
+                    return workbench_sessions_service.get_session(
+                        conn,
+                        raw_session_id,
+                    )
+            finally:
+                engine.dispose()
+
+        existing = await asyncio.to_thread(read_session)
+        if existing.get("status") == "archived":
+            return existing
+
+        def archive_session() -> dict[str, Any]:
+            engine = create_sqlite_engine()
+            try:
+                with engine.begin() as conn:
+                    return workbench_sessions_service.archive_session(
+                        conn,
+                        raw_session_id,
+                    )
+            finally:
+                engine.dispose()
+
+        async def archive_operation() -> dict[str, Any]:
+            # Cancelling the socket request must not release Memory admission
+            # while SQLite is still committing the terminal transition.
+            task = asyncio.create_task(asyncio.to_thread(archive_session))
+            cancellation: asyncio.CancelledError | None = None
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as error:
+                    cancellation = cancellation or error
+            result = task.result()
+            if cancellation is not None:
+                raise cancellation
+            return result
+
+        scope = self.memory_scope_for_cli_session(raw_session_id)
+        runtime = getattr(self, "memory_runtime", None)
+        if scope is None:
+            resolve = getattr(runtime, "resolve_current_session_scope", None)
+            if callable(resolve):
+                scope = await resolve(raw_session_id)
+        if scope is None:
+            return await archive_operation()
+        if (
+            not isinstance(scope, tuple)
+            or len(scope) != 2
+            or not is_principal_id(scope[0])
+            or not is_project_id(scope[1])
+        ):
+            raise RuntimeError("invalid canonical Memory session scope")
+
+        run_lifecycle = getattr(runtime, "run_session_lifecycle", None)
+        if not callable(run_lifecycle):
+            raise RuntimeError("Memory session lifecycle is unavailable")
+        return await run_lifecycle(
+            principal_id=scope[0],
+            project_id=scope[1],
+            raw_session_id=raw_session_id,
+            operation=archive_operation,
+            deadline_seconds=deadline_seconds,
+        )
+
     async def _final_flush_memory_scope(
         self,
         raw_session_id: str,

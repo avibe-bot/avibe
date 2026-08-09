@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
+from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -333,6 +334,114 @@ def test_memory_final_flush_delegates_identity_to_controller() -> None:
         call("ses-absent", deadline_seconds=5.0),
     ]
     controller.memory_scope_for_cli_session.assert_not_called()
+
+
+def test_memory_archive_session_delegates_only_raw_session_identity() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.archive_memory_cli_session = AsyncMock(
+        return_value={"id": "ses-memory", "status": "archived"}
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session": {"id": "ses-memory", "status": "archived"},
+    }
+    controller.archive_memory_cli_session.assert_awaited_once_with(
+        "ses-memory",
+        deadline_seconds=5.0,
+    )
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": " ses-memory"},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "principal_id": "u-untrusted"},
+    ],
+)
+def test_memory_archive_session_rejects_widened_or_invalid_payloads(
+    payload: dict[str, object],
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_memory_cli_session = AsyncMock(return_value={})
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json=payload,
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.archive_memory_cli_session.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error,status_code,error_code",
+    [
+        (LookupError("missing"), 404, "session_not_found"),
+        (
+            MemorySessionLifecycleBusyError("busy"),
+            503,
+            "memory_session_lifecycle_busy",
+        ),
+        (RuntimeError("failed"), 503, "session_archive_unavailable"),
+    ],
+)
+def test_memory_archive_session_returns_closed_failure_codes(
+    error: Exception,
+    status_code: int,
+    error_code: str,
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_memory_cli_session = AsyncMock(side_effect=error)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == status_code
+    assert response.json() == {"ok": False, "error": error_code}
 
 
 def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:

@@ -973,6 +973,72 @@ def create_app(
             flushed = False
         return {"ok": True, "flushed": bool(flushed)}
 
+    @app.post("/internal/memory/archive-session")
+    async def _memory_archive_session(request: Request) -> Any:
+        """Archive one Workbench session through the controller lifecycle."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"]
+            or payload["session_id"] != payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        archive_session = getattr(controller, "archive_memory_cli_session", None)
+        if not callable(archive_session):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        try:
+            session = await archive_session(
+                payload["session_id"],
+                deadline_seconds=5.0,
+            )
+        except LookupError:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "session_not_found"},
+            )
+        except PermissionError as error:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": getattr(error, "code", "forbidden"),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            from core.memory.runtime import MemorySessionLifecycleBusyError
+
+            code = (
+                error.code
+                if isinstance(error, MemorySessionLifecycleBusyError)
+                else "session_archive_unavailable"
+            )
+            logger.debug(
+                "internal Workbench session archive failed for %s",
+                payload["session_id"],
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": code},
+            )
+        if not isinstance(session, dict):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        return {"ok": True, "session": session}
+
     def _verified_memory_ui_user_key(request: Request) -> str | None:
         from core.memory.http_headers import (
             CALLER_SESSION_HEADER,

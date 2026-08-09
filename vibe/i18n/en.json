@@ -221,6 +221,7 @@
       }
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
+    "sessionArchiveUnavailable": "This session cannot be archived while the Avibe controller is unavailable. Please try again shortly.",
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` is built in and cannot be deleted.",

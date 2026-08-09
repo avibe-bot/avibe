@@ -313,12 +313,29 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
     )
 
 
+def _memory_admission_merge_identity(row: dict[str, Any]) -> tuple[bool, bool]:
+    """Return the Memory facts that one dispatch context must keep singular.
+
+    User identity is already part of ``message_merge_identity`` via ``author_id``.
+    These two durable metadata flags are the remaining Memory admission facts
+    hydrated onto one ``MessageContext``; only a literal ``True`` is an assertion.
+    """
+
+    metadata = row.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return (
+        metadata.get("_memory_ordinary_text") is True,
+        metadata.get("_memory_cli_admitted") is True,
+    )
+
+
 def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return the one compatible leading segment a Turn may claim."""
 
     if not rows:
         return []
     message_identity = delivery_store.message_merge_identity(rows[0])
+    memory_admission_identity = _memory_admission_merge_identity(rows[0])
     scheduled_key = _scheduled_merge_key(rows[0])
     if _scheduled_provenance(rows[0]) is not None and scheduled_key is None:
         return [rows[0]]
@@ -330,6 +347,8 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             current = _parse_queue_timestamp(row.get("submitted_at"))
             if (
                 delivery_store.message_merge_identity(row) != message_identity
+                or _memory_admission_merge_identity(row)
+                != memory_admission_identity
                 or _scheduled_merge_key(row) != scheduled_key
                 or previous is None
                 or current is None
@@ -347,6 +366,8 @@ def _collect_delivery_segment(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         if _scheduled_provenance(row) is not None:
             break
         if delivery_store.message_merge_identity(row) != message_identity:
+            break
+        if _memory_admission_merge_identity(row) != memory_admission_identity:
             break
         native_message_id = str(row.get("native_message_id") or "").strip()
         if native_message_id:

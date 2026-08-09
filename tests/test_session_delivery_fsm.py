@@ -1535,6 +1535,149 @@ def test_durable_memory_cli_admission_fails_closed(
     assert admissions == [None]
 
 
+@pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
+@pytest.mark.parametrize("reverse_order", [False, True], ids=["listed-order", "reverse-order"])
+@pytest.mark.parametrize(
+    ("other_label", "ordinary_marker", "cli_marker", "extra_metadata"),
+    [
+        pytest.param(
+            "quick-reply",
+            False,
+            True,
+            {"quick_reply_for": "agent-message-1"},
+            id="ordinary-vs-quick-reply",
+        ),
+        pytest.param(
+            "forwarded",
+            False,
+            True,
+            {"forwarded": True},
+            id="ordinary-vs-forwarded",
+        ),
+        pytest.param(
+            "cli-not-admitted",
+            True,
+            False,
+            {},
+            id="cli-admission-difference",
+        ),
+        pytest.param(
+            "cli-malformed",
+            True,
+            1,
+            {},
+            id="cli-admission-strict-bool",
+        ),
+        pytest.param(
+            "ordinary-malformed",
+            1,
+            True,
+            {},
+            id="ordinary-classification-strict-bool",
+        ),
+    ],
+)
+def test_durable_batch_preserves_each_delivery_memory_admission_facts(
+    managers,
+    launch_path: str,
+    reverse_order: bool,
+    other_label: str,
+    ordinary_marker: object,
+    cli_marker: object,
+    extra_metadata: dict[str, object],
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    ordinary_facts = (
+        "ordinary",
+        {
+            "_memory_ordinary_text": True,
+            "_memory_cli_admitted": True,
+        },
+    )
+    other_facts = (
+        other_label,
+        {
+            **extra_metadata,
+            "_memory_ordinary_text": ordinary_marker,
+            "_memory_cli_admitted": cli_marker,
+        },
+    )
+    fact_pair = [ordinary_facts, other_facts]
+    ordered_facts = list(reversed(fact_pair)) if reverse_order else fact_pair
+    starts: list[tuple[str, str, bool | None, bool, tuple[str, ...]]] = []
+    started_contexts: list[MessageContext] = []
+
+    async def capture_start(_session_id, context, text, **kwargs):
+        payload = context.platform_specific or {}
+        started_contexts.append(context)
+        starts.append(
+            (
+                str(kwargs.get("logical_turn_id") or ""),
+                text,
+                context.is_ordinary_text,
+                payload.get("memory_cli_admitted") is True,
+                tuple(payload.get("delivery_ids") or ()),
+            )
+        )
+
+    manager._run = capture_start
+
+    async def run() -> list[str]:
+        delivery_ids: list[str] = []
+        for index, (label, metadata) in enumerate(ordered_facts):
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=f"text-{label}",
+                    metadata=metadata,
+                    admission_only=(launch_path != "immediate" or index == 0),
+                ),
+                context=_context(),
+            )
+            assert result.delivery_id is not None
+            delivery_ids.append(result.delivery_id)
+
+        if launch_path == "fifo":
+            assert await manager.drain_delivery_queue("ses_fsm")
+        elif launch_path == "recovery":
+            await manager.recover_durable_delivery_state(service_restart=True)
+
+        assert len(starts) == 1
+        first_context = started_contexts[0]
+        turn_id = starts[0][0]
+        first_context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+        manager._active_identity = lambda _backend, _session_id, logical_id: (
+            logical_id,
+            f"native-{logical_id}",
+        )
+        manager.on_native_start(
+            first_context,
+            backend="codex",
+            runtime_key=f"runtime-key-{turn_id}",
+            runtime_turn_id=f"runtime-{turn_id}",
+        )
+        assert await manager.terminalize_turn(turn_id)
+        return delivery_ids
+
+    delivery_ids = asyncio.run(run())
+
+    assert [start[1:] for start in starts] == [
+        (
+            f"text-{label}",
+            metadata.get("_memory_ordinary_text") is True,
+            metadata.get("_memory_cli_admitted") is True,
+            (delivery_id,),
+        )
+        for (label, metadata), delivery_id in zip(ordered_facts, delivery_ids)
+    ]
+    assert [start[1] for start in starts if start[2] is True] == [
+        f"text-{label}"
+        for label, metadata in ordered_facts
+        if metadata.get("_memory_ordinary_text") is True
+    ]
+
+
 def test_dispatch_uses_current_session_route_without_mutating_delivery_provenance(
     managers,
 ) -> None:

@@ -3196,7 +3196,7 @@ def test_legacy_disabled_diagnostics_still_records_provider_calls(
     asyncio.run(run())
 
 
-def test_status_reuses_each_direct_everos_recorder_observation(
+def test_status_preserves_recorder_degradation_episode_timestamp(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3215,11 +3215,26 @@ def test_status_reuses_each_direct_everos_recorder_observation(
             effective_home=tmp_path,
         )
         assert (await runtime.reconcile(config))["ok"] is True
-        calls = 0
+        health = iter(
+            (
+                {"state": "degraded", "reason": "writer_failures"},
+                {"state": "degraded", "reason": "writer_failures"},
+                {"state": "active", "reason": None},
+                {"state": "degraded", "reason": "writer_failures"},
+                {"state": "degraded", "reason": "call_log_corrupt"},
+            )
+        )
+        observed_at = iter(
+            (
+                "2026-08-09T00:00:01.000Z",
+                "2026-08-09T00:00:02.000Z",
+                "2026-08-09T00:00:03.000Z",
+                "2026-08-09T00:00:04.000Z",
+                "2026-08-09T00:00:05.000Z",
+            )
+        )
 
         async def health_snapshot() -> ProviderHealthSnapshot:
-            nonlocal calls
-            calls += 1
             return ProviderHealthSnapshot(
                 status="ok",
                 version="1.2.3",
@@ -3232,30 +3247,65 @@ def test_status_reuses_each_direct_everos_recorder_observation(
                 },
                 disabled_features=(),
                 cascade=None,
-                recorder=(
-                    {"state": "degraded", "reason": "call_log_corrupt"}
-                    if calls == 1
-                    else {"state": "active", "reason": None}
-                ),
+                recorder=next(health),
             )
 
         monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+        monkeypatch.setattr(memory_runtime, "_utc_observed_at", lambda: next(observed_at))
 
         first = await runtime.status_payload()
-        anomalies = await runtime.failure_log_payload()
+        first_anomalies = await runtime.failure_log_payload()
         second = await runtime.status_payload()
+        second_anomalies = await runtime.failure_log_payload()
+        recovered = await runtime.status_payload()
+        recovered_anomalies = await runtime.failure_log_payload()
+        recovered_observed_at = runtime._recorder_health_observed_at
 
         assert first["health"]["recorder"] == {
             "state": "degraded",
+            "reason": "writer_failures",
+        }
+        assert first_anomalies["items"][0] == {
+            "kind": "recorder_degraded",
+            "state": "degraded",
+            "operation": "record",
+            "occurred_at": "2026-08-09T00:00:01.000Z",
+            "error_code": "memory_processing_failed",
+            "attempts": 0,
+            "generation": 0,
+            "request_id": None,
+        }
+        assert second["source"]["observed_at"] == "2026-08-09T00:00:02.000Z"
+        assert second_anomalies["items"][0]["occurred_at"] == (
+            "2026-08-09T00:00:01.000Z"
+        )
+        assert recovered["health"]["recorder"] == {
+            "state": "active",
+            "reason": None,
+        }
+        assert recovered_anomalies["items"] == []
+        assert recovered_observed_at is None
+        new_episode = await runtime.status_payload()
+        new_episode_anomalies = await runtime.failure_log_payload()
+        assert new_episode["health"]["recorder"] == {
+            "state": "degraded",
+            "reason": "writer_failures",
+        }
+        assert new_episode_anomalies["items"][0]["occurred_at"] == (
+            "2026-08-09T00:00:04.000Z"
+        )
+        changed_reason = await runtime.status_payload()
+        changed_reason_anomalies = await runtime.failure_log_payload()
+        assert changed_reason["health"]["recorder"] == {
+            "state": "degraded",
             "reason": "call_log_corrupt",
         }
-        assert anomalies["items"][0]["kind"] == "recorder_degraded"
-        assert anomalies["items"][0]["operation"] == "record"
-        assert anomalies["items"][0]["error_code"] == "memory_processing_failed"
-        assert second["health"]["recorder"] == {"state": "active", "reason": None}
-        assert calls == 2
+        assert changed_reason_anomalies["items"][0]["occurred_at"] == (
+            "2026-08-09T00:00:05.000Z"
+        )
         await runtime._stop_sidecar_for_clear()
         assert runtime._recorder_health == {"state": "disabled", "reason": None}
+        assert runtime._recorder_health_observed_at is None
         await runtime.close()
 
     asyncio.run(run())

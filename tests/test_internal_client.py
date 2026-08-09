@@ -326,6 +326,45 @@ def test_memory_final_flush_round_trip(socket_path):
     }
 
 
+def test_memory_archive_session_round_trip_uses_only_session_identity(socket_path):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "session": {"id": "ses-memory", "status": "archived"},
+            },
+        )
+
+    async def _exercise():
+        transport = httpx.MockTransport(handler)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=transport):
+            return await internal_client.memory_archive_session(
+                "ses-memory",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_exercise())
+
+    assert captured == {
+        "method": "POST",
+        "path": "/internal/memory/archive-session",
+        "payload": {"session_id": "ses-memory"},
+    }
+    assert result == {
+        "status_code": 200,
+        "body": {
+            "ok": True,
+            "session": {"id": "ses-memory", "status": "archived"},
+        },
+    }
+
+
 def test_memory_recovery_reads_round_trip_signed_operator(monkeypatch, socket_path):
     from core.memory import ui_access
 

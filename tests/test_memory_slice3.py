@@ -426,6 +426,168 @@ def test_final_flush_memory_cli_session_skips_without_stored_scope() -> None:
     assert controller.memory_runtime.final_flush_calls == []
 
 
+def test_archive_memory_cli_session_holds_capture_fence_through_db_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.services import sessions as sessions_service
+    from storage import workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive me",
+        )["id"]
+
+    principal_id = "u-" + ("2" * 32)
+    admission_lock = asyncio.Lock()
+    capture_entered = asyncio.Event()
+    release_capture = asyncio.Event()
+    flush_entered = asyncio.Event()
+    release_flush = asyncio.Event()
+    archive_lock_states: list[bool] = []
+
+    class LifecycleRuntime(_Runtime):
+        async def run_session_lifecycle(self, **kwargs):
+            operation = kwargs.pop("operation")
+            self.session_lifecycle_calls.append(kwargs)
+            async with admission_lock:
+                flush_entered.set()
+                await release_flush.wait()
+                return await operation()
+
+    controller = _controller()
+    controller.memory_runtime = LifecycleRuntime(controller.memory_module)
+    controller._memory_scopes_by_session = {
+        session_id: (principal_id, PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    original_archive = sessions_service.archive_session
+
+    def archive_under_test(conn, actual_session_id):
+        archive_lock_states.append(admission_lock.locked())
+        return original_archive(conn, actual_session_id)
+
+    monkeypatch.setattr(sessions_service, "archive_session", archive_under_test)
+
+    async def run() -> None:
+        async def old_capture() -> None:
+            async with admission_lock:
+                capture_entered.set()
+                await release_capture.wait()
+
+        capture = asyncio.create_task(old_capture())
+        await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
+        archive = asyncio.create_task(
+            controller.archive_memory_cli_session(
+                session_id,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.sleep(0)
+
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        assert not archive.done()
+        assert not flush_entered.is_set()
+
+        release_capture.set()
+        await capture
+        await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
+
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        assert not archive.done()
+
+        release_flush.set()
+        result = await archive
+
+        assert result["status"] == "archived"
+        assert archive_lock_states == [True]
+        assert controller.memory_runtime.session_lifecycle_calls == [
+            {
+                "principal_id": principal_id,
+                "project_id": PROJECT,
+                "raw_session_id": session_id,
+                "deadline_seconds": 2.0,
+            }
+        ]
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+
+    try:
+        asyncio.run(run())
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("state", ["missing", "reserved", "archived"])
+def test_archive_memory_cli_session_preflight_skips_memory_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    state: str,
+) -> None:
+    from storage import workbench_sessions_service
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.projects_service import create_project
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    session_id = "ses-missing"
+    if state == "reserved":
+        session_id = WORKSPACE_NOTICE_SESSION_ID
+    elif state == "archived":
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        with engine.begin() as conn:
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session_id = workbench_sessions_service.create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
+            workbench_sessions_service.archive_session(conn, session_id)
+
+    controller = _controller()
+    controller._memory_scopes_by_session = {
+        session_id: ("u-" + ("2" * 32), PROJECT),
+    }
+    controller._memory_cli_facts_by_session = {}
+
+    async def archive() -> dict[str, object]:
+        return await controller.archive_memory_cli_session(session_id)
+
+    try:
+        if state == "missing":
+            with pytest.raises(LookupError):
+                asyncio.run(archive())
+        elif state == "reserved":
+            with pytest.raises(PermissionError):
+                asyncio.run(archive())
+        else:
+            assert asyncio.run(archive())["status"] == "archived"
+    finally:
+        engine.dispose()
+
+    assert controller.memory_runtime.session_lifecycle_calls == []
+    assert controller.memory_runtime.scope_recovery_calls == []
+
+
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     controller = _controller()
     context = _context("avibe", user_id="local")

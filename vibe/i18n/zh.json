@@ -221,6 +221,7 @@
       }
     },
     "sessionArchived": "该会话已归档，无法再修改。",
+    "sessionArchiveUnavailable": "Avibe 控制器当前不可用，暂时无法归档该会话。请稍后重试。",
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` 是内置 Agent，无法删除。",

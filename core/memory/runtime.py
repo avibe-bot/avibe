@@ -710,9 +710,9 @@ class MemoryRuntime:
             observed_at = _utc_observed_at()
             self._last_health_snapshot = snapshot
             self._last_health_observed_at = observed_at
-            self._recorder_health = dict(snapshot.recorder)
-            self._recorder_health_observed_at = (
-                observed_at if snapshot.recorder.get("state") == "degraded" else None
+            self._observe_recorder_health(
+                snapshot.recorder,
+                observed_at=observed_at,
             )
             source_status = "available"
             health = snapshot.payload()
@@ -755,8 +755,26 @@ class MemoryRuntime:
             # Recording is always enabled. A live sidecar with its recorder
             # off is a writer failure, not an intentional state.
             health = dict(_RECORDER_DEGRADED)
-        self._recorder_health = dict(health)
+        self._observe_recorder_health(health)
         return dict(self._recorder_health)
+
+    def _observe_recorder_health(
+        self,
+        health: dict[str, str | None],
+        *,
+        observed_at: str | None = None,
+    ) -> None:
+        previous = self._recorder_health
+        current = dict(health)
+        if current.get("state") != "degraded":
+            self._recorder_health_observed_at = None
+        elif (
+            previous.get("state") != "degraded"
+            or previous.get("reason") != current.get("reason")
+            or self._recorder_health_observed_at is None
+        ):
+            self._recorder_health_observed_at = observed_at or _utc_observed_at()
+        self._recorder_health = current
 
     async def failure_log_payload(
         self,
@@ -1449,7 +1467,7 @@ class MemoryRuntime:
             await self._run_maintenance_io(
                 lambda: clear_call_log(self._call_log_db_path)
             )
-            self._recorder_health = dict(_RECORDER_DISABLED)
+            self._set_recorder_health_disabled()
             return
         if surface.surface == "attachments":
             await self._run_maintenance_io(
@@ -1486,7 +1504,7 @@ class MemoryRuntime:
             self._process = None
         self._process_records_calls = False
         await self._stop_call_log_retention()
-        self._recorder_health = dict(_RECORDER_DISABLED)
+        self._set_recorder_health_disabled()
 
     async def _recover_backup_restore_locked(self) -> bool:
         """Converge an interrupted restore before any boot-time activation."""
@@ -2584,13 +2602,13 @@ class MemoryRuntime:
                 if not should_continue:
                     return
                 if reason is not None:
-                    self._recorder_health = {"state": "degraded", "reason": reason}
-                    self._recorder_health_observed_at = _utc_observed_at()
+                    self._observe_recorder_health(
+                        {"state": "degraded", "reason": reason}
+                    )
                     if reason == "call_log_corrupt":
                         return
                 elif self._recorder_health.get("reason") != "call_log_corrupt":
-                    self._recorder_health = dict(_RECORDER_DISABLED)
-                    self._recorder_health_observed_at = None
+                    self._set_recorder_health_disabled()
                 await asyncio.sleep(_CALL_LOG_RETENTION_INTERVAL_SECONDS)
         finally:
             if self._call_log_retention_task is current:
@@ -2633,7 +2651,11 @@ class MemoryRuntime:
 
     def _reset_recorder_health_unless_corrupt(self) -> None:
         if self._recorder_health.get("reason") != "call_log_corrupt":
-            self._recorder_health = dict(_RECORDER_DISABLED)
+            self._set_recorder_health_disabled()
+
+    def _set_recorder_health_disabled(self) -> None:
+        self._recorder_health = dict(_RECORDER_DISABLED)
+        self._recorder_health_observed_at = None
 
     async def _drain_loop(self) -> None:
         while self._config.enabled:
