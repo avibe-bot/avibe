@@ -403,14 +403,17 @@ const PendingRequestsSection: React.FC<{
   const denyProvisionRequest = useCallback(
     async (request: VaultRequest) => {
       try {
-        await api.denyVaultRequest(request.id);
+        const result = await api.denyVaultRequest(request.id);
+        if (!result?.ok) return false;
         setProvisioning(null);
         setRequests((prev) => prev.filter((r) => r.id !== request.id));
         showToast(t('vaults.requests.denied'), 'warning');
         load();
         onResolved();
+        return true;
       } catch (err: unknown) {
         showToast(messageFromError(err), 'warning');
+        return false;
       }
     },
     [api, showToast, t, load, onResolved],
@@ -441,10 +444,9 @@ const PendingRequestsSection: React.FC<{
             if (!o) setProvisioning(null);
           }}
           request={provisioning}
-          onCancel={() => {
-            void denyProvisionRequest(provisioning);
-          }}
-          cancelLabel={t('vaults.approval.deny')}
+          onCancel={() => setProvisioning(null)}
+          cancelLabel={t('vaults.approval.close')}
+          onDeny={() => denyProvisionRequest(provisioning)}
           onCreated={(name, reason) => {
             setProvisioning(null);
             if (reason !== 'already_exists') {

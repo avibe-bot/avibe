@@ -473,6 +473,20 @@ export const ChatPage: React.FC = () => {
     // that makes the deferred request eligible for its next anchor attempt.
     setVaultAnchorCycle((cycle) => cycle + 1);
   }, []);
+  const denyVaultProvisionRequest = useCallback(
+    async (requestId: string) => {
+      try {
+        const result = await api.denyVaultRequest(requestId);
+        if (!result?.ok) return false;
+        showToast(t('vaults.requests.denied'), 'warning');
+        return true;
+      } catch {
+        showToast(t('vaults.approval.errors.failed'), 'warning');
+        return false;
+      }
+    },
+    [api, showToast, t],
+  );
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
@@ -2478,6 +2492,7 @@ export const ChatPage: React.FC = () => {
         requests={vaultRequests}
         onResolved={refreshVaultRequests}
         onProvisionRequestHidden={markVaultRequestHidden}
+        onProvisionRequestDenied={denyVaultProvisionRequest}
         disabled={readOnly}
       >
       {/* Mobile: a FIXED full-screen flex column (the AppShell brand header is
