@@ -1,7 +1,7 @@
 import type { DependenciesResult, DependencyItem } from '@/context/ApiContext';
 
 const INSTALLABLE_DEPENDENCIES = new Set(['askill', 'avault', 'show-runtime', 'memory-runtime', 'tmux']);
-const STARTUP_MANAGED_DEPENDENCIES = new Set(['askill', 'avault', 'show-runtime', 'tmux', 'node']);
+const STARTUP_MANAGED_DEPENDENCIES = new Set(['askill', 'avault', 'show-runtime', 'tmux']);
 
 export const dependencyHasInstallAction = (
   dependency: Pick<DependencyItem, 'id' | 'status'>,

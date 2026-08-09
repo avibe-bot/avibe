@@ -4937,14 +4937,15 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
     monkeypatch.setattr(manager, "_install_managed_runtime", fake_install)
     calls = []
 
-    async def fake_to_thread(func):
+    async def fake_to_thread(func, *args):
         calls.append(func)
-        return func()
+        return func(*args)
 
     monkeypatch.setattr("core.show_runtime.asyncio.to_thread", fake_to_thread)
 
     assert asyncio.run(manager._resolve_managed_command()) == [str(manager._managed_bin_path())]
-    assert calls == [fake_install]
+    assert len(calls) == 1
+    assert calls[0].__name__ == "_install_managed_runtime_serialized"
 
 
 def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
@@ -5125,6 +5126,62 @@ def test_show_runtime_manager_reuses_cached_managed_command_after_install_attemp
     monkeypatch.setattr("core.show_runtime._resolve_command", lambda command: None)
 
     assert asyncio.run(manager._resolve_managed_command()) == ["/bin/node", "/tmp/runtime/cli.js"]
+
+
+def test_show_runtime_prepare_and_request_install_are_serialized(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+    )
+    command = ["/bin/node", str(tmp_path / "runtime.js")]
+    state = {"installed": False}
+    entered = threading.Event()
+    release = threading.Event()
+    request_done = threading.Event()
+    install_calls = 0
+
+    monkeypatch.setattr("core.show_runtime._resolve_executable_path", lambda _path: None)
+
+    def fake_status():
+        return {"installed": state["installed"], "command": command if state["installed"] else None}
+
+    def fake_install():
+        nonlocal install_calls
+        install_calls += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        state["installed"] = True
+        return command
+
+    monkeypatch.setattr(manager, "status", fake_status)
+    monkeypatch.setattr(manager, "_install_managed_runtime", fake_install)
+    prepare_result = {}
+    request_result = {}
+
+    prepare_thread = threading.Thread(target=lambda: prepare_result.update(manager.prepare()))
+
+    def resolve_request():
+        try:
+            request_result["command"] = asyncio.run(manager._resolve_managed_command())
+        finally:
+            request_done.set()
+
+    request_thread = threading.Thread(target=resolve_request)
+    prepare_thread.start()
+    assert entered.wait(timeout=2)
+    request_thread.start()
+    assert not request_done.wait(timeout=0.1)
+    release.set()
+    prepare_thread.join(timeout=2)
+    request_thread.join(timeout=2)
+
+    assert not prepare_thread.is_alive()
+    assert not request_thread.is_alive()
+    assert install_calls == 1
+    assert prepare_result["ok"] is True
+    assert request_result["command"] == command
+    assert manager._managed_command == command
 
 
 def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):

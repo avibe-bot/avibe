@@ -29,9 +29,10 @@ describe('startup dependency refresh', () => {
   });
 
   it('tracks every dependency repaired by the startup reconciler', () => {
-    for (const id of ['askill', 'avault', 'show-runtime', 'tmux', 'node']) {
+    for (const id of ['askill', 'avault', 'show-runtime', 'tmux']) {
       expect(dependencyIsStartupManaged({ id })).toBe(true);
     }
+    expect(dependencyIsStartupManaged({ id: 'node' })).toBe(false);
     expect(dependencyIsStartupManaged({ id: 'memory-runtime' })).toBe(false);
   });
 

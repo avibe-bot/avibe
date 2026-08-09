@@ -15,6 +15,7 @@ import signal
 import subprocess
 import tarfile
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -139,6 +140,11 @@ class ShowRuntimeManager:
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
+        # `prepare()` runs in a worker thread while serving requests calls
+        # `ensure()` on the event loop. Both paths can reach the provider
+        # installer, so protect the filesystem-mutating section across threads.
+        self._install_lock = threading.RLock()
+        self._install_generation = 0
 
     async def ensure(self) -> ShowRuntimeResult:
         if self._base_url and await self._healthy(self._base_url):
@@ -330,7 +336,8 @@ class ShowRuntimeManager:
                 return command
             if self.auto_install and not self._install_attempted:
                 self._install_attempted = True
-                command = await asyncio.to_thread(self._install_managed_runtime)
+                generation = self._install_generation
+                command = await asyncio.to_thread(self._install_managed_runtime_serialized, generation)
                 if command:
                     self._managed_command = command
                     return command
@@ -344,7 +351,8 @@ class ShowRuntimeManager:
         if self.runtime_source == _RUNTIME_SOURCE_ARCHIVE:
             if self.auto_install and not self._install_attempted:
                 self._install_attempted = True
-                command = await asyncio.to_thread(self._install_managed_runtime)
+                generation = self._install_generation
+                command = await asyncio.to_thread(self._install_managed_runtime_serialized, generation)
                 if command:
                     self._managed_command = command
                     return command
@@ -372,10 +380,38 @@ class ShowRuntimeManager:
         if self._install_attempted:
             return None
         self._install_attempted = True
-        command = await asyncio.to_thread(self._install_managed_runtime)
+        generation = self._install_generation
+        command = await asyncio.to_thread(self._install_managed_runtime_serialized, generation)
         if command:
             self._managed_command = command
         return command
+
+    def _install_managed_runtime_serialized(self, expected_generation: int | None = None) -> list[str] | None:
+        """Perform one provider install without racing a serving request."""
+        with self._install_lock:
+            if expected_generation is not None and expected_generation != self._install_generation:
+                status = self.status()
+                command = status.get("command")
+                if status.get("installed") and isinstance(command, list) and command:
+                    self._install_reason = None
+                    self._managed_command = command
+                    return command
+            command = self._install_managed_runtime()
+            if command:
+                self._install_generation += 1
+            return command
+
+    def _prepare_managed_runtime_serialized(self) -> list[str] | None:
+        """Reuse a verified install, or install it while holding the shared lock."""
+        with self._install_lock:
+            if not self.force_install:
+                status = self.status()
+                command = status.get("command")
+                if status.get("installed") and isinstance(command, list) and command:
+                    self._install_reason = None
+                    self._managed_command = command
+                    return command
+            return self._install_managed_runtime_serialized()
 
     def _install_managed_runtime(self) -> list[str] | None:
         command: list[str] | None
@@ -686,7 +722,7 @@ class ShowRuntimeManager:
                 command = _resolve_command(self.command)
                 self._install_reason = None if command else "runtime_command_missing"
             else:
-                command = self._install_managed_runtime()
+                command = self._prepare_managed_runtime_serialized()
             return {
                 "ok": command is not None,
                 "provider": self.runtime_source,
