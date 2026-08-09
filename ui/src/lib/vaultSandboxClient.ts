@@ -309,6 +309,24 @@ function observeElementVisibility(target: Element): Promise<{ ratio: number; vis
   });
 }
 
+// IntersectionObserver v2 is intentionally conservative: browser/automation extension layers can
+// make `isVisible` false even when the page itself has no covering element. Keep that signal, but
+// supplement it with synchronous page hit-testing so the sandbox can distinguish that case from a
+// real DOM overlay. Sampling the interior 3x3 grid also catches partial clickjacking overlays; every
+// point must resolve to the target (or one of its descendants).
+function elementVisibleByHitTest(target: Element): boolean {
+  if (typeof document.elementFromPoint !== 'function' || typeof target.getBoundingClientRect !== 'function') return false;
+  const rect = target.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  const offsets = [0.1, 0.5, 0.9];
+  return offsets.every((xOffset) =>
+    offsets.every((yOffset) => {
+      const topmost = document.elementFromPoint(rect.left + rect.width * xOffset, rect.top + rect.height * yOffset);
+      return topmost === target || (topmost !== null && target.contains(topmost));
+    }),
+  );
+}
+
 export class VaultSandboxClient {
   private iframe: HTMLIFrameElement;
   private backdrop: HTMLDivElement | null = null;
@@ -436,6 +454,7 @@ export class VaultSandboxClient {
       frameHeight: rect.height,
       intersectionRatio: observed.ratio,
       visibleByIntersectionObserver: observed.visible,
+      visibleByHitTest: elementVisibleByHitTest(this.iframe),
       opacity: style.opacity,
       pointerEvents: style.pointerEvents,
       sampledAt: Date.now(),
@@ -596,12 +615,17 @@ export class VaultSandboxClient {
     await this.readyPromise;
     const id = randomId();
     // Interactive (R2/R3) ops carry a parent surface attestation and get it refreshed while their
-    // confirm card is up (protocol v2 §6.6). Measured before send it reflects the still-headless
-    // worker; the post-`ui.show` refresh replaces it with the visible-modal reading the sandbox
-    // actually gates on. The `surface` field rides as a top-level sibling of `op`/`payload`. Only
+    // confirm card is up (protocol v2 §6.6). Expand before sending the RPC: otherwise the sandbox
+    // can start its fail-closed IntersectionObserver gate while the iframe is still the hidden
+    // 0x0 worker, before its asynchronous `ui.show` event reaches the parent. The `surface` field
+    // rides as a top-level sibling of `op`/`payload`. Only
     // `approveRelease`/`sign`/`reveal` are interactive here: those are the ops whose sandbox handler
     // runs the confirm-surface gate (§13). `setup`/`unlock` are WebAuthn/PRF ceremonies, not in-
     // sandbox confirm clicks, so their handlers never assert a parent surface and none is sent.
+    if (options.interactive) {
+      this.interactiveRequests.add(id);
+      this.setModalVisible(true);
+    }
     const surface = options.interactive ? await this.measureSurface() : null;
     const promise = new Promise<T>((resolve, reject) => {
       const timer = window.setTimeout(() => {
@@ -616,7 +640,6 @@ export class VaultSandboxClient {
         timer,
       });
     });
-    if (options.interactive) this.interactiveRequests.add(id);
     this.target.postMessage(
       { channel: CHANNEL, version: VERSION, id, op, payload: payload ?? {}, ...(surface ? { surface } : {}) },
       VAULT_SANDBOX_ORIGIN,

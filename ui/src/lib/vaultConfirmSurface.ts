@@ -14,6 +14,7 @@ export type VaultConfirmSurface = {
     frameHeight: number;
     intersectionRatio: number;
     visibleByIntersectionObserver: boolean;
+    visibleByHitTest: boolean;
     opacity: number;
     pointerEvents: boolean;
   };
@@ -26,6 +27,7 @@ export type VaultConfirmSurfaceMeasurement = {
   frameHeight: number;
   intersectionRatio: number;
   visibleByIntersectionObserver: boolean;
+  visibleByHitTest: boolean;
   /** Computed `opacity` — a CSS string ("1") or a number; anything non-numeric collapses to 0. */
   opacity: string | number;
   /** Computed `pointer-events` — anything other than "none" (or a `true` boolean) is interactive. */
@@ -50,6 +52,7 @@ export function buildVaultConfirmSurface(measurement: VaultConfirmSurfaceMeasure
       frameHeight: measurement.frameHeight,
       intersectionRatio: measurement.intersectionRatio,
       visibleByIntersectionObserver: measurement.visibleByIntersectionObserver,
+      visibleByHitTest: measurement.visibleByHitTest,
       opacity: Number.isFinite(opacity) ? opacity : 0,
       pointerEvents,
     },

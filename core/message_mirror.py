@@ -585,7 +585,7 @@ def agent_message_exists(
         return None
 
 
-def mirror_harness_inbound(context: MessageContext, text: str) -> None:
+def mirror_harness_inbound(context: MessageContext, text: str) -> bool:
     """Record a harness-originated prompt (scheduled task / watch / webhook).
 
     The backend consumes the prompt as turn input, but the persisted row must
@@ -601,9 +601,9 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
     scope, IM rows to the delivery channel.
     """
     if not text or not text.strip():
-        return
+        return False
     if not context.platform:
-        return
+        return False
     spec = context.platform_specific or {}
     trigger_kind = spec.get("task_trigger_kind")
     definition_id = spec.get("task_definition_id")
@@ -651,7 +651,7 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
                 row_session_id = session_id
                 session_row = None
             if scope_id is None and session_row is None:
-                return
+                return False
             appended_row = _append_quietly(
                 conn,
                 scope_id=scope_id,
@@ -681,8 +681,50 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
             from core.inbox_events import bus
 
             bus.publish("inbox.session.updated", inbox_row)
+        return True
     except Exception:
         logger.exception("mirror_harness_inbound: unexpected failure on platform=%s", context.platform)
+        return False
+
+
+def mirror_vault_waiter_outcome(
+    *,
+    session_id: str,
+    request_id: str,
+    request_type: str,
+    request_status: str,
+    message: str,
+) -> bool:
+    """Persist a Vault result already consumed by a synchronous CLI waiter.
+
+    The waiting Agent turn receives the result from the CLI command itself, so starting a callback
+    turn would deliver it twice. The transcript still needs the same first-class Vault provenance
+    as an asynchronous callback. A stable native identity makes the mirror idempotent if callback
+    bookkeeping is retried after the message commit.
+    """
+
+    identity = str(session_id or "").strip()
+    vault_request_id = str(request_id or "").strip()
+    status = str(request_status or "").strip()
+    if not identity or not vault_request_id or not status:
+        return False
+    return mirror_harness_inbound(
+        MessageContext(
+            user_id="vault",
+            channel_id=identity,
+            platform="avibe",
+            message_id=f"vault:{vault_request_id}:{status}:waiter",
+            platform_specific={
+                "agent_session_id": identity,
+                "task_trigger_kind": "vault",
+                "source_kind": "callback",
+                "source_actor": f"vault:{vault_request_id}",
+                "vault_request_type": str(request_type or ""),
+                "vault_request_status": status,
+            },
+        ),
+        message,
+    )
 
 
 def mirror_inbound(context: MessageContext, text: str) -> None:

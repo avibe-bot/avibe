@@ -7177,16 +7177,31 @@ class ScheduledTaskService:
                 return "pending"
             plan = vault_service.resolve_request_callback(row)
             if plan is not None:
-                enqueue_session_callback(
-                    self.request_store,
-                    session_id=plan.session_id,
-                    message=plan.message,
-                    source_actor=f"vault:{request_id}",
-                    metadata={
-                        "vault_request_type": str(row.get("request_type") or ""),
-                        "vault_request_status": str(row.get("status") or ""),
-                    },
-                )
+                request_type = str(row.get("request_type") or "")
+                request_status = str(row.get("status") or "")
+                if vault_service.request_callback_consumed_by_waiter(row):
+                    from core.message_mirror import mirror_vault_waiter_outcome
+
+                    mirrored = mirror_vault_waiter_outcome(
+                        session_id=plan.session_id,
+                        request_id=request_id,
+                        request_type=request_type,
+                        request_status=request_status,
+                        message=plan.message,
+                    )
+                    if not mirrored:
+                        raise RuntimeError("failed to persist Vault waiter outcome")
+                else:
+                    enqueue_session_callback(
+                        self.request_store,
+                        session_id=plan.session_id,
+                        message=plan.message,
+                        source_actor=f"vault:{request_id}",
+                        metadata={
+                            "vault_request_type": request_type,
+                            "vault_request_status": request_status,
+                        },
+                    )
                 status = "sent"
         except ValueError:
             status = "skipped"
