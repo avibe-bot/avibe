@@ -1054,7 +1054,7 @@ export const VaultSecretForm: React.FC<{
           <Asterisk className="size-[18px] shrink-0 text-accent" />
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{t('vaults.dialog.nameUpper')}</span>
-            <span className="truncate font-mono text-[15px] font-semibold text-foreground">{secretName}</span>
+            <span className="whitespace-normal break-all font-mono text-[15px] font-semibold text-foreground">{secretName}</span>
           </div>
           <Badge variant="secondary" className="bg-surface">{t('vaults.request.notSetYet')}</Badge>
         </div>
