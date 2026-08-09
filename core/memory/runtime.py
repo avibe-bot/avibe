@@ -25,7 +25,6 @@ from core.memory.artifact import (
     MemoryArtifactPort,
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
-    PROVIDER_ROOT_CONTROL_FILES,
     get_memory_artifact_manager,
 )
 from core.memory.backup_restore_journal import (
@@ -54,6 +53,11 @@ from core.memory.process import (
     EverOSProcessSettings,
     SidecarOwnership,
     sidecar_record_path,
+)
+from core.memory.provider_root import (
+    ProviderRoot,
+    ProviderRootMetadata,
+    ProviderRootRollback,
 )
 from core.memory.store import MemoryStore, is_principal_id, is_project_id
 from core.memory.snapshot import MemorySnapshot, MemorySnapshotManager
@@ -176,6 +180,10 @@ class MemoryRuntime:
                 "Memory maintenance journal initialization failed; maintenance is fenced"
             )
         self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
+        self._provider_root_owner = ProviderRoot(
+            self._provider_root,
+            effective_home=self._effective_home,
+        )
         self._process_factory: EverOSProcessFactory = process_factory or EverOSProcess
         self._processing_event = processing_event
         self._process: EverOSProcessPort | None = None
@@ -232,11 +240,9 @@ class MemoryRuntime:
                 runtime_error=lambda: self._runtime_error,
                 starting=lambda: bool(self._process and self._process.starting),
                 provider_root=self._provider_root,
+                provider_root_owner=self._provider_root_owner,
+                provider_root_metadata=self._active_provider_root_metadata,
                 maintenance_open=self._maintenance_open,
-                provider_root_format=self._artifact_manager.provider_root_format()
-                or f"everos-{EVEROS_VERSION}",
-                artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
-                compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
                 processing_event=self._processing_event,
                 effective_home=self._effective_home,
             )
@@ -626,10 +632,13 @@ class MemoryRuntime:
         self._configure_insight_reader(config)
         self._provider = candidate_provider
         self.module._replace_provider(self._provider)
-        await self._apply_active_artifact_metadata()
         try:
             meta = await asyncio.to_thread(self._store.ensure_meta)
-            await asyncio.to_thread(self.module._ensure_owned_provider_root, meta)
+            await run_blocking(
+                self._provider_root_owner.ensure,
+                meta,
+                self._active_provider_root_metadata(),
+            )
         except Exception:
             self._runtime_error = "memory_clear_failed"
             if resume_claims_on_failure:
@@ -1528,9 +1537,15 @@ class MemoryRuntime:
             def reset_provider_root() -> None:
                 meta = self._store.ensure_meta()
                 if self._provider_root.exists():
-                    self.module._recreate_owned_provider_root(meta)
+                    self._provider_root_owner.recreate_empty(
+                        meta,
+                        self._active_provider_root_metadata(),
+                    )
                 else:
-                    self.module._ensure_owned_provider_root(meta)
+                    self._provider_root_owner.ensure(
+                        meta,
+                        self._active_provider_root_metadata(),
+                    )
 
             await self._run_maintenance_io(reset_provider_root)
             return
@@ -2237,10 +2252,13 @@ class MemoryRuntime:
                 processing_health_check=self._processing_healthy,
             )
             self.module._replace_provider(self._provider)
-            await self._apply_active_artifact_metadata()
             try:
                 meta = await asyncio.to_thread(self._store.ensure_meta)
-                await asyncio.to_thread(self.module._ensure_owned_provider_root, meta)
+                await run_blocking(
+                    self._provider_root_owner.ensure,
+                    meta,
+                    self._active_provider_root_metadata(),
+                )
             except Exception:
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
@@ -2337,13 +2355,21 @@ class MemoryRuntime:
         self._artifact_manager.set_activation_coordinator(None)
         await self._stop_terminal_snapshot_gc()
 
-    async def _apply_active_artifact_metadata(self) -> None:
-        provider_root_format = await asyncio.to_thread(self._artifact_manager.provider_root_format)
-        artifact_fingerprint = await asyncio.to_thread(self._artifact_manager.artifact_fingerprint)
-        self.module._set_runtime_artifact_metadata(
-            provider_root_format=provider_root_format or f"everos-{EVEROS_VERSION}",
+    def _active_provider_root_metadata(self) -> ProviderRootMetadata:
+        provider_root_format = (
+            self._artifact_manager.provider_root_format()
+            or f"everos-{EVEROS_VERSION}"
+        )
+        artifact_fingerprint = self._artifact_manager.artifact_fingerprint()
+        return ProviderRootMetadata(
+            provider_root_format=provider_root_format,
             artifact_fingerprint=artifact_fingerprint or "memory-runtime-unavailable",
-            compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
+            compatible_provider_root_formats=frozenset(
+                {
+                    provider_root_format,
+                    *_active_compatible_root_formats(self._artifact_manager),
+                }
+            ),
         )
 
     def _coordinate_artifact_activation(
@@ -2431,68 +2457,59 @@ class MemoryRuntime:
                 if self._maintenance_open():
                     self.module._worker.pause_claims()
                     raise MemoryRuntimeActivationError("memory clear recovery is required")
-                previous_metadata = (
-                    self.module._provider_root_format,
-                    self.module._artifact_fingerprint,
-                    self.module._compatible_provider_root_formats,
-                )
-                meta = None
-                sentinel_rewritten = False
-                try:
-                    if not await self.module._worker.pause_and_wait():
-                        raise MemoryRuntimeActivationError("memory worker could not pause")
-                    await self._stop_worker()
-                    if self._process is not None:
-                        await self._process.stop()
-                        self._process = None
-                    self._process_records_calls = False
-                    if root_state.exists:
-                        meta = await asyncio.to_thread(self._store.get_meta)
-                        if meta is None:
-                            raise MemoryRuntimeActivationError("memory provider root metadata is missing")
-                    self.module._set_runtime_artifact_metadata(
-                        provider_root_format=candidate.provider_root_format,
-                        artifact_fingerprint=candidate.artifact_fingerprint,
-                        compatible_provider_root_formats=candidate.compatible_provider_root_formats,
-                    )
-                    if root_state.exists and root_state.empty and meta is not None:
-                        sentinel_rewritten = await asyncio.to_thread(
-                            self.module._activate_empty_provider_root_format,
-                            meta,
-                        )
-                    commit()
-                    result = await self._reconcile_locked(
-                        self._config,
-                        claims_already_paused=True,
-                        skip_embedding_guard=not self._config.embedding_change_pending,
-                        resume_claims_on_failure=False,
-                    )
-                    if result.get("ok") is not True:
-                        raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
-                    self._restart_config = deepcopy(self._config)
-                    return
-                except (Exception, asyncio.CancelledError) as activation_error:
+                if not await self.module._worker.pause_and_wait():
+                    self.module._worker.resume_claims()
+                    raise MemoryRuntimeActivationError("memory worker could not pause")
+                async with self.module._root_lifecycle_lock():
+                    meta = None
+                    root_rollback: ProviderRootRollback | None = None
                     try:
-                        rollback()
-                        self.module._restore_runtime_artifact_metadata(previous_metadata)
-                        if sentinel_rewritten and meta is not None:
-                            await asyncio.to_thread(self.module._write_root_sentinel, meta)
-                            await asyncio.to_thread(self.module._verify_owned_provider_root, meta, require_empty=True)
-                        rollback_result = await self._reconcile_locked(
+                        await self._stop_worker()
+                        if self._process is not None:
+                            await self._process.stop()
+                            self._process = None
+                        self._process_records_calls = False
+                        if root_state.exists:
+                            meta = await asyncio.to_thread(self._store.get_meta)
+                            if meta is None:
+                                raise MemoryRuntimeActivationError("memory provider root metadata is missing")
+                        if root_state.exists and root_state.empty and meta is not None:
+                            root_rollback = await run_blocking(
+                                self._provider_root_owner.activate_empty_format,
+                                meta,
+                                candidate,
+                            )
+                        commit()
+                        result = await self._reconcile_locked(
                             self._config,
                             claims_already_paused=True,
                             skip_embedding_guard=not self._config.embedding_change_pending,
                             resume_claims_on_failure=False,
                         )
-                        if rollback_result.get("ok") is not True:
-                            raise MemoryRuntimeActivationError("previous runtime reconciliation failed")
+                        if result.get("ok") is not True:
+                            raise MemoryRuntimeActivationError("candidate runtime reconciliation failed")
                         self._restart_config = deepcopy(self._config)
-                    except Exception as rollback_error:
-                        self._runtime_error = "memory_runtime_install_failed"
-                        raise MemoryRuntimeActivationError("memory runtime rollback failed") from rollback_error
-                    if isinstance(activation_error, asyncio.CancelledError):
-                        raise
-                    raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
+                        return
+                    except (Exception, asyncio.CancelledError) as activation_error:
+                        try:
+                            rollback()
+                            if root_rollback is not None:
+                                await run_blocking(root_rollback.rollback)
+                            rollback_result = await self._reconcile_locked(
+                                self._config,
+                                claims_already_paused=True,
+                                skip_embedding_guard=not self._config.embedding_change_pending,
+                                resume_claims_on_failure=False,
+                            )
+                            if rollback_result.get("ok") is not True:
+                                raise MemoryRuntimeActivationError("previous runtime reconciliation failed")
+                            self._restart_config = deepcopy(self._config)
+                        except Exception as rollback_error:
+                            self._runtime_error = "memory_runtime_install_failed"
+                            raise MemoryRuntimeActivationError("memory runtime rollback failed") from rollback_error
+                        if isinstance(activation_error, asyncio.CancelledError):
+                            raise
+                        raise MemoryRuntimeActivationError("memory runtime activation failed") from activation_error
 
     async def _stop_sidecar_for_clear(self) -> None:
         """Compatibility alias for the non-destructive clear quiesce step."""
@@ -2790,16 +2807,7 @@ class MemoryRuntime:
     def _provider_data_exists_strict(self) -> bool:
         """Inspect all vector-bearing state, raising when it cannot be proven empty."""
 
-        root = self._provider_root
-        try:
-            info = root.lstat()
-        except FileNotFoundError:
-            root_has_data = False
-        else:
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise OSError("provider root is not a safe directory")
-            with os.scandir(root) as entries:
-                root_has_data = any(entry.name not in PROVIDER_ROOT_CONTROL_FILES for entry in entries)
+        root_has_data = self._provider_root_owner.has_data()
         stats = self._store.queue_stats()
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
 

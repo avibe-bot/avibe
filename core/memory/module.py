@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import os
-import secrets
 import shutil
 import stat
 import unicodedata
@@ -24,10 +22,9 @@ from core.memory.attachments import (
     PinnedBundle,
     encode_pinned_bundle,
 )
-from core.memory.artifact import PROVIDER_ROOT_CONTROL_FILES
-from core.memory.confined_filesystem import (
-    ConfinedFilesystemError,
-    remove_confined_path,
+from core.memory.provider_root import (
+    ProviderRoot,
+    ProviderRootMetadata,
 )
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
 from core.memory.store import (
@@ -77,12 +74,8 @@ PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 CLEAR_CLEANUP_TIMEOUT_SECONDS = 20.0
 MAX_PROVIDER_DISK_ENTRIES = 100_000
-ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
-ROOT_SENTINEL_SCHEMA_VERSION = 1
-ROOT_PROVIDER_ID = "everos"
 SLICE1_PROVIDER_ROOT_FORMAT = "slice1"
 SLICE1_ARTIFACT_FINGERPRINT = "slice1-core"
-MAX_ROOT_SENTINEL_BYTES = 4 * 1024
 
 
 _ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -108,6 +101,8 @@ class MemoryModule:
         provider_root: Path | None = None,
         clear_provider_data: Callable[[], Awaitable[None] | None] | None = None,
         maintenance_open: Callable[[], bool] | None = None,
+        provider_root_owner: ProviderRoot | None = None,
+        provider_root_metadata: Callable[[], ProviderRootMetadata] | None = None,
         provider_root_format: str = SLICE1_PROVIDER_ROOT_FORMAT,
         artifact_fingerprint: str = SLICE1_ARTIFACT_FINGERPRINT,
         compatible_provider_root_formats: Iterable[str] = (),
@@ -131,23 +126,17 @@ class MemoryModule:
         )
         self._provider_root = provider_root or (self._effective_home / "memory" / "everos-root")
         self._provider_root_key = os.path.abspath(os.fspath(self._provider_root))
-        self._provider_root_format = _root_metadata_value(
-            provider_root_format,
-            fallback=SLICE1_PROVIDER_ROOT_FORMAT,
+        self.provider_root = provider_root_owner or ProviderRoot(
+            self._provider_root,
+            effective_home=self._effective_home,
         )
-        self._artifact_fingerprint = _root_metadata_value(
-            artifact_fingerprint,
-            fallback=SLICE1_ARTIFACT_FINGERPRINT,
+        static_metadata = _provider_root_metadata(
+            provider_root_format=provider_root_format,
+            artifact_fingerprint=artifact_fingerprint,
+            compatible_provider_root_formats=compatible_provider_root_formats,
         )
-        self._compatible_provider_root_formats = frozenset(
-            {
-                self._provider_root_format,
-                *(
-                    value
-                    for value in compatible_provider_root_formats
-                    if _is_root_metadata_value(value)
-                ),
-            }
+        self._provider_root_metadata = provider_root_metadata or (
+            lambda: static_metadata
         )
         self._clear_provider_data = clear_provider_data
         self._maintenance_open = maintenance_open or (lambda: False)
@@ -181,69 +170,6 @@ class MemoryModule:
 
         self._provider = provider
         self._worker.replace_provider(provider)
-
-    def _set_runtime_artifact_metadata(
-        self,
-        *,
-        provider_root_format: str,
-        artifact_fingerprint: str,
-        compatible_provider_root_formats: Iterable[str],
-    ) -> tuple[str, str, frozenset[str]]:
-        """Switch active artifact metadata while the runtime lifecycle is fenced."""
-
-        previous = (
-            self._provider_root_format,
-            self._artifact_fingerprint,
-            self._compatible_provider_root_formats,
-        )
-        self._provider_root_format = _root_metadata_value(
-            provider_root_format,
-            fallback=SLICE1_PROVIDER_ROOT_FORMAT,
-        )
-        self._artifact_fingerprint = _root_metadata_value(
-            artifact_fingerprint,
-            fallback=SLICE1_ARTIFACT_FINGERPRINT,
-        )
-        self._compatible_provider_root_formats = frozenset(
-            {
-                self._provider_root_format,
-                *(value for value in compatible_provider_root_formats if _is_root_metadata_value(value)),
-            }
-        )
-        return previous
-
-    def _restore_runtime_artifact_metadata(self, previous: tuple[str, str, frozenset[str]]) -> None:
-        self._provider_root_format, self._artifact_fingerprint, self._compatible_provider_root_formats = previous
-
-    def _activate_empty_provider_root_format(self, meta: MemoryMeta) -> bool:
-        """Rewrite only a verified empty sentinel when an artifact format changes."""
-
-        try:
-            self._provider_root.lstat()
-        except FileNotFoundError:
-            return False
-        self._verify_owned_provider_root(meta, require_empty=True, allow_format_mismatch=True)
-        sentinel = _read_root_sentinel(self._provider_root / ROOT_SENTINEL_FILENAME)
-        current_format = sentinel.get("provider_root_format") if isinstance(sentinel, dict) else None
-        if current_format == self._provider_root_format:
-            return False
-        previous_fingerprint = sentinel.get("created_by_artifact_fingerprint")
-        try:
-            self._write_root_sentinel(meta)
-            self._verify_owned_provider_root(meta, require_empty=True)
-        except Exception:
-            self._write_root_sentinel(
-                meta,
-                provider_root_format=current_format,
-                artifact_fingerprint=previous_fingerprint,
-            )
-            self._verify_owned_provider_root(
-                meta,
-                require_empty=True,
-                allow_format_mismatch=True,
-            )
-            raise
-        return True
 
     async def capture(self, request: CaptureRequest) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
@@ -676,44 +602,14 @@ class MemoryModule:
     async def _clear_provider_data_or_fail(self, meta: MemoryMeta) -> None:
         """Clear one verified root without allowing timed-out cleanup to escape ownership."""
 
-        await asyncio.to_thread(self._verify_owned_provider_root, meta, require_empty=False)
+        metadata = self._provider_root_metadata()
+        await asyncio.to_thread(self.provider_root.ensure, meta, metadata)
         await self._run_owned_provider_cleanup()
-        await asyncio.to_thread(self._recreate_owned_provider_root, meta)
-
-    def _ensure_owned_provider_root(self, meta: MemoryMeta) -> None:
-        """Create the first sentinel-owned root or verify an existing one.
-
-        Runtime wiring calls this private helper before starting EverOS. Keeping
-        it here means first enablement and Clear all use the same ownership
-        sentinel rules without widening the frozen MemoryModule interface.
-        """
-
-        _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
-        parent = self._provider_root.parent
-        try:
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        except OSError as error:
-            raise _ClearStepFailure("provider root parent cannot be created") from error
-        _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
-        parent_info = _lstat_or_clear_failure(parent, "provider root parent")
-        _require_owned_directory(parent_info, "provider root parent", private=True)
-        try:
-            root_info = self._provider_root.lstat()
-        except FileNotFoundError:
-            self._provider_root.mkdir(mode=0o700)
-            root_info = self._provider_root.lstat()
-        _require_owned_directory(root_info, "provider root", private=True)
-        sentinel = self._provider_root / ROOT_SENTINEL_FILENAME
-        if sentinel.exists() or sentinel.is_symlink():
-            self._verify_owned_provider_root(meta, require_empty=False)
-            return
-        try:
-            with os.scandir(self._provider_root) as entries:
-                if any(True for _entry in entries):
-                    raise _ClearStepFailure("provider root is not empty")
-        except OSError as error:
-            raise _ClearStepFailure("provider root cannot be read") from error
-        self._write_root_sentinel(meta)
+        await asyncio.to_thread(
+            self.provider_root.recreate_empty,
+            meta,
+            metadata,
+        )
 
     def _root_lifecycle_lock(self) -> asyncio.Lock:
         return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())
@@ -780,114 +676,6 @@ class MemoryModule:
         result = await asyncio.to_thread(callback)
         if inspect.isawaitable(result):
             await result
-
-    def _verify_owned_provider_root(
-        self,
-        meta: MemoryMeta,
-        *,
-        require_empty: bool,
-        allow_format_mismatch: bool = False,
-    ) -> None:
-        _ensure_provider_root_chain_safe(self._provider_root, self._effective_home)
-        root_info = _lstat_or_clear_failure(self._provider_root, "provider root")
-        _require_owned_directory(root_info, "provider root", private=True)
-        sentinel_path = self._provider_root / ROOT_SENTINEL_FILENAME
-        sentinel_info = _lstat_or_clear_failure(sentinel_path, "provider root sentinel")
-        _require_owned_regular_file(sentinel_info, "provider root sentinel", private=True)
-        sentinel = _read_root_sentinel(sentinel_path)
-        expected_keys = {
-            "schema_version",
-            "provider_root_id",
-            "provider_id",
-            "provider_root_format",
-            "created_by_artifact_fingerprint",
-        }
-        if not isinstance(sentinel, dict) or set(sentinel) != expected_keys:
-            raise _ClearStepFailure("provider root sentinel is invalid")
-        if (
-            type(sentinel.get("schema_version")) is not int
-            or sentinel.get("schema_version") != ROOT_SENTINEL_SCHEMA_VERSION
-        ):
-            raise _ClearStepFailure("provider root sentinel schema is invalid")
-        if sentinel.get("provider_root_id") != meta.provider_root_id:
-            raise _ClearStepFailure("provider root id does not match")
-        if sentinel.get("provider_id") != ROOT_PROVIDER_ID:
-            raise _ClearStepFailure("provider root owner does not match")
-        if (
-            not allow_format_mismatch
-            and sentinel.get("provider_root_format") not in self._compatible_provider_root_formats
-        ):
-            raise _ClearStepFailure("provider root format does not match")
-        if not _is_root_metadata_value(sentinel.get("created_by_artifact_fingerprint")):
-            raise _ClearStepFailure("provider root sentinel is invalid")
-
-        if require_empty:
-            try:
-                with os.scandir(self._provider_root) as entries:
-                    if any(entry.name not in PROVIDER_ROOT_CONTROL_FILES for entry in entries):
-                        raise _ClearStepFailure("provider root still contains data")
-            except OSError as error:
-                raise _ClearStepFailure("provider root cannot be read") from error
-
-    def _recreate_owned_provider_root(self, meta: MemoryMeta) -> None:
-        """Remove all provider children with no-follow traversal, preserving the root itself."""
-
-        # The sentinel remains until the replacement is atomically installed, so
-        # a crash retains a verifiable root for idempotent recovery.
-        self._verify_owned_provider_root(meta, require_empty=False)
-        try:
-            with os.scandir(self._provider_root) as entries:
-                children = [Path(entry.path) for entry in entries if entry.name != ROOT_SENTINEL_FILENAME]
-        except OSError as error:
-            raise _ClearStepFailure("provider root cannot be read") from error
-        for child in children:
-            _remove_root_child_no_follow(child, self._effective_home)
-        self._write_root_sentinel(meta)
-        self._verify_owned_provider_root(meta, require_empty=True)
-
-    def _write_root_sentinel(
-        self,
-        meta: MemoryMeta,
-        *,
-        provider_root_format: str | None = None,
-        artifact_fingerprint: str | None = None,
-    ) -> None:
-        payload = json.dumps(
-            {
-                "schema_version": ROOT_SENTINEL_SCHEMA_VERSION,
-                "provider_root_id": meta.provider_root_id,
-                "provider_id": ROOT_PROVIDER_ID,
-                "provider_root_format": provider_root_format or self._provider_root_format,
-                "created_by_artifact_fingerprint": artifact_fingerprint or self._artifact_fingerprint,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        temporary = self._provider_root / f".{ROOT_SENTINEL_FILENAME}.{secrets.token_hex(8)}.tmp"
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            _write_all(descriptor, payload)
-            os.fsync(descriptor)
-            os.close(descriptor)
-            descriptor = None
-            os.replace(temporary, self._provider_root / ROOT_SENTINEL_FILENAME)
-            sentinel_info = _lstat_or_clear_failure(
-                self._provider_root / ROOT_SENTINEL_FILENAME,
-                "provider root sentinel",
-            )
-            _require_owned_regular_file(sentinel_info, "provider root sentinel", private=True)
-        except OSError as error:
-            raise _ClearStepFailure("provider root sentinel could not be written") from error
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
 
     async def _record_clear_failure(self) -> None:
         try:
@@ -1038,114 +826,6 @@ def _consume_cleanup_task_exception(task: asyncio.Task[None]) -> None:
         return
 
 
-def _lstat_or_clear_failure(path: Path, label: str) -> os.stat_result:
-    try:
-        return os.lstat(path)
-    except OSError as error:
-        raise _ClearStepFailure(f"{label} is unavailable") from error
-
-
-def _require_owned_directory(info: os.stat_result, label: str, *, private: bool) -> None:
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise _ClearStepFailure(f"{label} is not an owned directory")
-    _require_current_user_owner(info, label)
-    if private and stat.S_IMODE(info.st_mode) != 0o700:
-        raise _ClearStepFailure(f"{label} is not owner-only")
-
-
-def _require_owned_regular_file(info: os.stat_result, label: str, *, private: bool) -> None:
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise _ClearStepFailure(f"{label} is not an owned regular file")
-    _require_current_user_owner(info, label)
-    if private and stat.S_IMODE(info.st_mode) != 0o600:
-        raise _ClearStepFailure(f"{label} is not owner-only")
-
-
-def _require_current_user_owner(info: os.stat_result, label: str) -> None:
-    getuid = getattr(os, "getuid", None)
-    if callable(getuid) and info.st_uid != getuid():
-        raise _ClearStepFailure(f"{label} has an unexpected owner")
-
-
-def _read_root_sentinel(path: Path) -> object:
-    flags = os.O_RDONLY
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(path, flags | no_follow)
-        _require_owned_regular_file(
-            os.fstat(descriptor),
-            "provider root sentinel",
-            private=True,
-        )
-        chunks: list[bytes] = []
-        remaining = MAX_ROOT_SENTINEL_BYTES + 1
-        while remaining:
-            chunk = os.read(descriptor, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
-    except OSError as error:
-        raise _ClearStepFailure("provider root sentinel cannot be read") from error
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    if len(payload) > MAX_ROOT_SENTINEL_BYTES:
-        raise _ClearStepFailure("provider root sentinel is too large")
-    try:
-        return json.loads(payload.decode("utf-8"))
-    except (UnicodeError, ValueError) as error:
-        raise _ClearStepFailure("provider root sentinel is invalid") from error
-
-
-def _remove_root_child_no_follow(path: Path, effective_home: Path) -> None:
-    try:
-        remove_confined_path(effective_home, path)
-    except (ConfinedFilesystemError, OSError, ValueError) as error:
-        raise _ClearStepFailure("provider root child could not be removed") from error
-
-
-def _ensure_provider_root_chain_safe(provider_root: Path, effective_home: Path) -> None:
-    """Reject a provider root whose path reaches its target via a symlinked component.
-
-    The final root and sentinel are validated separately; this guards every PARENT
-    component so that clear/delete cannot traverse a symlinked directory and remove
-    data outside the intended root (the exact-root/no-follow requirement).
-    Each component from the root upward is lstat'd (no follow) until it reaches the
-    effective home or the filesystem root; a symlink anywhere on that chain is
-    rejected. Components below the effective home (e.g. an isolated test tmpdir) are
-    still checked for symlinks but are not required to live inside the home.
-    """
-    home_abs = Path(os.path.abspath(os.fspath(effective_home)))
-    current = Path(os.path.abspath(os.fspath(provider_root)))
-    while True:
-        try:
-            info = os.lstat(current)
-        except FileNotFoundError:
-            # A not-yet-created ancestor is acceptable (clear recreates the chain);
-            # only existing components are checked for symlink escape.
-            pass
-        else:
-            if stat.S_ISLNK(info.st_mode):
-                raise _ClearStepFailure("provider root chain contains a symlink")
-        if current == current.parent:
-            break
-        if current == home_abs:
-            break
-        current = current.parent
-
-
-def _write_all(descriptor: int, payload: bytes) -> None:
-    written = 0
-    while written < len(payload):
-        result = os.write(descriptor, payload[written:])
-        if result <= 0:
-            raise OSError("provider root sentinel write failed")
-        written += result
-
-
 def _is_root_metadata_value(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -1156,8 +836,36 @@ def _is_root_metadata_value(value: object) -> bool:
     )
 
 
-def _root_metadata_value(value: object, *, fallback: str) -> str:
-    return value if _is_root_metadata_value(value) else fallback
+def _provider_root_metadata(
+    *,
+    provider_root_format: object,
+    artifact_fingerprint: object,
+    compatible_provider_root_formats: Iterable[object],
+) -> ProviderRootMetadata:
+    root_format = (
+        provider_root_format
+        if _is_root_metadata_value(provider_root_format)
+        else SLICE1_PROVIDER_ROOT_FORMAT
+    )
+    fingerprint = (
+        artifact_fingerprint
+        if _is_root_metadata_value(artifact_fingerprint)
+        else SLICE1_ARTIFACT_FINGERPRINT
+    )
+    return ProviderRootMetadata(
+        provider_root_format=root_format,
+        artifact_fingerprint=fingerprint,
+        compatible_provider_root_formats=frozenset(
+            {
+                root_format,
+                *(
+                    value
+                    for value in compatible_provider_root_formats
+                    if _is_root_metadata_value(value)
+                ),
+            }
+        ),
+    )
 
 
 def _utf8_bytes(value: str) -> bytes | None:

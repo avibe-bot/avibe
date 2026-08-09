@@ -180,7 +180,10 @@ async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
     manager = runtime._snapshot_manager
     assert manager is not None
     provider_root = tmp_path / "memory/everos-root"
-    runtime.module._ensure_owned_provider_root(runtime._store.ensure_meta())
+    runtime._provider_root_owner.ensure(
+        runtime._store.ensure_meta(),
+        runtime._active_provider_root_metadata(),
+    )
     path_max = os.pathconf(tmp_path, "PC_PATH_MAX")
     snapshot_prefix = manager.snapshot_root / (
         f".{('x' * 32)}.tmp/payload/memory/everos-root"
@@ -1094,23 +1097,26 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    runtime.module._ensure_owned_provider_root(runtime._store.ensure_meta())
+    runtime._provider_root_owner.ensure(
+        runtime._store.ensure_meta(),
+        runtime._active_provider_root_metadata(),
+    )
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    original_recreate = runtime.module._recreate_owned_provider_root
+    original_recreate = runtime._provider_root_owner.recreate_empty
 
-    def blocking_recreate(meta) -> None:
+    def blocking_recreate(meta, metadata) -> None:
         started.set()
         assert release.wait(2)
         try:
-            original_recreate(meta)
+            original_recreate(meta, metadata)
         finally:
             finished.set()
 
     monkeypatch.setattr(
-        runtime.module,
-        "_recreate_owned_provider_root",
+        runtime._provider_root_owner,
+        "recreate_empty",
         blocking_recreate,
     )
     clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
@@ -1134,8 +1140,8 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
     assert recovery.recovery_from_state == "deleting"
 
     monkeypatch.setattr(
-        runtime.module,
-        "_recreate_owned_provider_root",
+        runtime._provider_root_owner,
+        "recreate_empty",
         original_recreate,
     )
     completed = await runtime.resume_clear(
