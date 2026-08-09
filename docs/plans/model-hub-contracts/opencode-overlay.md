@@ -34,6 +34,14 @@ requirements.
 - The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
   normalizes a provider, matches inventory, or substitutes a model.
 
+## Add-time matching (`matching-v1`)
+
+OpenCode matching occurs only while adding a Source, after its protocol and inventory
+have been observed. An exact checked identifier wins. Otherwise a bare model id is
+accepted only when exactly one checked identifier ends with `/<bare>`; zero matches and
+ambiguous matches are left unconfigured. The stored Route carries the concrete upstream
+model id and this normalization is never repeated by runtime or refresh.
+
 ## Stability invariant (test requirement, L7)
 
 For a fixed set of checked models, the generated identifier strings are

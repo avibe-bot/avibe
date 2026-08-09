@@ -337,6 +337,53 @@ No health score, latency, cost, usage, vendor label, creation timestamp, or late
 inventory result reorders existing configuration. `created_at` remains ordinary Source
 metadata for audit/display; routing and placement never read or mutate it.
 
+**Current matching value (`matching-v1`).** Add Source uses the same observed-inventory
+matching semantics that preceded the configured-chain freeze, then persists the concrete
+upstream id in the Route hop. It runs once, after connectivity, protocol, and inventory
+observation, and is never re-run by refresh, restart, catalog changes, health changes, or
+turn execution.
+
+| Backend/source case | Candidate set | Accepted match and tie-break |
+| --- | --- | --- |
+| Claude fixed-menu id on a native `anthropic` Source | The Source's `discovered` models observed by this add transaction | A dated request is literal only. An undated version request matches the same family and exact version tuple; a bare `opus`, `sonnet`, or `haiku` alias matches that family at any version. Select `max(version_tuple, date_or_zero, model_id)`. `fable` has no bare alias. |
+| OpenCode menu id | The Source's observed models projected through its normalized provider id | Exact checked id first; otherwise a bare model id matches only when exactly one checked identifier ends with `/<bare>`. Zero or multiple matches is rejected as ambiguous. |
+| Codex fixed-menu id, or any non-native Source | The Source's observed models | Literal model-id equality only. Explicit user route edits may name an exact model, but runtime never infers or substitutes one. |
+
+The resulting hop always contains the selected concrete upstream model id, never the menu
+alias. A missing or ambiguous match leaves that menu model's Route empty; it does not
+create a runtime matching branch.
+
+The `matching-v1` decision is normative and exhaustive:
+
+```text
+for each configuration-eligible Source added in this transaction:
+    observed = response_backed_observation(Source, protocol_order)
+    if observed.protocol is null:
+        persist no Source and no Route hop
+        return the classified observation failure
+
+    for each backend menu model M:
+        candidates = observed.discovered_models
+        if backend == opencode:
+            checked = M if M is checked else the unique checked identifier ending with "/" + M
+            match = the unique candidate whose normalized provider/model identifier equals checked
+        elif backend == claude and Source is native anthropic:
+            match = native_claude_alias(M, candidates)
+        else:
+            match = literal_model_id(M, candidates)
+
+        if match is not null:
+            append {source_id: Source.id, model_id: match} to the stored Route tail
+
+    persist the Source and all accepted concrete hops once
+```
+
+`native_claude_alias` is the literal former resolver rule: dated requests are literal;
+undated version requests require an equal version tuple; bare aliases match a family;
+the total order is `(version_tuple, date_or_zero, model_id)`. `exact_checked_identifier`
+and the unique suffix rule are the OpenCode overlay rule. No other backend gets an
+alias family, and explicit user-authored Route edits remain literal configuration.
+
 **Routing configuration is per backend and per model; health is Source-global.** Quota
 and reachability belong to the Source, not the Agent that touched it. §4.3 reads the
 stored chain and annotates its live execution state; it does not construct another

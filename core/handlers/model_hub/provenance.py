@@ -34,7 +34,6 @@ class AttemptIdentity:
     source_id: str
     resolved_model_id: str
     channel: SupplyChannel
-    via_mapping: bool
 
     def payload(self) -> dict:
         return {
@@ -57,7 +56,6 @@ class TurnTrace:
     model_supply_state: Optional[SupplyState] = None
     gateway_source_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
-    gateway_via_mapping: bool = False
     ambiguous: bool = False
 
 
@@ -147,7 +145,6 @@ class GatewayTurnTerminalizer:
             source_id=source_id,
             resolved_model_id=resolved_model_id,
             channel=channel,
-            via_mapping=via_mapping,
         )
 
     def finish_attempt(
@@ -440,7 +437,6 @@ class TurnCorrelationRegistry:
                 return
             trace.gateway_source_id = source_id
             trace.gateway_model_id = resolved_model_id
-            trace.gateway_via_mapping = via_mapping
 
     def gateway_requested_model(self, turn_id: str) -> Optional[str]:
         with self._lock:
@@ -483,7 +479,6 @@ class TurnCorrelationRegistry:
                 source_id=trace.gateway_source_id,
                 resolved_model_id=trace.gateway_model_id,
                 channel="hub",
-                via_mapping=trace.gateway_via_mapping,
             )
             return turn_id
 
@@ -520,7 +515,6 @@ class TurnCorrelationRegistry:
                     source_id=trace.gateway_source_id,
                     resolved_model_id=trace.gateway_model_id,
                     channel="hub",
-                    via_mapping=trace.gateway_via_mapping,
                 )
             if identity is None or identity.channel != "hub":
                 return
@@ -564,7 +558,6 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
                 channel="native_cli",
-                via_mapping=via_mapping,
             )
 
     def mark_no_candidate(
@@ -625,15 +618,10 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is None:
                 return
-            observed_via_mapping = via_mapping or (
-                trace.gateway_via_mapping
-                and trace.gateway_model_id == resolved_model_id
-            )
             trace.pending_attempt = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
                 channel=channel,
-                via_mapping=observed_via_mapping,
             )
 
     def fail_native_attempt(

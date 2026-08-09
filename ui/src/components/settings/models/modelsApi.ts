@@ -552,7 +552,7 @@ class MockStore {
       kind: 'api_key',
       vendor: draft.vendor,
       display_name: draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor),
-      protocol: draft.vendor === 'anthropic' ? 'anthropic' : 'openai_compatible',
+      protocol: draft.vendor === 'anthropic' ? 'anthropic' : 'openai_chat',
       base_url: draft.base_url ?? null,
       supply_channel: 'hub',
       billing: 'metered',
