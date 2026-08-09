@@ -212,7 +212,7 @@ than in a moving one.
 | --- | --- | --- | --- |
 | G-3 | 06 model inventory | a way to retire a *discovered* model from a source's inventory, **and a place to remember that it was retired** | the ruled delete route removes a manual entry only; no other inventory-shrink route is user-initiated, and `source.schema.json`'s `models` carries no per-model retained flag |
 | G-9 | 03 order save that drops sources | the guarded-change response for the whole-order `PUT` | `api.md`'s `PUT /api/models/agents/<backend>/sources` takes `{order: string[]}` and returns `{agent: AgentSupply}` — the success echo and nothing else, with no `force` in the body and no `409` branch. The gap narrowed at `ceace07f` but did not close: the shared refusal envelope `{error, would_remove_hops, would_interrupt}` is now contracted, and the route-chain `PUT /api/models/agents/<backend>/chain` uses it, so the field this frame needs exists and is spelled as `model-hub.md`'s matrix spells it. What is still missing is only its application to the order save. §1.3's Guard-refused row states the surface anyway, as a `[contract-gap]` and not as a requirement |
-| G-10 | 01 shell pill, install in flight | a server-side install state, and the route that enters it | `runtime-dependency.schema.json` v5's `status.health` runs `ok · degraded · down · not_started · not_installed` with nothing between the last two, and `api.md` contracts exactly two runtime routes — `GET /api/models/runtime/status` and `POST /api/models/runtime/start` — with no install route at all. So *installing* exists on the client and nowhere else, and a reload during one reads back as `not_installed`. §0.8's Installing and Install failed rows are the client-side states that gap forces, and they are marked as such |
+| G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one | a server-side install state, and the route that enters it | `runtime-dependency.schema.json` v5's `status.health` runs `ok · degraded · down · not_started · not_installed` with nothing between the last two, and `api.md` contracts exactly two runtime routes — `GET /api/models/runtime/status` and `POST /api/models/runtime/start` — with no install route at all. So *installing* exists on the client and nowhere else, and a reload during one reads back as `not_installed`. §0.8's Installing and Install failed rows are the client-side states that gap forces, and they are marked as such. The second caller is D-26's confirm: its primary promises install → start → switch, and only the last two are routes, so its 安装 is the same client-side state and its row carries the same marker. One missing route, two surfaces that press it |
 | G-11 | 09 direct-only home, zero backends | an installation flag per agent backend, and the payload that carries it | No property of `AgentSupply` (`agent-supply.schema.json`) reports whether a backend's CLI is present, and `core/handlers/model_hub/service.py:list_agents` builds its array from a literal three-backend tuple, so the payload is length 3 unconditionally and the zero-backend state cannot be produced from it |
 | G-12 | 01 upstream card and 06 header, `needs_action` | the control that replaces a dead credential, on either surface | §1.1 sends repair to 06 and §1.6 sends it back to 01, and no frame draws it. `api.md` contracts both replacement routes — `PUT /api/models/sources/<id>/credential` for a key and `POST /api/models/sources/<id>/reauth` for a subscription — the first with the guarded envelope, so the behaviour exists and only its affordance is missing. Both sections now state the absence instead of pointing at each other |
 | G-13 | 03 order drawer, chains that already exist | an action that re-applies the current order to chains built before it, and the route behind it | `api.md` contracts `PUT /api/models/agents/<backend>/sources` for the order itself and `PUT /api/models/agents/<backend>/chain` for one model's hops; nothing bulk-rewrites stored chains, and `model-hub.md`'s `placement-v1` runs "only during Add Source". So the order genuinely cannot reach an existing chain, and §1.3 says that rather than implying the drawer keeps chains in sync |
@@ -222,6 +222,7 @@ than in a moving one.
 | G-17 | 04 add-subscription, a flow that expects something pasted back | the field that takes it, and the control that sends it | `oauth-flow.schema.json`'s `presentation.expects` runs `none · paste_code · paste_callback_url`, and `api.md` contracts `POST /api/models/oauth/submit` with `{flow_id, value}` for the second and third. Frame 04's foot is 取消 / 去登录 and draws no input, so only `expects: none` — the browser round trip — has a surface. §1.4 states the declaration rather than the browser assumption it carried before, and states this absence rather than describing a field no frame draws |
 | G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves | the route that carries a non-persisting observation of a source that does not exist yet | **The behaviour is contracted and the route is not**, so this row registers a gap *inside* the contract rather than an undecided question. AC-26 states the operation outright — 「Add Source exposes one non-persisting submission that combines connectivity classification with response-backed protocol observation」, returning classified reachability, authentication and a protocol 「without persisting a Source」 — and `model-hub.md`'s protocol-observation ruling of 2026-08-09 requires every stored `protocol` to trace back to a real response taken *before* Save, so an observation that saves nothing is not optional to the design. None of `api.md`'s 28 route rows accepts one: `POST /api/models/agents/<backend>/probe` is backend-scoped (`{model?}`) and reports on the configured chain, `POST /api/models/sources/<id>/refresh` needs an `id` only Save produces, and `POST /api/models/sources` persists on success. §1.5 keeps every Pull-origin state, because the operation is contracted and 05 draws it; what is missing is the way to invoke it |
 | G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight | what the server is left holding when the cancel lands after the transient phase | **Cancellation is contracted everywhere except the persisting half.** AC-26 requires an API-key test's success, authentication failure, adapter error, timeout **and cancellation** each to 「revoke the transient provisioned ref before the operation settles」, with a durable pending-revocation record and reconciliation behind a fault-injected revoke failure, and repeats that guarantee for unsaved model discovery; `api.md` contracts `POST /api/models/oauth/cancel` for the subscription branch. No artefact states the outcome once `POST /api/models/sources` has crossed out of that transient phase into persistence — whether a cancel there yields a Source or nothing. §1.5 states the guarantee for the phase that has one and stops at that seam rather than extending AC-26 over a boundary AC-26 does not cross |
+| G-20 | 01 source card, 被哪些链收编 — **on any load that is not the creation response** | a *read* that carries `adopted_by` | **The contract names this exact consumer and then gives it nothing to call.** `api.md:212` defines `AdoptedBy` as 「the stable Source-card projection of persisted references」 and FC-05 requires `agent-supply` to expose it, which is what makes the field authority rather than an invention (§0.3). Every place it is actually contracted is a creation terminal: `POST /api/models/sources` → `{source, added_to, adopted_by}`, and the OAuth completion reading — `api.md`'s *OAuth completion* section, which makes the terminal shape a function of `OAuthFlow.intent` and puts the same three arrays behind `intent: "create"` and explicitly not behind `intent: "reauth"`. The reads a loaded page can call carry no trace of it: `GET /api/models/sources` → `{sources: Source[]}` and `source.schema.json` has no backend-attribution property at all; `GET /api/models/agents` → `{agents: AgentSupply[]}` and `agent-supply.schema.json`'s 13 properties do not include `adopted_by`, nor does `api.md:628`'s CI-guarded AgentSupply serializer-completeness row. So the projection survives exactly one response and a reload has nowhere to read it from, while D-28 forbids the one derivation that would rebuild it from `hops`. This is FC-12/G-9's shape rather than FC-05's `hops` shape: an FC item requiring another file to carry something that file does not (§0.3) |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -646,7 +647,7 @@ as everywhere else in this document.
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
 | §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success → the dialog closes and the page becomes 01 with this backend in 网关 mode |
 | §1.9 | Failed | The mode change did not persist | F1 lands here | `adopt.fail.title`, `adopt.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable |
-| §1.9 | Dependency missing `[derived]` D-26 | Runtime `health` is `not_installed` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press, three steps, reported as one outcome. 取消 is unchanged |
+| §1.9 | Dependency missing `[derived]` D-26 `[contract-gap]` G-10 | Runtime `health` is `not_installed` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press, three steps, reported as one outcome. **Only the last two steps have routes** (`POST /api/models/runtime/start`, then the mode `PATCH`), so this row inherits G-10 the way 01's pill does: the install's progress is client-side only, and a reload while it runs reads back `not_installed` with this backend still in 直连, because the mode `PATCH` is the third step and has not been sent. A step that fails lands in this dialog's own Failed row above, which is why the promise is safe to make as one outcome — the dialog reports no switch it did not make. 取消 is unchanged |
 
 Two frames deliberately hold no rows. §1.2 specifies nothing (§0.2), and the
 `Qp6FI` confirm is not a frame of its own — it is reached from two callers and
@@ -1063,14 +1064,31 @@ can co-occur (a taken-over backend usually reads `degraded`) and are computed fr
 different inputs, so a surface that derives one from the other is right by accident until
 the first `degraded`-without-reroute payload.
 
-**A source's supply line renders `adopted_by`, not the chain** `[contract]` FC-05.
-`upstream.state.supplying*` names which backends currently take models from this source;
-FC-05 states that `agent-supply` exposes `adopted_by: [{backend, menu_model}]` from the
-persisted references and that source-card attribution reuses that projection. The line
-groups it by backend and de-duplicates, so it carries no position and no menu-model
-detail. This section owns that reading; §1.1 and §1.7 render it and name no source of
-their own. The chain is the other projection — the stored `hops` array, read by §1.2 and
-§1.3 — and D-28 is why neither may be computed from the other.
+**A source's supply line renders `adopted_by`, not the chain** `[contract]` FC-05 —
+**and on any load that is not the creation response it has nothing to render it from**
+`[contract-gap]` G-20. `upstream.state.supplying*` names which backends currently take
+models from this source; FC-05 states that `agent-supply` exposes
+`adopted_by: [{backend, menu_model}]` from the persisted references and that source-card
+attribution reuses that projection, and `api.md` calls that array 「the stable Source-card
+projection」 in as many words — which is what makes the field authority here even though
+the frozen `agent-supply.schema.json` omits it (§0.3, the FC-05 case). What is missing is
+not the shape but the read: every response that carries it is a *creation* terminal, and
+neither `GET /api/models/sources` nor `GET /api/models/agents` returns it, so a page that
+paints this line after a reload is painting a value the contract never sends. That is
+G-20, and it is the FC-12 case rather than the FC-05 one. The line groups the projection
+by backend and de-duplicates, so it carries no position and no menu-model detail. This
+section owns that reading; §1.1 and §1.7 render it and name no source of their own. The
+chain is the other projection — the stored `hops` array, read by §1.2 and §1.3 — and
+D-28 is why neither may be computed from the other.
+
+**Under G-20 the line is absent, not derived** `[derived]`. The two candidate
+work-arounds are both worse than the gap showing through: recomputing attribution from
+the chains is the one derivation D-28 forbids by name, and holding the creation
+response's array in client state would make the card correct for one session and
+confidently wrong in the next — a source adopted by a chain edited elsewhere would still
+claim its old backends, which is the failure D-28 exists to prevent. So the card renders
+the line when a response carries the projection and omits it otherwise. A missing line
+reads as *unknown*, which is true; a stale one would read as *known*, which is not.
 
 **The legend is a rendered-relation index, not a fixed asset** `[frame]` `[derived]`.
 01 draws three keys, 08 draws five; the two extra keys in 08 are exactly the two
@@ -1198,8 +1216,8 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `heujA` upstream card | tile icon by kind, name, kind pill, mono detail line, one status line | one source | yes (whole card) | Open 06 for that source |
-| `uf3re` detail | account label, or `host/path · masked key` | source | no | — |
-| `YcOFo` status | who it is supplying right now | derived from live supply | no | — |
+| `uf3re` detail | account label, or `host/path · masked key` — **and every field it can draw is nullable, so the line is specified by omission, exactly as §0.9 and §1.6 rule the same hole** `[contract]`. `account_label`, `base_url` and `masked_credential` are each `["string","null"]` in `source.schema.json`, so a segment with no value is dropped, never rendered empty and never left behind a dangling `·`; `base_url: null` is the vendor's official endpoint (§0.9's `{{host}}`) and is not synthesized into a hostname (§1.6). When nothing is left the whole line is omitted rather than filled — a subscription that reports no account label is the common case, and the card still identifies itself from four required fields (icon and pill by `kind`, name by `display_name`, state by `state`). Repeating the kind pill or the card's own name here would be the only alternative, and it would say nothing the card has not already said | source | no | — |
+| `YcOFo` status | who it is supplying right now — `adopted_by`, absent under `[contract-gap]` G-20 (§1.0) | that projection when a response carries it, never a computation over chains (D-28) | no | — |
 | `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | Open 04 / 05 |
 | `f8w6Xp` + `pnYa0` rail | dispatch happens between the columns | decorative | no | — |
 | `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{status}}` line | per-backend mode + supply health | head: buttons only | — |
@@ -1882,8 +1900,14 @@ time:
   (`[contract]` AC-26, which requires that revocation on every way the submission can
   settle, cancellation included); what a cancel yields once the add has crossed into
   persistence is `[contract-gap]` G-19, and this file states the guarantee for the phase
-  that has one instead of extending it past the seam. A cancelled pull has nothing to
-  revoke at either phase, because a pull writes no credential.
+  that has one instead of extending it past the seam. **A cancelled pull revokes too**
+  `[contract]` AC-26, which names unsaved discovery separately from the connectivity test
+  and gives it its own independently provisioned transient ref, the same revocation on
+  success, failure, adapter error, timeout and cancellation, and the same durable
+  pending-revocation record when the revoke itself fails. The pull is the simpler half of
+  that rule rather than an exception to it: it can never persist (below), so it has no
+  seam for the guarantee to stop at, and where the add's promise ends at G-19's boundary
+  the pull's covers every way it can settle.
 - **A pull-origin state can never persist.** Where a state's Add-origin form offers a
   persisting exit, the pull-origin form does not offer it at all: ④′ reports its result
   inline instead of saving, and ⑤′ drops 仍要添加 and keeps the ordinary two-button foot.
@@ -2744,10 +2768,17 @@ that shows 「网关未运行」 in red on a first-run screen is reporting a pro
 does not have.
 
 **At zero installed backends the pill does not render, and that absence is what gives
-`shell.allDirect` its branch guarantee** `[derived]` `[contract]`. The rows come from
-`GET /api/models/agents` → `{agents: AgentSupply[]}` (`api.md`), and the array carries no
-`minItems` in `agent-supply.schema.json`, so an empty one is a legal response, not a
-malformed one — a machine with none of the three CLIs installed returns it. The
+`shell.allDirect` its branch guarantee** `[derived]` `[contract-gap]` G-11. The rows come
+from `GET /api/models/agents` → `{agents: AgentSupply[]}` (`api.md`), and the array
+carries no `minItems` in `agent-supply.schema.json`, so an empty one is a *legal*
+response, not a malformed one. Legal is not the same as reachable, and G-11 is the
+distance between them: no property of `AgentSupply` reports whether a backend's CLI is
+present, and the array is built from a literal three-backend tuple, so the payload is
+length 3 whatever the machine has and an empty one is a response nothing can currently
+send. **What follows is specified against the payload closing G-11 would produce, not
+against one this build emits** — the reading is inferred from the array's length only
+because the gap leaves no flag to read, and it is marked so a reader cannot mistake the
+branch for reachable behavior. The
 extreme-data rule below omits an uninstalled backend from the list and derives
 `{{count}}` from the rows rendered; at zero rows those two rules together select
 `shell.allDirect_other` at `count = 0`, and the pill says 「0 个后端都在直连」 / 「All 0
@@ -2758,7 +2789,7 @@ So the page branches once more, and it branches **before** the pill:
 
 | Backends installed | Header pill | Body |
 | --- | --- | --- |
-| **0** | absent `[derived]` | Empty state: `empty.title` / `empty.body`, and neither card renders |
+| **0** | absent `[derived]` `[contract-gap]` G-11 | Empty state: `empty.title` / `empty.body`, and neither card renders |
 | **≥1** | `shell.allDirect`, count = rows rendered | This frame as drawn |
 
 The empty state keeps the 你会多出三件事 card off the page too: three benefits that all
