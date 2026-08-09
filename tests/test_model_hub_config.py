@@ -414,10 +414,33 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     # `[contract-gap]` is also the marker that tells a checker to stop asking.
     # Pointed at a number no §0.5 row defines, it must silence nothing at all.
     GateCase(
-        "A", "routes", "arm",
+        "A", "gaps", "empty",
         "gap marker cites an unregistered number",
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-99 carries",
+        "is named by no §0.8 row",
+    ),
+    # The same marker pointed at a *prefix* of a registered number. Set
+    # intersection got this right by accident and would have gone on getting it
+    # right; the case is here because the cell is, and because the silencer is
+    # now resolved like every other name.
+    GateCase(
+        "A", "gaps", "token",
+        "gap marker cites a prefix of a registered number",
+        "`[contract]` `[contract-gap]` G-15 carries",
+        "`[contract]` `[contract-gap]` G-1 carries",
+        "is named by no §0.8 row",
+    ),
+    # Reviewer's repro, round 14: a route first mentioned inside a
+    # registered-gap paragraph and then drawn as an unmarked affordance. The
+    # dedupe ran before the verdict, so the first mention's excuse covered the
+    # second, and the gate returned zero findings.
+    GateCase(
+        "A", "routes", "arm",
+        "an unmarked affordance repeats a route a gap paragraph excused",
+        "the surface of truth when it does not.",
+        "the surface of truth when it does not.\n\n06's header carries a 移除来源 "
+        "button that sends `DELETE /api/models/sources/<id>` and returns to 01.",
         "is named by no §0.8 row",
     ),
     # The mirror of class A, and the generator behind five findings across two
@@ -609,6 +632,54 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "service.py:list_agent_rows",
         "defines no `list_agent_rows`",
     ),
+    # Reviewer's finding, round 14: `ast.walk` credited every `Store` name in the
+    # file, so any local variable vouched for a citation. `cancelled` is one —
+    # a name assigned inside a method body, addressable by nobody.
+    GateCase(
+        "E", "repo symbols", "token",
+        "a cited symbol is a name local to some function body",
+        "service.py:list_agents",
+        "service.py:cancelled",
+        "defines no `cancelled`",
+    ),
+    # The §0.5 registry, read as a universe. Its three rules are exercised where
+    # the marker is spent: class A's route coverage (above) and class E's claim
+    # check (here). E owns the duplicate rule because a gap row is a claim about
+    # what the contract does not have, and that is the class that checks those.
+    #
+    # Reviewer's repro, round 14: a contradicting second `G-19`. Built by hand,
+    # the registry kept the later row and every reference went on resolving.
+    GateCase(
+        "E", "gaps", "duplicate",
+        "a second row answers one gap number differently",
+        "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
+        "| G-19 | 05 add-by-key, an unrelated surface | a different missing behaviour "
+        "| Contradicting evidence. | pending |\n"
+        "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
+        "is defined twice in gaps with different content",
+    ),
+    # A row that stops being a registration stops excusing its own claim: G-9's
+    # row states a 409 branch for a route `api.md` does not guard, which is the
+    # gap it registers, and which E reports the moment the row is not one.
+    GateCase(
+        "E", "gaps", "empty",
+        "a gap row loses the number that makes it a registration",
+        "| G-9 | 03 order save that drops sources |",
+        "| gap 9 | 03 order save that drops sources |",
+        "a 409 branch is claimed for",
+    ),
+    # E's own use of the marker, against a near miss: the claim cites `G-1`,
+    # which is a prefix of `G-15` and a row nobody wrote. Citing a registered
+    # number silences the same sentence, which is the half that makes this a
+    # test of identity rather than of the marker being ignored.
+    GateCase(
+        "E", "gaps", "token",
+        "a silenced claim cites a prefix of a registered number",
+        "the surface of truth when it does not.",
+        "the surface of truth when it does not.\n\nA 409 conflict answer to "
+        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-1.",
+        "a 409 branch is claimed for",
+    ),
     # A total rendering of a contracted vocabulary that quietly drops a row. The
     # author cannot see the schema while writing the table, so nothing but a set
     # comparison catches this.
@@ -649,13 +720,6 @@ UNREACHABLE_BY_CLASS: dict[tuple[str, str], str] = {
         "class D defines nothing. It reads the copy universe class B fills, and a "
         "copy key declared twice is reported once, by B — the (B, copy, duplicate) case."
     ),
-    ("E", "duplicate"): (
-        "class E resolves spec citations against the contract files, and the spec "
-        "declares nothing E resolves. The authority-side universes still carry the "
-        "rule; it is proved directly, by "
-        "test_authority_side_universes_report_a_duplicate_definition, because the "
-        "mutation harness may not edit a contract file."
-    ),
 }
 
 UNREACHABLE_BY_UNIVERSE: dict[tuple[str, str], str] = {
@@ -665,6 +729,28 @@ UNREACHABLE_BY_UNIVERSE: dict[tuple[str, str], str] = {
         "test_authority_side_universes_report_a_duplicate_definition."
     )
     for name in ("routes", "schema files", "schema fields", "repo symbols")
+}
+
+# The finest grain: one class's use of one universe. Two projections can both be
+# full while a cell is empty — every class had a `token` case and every universe
+# had one, and `A`'s reading of the gap registry still had none, which is where
+# three of round 14's findings lived. So the grid is tiled per arm, and an arm
+# that cannot reach a rule says why here.
+UNREACHABLE_BY_ARM: dict[tuple[str, str, str], str] = {
+    ("A", "routes", "empty"): (
+        "class A never resolves a citation against `routes`. It reads the universe as "
+        "an inventory — which contracted mutations does nothing reach — and asks its "
+        "questions as set arithmetic over tokens `normalize_route` has already "
+        "canonicalised. A citation that resolves to nothing is E's verdict, and E has "
+        "the case. What A can get wrong is the canonicalisation, which is the "
+        "(A, routes, token) case."
+    ),
+    ("A", "gaps", "duplicate"): (
+        "one canonical token declared twice is reported once, by the universe's owner. "
+        "The registry's owner is E — a gap row is a claim about what the contract does "
+        "not have — so the case is (E, gaps, duplicate), reached through the same "
+        "registry object A reads."
+    ),
 }
 
 
@@ -694,54 +780,110 @@ def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: 
     assert any(case.says in m for m in said), (case.label, case.says, result["findings"])
 
 
-def test_gate_mutation_suite_is_tiled_over_every_class_and_every_rule():
-    """The suite is filed by (class, universe, rule), and every cell is answered.
+def test_gate_mutation_suite_is_tiled_over_every_arm_and_every_rule():
+    """Every (class, universe, rule) is answered — by a case, or by a stated reason.
 
     The gate grew one class at a time, each writing its own comparison, so each
     new class was a fresh chance to repeat the same mistake — and the tests grew
     the same way, one case per bug a reviewer happened to find. Tiling is what
-    stops that: a class or a universe added without its cases fails here, before
-    it can ship a comparison nobody has watched fail.
-    """
-    from scripts.check_model_hub_ui_states import CLASS_UNIVERSES, CLASSES, RULES
+    stops that: an arm added without its cases fails here, before it can ship a
+    comparison nobody has watched fail.
 
-    known_universes = {u for us in CLASS_UNIVERSES.values() for u in us} | {
-        "copy", "slots", "states", "treatments", "frames"
-    }
+    Tiled per *arm*, because round 14 showed two full projections hiding an empty
+    cell. Every class had a `token` case and every universe had one, so both
+    2-D views read full, while class A's reading of the §0.5 registry had no case
+    for any rule and three findings came back out of it. The grid is the product
+    now, and the exemptions are read at three grains: this class everywhere, this
+    universe everywhere, or this one arm.
+    """
+    from scripts.check_model_hub_ui_states import (
+        CLASS_UNIVERSES,
+        CLASSES,
+        RULES,
+        UNIVERSES,
+    )
+
+    for name in sorted({u for us in CLASS_UNIVERSES.values() for u in us}):
+        assert name in UNIVERSES, f"{name} is consulted by a class and declared by nothing"
     for case in GATE_MUTATIONS:
         assert case.cls in CLASSES, f"{case.label}: class {case.cls} is not a gate class"
         assert case.rule in (*RULES, "arm"), f"{case.label}: {case.rule} is not a rule"
-        assert case.universe is None or case.universe in known_universes, (
-            f"{case.label}: {case.universe} is not a universe the gate builds"
+        assert case.universe is None or case.universe in UNIVERSES, (
+            f"{case.label}: {case.universe} is not a universe the gate declares"
+        )
+        if case.universe:
+            assert case.universe in CLASS_UNIVERSES[case.cls], (
+                f"{case.label}: class {case.cls} does not declare that it reads {case.universe}"
+            )
+
+    covered = {(c.cls, c.universe, c.rule) for c in GATE_MUTATIONS if c.universe}
+
+    def why(cls: str, name: str, rule: str) -> str | None:
+        return (
+            UNREACHABLE_BY_ARM.get((cls, name, rule))
+            or UNREACHABLE_BY_CLASS.get((cls, rule))
+            or UNREACHABLE_BY_UNIVERSE.get((name, rule))
         )
 
-    by_class = {(c.cls, c.rule) for c in GATE_MUTATIONS}
-    by_universe = {(c.universe, c.rule) for c in GATE_MUTATIONS if c.universe}
-
     missing = [
-        (cls, rule)
-        for cls in CLASSES
+        (cls, name, rule)
+        for cls, names in sorted(CLASS_UNIVERSES.items())
+        for name in names
         for rule in RULES
-        if (cls, rule) not in by_class and (cls, rule) not in UNREACHABLE_BY_CLASS
+        if (cls, name, rule) not in covered and not why(cls, name, rule)
     ]
-    assert not missing, f"classes with no case and no declared reason: {missing}"
-
-    missing = [
-        (name, rule)
-        for name in sorted(known_universes)
-        for rule in RULES
-        if (name, rule) not in by_universe and (name, rule) not in UNREACHABLE_BY_UNIVERSE
-    ]
-    assert not missing, f"universes with no case and no declared reason: {missing}"
+    assert not missing, f"arms with no case and no declared reason: {missing}"
 
     # An exemption that has been overtaken by a real case is a lie the next
     # reader would believe, and a reason nobody wrote is not an exemption.
-    for cell, why in {**UNREACHABLE_BY_CLASS, **UNREACHABLE_BY_UNIVERSE}.items():
-        assert why.strip(), f"{cell} is exempted with no reason"
-    for cell in UNREACHABLE_BY_CLASS:
-        assert cell not in by_class, f"{cell} is exempted and also covered"
-    for cell in UNREACHABLE_BY_UNIVERSE:
-        assert cell not in by_universe, f"{cell} is exempted and also covered"
+    exemptions = {**UNREACHABLE_BY_ARM, **UNREACHABLE_BY_CLASS, **UNREACHABLE_BY_UNIVERSE}
+    for cell, reason in exemptions.items():
+        assert reason.strip(), f"{cell} is exempted with no reason"
+    for cell in UNREACHABLE_BY_ARM:
+        assert cell not in covered, f"{cell} is exempted and also covered"
+    for cls, rule in UNREACHABLE_BY_CLASS:
+        clash = [c for c in covered if c[0] == cls and c[2] == rule]
+        assert not clash, f"({cls}, {rule}) is exempted for the whole class and also covered: {clash}"
+    for name, rule in UNREACHABLE_BY_UNIVERSE:
+        clash = [c for c in covered if c[1] == name and c[2] == rule]
+        assert not clash, f"({name}, {rule}) is exempted for the whole universe and also covered: {clash}"
+
+    # What this guard does not prove: that a case is a *good* case. It asserts the
+    # cell has one and that the gate names the right class and sentence, not that
+    # the mutation is the worst one available. `arm` cases are outside the grid
+    # entirely — they answer no cell and are only required to keep working.
+
+
+def test_every_universe_the_gate_builds_is_declared():
+    """The declaration is checked against the universes, not maintained beside them.
+
+    A list of names is a list of names: the tiling suite used to hold its own,
+    written out in this file, so the §0.5 registry — built by a dict
+    comprehension outside the comparator — was missing from the gate's idea of
+    "every universe" and from the test's, independently. Reading the built
+    objects back makes the two impossible to disagree: a universe built and not
+    declared fails here, and one declared and never built fails too.
+    """
+    from scripts.check_model_hub_ui_states import (
+        UNIVERSE_SIDES,
+        Document,
+        Origin,
+        Universe,
+        authority_claims,
+        load_authorities,
+        parse,
+        registered_gaps,
+    )
+
+    here = Origin.tree_at(ROOT)
+    doc = Document((ROOT / SPEC).read_text(encoding="utf-8"))
+    auth = load_authorities(here)
+    # `repo symbols` is filled while class E runs, so the run is what declares it.
+    authority_claims(doc, auth, here, [], registered_gaps(doc))
+
+    built = {u.name: u.side for u in parse(doc)["universes"].values()}
+    built |= {k: v.side for k, v in auth.items() if isinstance(v, Universe)}
+    assert built == UNIVERSE_SIDES
 
 
 def test_authority_side_universes_report_a_duplicate_definition():

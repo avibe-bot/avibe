@@ -448,12 +448,36 @@ class Universe:
 # `routes` because it reads that universe as an inventory: it enumerates the
 # contracted mutations and asks which of them nothing reaches.
 CLASS_UNIVERSES: dict[str, tuple[str, ...]] = {
-    "A": ("routes", "states", "treatments"),
+    "A": ("routes", "states", "treatments", "gaps"),
     "B": ("copy", "slots"),
     "C": ("frames",),
     "D": ("copy",),
-    "E": ("routes", "schema files", "schema fields", "repo symbols"),
+    "E": ("routes", "schema files", "schema fields", "repo symbols", "gaps"),
 }
+
+# Every universe this module builds, and which side fills it. The tiled mutation
+# suite used to union `CLASS_UNIVERSES` with a list of names written out in the
+# test, which meant the test's idea of "every universe" was maintained by hand,
+# in a second file — so a collection built by hand here was invisible to it
+# twice over. The §0.5 gap registry lived exactly there: a dict comprehension,
+# outside the comparator, uncovered by the grid that reports itself full.
+#
+# Declaring it here is what makes the grid self-proving: a universe added
+# without its cases fails the suite, and a universe named in `CLASS_UNIVERSES`
+# but never built — or built but never declared — fails it too.
+UNIVERSE_SIDES: dict[str, str] = {
+    "copy": "spec",
+    "slots": "spec",
+    "states": "spec",
+    "treatments": "spec",
+    "frames": "spec",
+    "gaps": "spec",
+    "routes": "authority",
+    "schema files": "authority",
+    "schema fields": "authority",
+    "repo symbols": "authority",
+}
+UNIVERSES: tuple[str, ...] = tuple(UNIVERSE_SIDES)
 
 # The class list, spelled once. It was spelled `"ABCDE"` in the reporter and as
 # the keys of the label table, so a sixth class could be checked and never
@@ -698,13 +722,37 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
 
 
 def defined_symbols(source: str) -> set[str]:
-    """Top-level and class-level names a Python file defines."""
+    """The names a Python file defines that a reader can go and look at.
+
+    A citation like `service.py:list_agents` promises the reader an addressable
+    symbol: something a module or a class declares, which a reviewer can reach by
+    name. `ast.walk` credited every assignment anywhere, so a local variable
+    three frames into a function body vouched for a citation — the identity rule
+    inverted, since it made a name the file does *not* export resolve as if it
+    did, and it hid the exact drift this class is here to catch.
+
+    The rule is one line: a name bound inside a function body belongs to that
+    body. So the descent records defs and classes and skips their bodies —
+    entering class bodies, because a method is addressable and is how the two
+    live citations name their functions, and never entering function bodies,
+    lambdas or comprehensions, whose bindings are local by definition.
+    """
     names: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            names.add(node.id)
+
+    def scan(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(child.name)
+                continue
+            if isinstance(child, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                continue
+            if isinstance(child, ast.ClassDef):
+                names.add(child.name)
+            elif isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                names.add(child.id)
+            scan(child)
+
+    scan(ast.parse(source))
     return names
 
 
@@ -1038,9 +1086,12 @@ def parse(doc: Document) -> dict[str, Any]:
             # uncovered the moment one side spells a parameter the other way.
             routes.append((sec, n, normalize_route(meth, path)))
 
+    # Built here, once, because a universe built per caller is a universe whose
+    # duplicate rule reports per caller: the registry was read twice, by two arms,
+    # and neither could see the other's copy.
     return {
         "register": register,
-        "universes": {u.name: u for u in (copy, slots, states, treatments, frames)},
+        "universes": {u.name: u for u in (copy, slots, states, treatments, frames, registered_gaps(doc))},
         "tables": tables,
         "rows": rows,
         "refs": refs,
@@ -1124,8 +1175,8 @@ GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)")
 GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 
 
-def registered_gaps(doc: Document) -> dict[str, int]:
-    """Gap number -> the §0.5 line registering it.
+def registered_gaps(doc: Document) -> Universe:
+    """The §0.5 registry, as a universe: gap number -> the line registering it.
 
     `[contract-gap]` is the document's one way to say "this surface has no
     backend behind it", and it is also the one way to tell a checker not to ask
@@ -1143,8 +1194,33 @@ def registered_gaps(doc: Document) -> dict[str, int]:
     thing this marker must never be cheap enough to do by accident. The row's
     line is kept so the arms that ask "is this scope itself a registration?" can
     ask about *this* row rather than re-testing the shape.
+
+    A universe, not a plain dict, because a silencer is a name and every name in
+    this checker is compared in one place. Built by hand, this registry answered
+    `G-19` twice by keeping whichever row came last — a second, contradicting row
+    silently replacing the first is the one outcome a register of missing
+    behaviour may not have — and its references were matched by set intersection,
+    which is a second comparison nobody had watched fail. The content is the row
+    itself: re-stating a row verbatim is a document repeating itself, while two
+    rows under one number saying different things are two answers to "what is
+    missing", and `E` reports them, because a gap row is a claim about the
+    contract and that is the class that checks those.
     """
-    return {m.group(1): n for n, line in doc.scope("gap registry") if (m := GAP_ROW_RE.match(line))}
+    gaps = Universe("gaps", "spec", "E")
+    for n, line in doc.scope("gap registry"):
+        if m := GAP_ROW_RE.match(line):
+            gaps.define(m.group(1), n, content=line.strip(), where=n)
+    return gaps
+
+
+def cites_a_registered_gap(gaps: Universe, text: str) -> bool:
+    """Does `text` point at a §0.5 row that exists? The one gap comparison.
+
+    Both arms that honour the marker — class A's route coverage and class E's
+    claim check — ask through here, so neither can drift into a spelling of its
+    own.
+    """
+    return any(not gaps.resolve(g).empty for g in GAP_REF_RE.findall(text))
 
 
 # A class whose correct value is zero cannot use "empty means the extractor
@@ -1169,7 +1245,8 @@ def self_test(auth: dict[str, Any], origin: Origin) -> list[str]:
     """Prove the target-zero arms still fire before believing their zeros."""
     broken: list[str] = []
     for fixture, want_counted, want_finding in SELF_TEST:
-        found, scale = authority_claims(Document(fixture), auth, origin, [])
+        fdoc = Document(fixture)
+        found, scale = authority_claims(fdoc, auth, origin, [], registered_gaps(fdoc))
         counted = scale["vocabulary claims"] > 0
         reported = any(f["class"] == "E" and "not" in f["message"] for f in found)
         if counted is not want_counted or reported is not want_finding:
@@ -1180,7 +1257,7 @@ def self_test(auth: dict[str, Any], origin: Origin) -> list[str]:
     return broken
 
 
-def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, register: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, int]]:
+def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, register: list[dict[str, Any]], gaps: Universe) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Class E — every factual claim the spec makes, against the file that owns it.
 
     Returns the findings and the input scale. The scale is not decoration: this
@@ -1206,8 +1283,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
     auth["repo symbols"] = symbols
     read_files: set[str] = set()
 
-    gaps = registered_gaps(doc)
-    registrations = set(gaps.values())
+    registrations = {line_no for _token, line_no in gaps.items()}
 
     guarded_named: dict[str, int] = {}
     for line_no, scope in doc.claims():
@@ -1218,7 +1294,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         # this scope a registration?" is answered by the registry's own line
         # numbers, not by re-testing the row shape here — that shape matches
         # anywhere, including the places §0.5 is quoted.
-        exempt = line_no in registrations or bool(gaps.keys() & set(GAP_REF_RE.findall(scope)))
+        exempt = line_no in registrations or cites_a_registered_gap(gaps, scope)
         # Where each route is written, not just which routes appear: a body
         # literal is bound to one route, and binding needs positions.
         mentions = [
@@ -1486,7 +1562,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # something the product does not do. That exception is exactly a registered
     # gap, so it is spelled as one: the scope has to name a G-number §0.5
     # defines. Anything less specific silences the check for free.
-    gaps = registered_gaps(doc)
+    gaps = p["universes"]["gaps"]
     # Keyed by every line a scope spans, not by the line it starts on: a route
     # sits three lines into a paragraph as often as on its first line, and a map
     # keyed by starts silently misses those.
@@ -1494,15 +1570,21 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     for ln, s in doc.claims():
         for offset in range(s.count("\n") + 1):
             scope_at[ln + offset] = s
-    seen: set[str] = set()
+    # One finding per route, decided per occurrence. Deduplicating first read the
+    # exemption of whichever mention came earliest in the file and applied it to
+    # every other mention: one paragraph carrying a `[contract-gap]` marker
+    # silenced the same route everywhere else, including where it was drawn as a
+    # live affordance owing §0.8 a state. An excuse belongs to the sentence that
+    # writes it, so the verdict is reached first and only then collapsed.
+    scanned: set[str] = set()
+    reported: set[str] = set()
     for sec, line, call in p["routes"]:
-        if call in seen:
+        scanned.add(call)
+        if call in covered_routes or call in reported:
             continue
-        seen.add(call)
-        if call in covered_routes:
+        if cites_a_registered_gap(gaps, scope_at.get(line, "")):
             continue
-        if gaps.keys() & set(GAP_REF_RE.findall(scope_at.get(line, ""))):
-            continue
+        reported.add(call)
         add("A", f"§{sec} L{line}", f"{call} is named by no §0.8 row")
     for r in reg:
         cell = r["failure"]
@@ -1652,7 +1734,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         add("D", f"L{row['line']}", f"condition key `{row['key']}` is cited by no §0.8 row")
 
     # ---- E ------------------------------------------------------------------
-    e_findings, e_scale = authority_claims(doc, auth, origin, reg)
+    e_findings, e_scale = authority_claims(doc, auth, origin, reg, gaps)
     findings.extend(e_findings)
 
     # ---- the duplicate rule, for every universe at once ---------------------
@@ -1680,7 +1762,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "distinct states": len(states),
         "frames with a register row": len(reg_frames),
         "frame sections with an element inventory": len(p["inventories"]),
-        "mutating calls scanned": len(seen),
+        "mutating calls scanned": len(scanned),
         "contracted mutations to reach": len(contracted_mutations),
         "copy tables / rows": f"{p['tables']} / {p['rows']}",
         "copy keys defined": len(copy_u),
