@@ -151,6 +151,13 @@ def regression_env(suffix: str, default: str = "") -> str:
     return value.strip()
 
 
+def voice_realtime_build_env() -> str:
+    value = regression_env("VOICE_REALTIME_ENABLED", "false").lower()
+    if value not in {"true", "false"}:
+        raise RegressionError("REGRESSION_VOICE_REALTIME_ENABLED must be true or false.")
+    return value
+
+
 def host_bind_env(default: str = "127.0.0.1") -> str:
     return (
         regression_env("PORT_BIND_HOST")
@@ -856,6 +863,7 @@ def compute_fingerprints(repo_root: Path) -> dict:
                 "ui/tsconfig.node.json",
             ],
         ),
+        f"voice_realtime={voice_realtime_build_env()}",
     ]
     return {
         "python": file_hash(repo_root, ["pyproject.toml", "uv.lock"]),
@@ -919,6 +927,7 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
         "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL", ""),
         "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
+        "VITE_VOICE_REALTIME_ENABLED": voice_realtime_build_env(),
     }
     for key, value in os.environ.items():
         if key == "REGRESSION_UI_HOST":

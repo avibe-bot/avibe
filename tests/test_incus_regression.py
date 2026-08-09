@@ -535,9 +535,23 @@ def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None
     assert before != after
 
 
+def test_voice_realtime_build_flag_is_part_of_ui_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
+    before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
+    after = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    assert before != after
+
+
 def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", "main")
     monkeypatch.setenv("REGRESSION_SLACK_CHANNEL", "C123")
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     payload = incus_regression.runtime_env_payload().decode()
@@ -548,7 +562,20 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     assert "VIBE_SHOW_RUNTIME_SOURCE=github-source" in payload
     assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload
+    assert "VITE_VOICE_REALTIME_ENABLED=true" in payload
     assert "OPENAI_API_KEY=sk-test" in payload
+
+
+def test_runtime_env_payload_rejects_invalid_voice_realtime_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "enabled")
+
+    with pytest.raises(
+        incus_regression.RegressionError,
+        match="REGRESSION_VOICE_REALTIME_ENABLED must be true or false",
+    ):
+        incus_regression.runtime_env_payload()
 
 
 def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.MonkeyPatch) -> None:
