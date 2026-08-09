@@ -1233,6 +1233,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if args.pr is not None and token is None and not args.include_self_comments:
+        print(
+            "Unauthenticated PR watches require --include-self-comments because viewer identity cannot be resolved.",
+            file=sys.stderr,
+        )
+        return 2
 
     watch_identity = _watch_identity(args)
     watch_id = _managed_watch_id()
@@ -1241,6 +1247,12 @@ def main() -> int:
     # told whether the report was queued. A manual run is one process whose stdout is
     # the delivery, so staging there would leave cursors nobody ever promotes.
     two_phase = watch_id is not None
+    if two_phase and not args.state_file:
+        print(
+            "Managed PR watchers require an owner-specific --state-file; refusing to poll without durable cursors.",
+            file=sys.stderr,
+        )
+        return 2
     _verify_state_file_writable(
         args.state_file,
         repo=args.repo,
@@ -1316,7 +1328,7 @@ def main() -> int:
     # contains the PR's full history.
     resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
     resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
-    if two_phase and args.state_file and not args.catch_up:
+    if two_phase and not args.catch_up:
         seeded = _saved_int(saved, "pr_cursor") is not None if args.new_prs else resumed
         if not seeded:
             print(
