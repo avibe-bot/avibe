@@ -35,4 +35,41 @@ describe('WindowManagerProvider focus ownership', () => {
     expect(manager!.focusedId).toBeNull();
     expect(manager!.windows.find((window) => window.id === windowId)?.minimized).toBe(false);
   });
+
+  it('transfers focus to the highest visible window when the owner closes or minimizes', () => {
+    let manager: WindowManagerValue | null = null;
+    const Probe = () => {
+      const value = useWindowManager();
+      useEffect(() => {
+        manager = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WindowManagerProvider>
+        <Probe />
+      </WindowManagerProvider>,
+    );
+
+    let firstId = '';
+    let secondId = '';
+    act(() => {
+      firstId = manager!.openApp('files');
+      secondId = manager!.openApp('files');
+    });
+    expect(manager!.focusedId).toBe(secondId);
+
+    act(() => manager!.close(secondId));
+    expect(manager!.focusedId).toBe(firstId);
+
+    let thirdId = '';
+    act(() => {
+      thirdId = manager!.openApp('files');
+    });
+    expect(manager!.focusedId).toBe(thirdId);
+
+    act(() => manager!.minimize(thirdId));
+    expect(manager!.focusedId).toBe(firstId);
+  });
 });

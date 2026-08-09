@@ -23,6 +23,12 @@ const DEFAULT_SIZE = { width: 760, height: 520 };
 const CASCADE_STEP = 32;
 const CASCADE_WRAP = 6;
 
+function highestVisibleWindow(windows: readonly WindowInstance[]): WindowInstance | null {
+  return windows
+    .filter((window) => !window.minimized)
+    .reduce<WindowInstance | null>((top, window) => (!top || window.z > top.z ? window : top), null);
+}
+
 // Persistence is desktop-only: the window layer is `hidden md:block` and windowed apps open only
 // from the desktop-only launcher/Dock, so restoring windows below md would mount invisible bodies
 // and a `[]` save from a phone would clobber a real desktop layout. Read live (not frozen at mount)
@@ -212,14 +218,16 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
     closeGuards.current.delete(id);
     stateProviders.current.delete(id);
     closingIds.current.delete(id);
-    setFocusedId((current) => (current === id ? null : current));
-    setWindows((prev) => prev.filter((w) => w.id !== id));
-  }, []);
+    const nextWindows = windowsRef.current.filter((window) => window.id !== id);
+    setFocusedId((current) => (current === id ? highestVisibleWindow(nextWindows)?.id ?? null : current));
+    setWindows(nextWindows);
+  }, [windowsRef]);
 
   const minimize = useCallback((id: string) => {
-    setFocusedId((current) => (current === id ? null : current));
-    setWindows((prev) => prev.map((w) => (w.id === id ? { ...w, minimized: true } : w)));
-  }, []);
+    const nextWindows = windowsRef.current.map((window) => (window.id === id ? { ...window, minimized: true } : window));
+    setFocusedId((current) => (current === id ? highestVisibleWindow(nextWindows)?.id ?? null : current));
+    setWindows(nextWindows);
+  }, [windowsRef]);
 
   const restore = useCallback(
     (id: string) => {
