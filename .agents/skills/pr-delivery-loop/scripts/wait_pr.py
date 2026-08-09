@@ -11,7 +11,6 @@ import re
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.parse
 from contextlib import contextmanager
 from functools import partial
@@ -30,10 +29,11 @@ if str(SCRIPT_DIR) not in sys.path:
 from _github_wait_common import (  # noqa: E402
     filter_new,
     get_token,
+    GitHubProtocolError,
+    GitHubRequestResult,
     github_get,
     github_graphql,
-    InitialRequestRetriesExhausted,
-    is_retryable_http_error,
+    github_request,
     LAST_DELIVERY_ENV,
     list_paginated,
     list_paginated_with_count,
@@ -379,17 +379,17 @@ def _fetch_review_threads(
         pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
         connection = pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
         if not isinstance(connection, dict):
-            raise RuntimeError("GitHub GraphQL response has no reviewThreads connection")
+            raise GitHubProtocolError("GitHub GraphQL response has no reviewThreads connection")
         nodes = connection.get("nodes")
         if not isinstance(nodes, list):
-            raise RuntimeError("GitHub GraphQL reviewThreads response has no nodes list")
+            raise GitHubProtocolError("GitHub GraphQL reviewThreads response has no nodes list")
         threads.extend(node for node in nodes if isinstance(node, dict))
         page_info = connection.get("pageInfo")
         if not isinstance(page_info, dict) or page_info.get("hasNextPage") is not True:
             break
         next_cursor = page_info.get("endCursor")
         if not isinstance(next_cursor, str) or not next_cursor:
-            raise RuntimeError("GitHub GraphQL reviewThreads page has no endCursor")
+            raise GitHubProtocolError("GitHub GraphQL reviewThreads page has no endCursor")
         end_cursor = next_cursor
     return threads, request_count
 
@@ -1682,20 +1682,14 @@ def main() -> int:
         if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
             viewer_login = _saved_str(saved, "viewer_login")
         if viewer_login is None:
-            try:
-                viewer_login = retry_initial_request(
-                    partial(resolve_authenticated_login, token),
-                    description="GitHub viewer lookup",
-                )
-            except urllib.error.HTTPError as err:
-                print(f"GitHub viewer lookup failed: {err.code} {err.reason}", file=sys.stderr)
+            viewer_result = retry_initial_request(
+                lambda: resolve_authenticated_login(token),
+                description="GitHub viewer lookup",
+            )
+            if viewer_result.error is not None:
+                print(f"GitHub viewer lookup failed: {viewer_result.error}", file=sys.stderr)
                 return 1
-            except InitialRequestRetriesExhausted as err:
-                print(str(err), file=sys.stderr)
-                return 1
-            except Exception as err:  # noqa: BLE001
-                print(f"GitHub viewer lookup failed: {err}", file=sys.stderr)
-                return 1
+            viewer_login = viewer_result.value
         if not viewer_login:
             print(
                 "GitHub viewer identity could not be resolved; pass --include-self-comments explicitly to continue.",
@@ -1767,39 +1761,35 @@ def main() -> int:
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
 
-    try:
-        if args.pr is not None:
-            state, requests_per_poll_count = retry_initial_request(
-                partial(_fetch_state, args.repo, args.pr, token, cache=cache),
-                description="initial GitHub PR state request",
-            )
-        else:
-            initial_pr_stop_after_id = None
-            initial_pr_max_pages = None
-            if since_pr_id is not None and not args.catch_up:
-                initial_pr_stop_after_id = since_pr_id
-            elif not args.catch_up:
-                initial_pr_max_pages = 1
-            state, requests_per_poll_count = retry_initial_request(
-                partial(
-                    _fetch_new_pr_state,
-                    args.repo,
-                    token,
-                    stop_after_id=initial_pr_stop_after_id,
-                    max_pages=initial_pr_max_pages,
-                    cache=cache,
-                ),
-                description="initial GitHub pull-request list request",
-            )
-    except urllib.error.HTTPError as err:
-        print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
+    if args.pr is not None:
+        initial_request = retry_initial_request(
+            lambda: _fetch_state(args.repo, args.pr, token, cache=cache),
+            description="initial GitHub PR state request",
+        )
+    else:
+        initial_pr_stop_after_id = None
+        initial_pr_max_pages = None
+        if since_pr_id is not None and not args.catch_up:
+            initial_pr_stop_after_id = since_pr_id
+        elif not args.catch_up:
+            initial_pr_max_pages = 1
+        initial_request = retry_initial_request(
+            lambda: _fetch_new_pr_state(
+                args.repo,
+                token,
+                stop_after_id=initial_pr_stop_after_id,
+                max_pages=initial_pr_max_pages,
+                cache=cache,
+            ),
+            description="initial GitHub pull-request list request",
+        )
+    if initial_request.error is not None:
+        print(f"Failed to fetch initial PR state: {initial_request.error}", file=sys.stderr)
         return 1
-    except InitialRequestRetriesExhausted as err:
-        print(str(err), file=sys.stderr)
+    if initial_request.value is None:
+        print("Initial GitHub request completed without a result", file=sys.stderr)
         return 1
-    except Exception as err:  # noqa: BLE001
-        print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
-        return 1
+    state, requests_per_poll_count = initial_request.value
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -1992,12 +1982,14 @@ def main() -> int:
         def _settle(
             first: tuple[str | None, int, int, int, int, str, str, dict[str, Any]],
             pending: tuple[int, int, int, int, str, str, dict[str, Any]],
-        ) -> tuple[str | None, int, int, int, int, str, str, dict[str, Any]]:
+        ) -> GitHubRequestResult[
+            tuple[str | None, int, int, int, int, str, str, dict[str, Any]]
+        ]:
             """Re-poll while a batch is still landing so it costs one Agent turn."""
 
             nonlocal state
             if settle_seconds <= 0:
-                return first
+                return GitHubRequestResult(value=first)
 
             best = first
             for _round in range(SETTLE_MAX_ROUNDS):
@@ -2016,30 +2008,40 @@ def main() -> int:
                             "reporting the batch seen so far.",
                             file=sys.stderr,
                         )
-                        return best
+                        return GitHubRequestResult(value=best)
                 time.sleep(settle_seconds)
-                try:
-                    state, _count = _fetch_state(
+                settle_request = github_request(
+                    lambda: _fetch_state(
                         args.repo,
                         args.pr,
                         token,
                         cache=cache,
                     )
-                except Exception as err:  # noqa: BLE001
+                )
+                if settle_request.error is not None:
                     print(
-                        f"Settle re-poll failed; reporting the batch as first seen: {err}",
+                        f"Settle re-poll failed: {settle_request.error}",
                         file=sys.stderr,
                     )
-                    return best
+                    if settle_request.error.retryable:
+                        continue
+                    return GitHubRequestResult(error=settle_request.error)
+                if settle_request.value is None:
+                    return GitHubRequestResult(
+                        error=GitHubProtocolError(
+                            "Settle GitHub request completed without a result"
+                        )
+                    )
+                state, _count = settle_request.value
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
                 candidate = _render(pending)
                 if candidate[0] is None:
-                    return best
+                    return GitHubRequestResult(value=best)
                 if candidate[1:] == best[1:]:
-                    return candidate
+                    return GitHubRequestResult(value=candidate)
                 best = candidate
-            return best
+            return GitHubRequestResult(value=best)
 
         pending_cursors = (
             review_cursor,
@@ -2053,7 +2055,13 @@ def main() -> int:
         pre_event_fields = _pr_state_fields()
         initial_result = _render(pending_cursors)
         if initial_result[0] is not None and not args.catch_up:
-            initial_result = _settle(initial_result, pending_cursors)
+            settle_result = _settle(initial_result, pending_cursors)
+            if settle_result.error is not None:
+                return 1
+            if settle_result.value is None:
+                print("Settle request completed without a result", file=sys.stderr)
+                return 1
+            initial_result = settle_result.value
         review_fingerprints = _review_fingerprint_map(state["reviews"])
         review_comment_fingerprints = _comment_fingerprint_map(state["review_comments"])
         issue_comment_fingerprints = _comment_fingerprint_map(state["issue_comments"])
@@ -2151,42 +2159,37 @@ def main() -> int:
 
         time.sleep(sleep_seconds)
 
-        try:
-            if args.pr is not None:
-                state, requests_per_poll_count = _fetch_state(
+        if args.pr is not None:
+            poll_request = github_request(
+                lambda: _fetch_state(
                     args.repo,
                     args.pr,
                     token,
                     cache=cache,
                 )
-            else:
-                state, requests_per_poll_count = _fetch_new_pr_state(
+            )
+        else:
+            poll_request = github_request(
+                lambda: _fetch_new_pr_state(
                     args.repo,
                     token,
                     stop_after_id=pr_cursor if pr_cursor > 0 else None,
                     cache=cache,
                 )
-        except urllib.error.HTTPError as err:
-            if token is None and err.code in {403, 429}:
+            )
+        if poll_request.error is not None:
+            print(f"GitHub polling failed: {poll_request.error}", file=sys.stderr)
+            if poll_request.error.retryable:
                 print(
-                    (
-                        "GitHub unauthenticated polling hit a rate limit. "
-                        "Authenticate with 'gh auth login' or GITHUB_TOKEN/GH_TOKEN."
-                    ),
-                    file=sys.stderr,
-                )
-                return 1
-            print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            if is_retryable_http_error(err):
-                print(
-                    f"Retryable GitHub API error during polling: {err.code} {err.reason}; continuing in this watch",
+                    "Retryable GitHub request failure; continuing in this watch",
                     file=sys.stderr,
                 )
                 continue
             return 1
-        except Exception as err:  # noqa: BLE001
-            print(f"Polling failed: {err}", file=sys.stderr)
-            continue
+        if poll_request.value is None:
+            print("GitHub polling completed without a result", file=sys.stderr)
+            return 1
+        state, requests_per_poll_count = poll_request.value
 
         if token is None:
             unauthenticated_min = min_interval_for_unauthenticated(requests_per_poll_count)
@@ -2225,7 +2228,13 @@ def main() -> int:
             pre_event_fields = _pr_state_fields()
             result = _render(pending_cursors)
             if result[0] is not None:
-                result = _settle(result, pending_cursors)
+                settle_result = _settle(result, pending_cursors)
+                if settle_result.error is not None:
+                    return 1
+                if settle_result.value is None:
+                    print("Settle request completed without a result", file=sys.stderr)
+                    return 1
+                result = settle_result.value
             review_fingerprints = _review_fingerprint_map(state["reviews"])
             review_comment_fingerprints = _comment_fingerprint_map(state["review_comments"])
             issue_comment_fingerprints = _comment_fingerprint_map(state["issue_comments"])

@@ -7,7 +7,6 @@ import argparse
 import json
 import sys
 import time
-import urllib.error
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -17,12 +16,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _github_wait_common import (  # noqa: E402
-    InitialRequestRetriesExhausted,
+    GitHubProtocolError,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
     get_token,
     github_get,
-    is_retryable_http_error,
+    github_request,
     min_interval_for_unauthenticated,
     no_event,
     retry_initial_request,
@@ -55,10 +54,10 @@ def _fetch_workflow_runs(
         payload = github_get(url, token)
         request_count += 1
         if not isinstance(payload, dict):
-            raise RuntimeError(f"Expected a JSON object from {url}")
+            raise GitHubProtocolError(f"Expected a JSON object from {url}")
         page_runs = payload.get("workflow_runs")
         if not isinstance(page_runs, list):
-            raise RuntimeError(f"Expected workflow_runs list from {url}")
+            raise GitHubProtocolError(f"Expected workflow_runs list from {url}")
         runs.extend(run for run in page_runs if isinstance(run, dict))
         if len(page_runs) < 100:
             break
@@ -250,58 +249,43 @@ def main() -> int:
     while True:
         first_poll = poll_attempt == 0
         poll_attempt += 1
-        try:
-            if first_poll:
-                runs, request_count = retry_initial_request(
-                    lambda: _fetch_workflow_runs(
-                        args.repo,
-                        token,
-                        branch=args.branch,
-                        head_sha=args.sha,
-                        max_pages=args.max_pages,
-                    ),
-                    description="initial GitHub Actions request",
-                )
-            else:
-                runs, request_count = _fetch_workflow_runs(
+        if first_poll:
+            request_result = retry_initial_request(
+                lambda: _fetch_workflow_runs(
+                    args.repo,
+                    token,
+                    branch=args.branch,
+                    head_sha=args.sha,
+                    max_pages=args.max_pages,
+                ),
+                description="initial GitHub Actions request",
+            )
+        else:
+            request_result = github_request(
+                lambda: _fetch_workflow_runs(
                     args.repo,
                     token,
                     branch=args.branch,
                     head_sha=args.sha,
                     max_pages=args.max_pages,
                 )
-        except InitialRequestRetriesExhausted as err:
-            print(str(err), file=sys.stderr)
-            return 1
-        except urllib.error.HTTPError as err:
-            if token is None and err.code in {403, 429}:
-                print(
-                    (
-                        "GitHub unauthenticated polling hit a rate limit. "
-                        "Authenticate with 'gh auth login' or GITHUB_TOKEN/GH_TOKEN."
-                    ),
-                    file=sys.stderr,
-                )
-                return 1
-            if not is_retryable_http_error(err):
-                print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
+            )
+
+        if request_result.error is not None:
+            print(str(request_result.error), file=sys.stderr)
+            if first_poll or not request_result.error.retryable:
                 return 1
             print(
-                f"Retryable GitHub API error during polling: {err.code} {err.reason}; continuing in this watch",
+                "Retryable GitHub request failure during polling; continuing in this watch",
                 file=sys.stderr,
             )
             runs = []
             request_count = 0
-        except urllib.error.URLError as err:
-            print(f"GitHub network error: {err.reason}", file=sys.stderr)
-            runs = []
-            request_count = 0
-        except Exception as err:  # noqa: BLE001
-            print(f"Polling failed: {err}", file=sys.stderr)
-            if first_poll:
+        else:
+            if request_result.value is None:
+                print("GitHub request completed without a result", file=sys.stderr)
                 return 1
-            runs = []
-            request_count = 0
+            runs, request_count = request_result.value
 
         if token is None and request_count > 0:
             bootstrap_requests = request_count if first_successful_fetch else 0

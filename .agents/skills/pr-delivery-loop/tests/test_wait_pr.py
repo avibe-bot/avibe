@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
@@ -16,6 +17,7 @@ sys.modules[SPEC.name] = wait_pr
 SPEC.loader.exec_module(wait_pr)
 
 ACTION_SCRIPT = Path(__file__).parents[1] / "scripts" / "wait_action.py"
+COMMON_SCRIPT = Path(__file__).parents[1] / "scripts" / "_github_wait_common.py"
 ACTION_SPEC = importlib.util.spec_from_file_location("repo_local_wait_action", ACTION_SCRIPT)
 assert ACTION_SPEC and ACTION_SPEC.loader
 wait_action = importlib.util.module_from_spec(ACTION_SPEC)
@@ -768,3 +770,174 @@ def test_initial_action_request_exits_after_transient_retry_budget(monkeypatch, 
     assert wait_action.main() == 1
     assert attempts == github_wait_common.INITIAL_REQUEST_MAX_ATTEMPTS
     assert "failed after 3 attempts" in capsys.readouterr().err
+
+
+def test_terminal_graphql_errors_exit_after_one_response(monkeypatch, tmp_path, capsys):
+    fetches = 0
+    responses = 0
+
+    class _Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            nonlocal responses
+            responses += 1
+            return json.dumps({"errors": [{"message": "forbidden"}]}).encode()
+
+    def _fetch(*_args, **_kwargs):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 1:
+            return _pr_state(), 1
+        github_wait_common.github_graphql("query", {}, "token")
+        raise AssertionError("terminal GraphQL response did not stop the fetch")
+
+    monkeypatch.setattr(wait_pr, "get_token", lambda: "token")
+    monkeypatch.setattr(wait_pr, "_fetch_state", _fetch)
+    monkeypatch.setattr(wait_pr.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(github_wait_common.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "1213",
+            "--include-self-comments",
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--settle",
+            "0",
+        ],
+    )
+
+    assert wait_pr.main() == 1
+    assert fetches == 2
+    assert responses == 1
+    assert "GitHub GraphQL error" in capsys.readouterr().err
+
+
+def test_transient_polling_failure_recovers(monkeypatch, tmp_path, capsys):
+    fetches = 0
+    activity = _pr_state(
+        issue_comments=[
+            {
+                "id": 1,
+                "body": "actionable",
+                "user": {"login": "reviewer"},
+                "html_url": "https://example.invalid/comment/1",
+            }
+        ]
+    )
+
+    def _fetch(*_args, **_kwargs):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 1:
+            return _pr_state(), 1
+        if fetches == 2:
+            raise TimeoutError("socket timed out")
+        return activity, 1
+
+    monkeypatch.setattr(wait_pr, "get_token", lambda: "token")
+    monkeypatch.setattr(wait_pr, "_fetch_state", _fetch)
+    monkeypatch.setattr(wait_pr.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "1213",
+            "--include-self-comments",
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--settle",
+            "0",
+        ],
+    )
+
+    assert wait_pr.main() == 0
+    assert fetches == 3
+    captured = capsys.readouterr()
+    assert "Retryable GitHub request failure" in captured.err
+    assert "issue_comment #1" in captured.out
+
+
+def _call_name(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def test_github_request_taxonomy_is_the_only_exception_boundary():
+    scripts = (COMMON_SCRIPT, SCRIPT, ACTION_SCRIPT)
+    allowed_broad_handlers = {"github_request", "_read_github_json"}
+    operation_names = {
+        "_fetch_new_pr_state",
+        "_fetch_state",
+        "_fetch_workflow_runs",
+        "resolve_authenticated_login",
+    }
+    policy_names = {"github_request", "retry_initial_request"}
+    raw_request_names = {"github_get", "github_graphql"}
+    violations = []
+    urlopen_sites = []
+
+    for path in scripts:
+        tree = ast.parse(path.read_text())
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+        def _ancestor_function(node):
+            current = parents.get(node)
+            while current is not None:
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return current.name
+                current = parents.get(current)
+            return None
+
+        def _has_policy_ancestor(node):
+            current = parents.get(node)
+            while current is not None:
+                if isinstance(current, ast.Call) and _call_name(current.func) in policy_names:
+                    return True
+                current = parents.get(current)
+            return False
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                caught = _call_name(node.type) if node.type is not None else "bare"
+                if caught in {"bare", "Exception", "BaseException"}:
+                    owner = _ancestor_function(node)
+                    if owner not in allowed_broad_handlers:
+                        violations.append(f"{path.name}:{node.lineno} broad catch in {owner}")
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node.func)
+            if name.endswith("urlopen"):
+                urlopen_sites.append((path.name, _ancestor_function(node)))
+            if name in operation_names and not _has_policy_ancestor(node):
+                violations.append(f"{path.name}:{node.lineno} {name} bypasses request policy")
+            if name in raw_request_names:
+                current = parents.get(node)
+                while current is not None and not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if isinstance(current, ast.Try):
+                        violations.append(f"{path.name}:{node.lineno} {name} has a local except")
+                        break
+                    current = parents.get(current)
+
+    assert violations == []
+    assert urlopen_sites == [(COMMON_SCRIPT.name, "_read_github_json")]

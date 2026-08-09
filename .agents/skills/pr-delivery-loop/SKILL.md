@@ -186,10 +186,13 @@ turn ends because you armed a watch and are waiting, say exactly that.
   re-arm after each round with the same watch ID, and never `--forever`. Update
   its command or message when needed, then always run `vibe watch resume <id>`;
   update alone does not re-enable a completed one-shot watch. A CI-only wait may
-  use the bundled `wait_action.py`. Both waiters keep retryable GitHub/network
-  errors inside the bounded one-shot timeout. Their initial request gets three
-  attempts with exponential backoff; exhausting that budget is an explicit
-  terminal error rather than a silent wait.
+  use the bundled `wait_action.py`. Every GitHub operation in both waiters crosses
+  one shared request taxonomy: only network failures and retryable HTTP statuses
+  may remain inside the bounded one-shot timeout. GraphQL `errors` payloads,
+  malformed protocol responses, non-retryable HTTP statuses, and unexpected
+  failures are terminal and exit explicitly; call sites do not keep local catch-all
+  retry paths. Initial transient requests get three attempts with exponential
+  backoff, and exhausting that budget is also an explicit terminal error.
 - The PR waiter filters your own reviews and comments by the authenticated
   GitHub viewer login. It must resolve that identity before polling; if `/user`
   is unavailable for `--pr`, fail closed or explicitly pass

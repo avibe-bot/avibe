@@ -12,7 +12,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, TypeVar
 
 
 RETRY_EXIT_CODE = 75
@@ -52,30 +53,99 @@ _MISSING = object()
 _T = TypeVar("_T")
 
 
-class InitialRequestRetriesExhausted(RuntimeError):
+class GitHubRequestError(RuntimeError):
+    """Base class for failures classified at the GitHub request boundary."""
+
+    retryable = False
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GitHubTransientError(GitHubRequestError):
+    """A network or retryable HTTP failure that a bounded waiter may retry."""
+
+    retryable = True
+
+
+class GitHubTerminalError(GitHubRequestError):
+    """A terminal GitHub failure that must stop the waiter."""
+
+
+class GitHubProtocolError(GitHubTerminalError):
+    """A successful HTTP response that violates the expected GitHub contract."""
+
+
+class InitialRequestRetriesExhausted(GitHubTerminalError):
     """A bounded initial GitHub request exhausted its transient retries."""
+
+
+@dataclass(frozen=True)
+class GitHubRequestResult(Generic[_T]):
+    """One classified request outcome; callers never catch request exceptions."""
+
+    value: _T | None = None
+    error: GitHubRequestError | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
+
+def _classify_github_exception(
+    err: Exception,
+    *,
+    unauthenticated: bool = False,
+) -> GitHubRequestError:
+    if isinstance(err, GitHubRequestError):
+        return err
+    if isinstance(err, urllib.error.HTTPError):
+        code = int(err.code)
+        reason = str(err.reason)
+        if unauthenticated and code in {403, 429}:
+            return GitHubTerminalError(
+                "GitHub unauthenticated polling hit a rate limit; authenticate with "
+                "'gh auth login' or GITHUB_TOKEN/GH_TOKEN",
+                status_code=code,
+            )
+        error_type = GitHubTransientError if code in RETRYABLE_HTTP_STATUS_CODES else GitHubTerminalError
+        return error_type(f"GitHub HTTP {code} {reason}", status_code=code)
+    if isinstance(err, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
+        reason = str(getattr(err, "reason", err))
+        return GitHubTransientError(f"GitHub network failure: {reason}")
+    return GitHubTerminalError(
+        f"Unexpected GitHub request failure ({type(err).__name__}): {err}"
+    )
+
+
+def github_request(operation: Callable[[], _T]) -> GitHubRequestResult[_T]:
+    """Run one GitHub operation through the sole transient/terminal taxonomy."""
+
+    try:
+        return GitHubRequestResult(value=operation())
+    except Exception as err:  # noqa: BLE001 - this is the classification boundary
+        return GitHubRequestResult(error=_classify_github_exception(err))
 
 
 def retry_initial_request(
     operation: Callable[[], _T],
     *,
     description: str,
-) -> _T:
+) -> GitHubRequestResult[_T]:
     """Retry initial network/5xx failures with a bounded exponential backoff."""
 
     for attempt in range(1, INITIAL_REQUEST_MAX_ATTEMPTS + 1):
-        try:
-            return operation()
-        except urllib.error.HTTPError as err:
-            if not is_retryable_http_error(err):
-                raise
-            failure = f"HTTP {err.code} {err.reason}"
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
-            failure = str(getattr(err, "reason", err))
+        result = github_request(operation)
+        if result.succeeded or result.error is None or not result.error.retryable:
+            return result
+        failure = str(result.error)
 
         if attempt == INITIAL_REQUEST_MAX_ATTEMPTS:
-            raise InitialRequestRetriesExhausted(
-                f"{description} failed after {INITIAL_REQUEST_MAX_ATTEMPTS} attempts: {failure}"
+            return GitHubRequestResult(
+                error=InitialRequestRetriesExhausted(
+                    f"{description} failed after {INITIAL_REQUEST_MAX_ATTEMPTS} attempts: {failure}"
+                )
             )
         delay = INITIAL_REQUEST_BACKOFF_SECONDS * (2 ** (attempt - 1))
         print(
@@ -85,7 +155,7 @@ def retry_initial_request(
         )
         time.sleep(delay)
 
-    raise AssertionError("unreachable")
+    return GitHubRequestResult(error=GitHubTerminalError("unreachable request state"))
 
 
 def no_event(summary: str = "") -> int:
@@ -118,7 +188,7 @@ def get_token() -> str | None:
             capture_output=True,
             text=True,
         )
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         return None
     token = result.stdout.strip()
     return token or None
@@ -176,6 +246,38 @@ class ResponseCache:
         )
 
 
+def _read_github_json(
+    request: urllib.request.Request,
+    *,
+    token: str | None,
+    cache: ResponseCache | None = None,
+    cache_key: str | None = None,
+) -> Any:
+    """Read one response and translate every failure through the taxonomy."""
+
+    try:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            if cache is not None:
+                cache.downloaded += 1
+                response_etag = response.headers.get("ETag")
+                if response_etag and cache_key is not None:
+                    cache.store(cache_key, response_etag, payload)
+            return payload
+    except urllib.error.HTTPError as err:
+        if err.code == NOT_MODIFIED_STATUS and cache is not None and cache_key is not None:
+            payload = cache.payload_for(cache_key)
+            if payload is not _MISSING:
+                cache.revalidated += 1
+                return payload
+        raise _classify_github_exception(
+            err,
+            unauthenticated=token is None,
+        ) from err
+    except Exception as err:  # noqa: BLE001 - this is the raw HTTP boundary
+        raise _classify_github_exception(err) from err
+
+
 def github_get(url: str, token: str | None, *, cache: ResponseCache | None = None) -> Any:
     request = urllib.request.Request(url)
     request.add_header("Accept", "application/vnd.github+json")
@@ -185,23 +287,7 @@ def github_get(url: str, token: str | None, *, cache: ResponseCache | None = Non
     etag = cache.etag_for(url) if cache is not None else None
     if etag:
         request.add_header("If-None-Match", etag)
-
-    try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-            if cache is not None:
-                cache.downloaded += 1
-                response_etag = response.headers.get("ETag")
-                if response_etag:
-                    cache.store(url, response_etag, payload)
-            return payload
-    except urllib.error.HTTPError as err:
-        if err.code == NOT_MODIFIED_STATUS and cache is not None:
-            payload = cache.payload_for(url)
-            if payload is not _MISSING:
-                cache.revalidated += 1
-                return payload
-        raise
+    return _read_github_json(request, token=token, cache=cache, cache_key=url)
 
 
 def github_graphql(query: str, variables: dict[str, Any], token: str) -> dict[str, Any]:
@@ -214,40 +300,16 @@ def github_graphql(query: str, variables: dict[str, Any], token: str) -> dict[st
     request.add_header("Content-Type", "application/json")
     request.add_header("User-Agent", "background-watch-hook/0.1.0")
     request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = _read_github_json(request, token=token)
     if not isinstance(payload, dict):
-        raise RuntimeError("GitHub GraphQL returned an unexpected payload")
+        raise GitHubProtocolError("GitHub GraphQL returned an unexpected payload")
     errors = payload.get("errors")
     if errors:
-        raise RuntimeError(f"GitHub GraphQL error: {errors}")
+        raise GitHubProtocolError(f"GitHub GraphQL error: {errors}")
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise RuntimeError("GitHub GraphQL response has no data object")
+        raise GitHubProtocolError("GitHub GraphQL response has no data object")
     return data
-
-
-def is_retryable_http_error(err: urllib.error.HTTPError) -> bool:
-    try:
-        code = int(err.code)
-    except Exception:
-        return False
-    return code in RETRYABLE_HTTP_STATUS_CODES
-
-
-def get_authenticated_login(token: str | None) -> str | None:
-    if not token:
-        return None
-
-    try:
-        payload = github_get("https://api.github.com/user", token)
-    except Exception:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-    login = payload.get("login")
-    return str(login) if isinstance(login, str) and login else None
 
 
 def resolve_authenticated_login(token: str | None) -> str | None:
@@ -257,10 +319,10 @@ def resolve_authenticated_login(token: str | None) -> str | None:
         return None
     payload = github_get("https://api.github.com/user", token)
     if not isinstance(payload, dict):
-        raise RuntimeError("GitHub /user returned an unexpected payload")
+        raise GitHubProtocolError("GitHub /user returned an unexpected payload")
     login = payload.get("login")
     if not isinstance(login, str) or not login:
-        raise RuntimeError("GitHub /user did not return a viewer login")
+        raise GitHubProtocolError("GitHub /user did not return a viewer login")
     return login
 
 
@@ -291,7 +353,7 @@ def list_paginated_with_count(
         payload = github_get(url, token, cache=cache)
         request_count += 1
         if not isinstance(payload, list):
-            raise RuntimeError(f"Expected a JSON list from {url}")
+            raise GitHubProtocolError(f"Expected a JSON list from {url}")
         if not payload:
             break
         page_items = [item for item in payload if isinstance(item, dict)]
