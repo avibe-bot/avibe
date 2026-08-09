@@ -604,8 +604,34 @@ class ProcessingIndicatorService:
             if self._mode_supported(capabilities, "typing", handle.context):
                 fell_back = await self._start_typing_indicator(handle)
             if not fell_back and self._mode_supported(capabilities, "message", handle.context):
-                await self._start_message_indicator(handle, agent_name or "")
+                fell_back = await self._start_message_indicator(handle, agent_name or "")
+            if fell_back:
+                self._warn_ack_mode_downgraded(
+                    handle.context,
+                    "typing" if handle.typing_indicator_active else "message",
+                )
         self._sync_reaction_to_request(handle, request)
+
+    def _warn_ack_mode_downgraded(self, context: MessageContext, applied_mode: str) -> None:
+        """Report that the configured ack mode failed and a lower one was used.
+
+        The fallback ladder is deliberately silent about *which* mode won, so a
+        user who picked ``reaction`` and keeps seeing an ack message has nothing
+        to go on. Warn once per downgraded turn, naming the channel — a DM whose
+        channel_id is a user id is the usual cause.
+        """
+
+        configured = str(getattr(self.config, "ack_mode", "typing") or "typing")
+        if configured != "reaction":
+            return
+        logger.warning(
+            "Ack mode 'reaction' failed for %s channel=%s; downgraded to '%s'. "
+            "Check that the bot can react in this conversation (reactions:write, membership, "
+            "and a real channel id — a DM context must not carry the user id).",
+            context.platform or "unknown",
+            context.channel_id,
+            applied_mode,
+        )
 
     @staticmethod
     def _turn_tokens(context: MessageContext) -> set[str]:
