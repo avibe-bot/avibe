@@ -2149,7 +2149,15 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
 
         # First turn resolves the Agent default → empty columns fill in.
         assert service.materialize_agent_session_route(
-            reserved_id, model="gpt-5.5", reasoning_effort="xhigh"
+            reserved_id,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+            expected_route={
+                "agent_id": row["agent_id"],
+                "agent_name": row["agent_name"],
+                "agent_backend": row["agent_backend"],
+                "agent_variant": row["agent_variant"],
+            },
         )
         row = service.get_agent_session_by_id(reserved_id)
         assert row is not None
@@ -2179,6 +2187,57 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
         # No-op call shapes: nothing to pin → False, row untouched.
         assert not service.materialize_agent_session_route(reserved_id)
         assert not service.materialize_agent_session_route("ses_missing", model="gpt-5.5")
+    finally:
+        service.close()
+
+
+def test_materialize_agent_session_route_rejects_stale_agent_route(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses1",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="old-agent",
+                model=None,
+                reasoning_effort=None,
+                native_session_id=None,
+                workdir=str(tmp_path),
+                metadata={},
+            )
+        stale_route = {
+            "agent_id": None,
+            "agent_name": "old-agent",
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+        }
+
+        with service.engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == session_id)
+                .values(agent_name="new-agent")
+            )
+
+        assert not service.materialize_agent_session_route(
+            session_id,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+            expected_route=stale_route,
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_name"] == "new-agent"
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
     finally:
         service.close()
 

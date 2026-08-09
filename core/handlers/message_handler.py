@@ -471,19 +471,21 @@ class MessageHandler(BaseHandler):
                 effective_model = session_target.get("model")
             if "reasoning_effort" in explicit_overrides:
                 effective_reasoning_effort = session_target.get("reasoning_effort")
-            # Materialize the resolved route into EMPTY workbench session
-            # columns NOW, at turn start. A session created on an inherited
-            # default carries NULLs (dispatch resolves the live Agent default);
-            # without pinning, the chat header shows an agent with no model /
-            # effort after the first message. Pinning at turn START — not at
-            # native bind — means any later explicit header pick in this turn
-            # (including an explicit clear to NULL) lands after this write and
-            # is never undone by it. IM (scope/anchor) rows never carry
-            # ``agent_session_target`` and are untouched: their model semantics
-            # stay with channel routing.
-            if isinstance(session_target, dict) and session_target.get("id") and (
-                (effective_model and not session_target.get("model"))
-                or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+            # Materialize the resolved route into EMPTY Workbench session
+            # columns at turn start. A session created on an inherited default
+            # carries NULLs (dispatch resolves the live Agent default); without
+            # pinning, the chat header shows an Agent with no model / effort
+            # after the first message. Scheduled IM turns can carry the same
+            # target projection, so the platform gate is essential: their model
+            # semantics remain owned by channel routing.
+            if (
+                context.platform == "avibe"
+                and isinstance(session_target, dict)
+                and session_target.get("id")
+                and (
+                    (effective_model and not session_target.get("model"))
+                    or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+                )
             ):
                 materialize = getattr(self.sessions, "materialize_agent_session_route", None)
                 if callable(materialize):
@@ -492,6 +494,15 @@ class MessageHandler(BaseHandler):
                             str(session_target["id"]),
                             model=effective_model,
                             reasoning_effort=effective_reasoning_effort,
+                            expected_route={
+                                key: session_target.get(key)
+                                for key in (
+                                    "agent_id",
+                                    "agent_name",
+                                    "agent_backend",
+                                    "agent_variant",
+                                )
+                            },
                         )
                     except Exception:
                         logger.debug("Session route materialization failed; dispatch continues", exc_info=True)

@@ -1102,8 +1102,10 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={
                 "agent_session_target": {
                     "id": "ses_wb",
+                    "agent_id": None,
                     "agent_name": None,
                     "agent_backend": None,
+                    "agent_variant": None,
                     "model": None,
                     "reasoning_effort": None,
                 }
@@ -1113,7 +1115,15 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.handle_user_message(context, "hello")
 
         sessions_store.materialize_agent_session_route.assert_called_once_with(
-            "ses_wb", model="gpt-5.4", reasoning_effort="high"
+            "ses_wb",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": None,
+                "agent_variant": None,
+            },
         )
 
     async def test_workbench_explicit_route_skips_materialization(self):
@@ -1144,13 +1154,27 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
 
     async def test_im_turn_never_materializes_session_route(self):
-        """IM turns carry no ``agent_session_target``; their model semantics
-        belong to channel routing and must never be pinned onto session rows."""
+        """Scheduled IM turns can carry ``agent_session_target``; their model
+        semantics still belong to channel routing and must not be pinned."""
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
-        context = MessageContext(user_id="U1", channel_id="C1", message_id="m1", platform="slack")
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_im",
+                    "agent_name": "codex",
+                    "agent_backend": "codex",
+                    "model": None,
+                    "reasoning_effort": None,
+                }
+            },
+        )
 
         await handler.handle_user_message(context, "hello")
 

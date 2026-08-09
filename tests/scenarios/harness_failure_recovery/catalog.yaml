@@ -4148,10 +4148,10 @@ scenarios:
     name: inherited Workbench routes materialize through the runtime session facade
     status: covered
     kind: routing
-    layer: scenario
+    layer: contract
     backend: shared
-    # The first Turn persists the Agent's resolved model and reasoning effort so
-    # the refreshed chat header keeps displaying the complete route.
+    # The handler-to-facade contract forwards the resolved route at Turn start;
+    # the refreshed chat header remains a residual manual UI check.
     test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_workbench_inherited_route_materializes_at_turn_start
 manual_evidence:
   - local Incus backend process death after prompt acceptance

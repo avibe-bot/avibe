@@ -825,16 +825,18 @@ class SQLiteSessionsService:
         *,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        expected_route: Mapping[str, Any] | None = None,
     ) -> bool:
         """Pin the model / effort a turn is about to run with into EMPTY columns.
 
         A session created on an inherited default carries NULLs (dispatch
         resolves the live Agent default); the first turn pins the resolved
         values — same lifecycle as the backend pin on native bind. Called at
-        dispatch time (turn START), so a user's later explicit header pick —
-        including an explicit clear back to NULL — happens after this write and
-        is never undone by it. COALESCE keeps the fill-if-empty atomic against
-        a concurrent pick. Returns True when a row was updated.
+        dispatch time (turn START). The writer reservation serializes the marker
+        read with this write, while ``expected_route`` makes a stale turn a no-op
+        if the user has already switched the session to another Agent route.
+        COALESCE keeps each setting fill-if-empty. Returns True when a row was
+        updated.
 
         A setting the row pins EXPLICITLY is never filled, even when its column
         is empty: that is the whole point of the explicit-override marker (a
@@ -842,6 +844,7 @@ class SQLiteSessionsService:
         it here would turn the first turn into the thing the rebind was preventing
         -- the Agent's current default becoming the session's pinned model."""
         with self.engine.begin() as conn:
+            reserve_write_lock(conn)
             pinned = explicit_override_names(
                 _json_loads(
                     conn.execute(
@@ -862,12 +865,19 @@ class SQLiteSessionsService:
             if not values:
                 return False
             values["updated_at"] = _utc_now_iso()
-            result = conn.execute(
+            statement = (
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))
                 .where(agent_sessions.c.status != "archived")
                 .values(**values)
             )
+            for field in ("agent_id", "agent_name", "agent_backend", "agent_variant"):
+                if expected_route is not None and field in expected_route:
+                    statement = statement.where(
+                        func.coalesce(getattr(agent_sessions.c, field), "")
+                        == str(expected_route.get(field) or "")
+                    )
+            result = conn.execute(statement)
             return bool(result.rowcount)
 
     def bind_agent_session_by_id(
