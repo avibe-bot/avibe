@@ -131,7 +131,8 @@ export type ModelsApi = {
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
   putMappings(backend: AgentBackend, mappings: AgentMapping[]): Promise<AgentSupply>;
   putMenu(menu: AgentMenu): Promise<AgentSupply>;
-  addCustomModel(draft: CustomModelCreate): Promise<Source>;
+  addCustomModel(sourceId: string, draft: CustomModelCreate): Promise<Source>;
+  updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]): Promise<Source>;
   deleteCustomModel(sourceId: string, modelId: string): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
@@ -385,8 +386,9 @@ const liveApi: ModelsApi = {
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
   putMappings: (backend, mappings) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mappings`, jsonInit('PUT', { mappings })).then((r) => (r.agent ?? r) as AgentSupply),
   putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
-  addCustomModel: (draft) => call<{ source?: Source } & Source>('/api/models/custom-models', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
-  deleteCustomModel: (sourceId, modelId) => call<{ source?: Source } & Source>('/api/models/custom-models', jsonInit('DELETE', { source_id: sourceId, model_id: modelId })).then((r) => (r.source ?? r) as Source),
+  addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
+  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then((r) => (r.source ?? r) as Source),
+  deleteCustomModel: (sourceId, modelId) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', {})).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
   listEvents: (limit = 20, before) =>
@@ -907,22 +909,33 @@ class MockStore {
     return delay(structuredClone(agent));
   }
 
-  addCustomModel(draft: CustomModelCreate) {
-    const source = this.sources.find((s) => s.id === draft.source_id);
+  addCustomModel(sourceId: string, draft: CustomModelCreate) {
+    const source = this.sources.find((s) => s.id === sourceId);
     if (!source) throw new ApiCallError('source_not_found');
     const existing = source.models.find((m) => m.id === draft.model_id);
     if (existing) {
       existing.display_name = draft.display_name ?? existing.display_name;
       existing.provenance = 'manual';
+      existing.reasoning_efforts = [...draft.reasoning_efforts];
     } else {
       source.models.push({
         id: draft.model_id,
         display_name: draft.display_name ?? null,
         provenance: 'manual',
+        reasoning_efforts: [...draft.reasoning_efforts],
         discovered_at: null,
       });
     }
     return delay(structuredClone(source), 400);
+  }
+
+  updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]) {
+    const source = this.sources.find((s) => s.id === sourceId);
+    if (!source) throw new ApiCallError('source_not_found');
+    const model = source.models.find((item) => item.id === modelId);
+    if (!model) throw new ApiCallError('mapping_target_unavailable');
+    model.reasoning_efforts = [...reasoningEfforts];
+    return delay(structuredClone(source));
   }
 
   deleteCustomModel(sourceId: string, modelId: string) {
@@ -1227,7 +1240,8 @@ const mockApi: ModelsApi = {
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
   putMappings: (backend, mappings) => mockStore.putMappings(backend, mappings),
   putMenu: (menu) => mockStore.putMenu(menu),
-  addCustomModel: (draft) => mockStore.addCustomModel(draft),
+  addCustomModel: (sourceId, draft) => mockStore.addCustomModel(sourceId, draft),
+  updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => mockStore.updateModelReasoningEfforts(sourceId, modelId, reasoningEfforts),
   deleteCustomModel: (sourceId, modelId) => mockStore.deleteCustomModel(sourceId, modelId),
   scanMigration: () => mockStore.scanMigration(),
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),

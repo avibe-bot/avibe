@@ -443,20 +443,13 @@ const OWN_VENDOR: Record<AgentBackend, string | null> = {
   opencode: null,
 };
 
-/** §4.4 — server-authoritative eligibility, one row per source. api_key sources
- *  serve every backend; a subscription is bound to its own client, and the
- *  hub-held channel additionally needs the flag plus explicit consent. */
+/** §4.4 — server-authoritative eligibility, one row per source. API-key Sources
+ *  serve every backend; a native subscription is bound to its own client. */
 export function mockEligibility(sources: Source[], backend: AgentBackend): SourceEligibility[] {
   return sources.map((s): SourceEligibility => {
     if (s.kind === 'api_key') return { source_id: s.id, eligible: true, reason_key: null };
-    if (backend === 'opencode') {
-      return { source_id: s.id, eligible: false, reason_key: 'models.eligibility.opencode_api_key_only' };
-    }
     if (s.vendor !== OWN_VENDOR[backend]) {
       return { source_id: s.id, eligible: false, reason_key: 'models.eligibility.subscription_wrong_client' };
-    }
-    if (s.supply_channel === 'hub' && !(SUBSCRIPTION_HUB_EXPERIMENTAL && s.experimental_consent_at)) {
-      return { source_id: s.id, eligible: false, reason_key: 'models.eligibility.consent_required' };
     }
     return { source_id: s.id, eligible: true, reason_key: null };
   });
