@@ -622,11 +622,18 @@ export class VaultSandboxClient {
     // `approveRelease`/`sign`/`reveal` are interactive here: those are the ops whose sandbox handler
     // runs the confirm-surface gate (§13). `setup`/`unlock` are WebAuthn/PRF ceremonies, not in-
     // sandbox confirm clicks, so their handlers never assert a parent surface and none is sent.
-    if (options.interactive) {
-      this.interactiveRequests.add(id);
-      this.setModalVisible(true);
+    let surface: VaultConfirmSurface | null = null;
+    try {
+      if (options.interactive) {
+        this.interactiveRequests.add(id);
+        this.setModalVisible(true);
+        surface = await this.measureSurface();
+      }
+    } catch (error) {
+      this.interactiveRequests.delete(id);
+      if (this.interactiveRequests.size === 0 && this.modalVisible) this.setModalVisible(false);
+      throw error;
     }
-    const surface = options.interactive ? await this.measureSurface() : null;
     const promise = new Promise<T>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);

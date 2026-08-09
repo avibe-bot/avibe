@@ -640,7 +640,10 @@ def test_vault_callback_sweep_enqueues_protected_sign_callback(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("terminal_status", ["approved", "denied"])
-def test_completed_waiter_mirrors_vault_outcome_without_second_agent_turn(monkeypatch, tmp_path, terminal_status):
+def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_turn(
+    monkeypatch, tmp_path, terminal_status
+):
+    import asyncio
     from types import SimpleNamespace
 
     from core import scheduled_tasks as st
@@ -703,7 +706,7 @@ def test_completed_waiter_mirrors_vault_outcome_without_second_agent_turn(monkey
         request_store=request_store,
     )
 
-    assert service._process_vault_callback_sync(row) == "sent"
+    asyncio.run(service._drain_vault_callbacks())
     # The stable native message id also closes the crash window between mirror + callback mark.
     assert service._process_vault_callback_sync(row) == "sent"
 

@@ -7039,11 +7039,10 @@ class ScheduledTaskService:
         """Auto-resume the requesting session when a vault request reaches a terminal state.
 
         Mirrors :meth:`_drain_callbacks` but for ``vault_requests`` (which resolve outside the run
-        store): each row marked ``callback_status='pending'`` is turned into one callback turn via
-        the shared :func:`enqueue_session_callback` entry, then marked ``sent``/``skipped``/
-        ``failed``. Delivery is at-least-once, matching the run-store callback drain: enqueue and
-        the ``sent`` mark are separate writes, so a crash between them re-sends on the next tick.
-        Per-row isolation keeps one bad row from aborting the batch or being retried forever.
+        store). Pending rows use the same processor as the runtime-work lane, so callbacks either
+        enqueue one turn or mirror a completed waiter's outcome directly into the transcript before
+        being marked ``sent``/``skipped``/``failed``. Delivery is at-least-once; enqueue or mirror
+        and the ``sent`` mark are separate writes, with stable identities closing duplicate windows.
         """
         if not self._owns_service_instance():
             return
@@ -7063,44 +7062,9 @@ class ScheduledTaskService:
             logger.error("Vault request callback sweep failed to load: %s", exc, exc_info=True)
             return
         for row in pending:
-            request_id = str(row.get("id") or "")
-            if not request_id:
-                continue
-            # Resolve + enqueue as one guarded step so a bad row is marked (not left to retry
-            # forever) and does not abort the rest of the batch.
-            status = "skipped"
-            try:
-                with engine.begin() as conn:
-                    ready = vault_service.request_callback_ready(conn, row)
-                if not ready:
-                    # Approved access grant not delivery-ready yet (protected relay in flight);
-                    # leave callback_status='pending' and retry on a later tick.
-                    continue
-                plan = vault_service.resolve_request_callback(row)
-                if plan is not None:
-                    enqueue_session_callback(
-                        self.request_store,
-                        session_id=plan.session_id,
-                        message=plan.message,
-                        source_actor=f"vault:{request_id}",
-                        metadata={
-                            "vault_request_type": str(row.get("request_type") or ""),
-                            "vault_request_status": str(row.get("status") or ""),
-                        },
-                    )
-                    status = "sent"
-            except ValueError:
-                status = "skipped"  # session archived / not a valid target — nothing to resume
-            except Exception as exc:
-                logger.error("Vault request callback failed for %s: %s", request_id, exc, exc_info=True)
-                status = "failed"
-            try:
-                with engine.begin() as conn:
-                    vault_service.mark_request_callback(conn, request_id, status=status)
-            except Exception as exc:
-                # Leave callback_status='pending' → retried next tick (bounded, transient).
-                logger.error("Vault request callback mark failed for %s: %s", request_id, exc, exc_info=True)
-                continue
+            # Keep the legacy drain aligned with the runtime-work processor, including completed
+            # waiter outcomes that belong in the transcript without starting another Agent turn.
+            status = self._process_vault_callback_sync(row)
             if status == "sent":
                 # A callback run was enqueued into the run store; drain it promptly.
                 self._wake_runtime_work(RuntimeWorkLane.REQUESTS)

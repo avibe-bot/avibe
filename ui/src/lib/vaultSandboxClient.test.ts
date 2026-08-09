@@ -149,4 +149,36 @@ describe('VaultSandboxClient interactive request surface', () => {
     pending.resolve({ blindBoxes: [] });
     await expect(result).resolves.toEqual({ blindBoxes: [] });
   });
+
+  it('collapses the modal when interactive surface measurement fails before send', async () => {
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+
+    const client = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    Object.assign(client, {
+      iframe,
+      backdrop: null,
+      pending: new Map(),
+      readyPromise: Promise.resolve({}),
+      handshaken: true,
+      modalVisible: false,
+      interactiveRequests: new Set(),
+      surfaceRefreshTimer: null,
+    });
+    vi.spyOn(client, 'startSurfaceRefresh').mockImplementation(() => undefined);
+    vi.spyOn(client, 'measureSurface').mockRejectedValue(new Error('visibility API failed'));
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+
+    await expect(
+      client.request('approveRelease', { items: [] }, { interactive: true }),
+    ).rejects.toThrow('visibility API failed');
+
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(client.interactiveRequests.size).toBe(0);
+    expect(client.pending.size).toBe(0);
+    expect(client.modalVisible).toBe(false);
+    expect(client.backdrop).toBeNull();
+    expect(iframe.style.visibility).toBe('hidden');
+    expect(iframe.style.pointerEvents).toBe('none');
+  });
 });
