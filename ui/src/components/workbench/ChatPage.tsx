@@ -35,7 +35,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { readPageActivity } from '../../lib/pageActivity';
+import { canMarkConversationRead, readPageActivity } from '../../lib/pageActivity';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
@@ -2188,18 +2188,18 @@ export const ChatPage: React.FC = () => {
     };
   }, []);
 
-  // The user is actively viewing this session, so an agent reply here is seen,
+  // The user is actively viewing this session's live transcript, so an agent reply is seen,
   // not "new". Clear unread whenever it appears — on open, or when a realtime
   // inbox.session.updated lands after a reply — so the Inbox/sidebar never badge
   // the chat you're looking at. Reactive to the unread map, so it's race-free
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
-    if (historicalWindow || !pageActive) return;
+    if (!canMarkConversationRead({ pageActive, historicalWindow, showPageActive })) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead, historicalWindow, pageActive]);
+  }, [sessionId, unreadBySession, markInboxRead, historicalWindow, pageActive, showPageActive]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn

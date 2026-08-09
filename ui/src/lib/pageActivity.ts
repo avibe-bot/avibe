@@ -7,6 +7,19 @@ export type PageActivitySnapshot = {
 export function isPageActive(snapshot: PageActivitySnapshot): boolean {
   return snapshot.visibilityState === 'visible' && snapshot.hasFocus;
 }
+
+export function canMarkConversationRead({
+  pageActive,
+  historicalWindow,
+  showPageActive,
+}: {
+  pageActive: boolean;
+  historicalWindow: boolean;
+  showPageActive: boolean;
+}): boolean {
+  return pageActive && !historicalWindow && !showPageActive;
+}
+
 export function readPageActivity(): boolean {
   if (typeof document === 'undefined') return false;
   return isPageActive({
