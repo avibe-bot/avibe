@@ -215,6 +215,9 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `--catch-up` or fail closed; the normal PR-delivery path seeds the complete
   cursor baseline before pushing, then starts the post-push waiter from that
   file so a review that lands during the handoff cannot become the baseline.
+- A resumed PR state without a persisted `head_sha` is also treated as an
+  unseeded baseline; pass `--catch-up` explicitly to establish the head and
+  cursor baseline rather than silently skipping an upgrade-era push.
 - Both modes load saved cursors before deriving their initial baseline:
   `--new-prs` reads `pr_cursor` before limiting the first pagination, and
   `--pr` restores the saved review/comment/reaction cursors before polling.

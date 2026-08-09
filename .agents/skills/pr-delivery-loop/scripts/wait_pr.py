@@ -1415,6 +1415,12 @@ def main() -> int:
     # contains the PR's full history.
     resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
     resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
+    if args.pr is not None and args.state_file and resumed and _saved_str(saved, "head_sha") is None:
+        print(
+            "Saved PR state has no head_sha baseline; pass --catch-up to seed it explicitly before resuming.",
+            file=sys.stderr,
+        )
+        return 2
     if two_phase and not args.catch_up:
         seeded = _saved_int(saved, "pr_cursor") is not None if args.new_prs else resumed
         if not seeded:

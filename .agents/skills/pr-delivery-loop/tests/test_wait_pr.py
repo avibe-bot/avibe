@@ -210,6 +210,49 @@ def test_cursorless_state_allows_same_watch_to_change_filters(tmp_path):
     assert saved["owner"] == "watch-1"
 
 
+def test_resume_requires_persisted_head_baseline(monkeypatch, tmp_path):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "repo": "avibe-bot/avibe",
+                "pr": 1213,
+                "watch": wait_pr._watch_identity(
+                    wait_pr._build_parser().parse_args(
+                        ["--repo", "avibe-bot/avibe", "--pr", "1213", "--include-self-comments"]
+                    )
+                ),
+                "owner": "watch-1",
+                "review_cursor": 1,
+                "review_comment_cursor": 2,
+                "issue_comment_cursor": 3,
+                "reaction_cursor": 4,
+                "pr_status": "open",
+            }
+        )
+    )
+    monkeypatch.setenv("AVIBE_WATCH_ID", "watch-1")
+    monkeypatch.setattr(wait_pr, "get_token", lambda: "token")
+    monkeypatch.setattr(wait_pr, "_fetch_state", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "1213",
+            "--include-self-comments",
+            "--state-file",
+            str(state_file),
+        ],
+    )
+
+    assert wait_pr.main() == 2
+
+
 def test_head_change_is_reported_as_pr_activity():
     result = wait_pr._render_activity(
         repo="avibe-bot/avibe",
