@@ -1568,6 +1568,20 @@ had to survive a restart, a second dialog for the same vendor, and an OAuth code
 completes minutes later; none of that is worth buying when the flow can simply be
 allowed not to exist.
 
+**The cancel call's own failure does not hold the user** `[derived]`. It is issued as the
+dialog closes and its result is not awaited: a non-2xx or a dropped connection changes
+nothing on screen, renders no error, and offers no retry. Two reasons, and the second is
+the load-bearing one. Keeping someone inside a dialog to finish cleaning up an operation
+they just abandoned is the opposite of what 取消 means, and D-15 already says a failure
+never makes a mutation the only way out — a *forward* control on a dismissal would be
+exactly that. And the residual risk is small and already visible: a cancel that never
+lands leaves a flow that may still complete, in which case a source the user did not
+keep appears in the list — where D-16's rule applies unchanged, since the list reports
+what exists rather than what was intended, and 移除 is one press away. What this section
+will **not** do is claim the guarantee is stronger than the call: 「no flow outlives its
+dialog」 holds when the route answers, and the source list is the surface of truth when
+it does not.
+
 **There is no partial-completion state here, and that is a property of the rebuild, not
 an omission.** An earlier draft of this section carried a `[contract-gap]` (G-5) for the
 outcome when one of two simultaneously-selected channels landed and the other failed.
