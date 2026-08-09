@@ -45,6 +45,20 @@ def _sidecar_transport(handler):
     return patch("core.memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
 
 
+class _FailingResponseStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        failure_type: type[httpx.TransportError],
+        request: httpx.Request,
+    ) -> None:
+        self._failure_type = failure_type
+        self._request = request
+
+    async def __aiter__(self):
+        raise self._failure_type("response body lost", request=self._request)
+        yield b""  # pragma: no cover - keeps this an async generator
+
+
 def _health_envelope(recorder) -> dict:
     return {
         "status": "ok",
@@ -418,6 +432,92 @@ def test_flush_maps_non_2xx_envelopes_to_rejected(response: httpx.Response, expe
         result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
 
     assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("operation", "result_type", "route"),
+    [
+        ("add", AddRejected, "/api/v2/memory/add"),
+        ("flush", FlushRejected, "/api/v2/memory/flush"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status_code", "failure_type", "server_fault"),
+    [
+        (422, httpx.ReadTimeout, False),
+        (503, httpx.ReadError, True),
+    ],
+)
+def test_write_preserves_non_2xx_verdict_when_response_body_is_lost(
+    operation: str,
+    result_type: type[AddRejected] | type[FlushRejected],
+    route: str,
+    status_code: int,
+    failure_type: type[httpx.TransportError],
+    server_fault: bool,
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            status_code,
+            stream=_FailingResponseStream(failure_type, request),
+        )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        if operation == "add":
+            return await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        return await provider.flush(SESSION_REF)
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(run())
+
+    assert isinstance(result, result_type)
+    assert (result.request_id, result.error_code, result.server_fault) == (
+        None,
+        None,
+        server_fault,
+    )
+    assert requests == [route]
+
+
+@pytest.mark.parametrize(
+    ("operation", "route"),
+    [
+        ("add", "/api/v2/memory/add"),
+        ("flush", "/api/v2/memory/flush"),
+    ],
+)
+def test_write_keeps_2xx_body_disconnect_unknown_without_replaying(
+    operation: str,
+    route: str,
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            200,
+            stream=_FailingResponseStream(httpx.ReadError, request),
+        )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        if operation == "add":
+            return await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        return await provider.flush(SESSION_REF)
+
+    with _sidecar_transport(handler):
+        if operation == "add":
+            with pytest.raises(MemoryProviderSystemFailure) as raised:
+                asyncio.run(run())
+            assert raised.value.ambiguous is True
+        else:
+            assert asyncio.run(run()) == FlushUnknown(reason="transport")
+
+    assert requests == [route]
 
 
 @pytest.mark.parametrize(

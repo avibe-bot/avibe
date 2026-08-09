@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import uuid
+import weakref
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -75,6 +76,7 @@ class SessionFlushCoordinator:
         now: Callable[[], datetime] | None = None,
         release_attachment: AttachmentRelease | None = None,
         attachment_store: AttachmentPinStore | None = None,
+        attachment_admission_lock: asyncio.Lock | None = None,
         add_timeout_seconds: float = ADD_TIMEOUT_SECONDS,
         flush_timeout_seconds: float = FLUSH_TIMEOUT_SECONDS,
         max_concurrent_writes: int = MAX_CONCURRENT_PROVIDER_WRITES,
@@ -86,12 +88,15 @@ class SessionFlushCoordinator:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._release_attachment = release_attachment
         self._attachment_store = attachment_store
+        self._attachment_admission_lock = attachment_admission_lock
         self._add_timeout_seconds = _positive_timeout(add_timeout_seconds)
         self._flush_timeout_seconds = _positive_timeout(flush_timeout_seconds)
         self._write_slots = asyncio.Semaphore(max(1, int(max_concurrent_writes)))
         self._processing_event = processing_event
         self._processing_fault_lock = asyncio.Lock()
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._add_outage_until: datetime | None = None
         self._paused = False
@@ -133,23 +138,34 @@ class SessionFlushCoordinator:
         ):
             await self._classify_processing_fault(meta.processing_fault_since)
         if self._attachment_store is not None:
-            referenced, releasing = await self._store_call(
-                self._store.attachment_bundle_sets
-            )
-            try:
-                await asyncio.to_thread(
-                    self._attachment_store.reconcile,
-                    referenced,
-                    releasing,
-                )
-            except AttachmentPinError:
-                logger.warning("Memory attachment reconciliation was deferred")
+            if self._attachment_admission_lock is None:
+                await self._reconcile_attachments()
             else:
-                for bundle_id in releasing:
-                    await self._store_call(
-                        self._store.finalize_attachment_release,
-                        bundle_id,
-                    )
+                async with self._attachment_admission_lock:
+                    await self._reconcile_attachments()
+
+    async def _reconcile_attachments(self) -> None:
+        """Reconcile one DB reference snapshot inside the admission fence."""
+
+        if self._attachment_store is None:
+            return
+        referenced, releasing = await self._store_call(
+            self._store.attachment_bundle_sets
+        )
+        try:
+            await self._store_call(
+                self._attachment_store.reconcile,
+                referenced,
+                releasing,
+            )
+        except AttachmentPinError:
+            logger.warning("Memory attachment reconciliation was deferred")
+        else:
+            for bundle_id in releasing:
+                await self._store_call(
+                    self._store.finalize_attachment_release,
+                    bundle_id,
+                )
 
     async def deliver(self, row: QueueRow, *, lease_owner: str) -> bool:
         """Deliver one claimed add under the exact canonical session lock."""
@@ -311,8 +327,7 @@ class SessionFlushCoordinator:
                 return
             await self._store_call(self._store.reclaim_fenced_generation_claims, lease)
             while not self._paused and self._enabled():
-                row = await self._store_call(
-                    self._store.claim_fenced_generation,
+                row = await self._claim_fenced_generation(
                     lease,
                     lease_owner=lease.fence_token,
                     now=_iso(self._current_time()),
@@ -763,6 +778,46 @@ class SessionFlushCoordinator:
             lock = asyncio.Lock()
             self._session_locks[key] = lock
         return lock
+
+    async def _claim_fenced_generation(
+        self,
+        lease: FlushLease,
+        *,
+        lease_owner: str,
+        now: str,
+    ) -> QueueRow | None:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._store.claim_fenced_generation,
+                lease,
+                lease_owner=lease_owner,
+                now=now,
+            )
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        try:
+            row = task.result()
+        except Exception:
+            if cancellation is not None:
+                raise cancellation
+            raise
+        if cancellation is None:
+            return row
+        if row is not None:
+            try:
+                await self._store_call(
+                    self._store.return_unsubmitted_claim,
+                    row,
+                    lease_owner=lease_owner,
+                )
+            except asyncio.CancelledError as error:
+                cancellation = error
+        raise cancellation
 
     def _prune_tasks(self) -> None:
         for key, task in tuple(self._flush_tasks.items()):

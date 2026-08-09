@@ -325,7 +325,6 @@ class MemoryInsightReader:
         )
         steps = _steps_projection(
             row,
-            capture,
             selected_runs,
             base_urls=self._provider_base_urls,
             exact_values=self._exact_redaction_values,
@@ -1480,24 +1479,12 @@ def _capture_projection(
 
 def _steps_projection(
     memcell: sqlite3.Row,
-    capture: dict[str, Any],
     runs: list[sqlite3.Row],
     *,
     base_urls: tuple[str, ...],
     exact_values: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
-    if capture.get("status") == "available":
-        delivery_states = capture.get("delivery_states")
-        capture_status = (
-            delivery_states[0]
-            if isinstance(delivery_states, list) and len(delivery_states) == 1
-            else "mixed"
-        )
-        steps.append({"type": "capture", "status": capture_status})
-    else:
-        steps.append({"type": "capture", **capture})
-    steps.append(
+    steps: list[dict[str, Any]] = [
         {
             "type": "memcell",
             "status": "created",
@@ -1507,7 +1494,7 @@ def _steps_projection(
                 _MAX_MEMCELL_ID_BYTES,
             ),
         }
-    )
+    ]
     steps.extend(
         _run_projection(
             run,

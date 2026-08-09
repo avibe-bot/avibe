@@ -745,6 +745,51 @@ def test_capture_message_id_collision_with_foreign_scope_fails_closed(
     assert detail["calls"] == []
 
 
+def test_mutable_capture_state_is_not_projected_as_timeline_history(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(
+        insight_paths,
+        "mc_mutable_capture",
+        ALICE,
+        timestamp_ms=6_300,
+        message_ids=["m_mutable-session_6200_000"],
+    )
+    _insert_queue(
+        insight_paths,
+        "mutable-capture",
+        ALICE,
+        session="mutable-session",
+        timestamp_ms=6_200,
+    )
+    reader = MemoryInsightReader(insight_paths)
+
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET state = 'processing', payload_text = 'retained until settled',
+                completed_at = NULL
+            WHERE source_message_digest = 'mutable-capture'
+            """
+        )
+    processing = reader.entry_detail((ALICE, PROJECT), "mc_mutable_capture")
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET state = 'manual_required', completed_at = '2026-08-04T00:00:02Z'
+            WHERE source_message_digest = 'mutable-capture'
+            """
+        )
+    uncertain = reader.entry_detail((ALICE, PROJECT), "mc_mutable_capture")
+
+    assert processing["capture"]["delivery_states"] == ["processing"]
+    assert uncertain["capture"]["delivery_states"] == ["manual_required"]
+    assert processing["steps"] == uncertain["steps"]
+    assert [step["type"] for step in processing["steps"]] == ["memcell"]
+
+
 def test_oversized_memcell_json_is_not_decoded_or_used_for_capture_attribution(
     insight_paths: MemoryInsightPaths,
     monkeypatch: pytest.MonkeyPatch,

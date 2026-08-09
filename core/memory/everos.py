@@ -310,11 +310,20 @@ class EverOSPort:
                 trust_env=False,
             ) as client:
                 async with client.stream(method, route, json=payload) as response:
+                    status_code = response.status_code
                     try:
                         raw = await _read_bounded_response(response)
                     except MemoryProviderFailure:
                         raw = None
-                    status_code = response.status_code
+                    except (httpx.TransportError, OSError):
+                        if 200 <= status_code < 300:
+                            raise
+                        logger.warning(
+                            "EverOS sidecar rejection body lost route=%s status=%s",
+                            route,
+                            status_code,
+                        )
+                        raw = None
         except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc

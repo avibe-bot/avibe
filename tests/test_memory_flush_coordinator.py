@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -1950,6 +1951,158 @@ def test_cancelled_add_waiting_for_session_lock_returns_exact_claim(tmp_path: Pa
 
         release_first_add.set()
         assert await asyncio.wait_for(first_call, timeout=1)
+
+    asyncio.run(run())
+
+
+def test_cancelled_routine_claim_acquisition_returns_exact_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            boot_id="ordinary-worker",
+            coordinator=coordinator,
+        )
+        _enqueue(store, "cancelled-claim")
+        claim_committed = threading.Event()
+        release_claim = threading.Event()
+        original_claim_due = store.claim_due
+
+        def blocked_claim_due(*, lease_owner: str, now: str):
+            row = original_claim_due(lease_owner=lease_owner, now=now)
+            claim_committed.set()
+            release_claim.wait(timeout=2)
+            return row
+
+        monkeypatch.setattr(store, "claim_due", blocked_claim_due)
+        draining = asyncio.create_task(worker.drain_once())
+        assert await asyncio.to_thread(claim_committed.wait, 1)
+
+        draining.cancel()
+        await asyncio.sleep(0)
+        assert not draining.done()
+        release_claim.set()
+        with pytest.raises(asyncio.CancelledError):
+            await draining
+
+        queued = store.list_queue_rows()
+        assert len(queued) == 1
+        assert queued[0].state == "pending"
+        assert queued[0].lease_owner is None
+        assert queued[0].attempts == 0
+        assert provider.captures == []
+
+    asyncio.run(run())
+
+
+def test_cancelled_fenced_claim_acquisition_returns_exact_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        row = _enqueue(store, "cancelled-fenced-claim")
+        claim_committed = threading.Event()
+        release_claim = threading.Event()
+        original_claim = store.claim_fenced_generation
+
+        def blocked_claim(lease, *, lease_owner: str, now: str):
+            claimed = original_claim(lease, lease_owner=lease_owner, now=now)
+            claim_committed.set()
+            release_claim.wait(timeout=2)
+            return claimed
+
+        monkeypatch.setattr(store, "claim_fenced_generation", blocked_claim)
+        flushing = coordinator._schedule(row.provider_session_ref, force=True)
+        assert flushing is not None
+        assert await asyncio.to_thread(claim_committed.wait, 1)
+
+        flushing.cancel()
+        await asyncio.sleep(0)
+        assert not flushing.done()
+        release_claim.set()
+        with pytest.raises(asyncio.CancelledError):
+            await flushing
+
+        queued = store.list_queue_rows()
+        assert len(queued) == 1
+        assert queued[0].state == "pending"
+        assert queued[0].lease_owner is None
+        assert queued[0].attempts == 0
+        assert provider.captures == []
+
+    asyncio.run(run())
+
+
+def test_session_lock_is_shared_with_waiters_then_reclaimed(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        first_add_entered = asyncio.Event()
+        release_first_add = asyncio.Event()
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                if len(self.captures) == 1:
+                    first_add_entered.set()
+                    await release_first_add.wait()
+                return AddAck(f"add-{len(self.captures)}", "accumulated")
+
+        provider = Provider()
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        _enqueue(store, "lock-owner", session="shared-lock")
+        _enqueue(store, "lock-waiter", session="shared-lock")
+        claimed = [
+            row
+            for row in (
+                store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z"),
+                store.claim_due(lease_owner="worker", now="2026-01-01T00:00:00.000Z"),
+            )
+            if row is not None
+        ]
+        key = claimed[0].provider_session_ref.serialize()
+
+        owner = asyncio.create_task(coordinator.deliver(claimed[0], lease_owner="worker"))
+        await asyncio.wait_for(first_add_entered.wait(), timeout=1)
+        waiter = asyncio.create_task(coordinator.deliver(claimed[1], lease_owner="worker"))
+        await asyncio.sleep(0)
+        assert waiter.done() is False
+        assert len(coordinator._session_locks) == 1
+        shared_lock = coordinator._session_locks[key]
+
+        release_first_add.set()
+        assert await asyncio.wait_for(owner, timeout=1)
+        assert await asyncio.wait_for(waiter, timeout=1)
+        assert [capture.text for capture in provider.captures] == [
+            "payload-lock-owner",
+            "payload-lock-waiter",
+        ]
+
+        del shared_lock, owner, waiter
+        await asyncio.sleep(0)
+        gc.collect()
+        assert key not in coordinator._session_locks
 
     asyncio.run(run())
 

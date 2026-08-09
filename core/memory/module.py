@@ -158,6 +158,7 @@ class MemoryModule:
             enabled=self._is_enabled,
             processing_event=processing_event,
             attachment_store=self._attachment_store,
+            attachment_admission_lock=self._root_lifecycle_lock(),
         )
 
     def _replace_provider(self, provider: MemoryProviderPort) -> None:

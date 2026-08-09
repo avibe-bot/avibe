@@ -11,7 +11,7 @@ from typing import Any
 from core.memory.attachments import AttachmentPinStore
 from core.memory.coordinator import ProcessingEvent, SessionFlushCoordinator
 from core.memory.everos import MemoryProviderPort
-from core.memory.store import MemoryStore
+from core.memory.store import MemoryStore, QueueRow
 
 
 MAX_DRAIN_BATCH_SIZE = 32
@@ -32,6 +32,7 @@ class MemoryWorker:
         processing_event: ProcessingEvent | None = None,
         coordinator: SessionFlushCoordinator | None = None,
         attachment_store: AttachmentPinStore | None = None,
+        attachment_admission_lock: asyncio.Lock | None = None,
         **_legacy_options: object,
     ) -> None:
         self._store = store
@@ -46,6 +47,7 @@ class MemoryWorker:
             now=self._now,
             add_timeout_seconds=ingest_timeout_seconds,
             attachment_store=attachment_store,
+            attachment_admission_lock=attachment_admission_lock,
             processing_event=processing_event,
         )
         self._drain_lock = asyncio.Lock()
@@ -115,8 +117,7 @@ class MemoryWorker:
                     or not self._coordinator.add_claims_available()
                 ):
                     break
-                row = await self._store_call(
-                    self._store.claim_due,
+                row = await self._claim_due(
                     lease_owner=self._boot_id,
                     now=_iso(self._current_time()),
                 )
@@ -141,6 +142,39 @@ class MemoryWorker:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    async def _claim_due(self, *, lease_owner: str, now: str) -> QueueRow | None:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._store.claim_due,
+                lease_owner=lease_owner,
+                now=now,
+            )
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        try:
+            row = task.result()
+        except Exception:
+            if cancellation is not None:
+                raise cancellation
+            raise
+        if cancellation is None:
+            return row
+        if row is not None:
+            try:
+                await self._store_call(
+                    self._store.return_unsubmitted_claim,
+                    row,
+                    lease_owner=lease_owner,
+                )
+            except asyncio.CancelledError as error:
+                cancellation = error
+        raise cancellation
 
     async def _store_call(self, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))

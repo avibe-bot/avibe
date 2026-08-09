@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from config import paths
-from core.memory.attachments import AttachmentPinStore
+from core.memory.attachments import AttachmentPinStore, PinnedBundle
 from core.memory.everos import FakeMemoryProvider, MemoryProviderFailure
 from core.memory.module import (
     MAX_CAPTURE_ATTACHMENT_METADATA_BYTES,
@@ -242,6 +244,72 @@ async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_
     assert forwarded.name == attachment.name
     assert forwarded.uri != attachment.uri
     assert store.list_queue_rows()[0].payload_attachments is None
+
+
+async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accepted_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachment_store = _attachment_store()
+    module, store, _provider = _module(tmp_path, attachment_store=attachment_store)
+    attachment = _source_attachment("activation-race.txt", b"accepted bytes")
+    published = threading.Event()
+    allow_pin_return = threading.Event()
+    recovery_started = threading.Event()
+    pinned: list[PinnedBundle] = []
+    original_pin = attachment_store.pin
+    original_recover = store.recover_after_boot
+
+    def pin_before_enqueue(sources):
+        bundle = original_pin(sources)
+        pinned.append(bundle)
+        published.set()
+        if not allow_pin_return.wait(timeout=2):
+            raise AssertionError("capture admission was not released")
+        return bundle
+
+    def observe_recovery(*, lease_owner, clock):
+        recovery_started.set()
+        return original_recover(lease_owner=lease_owner, clock=clock)
+
+    monkeypatch.setattr(attachment_store, "pin", pin_before_enqueue)
+    monkeypatch.setattr(store, "recover_after_boot", observe_recovery)
+
+    capture = asyncio.create_task(
+        module.capture(_request(source="activation-race", attachments=(attachment,)))
+    )
+    try:
+        assert await asyncio.to_thread(published.wait, 1)
+        recovery = asyncio.create_task(
+            module._worker.coordinator.recover(lease_owner="activation-boot")
+        )
+        assert await asyncio.to_thread(recovery_started.wait, 1)
+
+        completed, _pending = await asyncio.wait({recovery}, timeout=0.1)
+        assert completed == set()
+
+        allow_pin_return.set()
+        assert await capture == CaptureAccepted()
+        await recovery
+    finally:
+        allow_pin_return.set()
+
+    bundle = pinned[0]
+    assert attachment_store.provider_attachments(bundle)[0].name == attachment.name
+    assert store.list_queue_rows()[0].attachment_bundle_id == bundle.bundle_id
+
+    restarted_store = MemoryStore(store.path)
+    restarted_attachments = _attachment_store()
+    restarted = MemoryModule(
+        restarted_store,
+        FakeMemoryProvider(),
+        enabled=True,
+        attachment_store=restarted_attachments,
+    )
+    await restarted._worker.coordinator.recover(lease_owner="restart-boot")
+
+    assert restarted_attachments.provider_attachments(bundle)[0].name == attachment.name
+    assert restarted_store.list_queue_rows()[0].attachment_bundle_id == bundle.bundle_id
 
 
 async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_path: Path) -> None:
