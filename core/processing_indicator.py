@@ -47,16 +47,10 @@ _ADMISSION_ACK_REACTIONS: dict[str, str] = {
     "reconciling_steer": UNCONFIRMED_REACTION_EMOJI,
     "retired": NOT_DELIVERED_REACTION_EMOJI,
 }
-# Receipts that can still be replaced or cleared later, and are therefore worth
-# remembering. The rest are final: the Delivery they describe never starts a turn
-# of its own, so nothing would ever read the entry back and keeping it would grow
-# the registry by one key per mid-turn message for the life of the process.
-_REPLACEABLE_ADMISSION_STATES = frozenset(
-    {"queued", "pending_steer", "reconciling_steer"}
-)
-# Backstop for receipts whose Delivery never reaches a turn (a queue drained by a
-# Stop, a session archived mid-wait). Bounded FIFO eviction: dropping the oldest
-# key only forfeits a later replace/clear, never the reaction itself.
+# Backstop for receipts nothing ever reads back (a queue drained by a Stop, a
+# session archived mid-wait, a terminal ✍️/🤷 on a message no other Delivery
+# touches). Bounded FIFO eviction: dropping the oldest key only forfeits a later
+# replace/clear, never the reaction itself.
 _ADMISSION_ACK_REGISTRY_LIMIT = 1024
 # Registry marker for a message whose own turn has started. Kept so a receipt
 # still in flight when the turn began cannot decorate it afterwards.
@@ -365,12 +359,14 @@ class ProcessingIndicatorService:
             if not applied:
                 registry.pop(key, None)
                 return None
-            if str(state or "").strip() in _REPLACEABLE_ADMISSION_STATES:
-                self._remember_admission_ack(key, emoji)
-            else:
-                # Final receipt: the Delivery behind it never starts a turn, so
-                # nothing will ever replace or clear this reaction.
-                registry.pop(key, None)
+            # Every receipt is remembered, terminal ones included. A reaction
+            # target can be shared — a quick-reply callback reacts on its bot
+            # echo, so two Deliveries settle on one message — and a platform
+            # shows one reaction per (message, emoji, bot). The receipt therefore
+            # describes the message rather than any one Delivery: last writer
+            # wins, and the previous receipt is removed instead of stacked. The
+            # FIFO cap bounds what a terminal receipt leaves behind.
+            self._remember_admission_ack(key, emoji)
             return emoji
 
     async def clear_admission_ack(self, context: MessageContext) -> None:

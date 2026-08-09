@@ -315,30 +315,61 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(applied)
         self.assertEqual(im.calls, [])
 
-    async def test_final_receipts_do_not_accumulate_registry_entries(self):
-        # accepted/retired deliveries never start a turn, so nothing would ever
-        # read these entries back; keeping them grows the registry by one key
-        # per mid-turn message for the life of the process.
+    async def test_terminal_receipt_is_replaced_rather_than_stacked(self):
+        # Two Deliveries can share one reaction target: a quick-reply callback
+        # reacts on its bot echo, so a second click settles on the message a
+        # first one already decorated. A platform shows one reaction per
+        # (message, emoji, bot), so the receipt describes the message — the
+        # terminal ✍️ is removed rather than left next to the new 👌.
         im = _FakeIM()
         svc = _svc(im)
+        context = _ctx(message_id="echo-7")
 
-        for index in range(5):
-            await svc.ack_delivery_state(
-                _ctx(message_id=f"steered-{index}"),
-                state="accepted",
-                admission="steered",
-            )
-            await svc.ack_delivery_state(_ctx(message_id=f"retired-{index}"), state="retired")
+        await svc.ack_delivery_state(context, state="accepted", admission="steered")
+        await svc.ack_delivery_state(context, state="queued")
 
-        self.assertEqual(svc._admission_acks, {})
-        self.assertEqual(len(im.calls), 10)
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "echo-7", STEERED_REACTION_EMOJI),
+                ("remove", "echo-7", STEERED_REACTION_EMOJI),
+                ("add", "echo-7", QUEUED_REACTION_EMOJI),
+            ],
+        )
 
-    async def test_replaceable_receipts_are_bounded(self):
+    async def test_terminal_receipt_is_cleared_when_a_turn_takes_the_message(self):
+        # Same shared-target case, other ordering: the second Delivery is the one
+        # that dispatches, so its turn's own indicator replaces the stale ✍️.
+        im = _FakeIM()
+        svc = _svc(im)
+        context = _ctx(message_id="echo-7")
+
+        await svc.ack_delivery_state(context, state="retired")
+        await svc.clear_admission_ack(context)
+
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "echo-7", NOT_DELIVERED_REACTION_EMOJI),
+                ("remove", "echo-7", NOT_DELIVERED_REACTION_EMOJI),
+            ],
+        )
+
+    async def test_receipts_are_bounded(self):
+        # Terminal receipts are remembered too, so the FIFO cap is the only thing
+        # keeping one entry per mid-turn message from living for the life of the
+        # process. Evicting the oldest only forfeits a later replace or clear.
         im = _FakeIM()
         svc = _svc(im)
 
         for index in range(_ADMISSION_ACK_REGISTRY_LIMIT + 10):
             await svc.ack_delivery_state(_ctx(message_id=f"q-{index}"), state="queued")
+        for index in range(_ADMISSION_ACK_REGISTRY_LIMIT + 10):
+            await svc.ack_delivery_state(
+                _ctx(message_id=f"s-{index}"),
+                state="accepted",
+                admission="steered",
+            )
 
         self.assertLessEqual(len(svc._admission_acks), _ADMISSION_ACK_REGISTRY_LIMIT)
 
