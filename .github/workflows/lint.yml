@@ -111,6 +111,9 @@ jobs:
             uv.lock
 
       - name: Install package and test deps
+        # Install the declared dev group instead of a hand-listed set so test
+        # dependencies (pytest, pytest-asyncio for asyncio_mode="auto",
+        # jsonschema) cannot drift from pyproject.
         run: uv pip install --system -e . --group dev
 
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
@@ -128,6 +131,40 @@ jobs:
             exit 1
           fi
           echo "All unit test shards passed."
+
+  memory-insight-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          version: "0.9.18"
+          enable-cache: true
+          cache-dependency-glob: scripts/memory_runtime/uv.lock
+
+      - name: Provision pinned Memory Runtime
+        run: uv sync --frozen --project scripts/memory_runtime
+
+      - name: Run Memory Insight real-wheel contract
+        env:
+          AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT: "1"
+        run: |
+          set -o pipefail
+          output="$RUNNER_TEMP/memory-insight-contract.log"
+          uv run --frozen --project scripts/memory_runtime \
+            --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
+            python -m pytest \
+            tests/test_memory_everos_insight_patches.py::test_pinned_everos_patch_contract \
+            -ra | tee "$output"
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "Memory Insight contract tests must not skip."
+            exit 1
+          fi
 
   npm-wrapper:
     runs-on: [self-hosted, Linux, X64, avibe]

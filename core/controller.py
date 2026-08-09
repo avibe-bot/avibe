@@ -6,7 +6,6 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -69,23 +68,6 @@ class _SettingsUserBindings:
         store.maybe_reload()
         user = store.get_user(user_id, platform=platform)
         return bool(user is not None and user.enabled)
-
-
-@dataclass(frozen=True)
-class _MemoryCliSessionAdmission:
-    """Immutable facts needed to revalidate one Agent session's Memory access."""
-
-    principal_id: str
-    platform: str | None
-    user_id: str | None
-    is_dm: bool
-
-    def admission_facts(self) -> InboundTurnFacts:
-        return InboundTurnFacts(
-            platform=self.platform,
-            user_id=self.user_id,
-            is_dm=self.is_dm,
-        )
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -247,7 +229,8 @@ class Controller:
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
-        self._memory_principals_by_session: Dict[str, _MemoryCliSessionAdmission] = {}
+        self._memory_scopes_by_session: Dict[str, tuple[str, str]] = {}
+        self._memory_cli_facts_by_session: Dict[str, InboundTurnFacts] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -1453,13 +1436,21 @@ class Controller:
         *,
         text: object = None,
         session_id: object = None,
+        include_workdir: bool = True,
     ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        workdir = None
+        if include_workdir:
+            try:
+                workdir = self.get_cwd(context)
+            except Exception:
+                workdir = None
         return InboundTurnFacts(
             platform=context.platform or payload.get("platform"),
             user_id=getattr(context, "user_id", None),
             message_id=getattr(context, "message_id", None),
             session_id=session_id,
+            workdir=workdir,
             text=text,
             files=getattr(context, "files", None),
             is_dm=payload.get("is_dm") is True,
@@ -1470,17 +1461,17 @@ class Controller:
         )
 
     def memory_capture_admitted(self, context: MessageContext) -> bool:
-        return self._memory_admission().admits(self._memory_turn_facts(context))
+        return self._memory_admission().admits(
+            self._memory_turn_facts(context, include_workdir=False)
+        )
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
-        return self._memory_admission().principal_for(self._memory_turn_facts(context))
-
-    def _memory_cli_session_admitted(self, facts: InboundTurnFacts) -> bool:
-        memory = getattr(getattr(self, "config", None), "memory", None)
-        return bool(getattr(memory, "enabled", False)) and self._memory_admission().admits(facts)
+        return self._memory_admission().principal_for(
+            self._memory_turn_facts(context, include_workdir=False)
+        )
 
     def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
-        """Associate an admitted Agent session with its Memory principal."""
+        """Associate an admitted Agent session with its Memory read/write scope."""
 
         from core.caller_context import caller_context_from_platform_payload
 
@@ -1488,41 +1479,80 @@ class Controller:
         caller = caller_context_from_platform_payload(payload)
         if caller is None:
             return False
-        facts = self._memory_turn_facts(context, session_id=caller.session_id)
+        facts_by_session = getattr(self, "_memory_cli_facts_by_session", None)
+        if not isinstance(facts_by_session, dict):
+            facts_by_session = {}
+            self._memory_cli_facts_by_session = facts_by_session
         admission = self._memory_admission()
-        principal_id = admission.principal_for(facts) if admitted and self._memory_cli_session_admitted(facts) else None
-        if principal_id is None:
-            self._memory_principals_by_session.pop(caller.session_id, None)
+        facts = self._memory_turn_facts(context)
+        principal_id = admission.principal_for(facts) if admitted else None
+        project_id = admission.project_for(facts) if admitted else None
+        if principal_id is None or project_id is None:
+            self._memory_scopes_by_session.pop(caller.session_id, None)
+            facts_by_session.pop(caller.session_id, None)
             return False
-        self._memory_principals_by_session[caller.session_id] = _MemoryCliSessionAdmission(
-            principal_id=principal_id,
-            platform=facts.platform,
-            user_id=facts.user_id,
-            is_dm=facts.is_dm,
-        )
+        self._memory_scopes_by_session[caller.session_id] = (principal_id, project_id)
+        facts_by_session[caller.session_id] = facts
         return True
 
+    def memory_scope_for_cli_session(self, session_id: str) -> Optional[tuple[str, str]]:
+        """Return the principal and project owned by an admitted Agent session."""
+
+        from core.memory.store import is_principal_id, is_project_id
+
+        session_key = str(session_id or "").strip()
+        scope = self._memory_scopes_by_session.get(session_key)
+        if (
+            isinstance(scope, tuple)
+            and len(scope) == 2
+            and is_principal_id(scope[0])
+            and is_project_id(scope[1])
+        ):
+            facts = getattr(self, "_memory_cli_facts_by_session", {}).get(session_key)
+            if facts is not None:
+                admission = self._memory_admission()
+                memory_enabled = bool(
+                    getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
+                )
+                current_scope = (
+                    admission.principal_for(facts),
+                    admission.project_for(facts),
+                )
+                if (
+                    not memory_enabled
+                    or not admission.admits(facts)
+                    or current_scope != scope
+                ):
+                    self._memory_scopes_by_session.pop(session_key, None)
+                    self._memory_cli_facts_by_session.pop(session_key, None)
+                    return None
+            return scope
+        return None
+
     def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
-        """Revalidate and return the principal for an admitted Agent session."""
+        """Return the principal associated with an admitted Agent session."""
 
-        from core.memory.store import is_principal_id
+        scope = self.memory_scope_for_cli_session(session_id)
+        return scope[0] if scope is not None else None
 
-        normalized_session_id = str(session_id or "").strip()
-        record = self._memory_principals_by_session.get(normalized_session_id)
-        if not isinstance(record, _MemoryCliSessionAdmission):
-            return None
+    def memory_project_for_cli_session(self, session_id: str) -> Optional[str]:
+        """Return the project associated with an admitted Agent session."""
 
-        facts = record.admission_facts()
-        admission = self._memory_admission()
-        if not self._memory_cli_session_admitted(facts):
-            self._memory_principals_by_session.pop(normalized_session_id, None)
-            return None
+        scope = self.memory_scope_for_cli_session(session_id)
+        return scope[1] if scope is not None else None
 
-        principal_id = admission.principal_for(facts)
-        if not is_principal_id(principal_id) or principal_id != record.principal_id:
-            self._memory_principals_by_session.pop(normalized_session_id, None)
-            return None
-        return principal_id
+    def default_memory_project_id(self) -> str:
+        """Return the Memory project used by a default-cwd Agent Session."""
+
+        from core.services.agent_run_target import resolve_default_agent_workdir
+
+        workdir = resolve_default_agent_workdir(
+            self,
+            platform="avibe",
+            settings_key="memory-ui",
+            session_key="memory-ui",
+        )
+        return self.memory_runtime.project_for_workdir(workdir)
 
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.
@@ -2137,12 +2167,13 @@ class Controller:
         # Reconciliation can start the sidecar, so settle it before closing the
         # runtime or it could race shutdown and leave a process behind.
         _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
-        message_handler = getattr(self, "message_handler", None)
-        if message_handler is not None:
-            _stop_loop_coroutine(
-                message_handler.drain_memory_capture_tasks(),
-                "Memory capture tasks",
-            )
+        async def _drain_memory_capture_tasks() -> None:
+            handler = getattr(self, "message_handler", None)
+            drain = getattr(handler, "drain_memory_capture_tasks", None)
+            if callable(drain):
+                await drain()
+
+        _stop_loop_coroutine(_drain_memory_capture_tasks(), "Memory capture tasks")
         memory_runtime = getattr(self, "memory_runtime", None)
         if memory_runtime is not None:
             _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")

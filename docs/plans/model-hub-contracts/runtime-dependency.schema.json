@@ -2,12 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/runtime-dependency.schema.json",
   "title": "RuntimeDependency",
-  "description": "v4 (2026-07-31 targeted amendment): managed engine dependency manifest + status. The installed lazy-start state is not a failure: not_started means no start has been demanded in this service lifetime; down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
+  "description": "v5 (2026-07-31 targeted amendment): managed engine dependency manifest + status. The installed lazy-start state is not a failure: not_started means no start has been demanded in this service lifetime; down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
   "type": "object",
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 4 },
+    "contract_version": { "const": 5 },
     "manifest": {
       "type": "object",
       "required": ["name", "version", "source_sha", "assets"],
@@ -58,7 +58,7 @@
   },
   "examples": [
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "manifest": {
         "name": "cliproxyapi",
         "version": "v7.2.95",

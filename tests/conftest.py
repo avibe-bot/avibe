@@ -234,6 +234,19 @@ def _reset_cached_sqlite_engines():
 
 
 @pytest.fixture(autouse=True)
+def _reset_memory_artifact_manager():
+    """Keep the managed Memory runtime bound to the current test home."""
+    try:
+        from core.memory.artifact import set_memory_artifact_manager_for_tests
+    except Exception:
+        yield
+        return
+    set_memory_artifact_manager_for_tests(None)
+    yield
+    set_memory_artifact_manager_for_tests(None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_oauth_runtime_state():
     """Reset module-level in-memory OAuth caches between tests.
 

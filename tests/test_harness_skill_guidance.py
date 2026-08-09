@@ -111,6 +111,26 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
             assert text not in body, f"{path} still contains {text!r}"
 
 
+def test_use_avibe_skill_keeps_its_broad_scope_without_a_session_lifecycle_protocol() -> None:
+    for path in ("skills/use-avibe/SKILL.md", "skills/use-vibe-remote/SKILL.md"):
+        body = _read(path)
+
+        assert "configure, repair, explain, or operate a local Avibe installation" in body
+        assert "managed background watch with `vibe watch`" in body
+        assert "scheduled task with `vibe task`" in body
+        assert "check or apply Avibe updates" in body
+        assert "inspect logs, run doctor, check service status" in body
+
+        for text in (
+            "every user turn",
+            "each user turn",
+            "new user turn",
+            "context compaction",
+            "active Agent Session context",
+        ):
+            assert text not in body
+
+
 def test_background_watch_skill_defaults_to_current_session() -> None:
     body = _read("skills/background-watch-hook/SKILL.md")
 

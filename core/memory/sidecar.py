@@ -6,23 +6,31 @@ import argparse
 import asyncio
 import importlib
 import json
+import logging
 import os
 import re
 import stat
+from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from core.memory.artifact import EVEROS_VERSION
+from core.memory.everos_insight import install_error_scrubbers, prepare_call_recorder
+from core.memory.everos_insight.patches import boundary_request
+from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+
 
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
-_PROJECT_ID = "personal"
 _PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
+_PROJECT_PATTERN = re.compile(r"p-[0-9a-f]{32}\Z")
+logger = logging.getLogger(__name__)
 
 
 def serve(uds: Path) -> None:
-    if version("everos") != "1.1.3":
+    if version("everos") != EVEROS_VERSION:
         raise RuntimeError("everos version mismatch")
     if uds.exists() or not uds.parent.is_dir():
         raise RuntimeError("invalid sidecar socket path")
@@ -31,25 +39,56 @@ def serve(uds: Path) -> None:
     from starlette.responses import JSONResponse
     import uvicorn
 
+    install_error_scrubbers()
+    recorder = None
+    if call_log_db := os.environ.get("AVIBE_MEMORY_CALL_LOG_DB"):
+        recorder = prepare_call_recorder(Path(call_log_db))
+
     factory_module = importlib.import_module("everos.entrypoints.api.app")
     create_app = getattr(factory_module, "create_app")
     app = create_app()
+    if recorder is not None:
+        original_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def recorder_lifespan(app_instance: Any) -> Any:
+            try:
+                recorder.start()
+            except Exception:
+                logger.warning("memory_call_recorder_start_failed", exc_info=True)
+            try:
+                async with original_lifespan(app_instance) as state:
+                    yield state
+            finally:
+                try:
+                    await recorder.close(timeout=1.0)
+                except Exception:
+                    logger.warning("memory_call_recorder_close_failed", exc_info=True)
+
+        app.router.lifespan_context = recorder_lifespan
     attachments_root = Path(os.environ["AVIBE_MEMORY_ATTACHMENTS_ROOT"])
 
     @app.middleware("http")
     async def guard(request: Any, call_next: Any) -> Any:
         body = await request.body()
-        if _request_rejection(
+        rejection = _request_rejection(
             request.method,
             request.url.path,
             body,
             attachments_root=attachments_root,
-        ) is not None:
+        )
+        if rejection is not None:
             return JSONResponse({"detail": "memory_request_rejected"}, status_code=403)
+        if recorder is not None and request.url.path in {
+            "/api/v2/memory/add",
+            "/api/v2/memory/flush",
+        }:
+            with boundary_request():
+                return await call_next(request)
         return await call_next(request)
 
     config = uvicorn.Config(
-        app,
+        _RecorderHealthProjection(app, recorder),
         uds=str(uds),
         access_log=False,
         log_level="warning",
@@ -57,6 +96,75 @@ def serve(uds: Path) -> None:
         timeout_graceful_shutdown=1,
     )
     uvicorn.Server(config).run()
+
+
+class _RecorderHealthProjection:
+    """Append recorder state to the existing EverOS health response."""
+
+    def __init__(self, app: Any, recorder: Any | None) -> None:
+        self._app = app
+        self._recorder = recorder
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if not (
+            scope.get("type") == "http"
+            and scope.get("method") == "GET"
+            and scope.get("path") == "/health"
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        messages: list[dict[str, Any]] = []
+
+        async def capture(message: dict[str, Any]) -> None:
+            messages.append(message)
+
+        await self._app(scope, receive, capture)
+        body = b"".join(
+            message.get("body", b"")
+            for message in messages
+            if message.get("type") == "http.response.body"
+        )
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["recorder"] = _recorder_health(self._recorder)
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        for message in messages:
+            if message.get("type") == "http.response.start":
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"content-length"
+                ]
+                headers.append((b"content-length", str(len(encoded)).encode("ascii")))
+                projected = dict(message)
+                projected["headers"] = headers
+                await send(projected)
+                break
+        await send({"type": "http.response.body", "body": encoded})
+
+
+def _recorder_health(recorder: Any | None) -> dict[str, str | None]:
+    if recorder is None:
+        return {"state": "disabled", "reason": None}
+    try:
+        health = recorder.health
+    except Exception:
+        return {"state": "degraded", "reason": "writer_failures"}
+    if not isinstance(health, dict):
+        return {"state": "degraded", "reason": "writer_failures"}
+    state = health.get("state")
+    reason = health.get("reason")
+    if state not in {"active", "degraded", "disabled"} or not (
+        reason is None or isinstance(reason, str)
+    ):
+        return {"state": "degraded", "reason": "writer_failures"}
+    return {"state": state, "reason": reason}
 
 
 def _request_rejection(
@@ -69,10 +177,10 @@ def _request_rejection(
     if method == "GET" and path == "/health":
         return None
     if method != "POST" or path not in {
-        "/api/v1/memory/add",
-        "/api/v1/memory/flush",
-        "/api/v1/memory/search",
-        "/api/v1/memory/get",
+        "/api/v2/memory/add",
+        "/api/v2/memory/flush",
+        "/api/v2/memory/search",
+        "/api/v2/memory/get",
     }:
         return "route"
     if len(body) > _MAX_BODY_BYTES:
@@ -83,17 +191,22 @@ def _request_rejection(
         return "json"
     if not isinstance(payload, dict):
         return "shape"
-    if path == "/api/v1/memory/add":
+    if path == "/api/v2/memory/add":
         return _validate_add(payload, attachments_root=attachments_root)
-    if path == "/api/v1/memory/flush":
+    if path == "/api/v2/memory/flush":
         return _validate_flush(payload)
-    if path == "/api/v1/memory/search":
+    if path == "/api/v2/memory/search":
         return _validate_search(payload)
     return _validate_get(payload)
 
 
 def _valid_scope(payload: dict[str, Any]) -> bool:
-    return payload.get("app_id") == _APP_ID and payload.get("project_id") == _PROJECT_ID
+    project_id = payload.get("project_id")
+    return (
+        payload.get("app_id") == _APP_ID
+        and isinstance(project_id, str)
+        and _PROJECT_PATTERN.fullmatch(project_id) is not None
+    )
 
 
 def _exact_keys(payload: dict[str, Any], keys: set[str]) -> bool:
@@ -154,6 +267,7 @@ def _valid_workbench_attachment(item: dict[str, Any], attachments_root: Path | N
         or not isinstance(extension, str)
         or not extension.isalnum()
         or len(extension) > 8
+        or extension.lower() not in SUPPORTED_ATTACHMENT_EXTENSIONS
     ):
         return False
     parsed = urlparse(uri)

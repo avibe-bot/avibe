@@ -14,7 +14,7 @@ def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, c
     args = cli.build_parser().parse_args(["memory", "search", "find this", "--limit", "3", "--json"])
     calls: list[tuple[str, int]] = []
 
-    def search(query: str, limit: int):
+    def search(query: str, limit: int, **_kwargs):
         calls.append((query, limit))
         return {"status_code": 200, "body": {"status": "ok", "items": [{"kind": "fact", "text": "result"}]}}
 
@@ -33,7 +33,7 @@ def test_memory_search_json_is_a_presentation_of_the_uds_response(monkeypatch, c
 def test_memory_status_json_returns_a_closed_service_down_code(monkeypatch, capsys) -> None:
     args = cli.build_parser().parse_args(["memory", "status", "--json"])
 
-    def unavailable():
+    def unavailable(**_kwargs):
         raise internal_client.InternalServerUnavailable("socket unavailable")
 
     monkeypatch.setattr(internal_client, "memory_status_sync", unavailable)
@@ -82,7 +82,7 @@ def test_memory_cli_human_output_uses_configured_i18n(monkeypatch, capsys) -> No
     monkeypatch.setattr(
         internal_client,
         "memory_status_sync",
-        lambda: {
+        lambda **_kwargs: {
             "status_code": 200,
             "body": {
                 "state": "degraded",
@@ -113,7 +113,7 @@ def test_memory_cli_locale_read_failure_keeps_closed_service_down_error(monkeypa
     def fail_config_path():
         raise RuntimeError("source checkout migration guard")
 
-    def unavailable():
+    def unavailable(**_kwargs):
         raise internal_client.InternalServerUnavailable("socket unavailable")
 
     monkeypatch.setattr(cli.paths, "get_config_path", fail_config_path)
@@ -133,7 +133,7 @@ def test_memory_remember_exits_zero_only_for_queued_outcomes(
     monkeypatch.setattr(
         internal_client,
         "memory_remember_sync",
-        lambda text: {"status_code": 200, "body": {"status": outcome}},
+        lambda text, **_kwargs: {"status_code": 200, "body": {"status": outcome}},
     )
 
     assert cli.cmd_memory(args) == 0
@@ -156,7 +156,7 @@ def test_memory_remember_nonqueued_outcomes_exit_nonzero(monkeypatch, capsys, bo
     monkeypatch.setattr(
         internal_client,
         "memory_remember_sync",
-        lambda text: {"status_code": 200, "body": body},
+        lambda text, **_kwargs: {"status_code": 200, "body": body},
     )
 
     assert cli.cmd_memory(args) == 1

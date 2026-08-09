@@ -40,6 +40,9 @@ from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
     NO_EVENT_EXIT_CODE,
+    WATCH_HOOK_OUTCOME_EVENT,
+    WATCH_HOOK_OUTCOME_METADATA_KEY,
+    WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
@@ -2025,6 +2028,7 @@ class ManagedWatchService:
         self,
         watch: ManagedWatch,
         *,
+        event_detected: bool = False,
         prompt: Optional[str] = None,
         prefix: Optional[str] = None,
         body: Optional[str] = None,
@@ -2049,7 +2053,14 @@ class ManagedWatchService:
             run_type="watch",
             definition_id=watch.id,
             source_kind="watch",
-            metadata=watch.metadata,
+            metadata={
+                **watch.metadata,
+                WATCH_HOOK_OUTCOME_METADATA_KEY: (
+                    WATCH_HOOK_OUTCOME_EVENT
+                    if event_detected
+                    else WATCH_HOOK_OUTCOME_WAITER_FAILURE
+                ),
+            },
         )
 
     def _commit_cycle_result(
@@ -2093,7 +2104,13 @@ class ManagedWatchService:
         file-backed watch store has no compare-and-set for a teardown to outrun.
         """
 
-        request = self._hook_request(watch, prompt=prompt, prefix=prefix, body=body)
+        request = self._hook_request(
+            watch,
+            event_detected=event_detected,
+            prompt=prompt,
+            prefix=prefix,
+            body=body,
+        )
         atomic = request is not None and _shared_run_ledger_backend(self.store, self.request_store) is not None
         queued_run = self.request_store.queued_run_payload(request) if atomic and request else None
         if not self._watch_store_call(

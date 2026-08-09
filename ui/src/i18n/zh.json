@@ -1147,7 +1147,7 @@
     "connectorConnectionsHealthy": "Cloudflare 连接正常",
     "connectorConnectionsPartial": "Cloudflare 连接不完整（{{connections}}/4）",
     "connectorConnectionsUnavailable": "Cloudflare 连接未建立",
-    "connectorPath": "连接器 · {{protocol}} · {{connections}}/4 · 往返 {{rtt}}",
+    "connectorPath": "{{protocol}} · {{connections}}",
     "connectorPathWithLatency": "{{protocol}} · {{connections}} · Tunnel 延迟 {{rtt}}",
     "requestPath": "远程请求 · P95 {{p95}} · P99 {{p99}} · {{slow}}% 超过 1 秒",
     "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
@@ -1205,9 +1205,7 @@
   },
   "models": {
     "eligibility": {
-      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
-      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
-      "consent_required": "需要先同意实验性中枢供给"
+      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用"
     },
     "oauth": {
       "upstream_failed": "厂商没有完成这次登录，请重试",
@@ -1314,7 +1312,11 @@
     "memory_runtime_manifest_missing": "记忆运行时的清单缺失。",
     "memory_runtime_manifest_unavailable": "无法下载记忆运行时的清单。",
     "memory_runtime_archive_unavailable": "记忆运行时的下载包当前不可用。",
-    "remote_execution_disabled": "当前版本的远程访问仅支持查看，不能执行 Agent、Harness、终端或文件操作。请在运行 Avibe 的机器上执行此操作。"
+    "remote_execution_disabled": "当前版本的远程访问仅支持查看，不能执行 Agent、Harness、终端或文件操作。请在运行 Avibe 的机器上执行此操作。",
+    "memory_log_entry_not_found": "该记忆处理条目已不可用。",
+    "memory_access_denied": "该调用方无权读取此记忆数据。",
+    "memory_reconcile_failed": "Avibe 无法应用记忆设置。请查看运行时日志了解失败步骤。",
+    "memory_restart_failed": "重启记忆引擎失败。"
   },
   "apps": {
     "title": "应用",
@@ -3015,7 +3017,8 @@
       "triagePrompt": "排查提示词",
       "cwdFromSession": "跟随绑定会话，否则运行时默认目录或 Avibe 状态目录",
       "cwdRuntimeDefault": "运行时默认目录，否则 Avibe 状态目录",
-      "definition": "定义"
+      "definition": "定义",
+      "eventProcessing": "事件处理"
     },
     "taskKind": {
       "command": "命令"
@@ -3124,6 +3127,11 @@
       "idle": "空闲",
       "enabled": "已启用",
       "disabled": "已禁用"
+    },
+    "processingHealth": {
+      "failing": "处理失败",
+      "degraded": "近期处理失败",
+      "unknown": "处理状态未知"
     }
   },
   "chat": {
@@ -3207,7 +3215,14 @@
       "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
-      "agentFallback": "智能体"
+      "agentFallback": "智能体",
+      "vault": "来自 Vault",
+      "vaultProvided": "填写完成",
+      "vaultAccessApproved": "访问已批准",
+      "vaultSigned": "签名完成",
+      "vaultDenied": "已拒绝",
+      "vaultFailed": "处理失败",
+      "vaultExpired": "已过期"
     },
     "annotation": {
       "titleUser": "用户批注",
@@ -3261,7 +3276,8 @@
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
       "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
       "removeAttachment": "移除",
-      "dropOverlay": "拖放文件以添加"
+      "dropOverlay": "拖放文件以添加",
+      "voicePreview": "实时转写预览"
     },
     "media": {
       "preview": "预览",
@@ -3608,7 +3624,7 @@
   "memory": {
     "title": "记忆",
     "betaTitle": "记忆 · Beta",
-    "subtitle": "从你的 Workbench 和私聊消息中提炼出的个人记忆——在这里查看、搜索或清除。",
+    "subtitle": "从你的 Workbench 和私聊消息中提炼出的个人记忆，以及 Agent 在为你工作时记录的长期事实。你可以在这里查看、搜索或清除。",
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
       "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"
@@ -3617,11 +3633,12 @@
       "status": "状态",
       "profile": "画像",
       "search": "搜索",
-      "settings": "设置"
+      "settings": "设置",
+      "log": "日志"
     },
     "remoteUnavailable": {
-      "title": "仅限本机访问",
-      "description": "记忆的设置和数据仅在直接连接到本机 Avibe 时可见——通过 Avibe Cloud 或其他远程方式无法访问。"
+      "title": "当前连接无法访问记忆",
+      "description": "请直接连接本机 Avibe，或使用已认证的 Avibe Cloud 会话。其他远程连接仍会被拒绝。"
     },
     "status": {
       "title": "状态",
@@ -3685,7 +3702,9 @@
           "distillation_rejected": "提炼被拒绝",
           "result_unknown": "处理结果未知"
         }
-      }
+      },
+      "restartEngine": "重启引擎",
+      "engineRestartCompleted": "记忆引擎已重启。"
     },
     "profile": {
       "description": "由已捕获的消息提炼出的、你当前的画像。",
@@ -3695,7 +3714,12 @@
       "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
       "disabledHint": "启用记忆后即可查看画像。",
       "refresh": "刷新",
-      "sourceNote": "由你的对话历史提炼而来。"
+      "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。",
+      "summary": "概览",
+      "explicitInfo": "明确信息",
+      "implicitTraits": "推断特征",
+      "basis": "推断依据",
+      "evidence": "相关证据"
     },
     "search": {
       "description": "搜索你的画像、事件和事实。",
@@ -3705,13 +3729,13 @@
       "empty": "没有结果。",
       "searchFailed": "搜索失败。",
       "disabledHint": "启用记忆后即可搜索。",
-      "sourceNote": "由你的对话历史提炼而来。"
+      "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "settings": {
       "loading": "正在加载设置…",
       "loadFailed": "无法加载记忆设置。",
       "enableLabel": "记忆",
-      "enableHint": "将符合条件的 Workbench 消息和已绑定、已启用用户的私聊消息提炼为按用户隔离的可搜索记忆。",
+      "enableHint": "将符合条件的 Workbench 消息，以及已绑定且已启用用户的私聊消息，提炼为按用户隔离的可搜索记忆。Agent 在为你工作时记录的长期事实也会包含在内。",
       "dependencyNotReady": "memory-runtime 依赖尚未就绪。请先在「设置 → 依赖」中安装或修复，然后重新尝试启用记忆。",
       "goToDependencies": "前往依赖页面",
       "llmTitle": "LLM 端点",
@@ -3734,11 +3758,13 @@
       "disclosureTitle": "启用记忆前请了解",
       "disclosure": [
         "符合条件的 Workbench 文本和已绑定、已启用用户的私聊文本会被复制到有界本地队列中等待处理。",
+        "Agent 还会在没有明确要求的情况下，把它从对话以及在本机工作中提炼的长期结论（如偏好、纠偏、决策，以及在文件或工具输出中遇到的持久环境或账户事实）记录到同一队列。",
         "一条消息处理成功或重试耗尽后，其文本会立即被清除；一个不含内容的去重标记最多保留 90 天，且以最新的 100,000 条为上限。",
         "记忆使用的 LLM 与 Embedding 端点与你的 Agent 模型订阅是分开的。",
         "这些远程端点会接收到被捕获的文本或搜索查询，并可能按其自身策略保留。",
         "私聊文本在被捕获前已经过该平台传输，并继续受该平台自身的留存与同步策略约束。",
         "本地运行时除了可见的画像外，还会在本地状态中保留尚未处理的原始消息和提取数据。",
+        "记忆处理会为本安装的所有用户和项目保留经脱敏且有大小限制的提供方请求与响应诊断，最长 14 天或直到执行「清除全部」。",
         "禁用记忆只会冻结本地数据，不会删除——如需删除请使用「清除全部」。",
         "「清除全部」只会移除本机上的本地记忆数据，无法追回已发送到远程端点的副本，也不会影响原始聊天记录。",
         "发往记忆端点的投递是至少一次——超时或崩溃后偶尔可能出现重复的派生记忆。",
@@ -3749,12 +3775,13 @@
     "clear": {
       "button": "清除全部",
       "confirmTitle": "清除全部本地记忆数据？",
-      "confirmDescription": "这会移除你的画像、事件、事实，以及本机上任何尚未处理的排队文本。",
+      "confirmDescription": "这会移除你的画像、事件、事实、本机上尚未处理的排队文本，以及已保留的提供方调用诊断。",
       "removesTitle": "将会移除：",
       "removes": [
         "你可见的画像",
         "用于构建画像的隐藏本地缓冲区和索引",
-        "本地处理队列中待处理和已完成的条目"
+        "本地处理队列中待处理和已完成的条目",
+        "已保留的提供方请求和响应诊断"
       ],
       "keepsTitle": "不会移除：",
       "keeps": [
@@ -3774,6 +3801,100 @@
       "profile": "画像",
       "episode": "事件",
       "fact": "事实"
+    },
+    "log": {
+      "description": "查看所有项目和用户的消息如何转化为记忆状态。",
+      "loading": "正在加载处理日志…",
+      "loadFailed": "无法加载处理日志。",
+      "detailLoading": "正在加载处理详情…",
+      "detailFailed": "无法加载处理详情。",
+      "detailUnavailable": "处理详情不可用。",
+      "forbidden": "当前连接无法访问处理日志。",
+      "disabledHint": "启用记忆后即可查看处理日志。",
+      "empty": "还没有已处理的记忆条目。",
+      "refresh": "刷新",
+      "loadMore": "加载更多",
+      "limitReached": "当前显示前 {{count}} 条记录。刷新后可查看最新处理活动。",
+      "back": "返回处理日志",
+      "messages": "{{count}} 条消息",
+      "runs": "{{count}} 次运行",
+      "providerCalls": "{{count}} 次调用",
+      "projectId": "项目 ID",
+      "userId": "用户 ID",
+      "noPreview": "没有可用的文本预览。",
+      "recorderDegraded": "新的提供方调用未被记录，已有记录仍可读取。",
+      "recorderCorrupt": "提供方调用日志已损坏。必须先通过「清除全部」移除该日志，之后才能恢复记录。",
+      "clearAction": "打开「清除全部」",
+      "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
+      "sectionPartial": "{{section}}部分可用（{{reason}}）。",
+      "section": {
+        "everos": "时间线数据",
+        "capture": "捕获关联",
+        "calls": "提供方调用"
+      },
+      "timeline": "处理时间线",
+      "step": {
+        "capture": "捕获与投递",
+        "memcell": "已创建 Memcell",
+        "strategy": "记忆策略"
+      },
+      "reason": {
+        "missing": "来源数据缺失",
+        "busy": "来源数据正忙",
+        "malformed": "来源数据格式异常",
+        "expired": "关联信息已过期",
+        "runsMissing": "处理运行记录缺失",
+        "runsBusy": "处理运行记录正忙",
+        "runsMalformed": "处理运行记录格式异常"
+      },
+      "status": {
+        "created": "已创建",
+        "mixed": "多种状态",
+        "pending": "等待中",
+        "processing": "处理中",
+        "delivered": "已投递",
+        "dead": "已停止",
+        "running": "运行中",
+        "ok": "成功",
+        "success": "成功",
+        "failed": "失败",
+        "deadLetter": "重试后停止",
+        "crashed": "已崩溃",
+        "error": "错误",
+        "present": "已存在",
+        "missing": "缺失",
+        "notSeen": "尚未发现",
+        "indexed": "已索引"
+      },
+      "callKind": {
+        "llm": "LLM",
+        "multimodalLlm": "多模态 LLM",
+        "embedding": "Embedding"
+      },
+      "callStage": {
+        "boundary": "请求边界",
+        "strategy": "处理策略",
+        "cascade": "级联处理",
+        "episodeExtract": "事件提取",
+        "parse": "多模态解析"
+      },
+      "callSummary": "{{kind}} · {{status}}",
+      "profileTrigger": "触发画像运行",
+      "unavailable": "不可用：{{reason}}",
+      "omittedSteps": "已省略 {{count}} 个较早的时间线步骤。",
+      "callDetails": "提供方调用",
+      "callsNotRecorded": "提供方调用未被记录或已经过期。",
+      "omittedCalls": "已省略 {{count}} 个较早的提供方调用。",
+      "droppedCalls": "此记录之前有 {{count}} 次提供方调用被丢弃。",
+      "copyCall": "复制请求和响应",
+      "finishReason": "结束原因",
+      "usage": "提示 / 补全 token",
+      "request": "请求",
+      "response": "响应",
+      "currentState": "当前记忆状态",
+      "currentProfile": "画像",
+      "currentIndexing": "索引",
+      "currentStateOnly": "这里显示的是当前状态，不是本次处理运行的历史快照。"
     }
   },
   "organization": {

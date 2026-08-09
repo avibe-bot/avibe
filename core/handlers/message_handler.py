@@ -84,18 +84,13 @@ class MessageHandler(BaseHandler):
 
         task.add_done_callback(_on_done)
 
-    async def drain_memory_capture_tasks(self, timeout_seconds: float = 4.0) -> None:
-        """Finish queued Memory captures before the runtime closes on shutdown."""
+    async def drain_memory_capture_tasks(self) -> None:
+        """Settle captures accepted before controller shutdown closes Memory."""
 
-        pending = {task for task in self._memory_capture_tasks if not task.done()}
-        if not pending:
-            return
-        _done, pending = await asyncio.wait(pending, timeout=timeout_seconds)
-        if pending:
-            logger.warning("Cancelling %d Memory capture tasks after shutdown drain timeout", len(pending))
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        while self._memory_capture_tasks:
+            tasks = tuple(self._memory_capture_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._memory_capture_tasks.difference_update(tasks)
 
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
@@ -514,6 +509,9 @@ class MessageHandler(BaseHandler):
             )
             restored_route = restored_route if isinstance(restored_route, dict) else None
 
+            if durable_delivery_owned:
+                self._restore_reaction_target(context, delivery_context)
+
             if restored_route is not None:
                 base_session_id = str(
                     restored_route.get("base_session_id") or base_session_id
@@ -688,6 +686,12 @@ class MessageHandler(BaseHandler):
                     delivery_intent=delivery_intent,
                     downloaded_attachment_paths=downloaded_attachment_paths,
                     admission_context={
+                        # The reaction target is not always the sender's own
+                        # message (a quick reply reacts on its bot echo), and it
+                        # cannot be rebuilt from the Delivery snapshot.
+                        "processing_indicator_message_id": self._reaction_target(
+                            context
+                        ),
                         "message_handler_route": {
                             "base_session_id": base_session_id,
                             "composite_session_id": composite_key,
@@ -1037,7 +1041,64 @@ class MessageHandler(BaseHandler):
             from core.inbox_events import bus
 
             bus.publish("queue.updated", {"session_id": session_id})
+        # This is the only place that knows an input's admission outcome: a
+        # Delivery that did not start its own turn returns here and the caller
+        # stops, so without a receipt the user sees nothing at all for every
+        # message sent while a turn is running.
+        await self._ack_delivery_admission(context, result)
         return True
+
+    @staticmethod
+    def _reaction_target(context: MessageContext) -> Optional[str]:
+        """The message this input's reactions belong on, when it is not its own.
+
+        A quick-reply callback is dispatched with ``message_id=None`` (to bypass
+        platform event dedup) and reacts on its bot echo instead. The echo id
+        only exists in this process, so it has to travel with the Delivery.
+        """
+
+        target = (context.platform_specific or {}).get(
+            "processing_indicator_message_id"
+        )
+        return str(target) if target else None
+
+    @staticmethod
+    def _restore_reaction_target(
+        context: MessageContext,
+        delivery_context: Any,
+    ) -> None:
+        """Put a Delivery's reaction target back on its rehydrated context.
+
+        Durable hydration restores only the native message id, so without this a
+        promoted quick-reply Delivery computes a different receipt key: its 👌
+        would never be cleared and its own indicator would target the synthetic
+        delivery id instead of the echo.
+        """
+
+        if not isinstance(delivery_context, dict):
+            return
+        target = delivery_context.get("processing_indicator_message_id")
+        if not target:
+            return
+        spec = dict(context.platform_specific or {})
+        spec["processing_indicator_message_id"] = str(target)
+        context.platform_specific = spec
+
+    async def _ack_delivery_admission(self, context: MessageContext, result: Any) -> None:
+        """Report one admission outcome back to the sender, best effort."""
+
+        indicator = getattr(self.controller, "processing_indicator", None)
+        ack = getattr(indicator, "ack_delivery_state", None)
+        if not callable(ack):
+            return
+        try:
+            await ack(
+                context,
+                state=str(getattr(result, "state", "") or ""),
+                admission=str(getattr(result, "admission", "") or ""),
+            )
+        except Exception as err:
+            logger.debug("Failed to acknowledge delivery admission: %s", err)
 
     @staticmethod
     def _cleanup_unowned_attachment_paths(paths: List[str]) -> None:
@@ -1095,15 +1156,19 @@ class MessageHandler(BaseHandler):
         thread_ts = context.thread_id or context.message_id
         if not message_ts or not thread_ts:
             return False
-        dedup_keys = self._processed_message_dedup_keys(context, thread_ts, message_ts)
-        legacy_keys = (str(context.channel_id), thread_ts, message_ts)
-        if self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys):
-            return True
+        legacy_keys = (str(context.channel_id), str(thread_ts), str(message_ts))
+        dedup_keys = self._processed_message_dedup_keys(context, str(thread_ts), str(message_ts))
         checker = getattr(self.sessions, "has_processed_message", None)
         if callable(checker):
-            return bool(checker(*dedup_keys))
+            if checker(*dedup_keys):
+                return True
+            return self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys)
         checker = getattr(self.sessions, "is_message_already_processed", None)
-        return bool(callable(checker) and checker(*dedup_keys))
+        if not callable(checker):
+            return False
+        if checker(*dedup_keys):
+            return True
+        return self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys)
 
     def _claim_native_human_event(self, context: MessageContext) -> bool:
         """Fence a native control input that intentionally creates no Delivery."""
@@ -1112,17 +1177,19 @@ class MessageHandler(BaseHandler):
         thread_ts = context.thread_id or context.message_id
         if not message_ts or not thread_ts:
             return True
-        dedup_keys = self._processed_message_dedup_keys(context, thread_ts, message_ts)
-        legacy_keys = (str(context.channel_id), thread_ts, message_ts)
-        try_record = getattr(self.sessions, "try_record_processed_message", None)
+        legacy_keys = (str(context.channel_id), str(thread_ts), str(message_ts))
+        dedup_keys = self._processed_message_dedup_keys(context, str(thread_ts), str(message_ts))
         if self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys):
-            recorded = False
-        elif callable(try_record):
+            return False
+        try_record = getattr(self.sessions, "try_record_processed_message", None)
+        if callable(try_record):
             recorded = try_record(*dedup_keys)
         else:
             recorded = not self.sessions.is_message_already_processed(*dedup_keys)
             if recorded:
-                self.sessions.record_processed_message(*dedup_keys)
+                self.sessions.record_processed_message(
+                    *dedup_keys,
+                )
         if not recorded:
             logger.info(
                 "Skipping already processed message: channel=%s, thread=%s, message=%s",

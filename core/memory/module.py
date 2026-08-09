@@ -11,7 +11,7 @@ import shutil
 import stat
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,6 +25,7 @@ from core.memory.store import (
     MemoryStore,
     QueueStats,
     is_principal_id,
+    is_project_id,
 )
 from core.memory.types import (
     CaptureAccepted,
@@ -39,6 +40,9 @@ from core.memory.types import (
     MemoryFailureLogEntry,
     MemoryItem,
     MemoryItems,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
     MemoryResult,
     MemoryStatus,
     OperationFailed,
@@ -243,6 +247,7 @@ class MemoryModule:
                 source_message_id=request.source_message_id,
                 session_id=request.session_id,
                 principal_id=request.principal_id,
+                project_ref=request.project_id,
                 provenance=request.provenance,
                 payload_text=normalized_text,
                 payload_attachments=encode_capture_attachments(request.attachments),
@@ -270,6 +275,7 @@ class MemoryModule:
         query: str,
         *,
         principal_id: str,
+        project_id: str,
         limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> MemoryResult:
         """Return a bounded provider search result or one closed error category."""
@@ -281,6 +287,8 @@ class MemoryModule:
         if query_bytes is None or not normalized_query.strip():
             return OperationFailed(error="memory_invalid_input")
         if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
+        if not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_SEARCH_LIMIT:
             return OperationFailed(error="memory_invalid_input")
@@ -303,16 +311,18 @@ class MemoryModule:
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
             result = await self._provider_read(
-                lambda: self._provider.search(principal_id, normalized_query, limit)
+                lambda: self._provider.search(principal_id, project_id, normalized_query, limit)
             )
         return result if isinstance(result, OperationFailed) else self._bounded_items(result, limit=limit)
 
-    async def profile(self, *, principal_id: str) -> MemoryResult:
+    async def profile(self, *, principal_id: str, project_id: str) -> MemoryResult:
         """Return a bounded provider profile result or one closed error category."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
+        if not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         recovery = await self._recover_interrupted_clear()
         if recovery is not None:
@@ -329,7 +339,7 @@ class MemoryModule:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
-            result = await self._provider_read(lambda: self._provider.profile(principal_id))
+            result = await self._provider_read(lambda: self._provider.profile(principal_id, project_id))
         return result if isinstance(result, OperationFailed) else self._bounded_items(
             result,
             limit=MAX_PROVIDER_RESULT_ITEMS,
@@ -443,30 +453,35 @@ class MemoryModule:
         if self._clear_active:
             return None
         async with self._lifecycle_lock:
-            async with self._root_lifecycle_lock():
-                if self._clear_active:
-                    return None
-                try:
-                    meta = await self._store_call(self._store.get_meta)
-                except Exception:
-                    return OperationFailed(error="memory_clear_failed")
-                if meta is None or not meta.clear_in_progress:
-                    self._worker.resume_claims()
-                    return None
+            return await self._recover_interrupted_clear_locked()
 
-                try:
-                    if not await self._worker.pause_and_wait(
-                        timeout_seconds=self._clear_drain_timeout_seconds
-                    ):
-                        raise _ClearStepFailure("worker drain did not stop in time")
-                    await self._clear_provider_data_or_fail(meta)
-                    await self._store_call(self._store.finish_clear)
-                except Exception:
-                    await self._record_clear_failure()
-                    return OperationFailed(error="memory_clear_failed")
+    async def _recover_interrupted_clear_locked(self) -> OperationFailed | None:
+        """Recover a durable Clear while ``_lifecycle_lock`` is already held."""
 
+        async with self._root_lifecycle_lock():
+            if self._clear_active:
+                return None
+            try:
+                meta = await self._store_call(self._store.get_meta)
+            except Exception:
+                return OperationFailed(error="memory_clear_failed")
+            if meta is None or not meta.clear_in_progress:
                 self._worker.resume_claims()
                 return None
+
+            try:
+                if not await self._worker.pause_and_wait(
+                    timeout_seconds=self._clear_drain_timeout_seconds
+                ):
+                    raise _ClearStepFailure("worker drain did not stop in time")
+                await self._clear_provider_data_or_fail(meta)
+                await self._store_call(self._store.finish_clear)
+            except Exception:
+                await self._record_clear_failure()
+                return OperationFailed(error="memory_clear_failed")
+
+            self._worker.resume_claims()
+            return None
 
     async def _skipped_with_missed(self, error: MemoryErrorCode) -> CaptureReceipt:
         try:
@@ -511,6 +526,13 @@ class MemoryModule:
                 except ValueError:
                     return OperationFailed(error="memory_provider_response_invalid")
                 total_bytes += len(date_bytes)
+            if item.profile is not None:
+                if item.kind != "profile":
+                    return OperationFailed(error="memory_provider_response_invalid")
+                profile_bytes = _profile_bytes(item.profile)
+                if profile_bytes is None:
+                    return OperationFailed(error="memory_provider_response_invalid")
+                total_bytes += profile_bytes
             if total_bytes > MAX_PROVIDER_RESULT_BYTES:
                 return OperationFailed(error="memory_provider_response_invalid")
         return MemoryItems(items=items)
@@ -524,7 +546,11 @@ class MemoryModule:
             return "memory_invalid_input"
         if not self._valid_identifier(request.source_message_id) or not self._valid_identifier(request.session_id):
             return "memory_invalid_input"
-        if not is_principal_id(request.principal_id) or request.provenance not in {"user_input", "agent"}:
+        if (
+            not is_principal_id(request.principal_id)
+            or not is_project_id(request.project_id)
+            or request.provenance not in {"user_input", "agent"}
+        ):
             return "memory_invalid_input"
         if not isinstance(request.occurred_at_ms, int) or isinstance(request.occurred_at_ms, bool):
             return "memory_invalid_input"
@@ -891,6 +917,83 @@ class MemoryModule:
     def _valid_identifier(value: str) -> bool:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
+
+
+def _profile_text_bytes(value: object) -> bytes | None:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        return None
+    encoded = _utf8_bytes(value)
+    if encoded is None or len(encoded) > MAX_PROVIDER_ITEM_BYTES:
+        return None
+    if any(ord(character) < 32 and character not in {"\n", "\t", "\r"} for character in value):
+        return None
+    return encoded
+
+
+def _profile_bytes(profile: object) -> int | None:
+    """Revalidate every structured profile field before it leaves the module."""
+
+    if not isinstance(profile, MemoryProfile):
+        return None
+    if profile.summary is None and not profile.explicit_info and not profile.implicit_traits:
+        return None
+
+    total = 0
+
+    def optional_text(value: object) -> int | None:
+        if value is None:
+            return 0
+        encoded = _profile_text_bytes(value)
+        return len(encoded) if encoded is not None else None
+
+    summary_bytes = optional_text(profile.summary)
+    if summary_bytes is None:
+        return None
+    total += summary_bytes
+
+    if not isinstance(profile.explicit_info, tuple) or len(profile.explicit_info) > MAX_PROVIDER_RESULT_ITEMS * 10:
+        return None
+    for info in profile.explicit_info:
+        if not isinstance(info, MemoryProfileExplicitInfo):
+            return None
+        description_bytes = _profile_text_bytes(info.description)
+        if description_bytes is None:
+            return None
+        total += len(description_bytes)
+        for value in (info.category, info.evidence):
+            value_bytes = optional_text(value)
+            if value_bytes is None:
+                return None
+            total += value_bytes
+
+    if not isinstance(profile.implicit_traits, tuple) or len(profile.implicit_traits) > MAX_PROVIDER_RESULT_ITEMS * 10:
+        return None
+    for trait in profile.implicit_traits:
+        if not isinstance(trait, MemoryProfileTrait):
+            return None
+        description_bytes = _profile_text_bytes(trait.description)
+        if description_bytes is None:
+            return None
+        total += len(description_bytes)
+        for value in (trait.trait, trait.basis, trait.evidence):
+            value_bytes = optional_text(value)
+            if value_bytes is None:
+                return None
+            total += value_bytes
+
+    if profile.updated_at is not None:
+        timestamp_bytes = _profile_text_bytes(profile.updated_at)
+        if timestamp_bytes is None or len(timestamp_bytes) > 64:
+            return None
+        try:
+            instant = datetime.fromisoformat(profile.updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if instant.tzinfo is None or instant.utcoffset() != timezone.utc.utcoffset(instant):
+            return None
+        total += len(timestamp_bytes)
+
+    return total
 
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:

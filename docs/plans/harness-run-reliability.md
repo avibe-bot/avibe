@@ -1,9 +1,10 @@
 # Harness Run Reliability
 
-Status (2026-08-03): **PR1, PR2, PR5, PR6, and #1139's Activity-output
-settlement closure are complete. PR3 and PR4's shared-drain liveness work
-remain. PR4's transport-attempt delta and PR7 must be re-baselined against the
-durable Delivery/Turn/Activity model before implementation.**
+Status (2026-08-06): **Every implementation unit through PR4 is merged. PR1,
+PR2, PR5, PR6, #1139's Activity-output settlement closure, PR3 (#1155), and
+PR4 (#1173) are complete. Only PR7R remains as the next unit, and it is
+evidence-only. PR4's conditional transport-attempt delta (PR4B) opens only if a
+current-master reproducer proves a missing durable fact.**
 
 This is the execution plan, not the investigation log. The original detailed
 diagnosis and its review history remain available in Git before `fe821905`.
@@ -20,9 +21,9 @@ numbers or old ownership assumptions.
 | Delivery / Turn / Message ownership model | **#1134 merged** |
 | Teardown-interrupted Run settlement | **#1140 merged**; supersedes closed #1131 |
 | Activity output batch receipt and local settlement | **#1139 merged**; supersedes #1121 |
-| Idle-eviction interlock for queued work | **Open — PR3** |
-| Bounded and supervised shared drains | **Open — PR4**; attempt-state delta requires a current-master reproducer |
-| Scheduled/watch terminal-time truth and cron liveness | **Re-baseline — PR7** |
+| Idle-eviction interlock for queued work | **#1155 merged** (PR3); scenarios `HFR-130…154` |
+| Bounded and supervised shared drains | **#1173 merged** (PR4); scenarios `HFR-155…179`; attempt-state delta (PR4B) still requires a current-master reproducer |
+| Scheduled/watch terminal-time truth and cron liveness | **Open — PR7R**, evidence-only; `HFR-180…219` reserved and unoccupied as of 2026-08-06 |
 
 The post-plan architecture is load-bearing:
 
@@ -680,6 +681,11 @@ Minimum baseline cases:
 
 ## 5. PR3 — Session runtime ownership and activation
 
+**Merged as #1155 (2026-08-04).** Retained as the accepted contract: PR7R and
+any later implementation unit must consume the runtime ownership snapshot,
+activation interlock, and work-supervisor interfaces defined here rather than
+reintroducing side maps or adapter-local reclamation rules.
+
 ### Goal
 
 Make runtime reclamation and durable work activation consume one coherent
@@ -871,6 +877,10 @@ pinning resources, no productive or transitioning owner is reclaimed, and the
 provider cannot make a stuck session immortal.
 
 ## 6. PR4 — Event-first supervised work lanes
+
+**Merged as #1173 (2026-08-05).** Retained as the accepted contract. The
+conditional transport-attempt delta below remains unimplemented and is the only
+part of this section still open.
 
 ### Goal
 
@@ -1164,6 +1174,10 @@ unchanged.
 
 ## 7. PR7 — Evidence gate before any new timeout model
 
+**Open. This is the next unit of work.** PR3 and PR4 removed the serial-drain
+and reclamation causes; whether any terminal-truth or scheduler-liveness defect
+survives them is now an open question that only evidence may answer.
+
 Do **not** implement the old PR7 prescription. #1134 added
 `complete_on_return`, durable Delivery ownership, immutable Turn terminal
 evidence, and restart recovery; #1139 added exact Activity output batch receipts,
@@ -1256,16 +1270,16 @@ evidence plan.
 complete: #1063, #1064, #1072, #1134, #1139, #1140
     |
     v
-PR3 runtime ownership + `session_deliveries` supervisor foundation
+complete: PR3 #1155 runtime ownership + `session_deliveries` supervisor foundation
     |
     v
-PR4 event-first supervised work lanes
+complete: PR4 #1173 event-first supervised work lanes
     |
     v
-PR7R current-master evidence matrix
+NEXT: PR7R current-master evidence matrix          (evidence-only)
     |
     v
-contract amendment for each reproduced defect
+contract amendment for each reproduced defect      (documentation-only)
     |
     v
 separate terminal-truth / scheduler-liveness implementation PRs
@@ -1274,42 +1288,41 @@ separate terminal-truth / scheduler-liveness implementation PRs
 PR7R is a separate test/documentation review unit. It may close either old claim
 without an implementation PR. A reproduced defect first receives the complete
 contract amendment above; only then may it become a separate implementation
-unit. Keep PR3 and PR4 separate: PR3 defines session ownership/reclamation;
-PR4 replaces serial polling as the normal executor. A PR4B transport-attempt
+unit. PR3 and PR4 stayed separate: PR3 defined session ownership/reclamation;
+PR4 replaced serial polling as the normal executor. A PR4B transport-attempt
 change exists only if the current-master reproducer proves a missing durable
 fact and its separate contract review passes.
 
 Implementation ownership is intentionally narrow:
 
-- **PR3** owns the derived SQLite snapshot, the controller-owned supervisor
+- **PR3** owned the derived SQLite snapshot, the controller-owned supervisor
   foundation, `session_deliveries` registration, the fallback-only pre-execution
   `requests` recovery registration, reclaimer consumers, and the exact
-  activation/reclamation tests. It does not admit general queued Harness Runs
+  activation/reclamation tests. It did not admit general queued Harness Runs
   or restructure the other drains.
-- **PR4** registers Harness lanes, replaces the scheduled-task and managed-watch
-  `_watch_store` loops, extends the existing Unix-socket event vocabulary and
-  bridge use, instruments post-commit producers, and adds lane lifecycle and
-  isolation tests. It does not change eviction disposition or durable owner
+- **PR4** registered Harness lanes, replaced the scheduled-task and managed-watch
+  `_watch_store` loops, extended the existing Unix-socket event vocabulary and
+  bridge use, instrumented post-commit producers, and added lane lifecycle and
+  isolation tests. It did not change eviction disposition or durable owner
   schemas.
 - **PR7R** remains evidence-only.
 
-PR3 and PR4 may be developed in isolated worktrees from this reviewed contract,
-but PR4 is rebased onto the accepted PR3 foundation before it opens for review.
-No stacked public PR may ask reviewers to infer an unmerged wake interface.
 Each lane owns its files and tests; the orchestrator alone resolves shared
 controller/supervisor edits and verifies one consuming test per contract before
 push.
 
-Scenario ranges reserved by the original plan remain available on current
-`master`:
+Scenario range status, verified against
+`tests/scenarios/harness_failure_recovery/catalog.yaml` on 2026-08-06:
 
-- PR3: `HFR-130…154`
-- PR4: `HFR-155…179`
-- PR7: `HFR-180…219`
+- PR3: `HFR-130…154` — occupied by #1155
+- PR4: `HFR-155…179` — occupied by #1173
+- PR7: `HFR-180…219` — reserved and still unoccupied; usable by PR7R
 
-Check the catalog again immediately before coding. If a range has been occupied,
-allocate a fresh contiguous block above the highest merged ID; never reuse a
-closed branch's overflow table.
+Check the catalog again immediately before coding. The highest merged ID is
+now `HFR-435`, allocated by unrelated capabilities above this plan's reserved
+blocks. If `HFR-180…219` has been taken by then, allocate a fresh contiguous
+block above the highest merged ID; never reuse a closed branch's overflow
+table.
 
 ## 9. Validation and non-goals
 

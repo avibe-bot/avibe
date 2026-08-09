@@ -33,6 +33,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
             {
                 "enabled": True,
                 "processing": _complete_processing(),
+                "diagnostics": {"log_provider_calls": True},
                 "embedding_change_pending": True,
             }
         )
@@ -44,6 +45,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
 
     assert stored["memory"]["processing"]["llm"]["api_key"] == "llm-key"
     assert stored["memory"]["embedding_change_pending"] is True
+    assert stored["memory"]["diagnostics"] == {"log_provider_calls": True}
     assert projected["memory"]["processing"]["llm"] == {
         "base_url": "https://llm.example.test/v1",
         "model": "chat",
@@ -52,6 +54,26 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
     }
     assert "embed-key" not in json.dumps(projected)
     assert "embedding_change_pending" not in projected["memory"]
+    assert projected["memory"]["diagnostics"] == {"log_provider_calls": True}
+
+
+def test_memory_config_drops_retired_proactive_capture_flag(tmp_path) -> None:
+    """A config written by a release that had the opt-in flag still loads."""
+
+    upgraded = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": True,
+                "proactive_capture": True,
+                "processing": _complete_processing(),
+            }
+        )
+    )
+    upgraded.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert "proactive_capture" not in stored["memory"]
+    assert "proactive_capture" not in config_to_payload(upgraded)["memory"]
 
 
 @pytest.mark.parametrize(
@@ -99,7 +121,7 @@ def test_memory_enable_requires_complete_authenticated_processing_config() -> No
         V2Config.from_payload(_payload({"enabled": True, "processing": processing}))
 
 
-def test_memory_config_defaults_disabled_for_legacy_payload() -> None:
+def test_memory_config_defaults_provider_logging_on_for_legacy_payload() -> None:
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -108,16 +130,41 @@ def test_memory_config_defaults_disabled_for_legacy_payload() -> None:
         agents=AgentsConfig(),
     )
     assert config.memory == MemoryConfig()
+    assert config.memory.diagnostics.log_provider_calls is True
 
 
-def test_memory_config_rejects_explicit_non_object_memory_block() -> None:
-    with pytest.raises(ValueError, match="Config 'memory' must be an object"):
-        V2Config.from_payload(_payload([]))
+def test_memory_config_upgrades_disabled_provider_logging_to_always_on() -> None:
+    config = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": False,
+                "processing": {},
+                "diagnostics": {"log_provider_calls": False},
+            }
+        )
+    )
+
+    assert config.memory.diagnostics.log_provider_calls is True
+    assert config_to_payload(config)["memory"]["diagnostics"] == {
+        "log_provider_calls": True,
+    }
 
 
-def test_memory_config_rejects_falsey_non_object_memory_payload() -> None:
-    with pytest.raises(ValueError, match="Config 'memory' must be an object"):
-        V2Config.from_payload(_payload(0))
+@pytest.mark.parametrize(
+    "diagnostics",
+    [True, [], {"log_provider_calls": "yes"}],
+)
+def test_memory_config_rejects_invalid_diagnostics(diagnostics: object) -> None:
+    with pytest.raises(ValueError, match="memory.diagnostics"):
+        V2Config.from_payload(
+            _payload(
+                {
+                    "enabled": False,
+                    "processing": {},
+                    "diagnostics": diagnostics,
+                }
+            )
+        )
 
 
 def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> None:

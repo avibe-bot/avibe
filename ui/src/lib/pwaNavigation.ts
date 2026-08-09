@@ -1,3 +1,11 @@
+import { isApplicationRouteHref } from './applicationRoutes';
+
+declare global {
+  interface Window {
+    __AVIBE_PWA_NAVIGATE_SAME_ORIGIN__?: (href: string) => boolean;
+  }
+}
+
 function normalizeHostname(hostname: string): string {
   return hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 }
@@ -28,4 +36,55 @@ export function shouldBlockPwaLoopbackLink(href: string, currentHref: string): b
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve a same-origin `_blank` navigation to the target the installed iOS
+ * PWA should open in its current browsing context.
+ *
+ * A private Show Page root uses the in-shell app route so the user keeps Avibe
+ * chrome and back navigation. Canonical AppShell routes stay on the SPA path,
+ * avoiding a reload and another auth pass. Every other same-origin destination
+ * uses a current-context document navigation so WebKit never creates the
+ * secondary context that iOS may incorrectly restore after process eviction.
+ * Callers exclude download anchors before using this resolver.
+ */
+export interface InternalPwaLinkTarget {
+  path: string;
+  navigation: 'spa' | 'document';
+}
+
+export function internalPwaLinkTarget(
+  href: string,
+  currentHref: string,
+): InternalPwaLinkTarget | null {
+  try {
+    const current = new URL(currentHref);
+    const target = new URL(href, current);
+    if (target.origin !== current.origin || !['http:', 'https:'].includes(target.protocol)) return null;
+
+    const privateShowRoot = /^\/show\/([^/]+)\/?$/.exec(target.pathname);
+    if (privateShowRoot && !target.search && !target.hash) {
+      return { path: `/apps/show/${privateShowRoot[1]}`, navigation: 'spa' };
+    }
+
+    return {
+      path: `${target.pathname}${target.search}${target.hash}`,
+      navigation: isApplicationRouteHref(target.pathname) ? 'spa' : 'document',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Open a link that normally requests a new browsing context while honoring the
+ * installed-PWA same-origin policy. The AppShell bridge returns true only when
+ * it handled the destination in the current PWA context; desktop and external
+ * destinations keep the browser's native `_blank` behavior.
+ */
+export function openLinkInNewContext(href: string, features?: string): Window | null {
+  if (typeof window === 'undefined') return null;
+  if (window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__?.(href)) return null;
+  return window.open(href, '_blank', features);
 }

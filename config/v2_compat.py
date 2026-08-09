@@ -89,6 +89,7 @@ class AppCompatConfig:
     # Mirrors ``V2Config.runtime.harness_prompt_echo``; read on the IM turn path, so
     # it has to reach the controller's runtime config like ``resource_governance``.
     harness_prompt_echo: bool = True
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def enabled_platforms(self) -> list[str]:
         enabled = self.platforms.get("enabled") if isinstance(self.platforms, dict) else None

@@ -536,6 +536,8 @@ export type ApiContextType = {
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
   searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
+  getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
+  getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
@@ -685,7 +687,7 @@ export type ApiContextType = {
   /** Counts of resources permanently reclaimed when archiving this session
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
-  listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null }>;
+  listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; aroundNativeId?: string; aroundNativePlatform?: string; aroundTurnId?: string; aroundRunId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null; anchor_id?: string | null }>;
   // Chat Activity panel (GET /api/sessions/<id>/activity): summary of turn groups
   // for chips, and one group's rows for lazy expand. Only used when the
   // ``ui.show_agent_activity`` toggle is on (see lib/agentActivity).
@@ -1387,6 +1389,11 @@ export type HarnessDefinitionState = {
   // the window at all. Both age out on their own; neither is acknowledgment state.
   consecutive_failures: number;
   recent_failures: number;
+  // Watches separate waiter health above from the Agent Runs created by events.
+  // Tasks omit these because their execution is already the definition health.
+  processing_health?: HarnessDefinitionHealth | null;
+  processing_consecutive_failures?: number;
+  processing_recent_failures?: number;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
@@ -1844,6 +1851,10 @@ export type MemoryStatus = {
   processing_fault_kind: 'credential' | 'engine' | null;
   processing_fault_since: string | null;
   processing_alert_active: boolean;
+  recorder?: {
+    state: 'active' | 'degraded' | 'disabled';
+    reason: string | null;
+  };
   error: string | null;
   data_exists: boolean;
 };
@@ -1867,14 +1878,127 @@ export type MemoryFailureLogResult =
 
 export type MemoryItemKind = 'profile' | 'episode' | 'fact';
 
+export type MemoryProfileExplicitInfo = {
+  description: string;
+  category: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfileTrait = {
+  description: string;
+  trait: string | null;
+  basis: string | null;
+  evidence: string | null;
+};
+
+export type MemoryProfile = {
+  summary: string | null;
+  explicit_info: MemoryProfileExplicitInfo[];
+  implicit_traits: MemoryProfileTrait[];
+  updated_at: string | null;
+};
+
 export type MemoryItem = {
   kind: MemoryItemKind;
   text: string;
   date: string | null;
+  profile?: MemoryProfile;
 };
 
 export type MemoryItemsResult =
   | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
+  | MemoryFailure;
+
+export type MemoryLogSourceStatus = {
+  status: 'available' | 'partial' | 'unavailable';
+  reason?: string;
+};
+
+export type MemoryLogSections = {
+  everos: MemoryLogSourceStatus;
+  capture: MemoryLogSourceStatus;
+  calls: MemoryLogSourceStatus;
+};
+
+export type MemoryLogEntry = {
+  memcell_id: string;
+  project_id: string;
+  principal_id: string;
+  timestamp_ms: number;
+  preview: string;
+  message_count: number;
+  run_summary: { total: number; statuses: Record<string, number> } | null;
+  authorized_call_count: number | null;
+};
+
+export type MemoryLogListResult =
+  | {
+      status: 'ok';
+      entries: MemoryLogEntry[];
+      next_cursor: string | null;
+      sections: MemoryLogSections;
+    }
+  | MemoryFailure;
+
+export type MemoryLogCapture =
+  | { status: 'available'; delivery_states: string[]; matched_message_count: number }
+  | { status: 'unavailable'; reason: string };
+
+export type MemoryLogStep = {
+  type: 'capture' | 'memcell' | 'strategy';
+  status: string;
+  timestamp_ms?: number;
+  started_at_ms?: number;
+  finished_at_ms?: number | null;
+  memcell_id?: string;
+  run_id?: string;
+  strategy?: string;
+  relation?: 'profile_trigger' | 'run';
+  attempt?: number;
+  error?: string | null;
+  reason?: string;
+};
+
+export type MemoryProviderCall = {
+  id: string;
+  started_at_ms: number;
+  duration_ms: number;
+  kind: string;
+  stage: string;
+  model: string | null;
+  status: string;
+  error: string | null;
+  finish_reason: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  request: unknown;
+  response: unknown;
+  request_bytes: number | null;
+  response_bytes: number | null;
+  dropped_before: number;
+};
+
+export type MemoryLogCurrentState =
+  | {
+      status: 'available';
+      profile: { status: 'present' | 'missing'; updated_at_ms: number | null };
+      indexing: { status: string; updated_at_ms?: number; error?: string | null };
+      label: 'current_state';
+    }
+  | { status: 'unavailable'; reason: string };
+
+export type MemoryLogDetailResult =
+  | {
+      status: 'ok';
+      entry: Pick<MemoryLogEntry, 'memcell_id' | 'project_id' | 'principal_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
+      capture: MemoryLogCapture;
+      steps: MemoryLogStep[];
+      calls: MemoryProviderCall[];
+      omitted_call_count: number;
+      omitted_step_count: number;
+      current_state: MemoryLogCurrentState;
+      sections: MemoryLogSections;
+    }
   | MemoryFailure;
 
 export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
@@ -2885,6 +3009,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
     searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
+    getMemoryLog: (cursor = null, limit = 20) => {
+      const query = new URLSearchParams({ limit: String(limit) });
+      if (cursor) query.set('cursor', cursor);
+      return getJson(`/api/memory/log?${query.toString()}`, { handleError: false });
+    },
+    getMemoryLogEntry: (memcellId) =>
+      getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
@@ -3073,6 +3204,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.afterId) search.set('after_id', params.afterId);
       if (params?.beforeId) search.set('before_id', params.beforeId);
       if (params?.aroundId) search.set('around_id', params.aroundId);
+      if (params?.aroundNativeId) search.set('around_native_id', params.aroundNativeId);
+      if (params?.aroundNativePlatform) search.set('around_native_platform', params.aroundNativePlatform);
+      if (params?.aroundTurnId) search.set('around_turn_id', params.aroundTurnId);
+      if (params?.aroundRunId) search.set('around_run_id', params.aroundRunId);
       if (params?.limit) search.set('limit', String(params.limit));
       if (params?.tail) search.set('tail', '1');
       const qs = search.toString();

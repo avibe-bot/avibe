@@ -837,7 +837,6 @@ def test_remote_config_post_uses_the_safe_projection_for_an_instance_owner(monke
     assert "platform_runtime" not in payload
     assert "agent_backend_runtime" not in payload
 
-
 def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

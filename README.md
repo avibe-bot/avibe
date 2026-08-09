@@ -346,6 +346,7 @@ Shipped recently: multi-window Apps, Show Page annotations, the Agent Harness, S
 - **[Official Docs](https://docs.avibe.bot)** — quickstart, concepts, platform & agent guides, troubleshooting
 - **[What is Avibe](https://docs.avibe.bot/concepts/agent-os)** — the Agent OS model
 - **[CLI Reference](docs/CLI.md)** · **[Commands](docs/COMMANDS.md)**
+- **[Memory](docs/MEMORY.md)** · **[记忆](docs/MEMORY_ZH.md)** — processing timeline, diagnostic capture, retention, and recovery
 - **[Install via AI agent](docs/INSTALL_FOR_AI.md)** — hand this to Claude Code, Codex, or OpenCode for guided setup
 - **[Slack](docs/SLACK_SETUP.md)** · **[Discord](docs/DISCORD_SETUP.md)** · **[Telegram](docs/TELEGRAM_SETUP.md)** setup guides
 

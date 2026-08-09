@@ -309,11 +309,26 @@ class MemoryProcessingConfig:
 
 
 @dataclass
+class MemoryDiagnosticsConfig:
+    # Retained only so older config files continue to load. Provider call
+    # recording is installation-wide and always enabled by the runtime.
+    log_provider_calls: bool = True
+
+    def validate(self) -> None:
+        if not isinstance(self.log_provider_calls, bool):
+            raise ValueError(
+                "Config 'memory.diagnostics.log_provider_calls' must be a boolean"
+            )
+        self.log_provider_calls = True
+
+
+@dataclass
 class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
 
     enabled: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
+    diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
     embedding_change_pending: bool = False
 
     def validate(self) -> None:
@@ -322,6 +337,7 @@ class MemoryConfig:
         if not isinstance(self.embedding_change_pending, bool):
             raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
         self.processing.validate()
+        self.diagnostics.validate()
         if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
             raise ValueError("Both Memory processing endpoints must be complete before enabling Memory")
 
@@ -421,6 +437,9 @@ def memory_config_to_payload(
         "processing": {
             "llm": endpoint_payload(memory.processing.llm),
             "embedding": endpoint_payload(memory.processing.embedding),
+        },
+        "diagnostics": {
+            "log_provider_calls": memory.diagnostics.log_provider_calls,
         },
     }
     if include_internal:
@@ -529,6 +548,7 @@ class AgentsConfig:
 class ModelHubModelConfig:
     id: str
     provenance: Literal["discovered", "manual"]
+    reasoning_efforts: list[str] = field(default_factory=list)
     display_name: Optional[str] = None
     discovered_at: Optional[str] = None
 
@@ -537,18 +557,26 @@ class ModelHubModelConfig:
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
         model_id = payload.get("id")
-        provenance = payload.get("provenance")
+        origin = payload.get("origin")
+        reasoning_efforts = payload.get("reasoning_efforts", [])
         display_name = payload.get("display_name")
         discovered_at = payload.get("discovered_at")
         if not isinstance(model_id, str) or not model_id:
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if provenance not in {"discovered", "manual"}:
-            raise ValueError("Config 'model_hub.sources.models.provenance' is invalid")
+        if origin not in {"discovered", "manual"}:
+            raise ValueError("Config 'model_hub.sources.models.origin' is invalid")
+        if (
+            not isinstance(reasoning_efforts, list)
+            or any(not isinstance(effort, str) or not effort for effort in reasoning_efforts)
+            or len(set(reasoning_efforts)) != len(reasoning_efforts)
+        ):
+            raise ValueError("Config 'model_hub.sources.models.reasoning_efforts' must be a unique array of strings")
         if display_name is not None and not isinstance(display_name, str):
             raise ValueError("Config 'model_hub.sources.models.display_name' must be a string or null")
         return cls(
             id=model_id,
-            provenance=provenance,
+            provenance=origin,
+            reasoning_efforts=list(reasoning_efforts),
             display_name=display_name,
             discovered_at=_validate_optional_datetime(
                 discovered_at,
@@ -560,7 +588,8 @@ class ModelHubModelConfig:
         return {
             "id": self.id,
             "display_name": self.display_name,
-            "provenance": self.provenance,
+            "origin": self.provenance,
+            "reasoning_efforts": list(self.reasoning_efforts),
             "discovered_at": self.discovered_at,
         }
 
@@ -666,7 +695,7 @@ class ModelHubSourceConfig:
     kind: Literal["subscription", "api_key"]
     vendor: str
     display_name: str
-    protocol: Literal["anthropic", "openai_responses", "openai_chat", "openai_compatible"]
+    protocol: Literal["anthropic", "openai_responses", "openai_chat"]
     supply_channel: Literal["native_cli", "hub"]
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
@@ -699,7 +728,7 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
         if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
             raise ValueError("Config 'model_hub.sources.display_name' is invalid")
-        if protocol not in {"anthropic", "openai_responses", "openai_chat", "openai_compatible"}:
+        if protocol not in {"anthropic", "openai_responses", "openai_chat"}:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
         if supply_channel not in {"native_cli", "hub"}:
             raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
@@ -776,8 +805,6 @@ class ModelHubSourceConfig:
         }
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
-        if self.experimental_consent_at is not None:
-            payload["experimental_consent_at"] = self.experimental_consent_at
         return payload
 
 
@@ -999,12 +1026,10 @@ class ModelHubConfig:
             )
             for backend in MODEL_HUB_BACKENDS
         }
-        for source in sources:
-            if source.kind == "subscription" and source.supply_channel == "hub":
-                if not experimental or not source.experimental_consent_at:
-                    raise ValueError("Config hub-held subscription source requires recorded experimental consent")
-            elif source.experimental_consent_at is not None:
-                raise ValueError("Config experimental consent is only valid for hub-held subscription sources")
+        # Consent and the experimental flag are retired product concepts.  Older
+        # in-memory callers may still carry these private attributes while the
+        # final serialized Source shape omits them; loading a valid final Source
+        # must therefore never require a retired stamp.
         config = cls(
             sources=sources,
             agents=agents,
@@ -1339,6 +1364,9 @@ class V2Config:
             raise ValueError("Config 'memory.processing.llm' must be an object")
         if not isinstance(memory_embedding_payload, dict):
             raise ValueError("Config 'memory.processing.embedding' must be an object")
+        memory_diagnostics_payload = memory_payload.get("diagnostics", {})
+        if not isinstance(memory_diagnostics_payload, dict):
+            raise ValueError("Config 'memory.diagnostics' must be an object")
         memory = MemoryConfig(
             enabled=memory_payload.get("enabled", False),
             embedding_change_pending=memory_payload.get("embedding_change_pending", False),
@@ -1349,6 +1377,12 @@ class V2Config:
                 embedding=MemoryEndpointConfig(
                     **_filter_dataclass_fields(MemoryEndpointConfig, memory_embedding_payload)
                 ),
+            ),
+            diagnostics=MemoryDiagnosticsConfig(
+                **_filter_dataclass_fields(
+                    MemoryDiagnosticsConfig,
+                    memory_diagnostics_payload,
+                )
             ),
         )
         memory.validate()

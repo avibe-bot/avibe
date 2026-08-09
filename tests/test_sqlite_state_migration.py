@@ -31,18 +31,20 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260806_0047"
+HEAD_REVISION = "20260809_0049"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
-        "('user', 'harness', 'annotation', 'result', 'notify', 'error', 'assistant')"
+        "('user', 'harness', 'agent_initiated', 'annotation', 'output', "
+        "'result', 'notify', 'vault', 'error', 'assistant')"
     ),
     "ix_messages_inbox_agent_reply": (
-        "session_id is not null and type in ('result', 'notify', 'error')"
+        "session_id is not null and type in ('output', 'result', 'notify', 'vault', 'error')"
     ),
     "ix_messages_inbox_user_send": (
         "session_id is not null and ((author = 'user' and type = 'user') "
         "or (author = 'harness' and type = 'harness') "
+        "or (author = 'harness' and type = 'agent_initiated') "
         "or (author = 'harness' and type = 'annotation'))"
     ),
 }
@@ -75,14 +77,77 @@ def test_message_partial_index_ddl_matches_catalog_contract(
     )
 
 
-def test_show_annotation_migration_predicate_matches_catalog() -> None:
+def test_message_index_migration_matches_catalog() -> None:
     migration = import_module(
-        "storage.alembic.versions.20260727_0038_show_annotation_type"
+        "storage.alembic.versions.20260809_0049_vault_message_type"
     )
 
+    assert migration.UPGRADE_ACTIVITY_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_activity"
+    )
+    assert migration.UPGRADE_AGENT_REPLY_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_agent_reply"
+    )
     assert migration.UPGRADE_USER_SEND_PREDICATE == build_partial_index_predicate(
         "ix_messages_inbox_user_send"
     )
+
+
+def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260806_0047")
+
+    with sqlite3.connect(db_path) as conn:
+        previous_activity = _index_sql(conn, "ix_messages_inbox_activity")
+        previous_agent_reply = _index_sql(conn, "ix_messages_inbox_agent_reply")
+        previous_user_send = _index_sql(conn, "ix_messages_inbox_user_send")
+        conn.execute(
+            "insert into messages "
+            "(id, platform, author, type, content_json, metadata_json, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-vault-waiter",
+                "avibe",
+                "harness",
+                "notify",
+                '{"text":"legacy Vault result"}',
+                '{"source_kind":"callback","source_actor":"vault:vrq_legacy"}',
+                "2026-08-09T00:00:00.000000Z",
+                "2026-08-09T00:00:00.000000Z",
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert _index_sql(conn, "ix_messages_inbox_activity").endswith(
+            MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_activity"]
+        )
+        assert _index_sql(conn, "ix_messages_inbox_user_send").endswith(
+            MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_user_send"]
+        )
+        assert _index_sql(conn, "ix_messages_inbox_agent_reply").endswith(
+            MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_agent_reply"]
+        )
+        assert conn.execute("select version_num from alembic_version").fetchone() == (
+            HEAD_REVISION,
+        )
+        assert conn.execute(
+            "select type from messages where id = ?", ("legacy-vault-waiter",)
+        ).fetchone() == ("vault",)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260806_0047")
+
+    with sqlite3.connect(db_path) as conn:
+        assert _index_sql(conn, "ix_messages_inbox_activity") == previous_activity
+        assert _index_sql(conn, "ix_messages_inbox_agent_reply") == previous_agent_reply
+        assert _index_sql(conn, "ix_messages_inbox_user_send") == previous_user_send
+        assert conn.execute(
+            "select type from messages where id = ?", ("legacy-vault-waiter",)
+        ).fetchone() == ("notify",)
 
 
 class _Pre335Cursor(sqlite3.Cursor):

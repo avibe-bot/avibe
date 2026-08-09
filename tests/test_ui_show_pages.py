@@ -1055,6 +1055,9 @@ def test_private_show_page_injects_runtime_event_config(monkeypatch, tmp_path):
     assert '"streamPath":"/show/ses123/__show/events?stream=1"' in body
     assert '"writeToken":"token-ses123"' in body
     assert '"annotation":{"authenticated":true,"mePath":"__show/me"}' in body
+    assert "__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__" in body
+    assert "anchor.hasAttribute('download')" in body
+    assert "target.origin!==window.location.origin" in body
     assert '<script type="module" src="/show/ses123/__show/annotation.js"></script>' in body
     assert body.index("globalThis.__AVIBE_SHOW__") < body.index('/src/main.tsx')
     assert body.index('/src/main.tsx') < body.index('/show/ses123/__show/annotation.js')
@@ -1100,6 +1103,7 @@ def test_public_show_page_injects_auth_aware_annotation_config(monkeypatch, tmp_
     assert f'"streamPath":"{base_path}__show/events?stream=1"' in body
     expected_auth = "true" if authenticated else "false"
     assert f'"annotation":{{"authenticated":{expected_auth},"mePath":"__show/me"}}' in body
+    assert "__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__" in body
     assert f'<script type="module" src="{base_path}__show/annotation.js"></script>' in body
     assert '"writeToken"' not in body
     assert body.index('/src/main.tsx') < body.index(f'{base_path}__show/annotation.js')

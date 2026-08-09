@@ -95,7 +95,10 @@ describe('resolveLocalFileLink', () => {
       '/apps/files',
       '/apps/files/',
       '/admin/settings/backends/codex',
+      '/admin/settings/models',
+      '/admin/settings/memory',
       '/settings/models?source=custom',
+      '/settings/memory',
       '/doctor/logs#latest',
     ]) {
       expect(resolveLocalFileLink(href, '/workspace')).toBeNull();

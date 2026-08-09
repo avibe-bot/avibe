@@ -118,10 +118,20 @@ export const MemorySettingsPanel: React.FC<{
   status: MemoryStatus | null;
   dependencyReady: boolean;
   onSaved: (next: MemorySettingsOk) => void;
+  onReloadSettings: () => void;
   onReloadStatus: () => void;
   onClearAll: () => void;
   clearing: boolean;
-}> = ({ settings, status, dependencyReady, onSaved, onReloadStatus, onClearAll, clearing }) => {
+}> = ({
+  settings,
+  status,
+  dependencyReady,
+  onSaved,
+  onReloadSettings,
+  onReloadStatus,
+  onClearAll,
+  clearing,
+}) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -194,15 +204,14 @@ export const MemorySettingsPanel: React.FC<{
         showToast(t('memory.settings.saved'), 'success');
       } else {
         setError(memoryErrorMessage(t, (res as { error?: string })?.error));
-        // A failed enable did not persist — revert the toggle to the stored state so it reflects
-        // reality, and refresh status so a runtime-dependency blocker (and its Dependencies
-        // affordance) reappears instead of a stale "enabled" toggle hiding it.
-        setEnabledDraft(settings.enabled);
+        // Reconciliation may roll back endpoint fields. Reload both resources
+        // instead of restoring drafts from the stale pre-save snapshot.
+        onReloadSettings();
         onReloadStatus();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
-      setEnabledDraft(settings.enabled);
+      onReloadSettings();
       onReloadStatus();
     } finally {
       setSaving(false);
@@ -245,6 +254,7 @@ export const MemorySettingsPanel: React.FC<{
         locked={false}
         canClearKey={canClearKeys}
       />
+
       <EndpointFields
         title={t('memory.settings.embeddingTitle')}
         draft={embeddingDraft}

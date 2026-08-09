@@ -10,6 +10,18 @@ from pathlib import Path
 import pytest
 
 from scripts import memory_runtime_release_guard as guard
+from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
+
+
+def test_guard_platform_contract_excludes_darwin_x64() -> None:
+    assert guard.EXPECTED_PLATFORMS == frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
+
+
+def test_guard_lock_hash_matches_canonical_runtime_lock() -> None:
+    lockfile = Path(__file__).resolve().parents[1] / "scripts/memory_runtime/uv.lock"
+
+    assert guard.EXPECTED_LOCK_SHA256 == RUNTIME_LOCK_SHA256
+    assert guard.EXPECTED_LOCK_SHA256 == hashlib.sha256(lockfile.read_bytes()).hexdigest()
 
 
 def _archive(binary: bytes) -> bytes:
@@ -31,7 +43,7 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
     for platform in sorted(guard.EXPECTED_PLATFORMS):
         binary = f"python-{platform}".encode()
         archive = _archive(binary)
-        name = f"memory-runtime-1.1.3-{platform}.tar.gz"
+        name = f"memory-runtime-1.2.1-{platform}.tar.gz"
         url = f"{base_url}/{name}"
         archives[platform] = {
             "name": name,
@@ -44,7 +56,7 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
         remote[url] = archive
     payload = {
         "schema_version": 1,
-        "everos_version": "1.1.3",
+        "everos_version": "1.2.1",
         "python_version": guard.EXPECTED_PYTHON_VERSION,
         "lock_sha256": guard.EXPECTED_LOCK_SHA256,
         "lock_id": f"uv-lock-sha256:{guard.EXPECTED_LOCK_SHA256}",
@@ -175,7 +187,20 @@ def test_guard_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> No
     assert "schedule:" in workflow
     assert "continue-on-error: true" in workflow
     assert "gh run download" in workflow
-    assert "memory-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}" in workflow
+    assert "memory-runtime-release-backup-${{ matrix.manifest.sha256 }}" in workflow
     assert "retention-days: 90" in workflow
     assert "missing=(" in workflow
     assert "--clobber" not in workflow
+
+
+def test_guard_workflow_verifies_every_published_manifest() -> None:
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/memory-runtime-release-guard.yml").read_text(
+        encoding="utf-8"
+    )
+
+    resolution = workflow.split("- name: Resolve every published Memory Runtime manifest", 1)[1]
+    resolution = resolution.split("  guard:", 1)[0]
+    assert "manifests=" in resolution
+    assert "break" not in resolution
+    assert "fromJSON(needs.resolve_manifests.outputs.manifests)" in workflow
+    assert "matrix.manifest.release_tag" in workflow

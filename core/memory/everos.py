@@ -16,7 +16,15 @@ from typing import Any, Deque, Literal, Protocol, runtime_checkable
 
 import httpx
 
-from core.memory.types import CaptureAttachment, MemoryErrorCode, MemoryItem, is_memory_error_code
+from core.memory.types import (
+    CaptureAttachment,
+    MemoryErrorCode,
+    MemoryItem,
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
+    is_memory_error_code,
+)
 from core.memory.observations import (
     AddAck,
     FlushRejected,
@@ -29,7 +37,6 @@ from core.memory.observations import (
 logger = logging.getLogger(__name__)
 
 _APP_ID = "avibe"
-_PROJECT_ID = "personal"
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_ITEM_BYTES = 64 * 1024
 _MAX_RESPONSE_DEPTH = 8
@@ -39,6 +46,13 @@ _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
 _PROFILE_QUERY = "profile"
+_MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
+_RECORDER_HEALTH_FALLBACK = {"state": "degraded", "reason": "writer_failures"}
+_RECORDER_HEALTH_REASONS = {
+    "writer_failures",
+    "serialization_failed",
+    "call_log_corrupt",
+}
 
 ProviderAttachment = CaptureAttachment
 
@@ -49,6 +63,7 @@ class ProviderCapture:
     session_ref: str
     text: str
     provider_timestamp_ms: int
+    project_ref: str
     attachments: tuple[CaptureAttachment, ...] = ()
 
 
@@ -149,11 +164,11 @@ class EverOSPort:
 
         status_code, raw = await self._sidecar_write(
             "POST",
-            "/api/v1/memory/add",
+            "/api/v2/memory/add",
             {
                 "session_id": capture.session_ref,
                 "app_id": _APP_ID,
-                "project_id": _PROJECT_ID,
+                "project_id": capture.project_ref,
                 "messages": [
                     {
                         "sender_id": capture.principal_id,
@@ -167,7 +182,14 @@ class EverOSPort:
         )
         if not 200 <= status_code < 300:
             logger.warning("EverOS add rejected status=%s", status_code)
-            raise MemoryProviderFailure("memory_processing_failed")
+            # A request the provider rejects on its own terms fails identically
+            # however often it is replayed. Retrying one keeps a poison row
+            # cycling the shared processing-fault breaker, which freezes capture
+            # for every session, so it is sent straight to terminal instead.
+            raise MemoryProviderFailure(
+                "memory_processing_failed",
+                retryable=not _deterministic_client_rejection(status_code, raw),
+            )
         envelope = _optional_json_object(raw)
         data = envelope.get("data") if envelope is not None else None
         status = data.get("status") if isinstance(data, dict) else None
@@ -180,17 +202,17 @@ class EverOSPort:
             status=status if status in {"accumulated", "extracted"} else None,
         )
 
-    async def flush(self, session_ref: str) -> FlushResult:
+    async def flush(self, session_ref: str, project_id: str) -> FlushResult:
         """Trigger distillation and return a total provider outcome."""
 
         try:
             status_code, raw = await self._sidecar_write(
                 "POST",
-                "/api/v1/memory/flush",
+                "/api/v2/memory/flush",
                 {
                     "session_id": session_ref,
                     "app_id": _APP_ID,
-                    "project_id": _PROJECT_ID,
+                    "project_id": project_id,
                 },
                 timeout_seconds=self._flush_timeout_seconds,
             )
@@ -265,14 +287,15 @@ class EverOSPort:
     async def search(
         self,
         principal_id: str,
+        project_id: str,
         query: str,
         limit: int,
     ) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(principal_id, query, limit)
+        data = await self._search_data(principal_id, project_id, query, limit)
         return _map_search_items(data, principal_id=principal_id, limit=limit)
 
-    async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(principal_id, _PROFILE_QUERY, 1)
+    async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
+        data = await self._search_data(principal_id, project_id, _PROFILE_QUERY, 1)
         profile = _map_profile_item(data, principal_id=principal_id)
         # "Valid response, no profile payload" is exactly "zero items returned",
         # so it needs no state on this provider: one EverOSPort serves every
@@ -285,6 +308,34 @@ class EverOSPort:
         except MemoryProviderFailure:
             return False
         return True
+
+    async def recorder_health(self) -> dict[str, str | None]:
+        """Return the closed recorder state projected by the sidecar health route."""
+        try:
+            payload = await self._sidecar_request(
+                "GET", "/health", None, require_json=True
+            )
+        except MemoryProviderFailure:
+            return dict(_RECORDER_HEALTH_FALLBACK)
+        recorder = payload.get("recorder") if payload is not None else None
+        if not isinstance(recorder, dict) or set(recorder) != {"state", "reason"}:
+            return dict(_RECORDER_HEALTH_FALLBACK)
+        state = recorder.get("state")
+        reason = recorder.get("reason")
+        valid = (
+            (state == "active" and reason is None)
+            or (
+                state == "degraded"
+                and reason in _RECORDER_HEALTH_REASONS
+            )
+            or (
+                state == "disabled"
+                and reason in {None, "writer_failures"}
+            )
+        )
+        if not valid:
+            return dict(_RECORDER_HEALTH_FALLBACK)
+        return {"state": state, "reason": reason}
 
     async def processing_healthy(self) -> bool:
         """Probe both configured model endpoints with fixed synthetic requests.
@@ -332,14 +383,20 @@ class EverOSPort:
             )
         )
 
-    async def _search_data(self, principal_id: str, query: str, limit: int) -> dict[str, Any]:
+    async def _search_data(
+        self,
+        principal_id: str,
+        project_id: str,
+        query: str,
+        limit: int,
+    ) -> dict[str, Any]:
         body = await self._sidecar_request(
             "POST",
-            "/api/v1/memory/search",
+            "/api/v2/memory/search",
             {
                 "user_id": principal_id,
                 "app_id": _APP_ID,
-                "project_id": _PROJECT_ID,
+                "project_id": project_id,
                 "query": query,
                 "method": "hybrid",
                 "top_k": limit,
@@ -446,6 +503,36 @@ class EverOSPort:
         return bool(validator(value))
 
 
+#: 4xx statuses that describe a passing condition rather than a request the
+#: provider can never accept. Everything else in 4xx is deterministic, and the
+#: default is deliberately the strict one because the two mistakes do not cost
+#: the same: a wrongly retryable capture is replayed up to MAX_MESSAGE_ATTEMPTS
+#: times, and every replay can re-open the shared processing-fault breaker, which
+#: freezes capture for BREAKER_RETRY_SECONDS across every session; a wrongly
+#: terminal one drops a single capture for a single session.
+_TRANSIENT_CLIENT_STATUS_CODES = frozenset({408, 409, 423, 425, 429})
+
+
+def _deterministic_client_rejection(status_code: int, raw: bytes | None = None) -> bool:
+    """Whether a status means this exact request can never be accepted.
+
+    EverOS 1.2.1 uses 422 both for deterministic DTO rejection and for a
+    missing provider configuration. The latter can recover after settings are
+    repaired, so its machine-readable envelope overrides the status taxonomy.
+
+    408, 425 and 429 are temporary by definition; 409 and 423 describe a state
+    a later attempt may find cleared, which is worth the bounded replay even
+    though a conflict can also be permanent.
+    """
+
+    envelope = _optional_json_object(raw)
+    error = envelope.get("error") if envelope is not None else None
+    error_code = error.get("code") if isinstance(error, dict) else None
+    if status_code == 422 and error_code == "PROVIDER_NOT_CONFIGURED":
+        return False
+    return 400 <= status_code < 500 and status_code not in _TRANSIENT_CLIENT_STATUS_CODES
+
+
 async def _read_bounded_response(response: httpx.Response) -> bytes:
     chunks: list[bytes] = []
     size = 0
@@ -505,10 +592,98 @@ def _map_profile_item(data: dict[str, Any], *, principal_id: str) -> MemoryItem 
     for profile in profiles:
         if not isinstance(profile, dict) or profile.get("user_id") != principal_id:
             continue
-        text = _canonical_profile_text(profile.get("profile_data"))
+        profile_data = profile.get("profile_data")
+        structured_profile = _structured_profile(profile_data)
+        text = _canonical_profile_text(profile_data)
         if text is not None:
-            return MemoryItem(kind="profile", text=text, date=_record_date(profile))
+            updated_at = structured_profile.updated_at if structured_profile is not None else None
+            return MemoryItem(
+                kind="profile",
+                text=text,
+                date=updated_at.split("T", 1)[0] if updated_at is not None else _record_date(profile),
+                profile=structured_profile,
+            )
     return None
+
+
+def _structured_profile(value: Any) -> MemoryProfile | None:
+    """Map only the known EverOS profile fields into stable caller-facing types."""
+
+    if not isinstance(value, dict):
+        return None
+
+    summary = _safe_text(value.get("summary")) if "summary" in value else None
+    explicit_info = _structured_explicit_info(value)
+    implicit_traits = _structured_implicit_traits(value)
+    updated_at = _normalized_profile_timestamp(value.get("profile_timestamp_ms"))
+
+    # A provider timestamp is metadata, not readable profile content. Unknown
+    # shapes retain their canonical raw-text fallback for compatibility.
+    if summary is None and not explicit_info and not implicit_traits:
+        return None
+    return MemoryProfile(
+        summary=summary,
+        explicit_info=explicit_info,
+        implicit_traits=implicit_traits,
+        updated_at=updated_at,
+    )
+
+
+def _structured_explicit_info(value: dict[str, Any]) -> tuple[MemoryProfileExplicitInfo, ...]:
+    if "explicit_info" not in value:
+        return ()
+    entries = value["explicit_info"]
+    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    mapped: list[MemoryProfileExplicitInfo] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        description = _safe_text(entry.get("description"))
+        if description is None:
+            continue
+        mapped.append(
+            MemoryProfileExplicitInfo(
+                description=description,
+                category=_safe_text(entry.get("category")),
+                evidence=_safe_text(entry.get("evidence")),
+            )
+        )
+    return tuple(mapped)
+
+
+def _structured_implicit_traits(value: dict[str, Any]) -> tuple[MemoryProfileTrait, ...]:
+    if "implicit_traits" not in value:
+        return ()
+    entries = value["implicit_traits"]
+    if not isinstance(entries, list) or len(entries) > _MAX_RESPONSE_COLLECTION:
+        raise MemoryProviderFailure("memory_provider_response_invalid")
+    mapped: list[MemoryProfileTrait] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        description = _safe_text(entry.get("description"))
+        if description is None:
+            continue
+        mapped.append(
+            MemoryProfileTrait(
+                description=description,
+                trait=_safe_text(entry.get("trait")),
+                basis=_safe_text(entry.get("basis")),
+                evidence=_safe_text(entry.get("evidence")),
+            )
+        )
+    return tuple(mapped)
+
+
+def _normalized_profile_timestamp(value: Any) -> str | None:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= _MAX_PROFILE_TIMESTAMP_MS:
+        return None
+    try:
+        instant = datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return instant.isoformat().replace("+00:00", "Z")
 
 
 def _episode_text(episode: dict[str, Any]) -> str | None:
@@ -660,18 +835,21 @@ def _elapsed_ms(started: float) -> int:
 class MemoryProviderPort(Protocol):
     async def add(self, capture: ProviderCapture) -> AddAck: ...
 
-    async def flush(self, session_ref: str) -> FlushResult: ...
+    async def flush(self, session_ref: str, project_id: str) -> FlushResult: ...
 
     async def search(
         self,
         principal_id: str,
+        project_id: str,
         query: str,
         limit: int,
     ) -> tuple[MemoryItem, ...]: ...
 
-    async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]: ...
+    async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
     async def health(self) -> bool: ...
+
+    async def recorder_health(self) -> dict[str, str | None]: ...
 
     async def processing_healthy(self) -> bool: ...
 
@@ -686,12 +864,18 @@ class FakeMemoryProvider:
     profile_items: tuple[MemoryItem, ...] = ()
     captures: list[ProviderCapture] = field(default_factory=list)
     flushes: list[str] = field(default_factory=list)
+    flush_projects: list[str] = field(default_factory=list)
+    search_scopes: list[tuple[str, str]] = field(default_factory=list)
+    profile_scopes: list[tuple[str, str]] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
     health_failure: BaseException | None = None
     processing_health_failure: BaseException | None = None
+    recorder_health_state: dict[str, str | None] = field(
+        default_factory=lambda: {"state": "disabled", "reason": None}
+    )
 
     async def add(self, capture: ProviderCapture) -> AddAck:
         if self.ingest_failures:
@@ -699,8 +883,9 @@ class FakeMemoryProvider:
         self.captures.append(capture)
         return AddAck(request_id=None, status="accumulated")
 
-    async def flush(self, session_ref: str) -> FlushResult:
+    async def flush(self, session_ref: str, project_id: str) -> FlushResult:
         self.flushes.append(session_ref)
+        self.flush_projects.append(project_id)
         if self.flush_results:
             return self.flush_results.popleft()
         return FlushSucceeded(request_id=None, status="extracted")
@@ -708,16 +893,18 @@ class FakeMemoryProvider:
     async def search(
         self,
         principal_id: str,
+        project_id: str,
         query: str,
         limit: int,
     ) -> tuple[MemoryItem, ...]:
-        del principal_id, query, limit
+        self.search_scopes.append((principal_id, project_id))
+        del query, limit
         if self.search_failure is not None:
             raise self.search_failure
         return self.search_items
 
-    async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]:
-        del principal_id
+    async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
+        self.profile_scopes.append((principal_id, project_id))
         if self.profile_failure is not None:
             raise self.profile_failure
         return self.profile_items
@@ -726,6 +913,9 @@ class FakeMemoryProvider:
         if self.health_failure is not None:
             raise self.health_failure
         return self.healthy
+
+    async def recorder_health(self) -> dict[str, str | None]:
+        return dict(self.recorder_health_state)
 
     async def processing_healthy(self) -> bool:
         """Whether the configured processing (LLM/embedding) endpoints are reachable.

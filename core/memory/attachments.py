@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from config import paths
+from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 from core.memory.types import CaptureAttachment
 
 
@@ -25,6 +26,10 @@ def workbench_capture_attachments(files: object) -> tuple[CaptureAttachment, ...
             continue
         extension = path.suffix.lstrip(".").lower()
         if not extension.isalnum() or len(extension) > 8:
+            continue
+        if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+            # The provider answers an unparseable extension with a permanent
+            # rejection, so an upload it cannot read never becomes a capture.
             continue
         normalized_mime = mimetype.lower().split(";", 1)[0].strip()
         if normalized_mime.startswith("image/"):

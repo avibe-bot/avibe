@@ -1263,8 +1263,6 @@ def remote_config_payload(config: V2Config) -> dict:
             if isinstance(ui_payload, dict) and key in ui_payload
         },
     }
-
-
 def _merge_legacy_discord_guild_scope_fields(
     merged_payload: dict,
     request_payload: dict,

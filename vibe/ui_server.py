@@ -1284,6 +1284,41 @@ def is_direct_loopback_memory_request() -> bool:
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
+def memory_ui_user_key() -> str | None:
+    """Resolve the Memory principal for a trusted browser request.
+
+    Direct loopback keeps the install-local identity. Remote browser access is
+    admitted only through the configured Avibe Cloud origin with a valid signed
+    session cookie; LAN and arbitrary proxy routes remain closed. Reads require
+    the same origin evidence as mutations so a remote session cookie cannot be
+    used as a cross-origin Memory oracle.
+    """
+
+    if is_direct_loopback_memory_request():
+        return "avibe:local"
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return None
+    source = _request_origin(request.headers.get("Origin")) or _request_origin(
+        request.headers.get("Referer")
+    )
+    if not source or not _same_origin(source, _current_origin()):
+        return None
+    try:
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        return None
+    return f"avibe:remote:{subject.strip()}"
+
+
 def _normalized_host(value: str | None) -> str:
     raw_host = (value or "").lower().strip()
     if raw_host.startswith("[") and "]" in raw_host:
@@ -3825,26 +3860,52 @@ async def model_hub_opencode_menu_put():
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["POST"])
-async def model_hub_custom_models_post():
+@app.route("/api/models/sources/<source_id>/models", methods=["POST"])
+async def model_hub_source_models_post(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         source = await _model_hub_service().add_custom_model(
-            _model_hub_json_object("source_not_found", status=404)
+            source_id,
+            _model_hub_json_object("mapping_target_unavailable")
         )
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["DELETE"])
-async def model_hub_custom_models_delete():
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["PATCH"],
+)
+async def model_hub_source_models_patch(source_id, model_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().update_model_reasoning_efforts(
+            source_id,
+            model_id,
+            _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["DELETE"],
+)
+async def model_hub_source_models_delete(source_id, model_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        source = await _model_hub_service().delete_custom_model(
+            source_id,
+            model_id,
+            force=payload.get("force") is True,
+        )
         return _model_hub_success(source=source)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -8754,6 +8815,12 @@ def sessions_messages_list(session_id: str):
     # ``around_id`` centers the window on a specific message (search deep-link
     # jump); it takes precedence over after/before/tail in the service.
     around_id = request.args.get("around_id") or None
+    # Legacy IM caller contexts may carry only the platform-native message id;
+    # storage resolves it to the durable row before applying cursor pagination.
+    around_native_id = request.args.get("around_native_id") or None
+    around_native_platform = request.args.get("around_native_platform") or None
+    around_turn_id = request.args.get("around_turn_id") or None
+    around_run_id = request.args.get("around_run_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -8775,6 +8842,10 @@ def sessions_messages_list(session_id: str):
             after_id=after_id,
             before_id=before_id,
             around_id=around_id,
+            around_native_id=around_native_id,
+            around_native_platform=around_native_platform,
+            around_turn_id=around_turn_id,
+            around_run_id=around_run_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             tail=tail,
@@ -9783,6 +9854,8 @@ def asr_telemetry():
         "backlogAtStop",
         "totalDurationMs",
         "stopToInsertionMs",
+        "firstPreviewMs",
+        "stopToFinalMs",
     }
     for key in integer_fields:
         if key not in payload:
@@ -9806,6 +9879,11 @@ def asr_telemetry():
         if not isinstance(payload["retry"], bool):
             return jsonify({"error": "invalid_field", "field": "retry"}), 400
         sanitized["retry"] = payload["retry"]
+
+    if "realtime" in payload:
+        if not isinstance(payload["realtime"], bool):
+            return jsonify({"error": "invalid_field", "field": "realtime"}), 400
+        sanitized["realtime"] = payload["realtime"]
 
     logger.info(
         "voice_reliability %s",
@@ -12883,6 +12961,32 @@ def _show_runtime_config_script(
         "(function(){"
         f"var next={payload};"
         "globalThis.__AVIBE_SHOW__=Object.assign({},globalThis.__AVIBE_SHOW__||{},next);"
+        "function parentNavigate(){"
+        "try{"
+        "var candidate=window.parent!==window&&window.parent.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__;"
+        "return typeof candidate==='function'?candidate:null;"
+        "}catch(_){return null;}"
+        "}"
+        "function isIosStandalone(){"
+        "var ua=navigator.userAgent||'';"
+        "var ios=/iP(hone|ad|od)/.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);"
+        "return ios&&(navigator.standalone===true||(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches));"
+        "}"
+        "document.addEventListener('click',function(event){"
+        "var bridge=parentNavigate();"
+        "if(!bridge&&!isIosStandalone())return;"
+        "var element=event.target instanceof Element?event.target:null;"
+        "var anchor=element&&element.closest('a[href]');"
+        "if(!anchor||String(anchor.target).toLowerCase()!=='_blank'||anchor.hasAttribute('download'))return;"
+        "var target;try{target=new URL(anchor.href,window.location.href);}catch(_){return;}"
+        "if(target.origin!==window.location.origin||!/^https?:$/.test(target.protocol))return;"
+        "event.preventDefault();event.stopImmediatePropagation();"
+        "var path=target.pathname+target.search+target.hash;"
+        "var base=String(next.basePath||'');"
+        "var withinShow=base&&(target.pathname===base.slice(0,-1)||target.pathname.indexOf(base)===0);"
+        "if(window.parent!==window&&!withinShow&&bridge){bridge(target.href);return;}"
+        "window.location.assign(path);"
+        "},true);"
         "}());"
         "</script>"
     )

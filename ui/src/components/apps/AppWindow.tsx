@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { ExternalLink, MessageCircle, Minus, Plus, X, type LucideIcon } from 'lucide-react';
 
+import { appTabHref } from '../../apps/appLaunch';
 import { APP_REGISTRY } from '../../apps/registry';
 import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
@@ -167,6 +168,9 @@ export const AppWindow: React.FC<{
   // A standalone-surface app (v1: showpage) exposes an external URL for its own
   // browser tab; the title bar then shows an open-in-new-tab button.
   const externalHref = def.externalHref?.(win.params);
+  const safeExternalHref = externalHref
+    ? appTabHref({ appId: win.appId, sessionId: showpageSid })
+    : null;
   // The same app may own a session chat (v1: showpage) — the title bar then also
   // shows a chat-bubble button that jumps there and minimizes this window.
   const chatHref = def.chatHref?.(win.params);
@@ -350,9 +354,9 @@ export const AppWindow: React.FC<{
               <MessageCircle className="size-3.5" />
             </button>
           )}
-          {externalHref && (
+          {safeExternalHref && (
             <a
-              href={externalHref}
+              href={safeExternalHref}
               target="_blank"
               rel="noopener noreferrer"
               title={t('apps.window.openInNewTab')}

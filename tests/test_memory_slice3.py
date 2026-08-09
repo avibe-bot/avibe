@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from core.controller import Controller
 from core.handlers.message_handler import MessageHandler
 from core.memory import CaptureAccepted, CaptureDuplicate
@@ -22,6 +23,9 @@ from modules.im.message_facts import (
     is_ordinary_telegram_text,
     is_ordinary_wechat_text,
 )
+
+
+PROJECT = "p-22222222222222222222222222222222"
 
 
 class _Store:
@@ -53,6 +57,10 @@ class _Runtime:
         suffix = "1" if user_key.endswith("user-1") else "2"
         return f"u-{suffix * 32}"
 
+    def project_for_workdir(self, workdir: str) -> str:
+        assert workdir == "/tmp/project"
+        return PROJECT
+
 
 class _CaptureModule:
     def __init__(self) -> None:
@@ -77,6 +85,7 @@ def _controller(*, user=None):
     }
     controller.memory_module = _CaptureModule()
     controller.memory_runtime = _Runtime(controller.memory_module)
+    controller.get_cwd = lambda _context: "/tmp/project"
     return controller
 
 
@@ -115,21 +124,28 @@ def test_message_handler_retains_memory_capture_task_until_completion() -> None:
     asyncio.run(run())
 
 
-def test_message_handler_drains_memory_capture_tasks_before_shutdown() -> None:
+def test_message_handler_drains_memory_capture_tasks() -> None:
     handler = MessageHandler.__new__(MessageHandler)
     handler._memory_capture_tasks = set()
+    completed = False
 
     async def run() -> None:
-        completed = False
+        nonlocal completed
+        release = asyncio.Event()
 
         async def capture() -> None:
             nonlocal completed
-            await asyncio.sleep(0)
+            await release.wait()
             completed = True
 
-        handler._track_memory_capture_task(asyncio.create_task(capture()))
-        await handler.drain_memory_capture_tasks()
+        task = asyncio.create_task(capture())
+        handler._track_memory_capture_task(task)
+        drain = asyncio.create_task(handler.drain_memory_capture_tasks())
+        await asyncio.sleep(0)
+        assert not drain.done()
 
+        release.set()
+        await drain
         assert completed is True
         assert handler._memory_capture_tasks == set()
 
@@ -142,36 +158,6 @@ def test_capture_admits_every_enabled_bound_dm_user(platform: str) -> None:
 
     assert controller.memory_capture_admitted(_context(platform)) is True
     assert controller.memory_capture_admitted(_context(platform, is_dm=False)) is False
-
-
-def test_memory_cli_session_revalidates_an_im_binding_before_each_request() -> None:
-    user = SimpleNamespace(enabled=True, is_admin=False)
-    controller = _controller(user=user)
-    controller._memory_principals_by_session = {}
-    context = _context("slack")
-    context.platform_specific["agent_session_target"] = {
-        "id": "ses-memory-user",
-        "agent_backend": "codex",
-    }
-
-    assert controller.configure_memory_cli_session(context, admitted=True) is True
-    assert (
-        controller.memory_principal_for_cli_session("ses-memory-user")
-        == "u-11111111111111111111111111111111"
-    )
-
-    controller.config.memory.enabled = False
-
-    assert controller.memory_principal_for_cli_session("ses-memory-user") is None
-    assert controller._memory_principals_by_session == {}
-
-    controller.config.memory.enabled = True
-    assert controller.configure_memory_cli_session(context, admitted=True) is True
-
-    user.enabled = False
-
-    assert controller.memory_principal_for_cli_session("ses-memory-user") is None
-    assert controller._memory_principals_by_session == {}
 
 
 @pytest.mark.parametrize(
@@ -207,6 +193,7 @@ def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None
     assert request.source_message_id == f"im:telegram:u-{'1' * 32}:native-1"
     assert request.session_id == "stable-session"
     assert request.principal_id == "u-" + ("1" * 32)
+    assert request.project_id == PROJECT
     assert request.provenance == "user_input"
     assert request.text == "/memory status"
     assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
@@ -221,6 +208,7 @@ def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     request = controller.memory_module.accepted[0]
     assert request.source_message_id == f"workbench:u-{'2' * 32}:native-1"
     assert request.principal_id == "u-" + ("2" * 32)
+    assert request.project_id == PROJECT
 
 
 def test_workbench_capture_converts_owned_attachment_without_text(monkeypatch, tmp_path: Path) -> None:
@@ -472,3 +460,73 @@ def test_slack_manifest_has_no_native_memory_command() -> None:
 
     commands = manifest["features"].get("slash_commands", [])
     assert all(command.get("command") != "/memory" for command in commands)
+
+
+def _memory_config(
+    *,
+    enabled: bool = True,
+    llm_model: str = "chat",
+    embedding_change_pending: bool = False,
+) -> MemoryConfig:
+    return MemoryConfig(
+        enabled=enabled,
+        embedding_change_pending=embedding_change_pending,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example.test/v1",
+                model=llm_model,
+                api_key="llm-key",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embed.example.test/v1",
+                model="embed",
+                api_key="embed-key",
+            ),
+        ),
+    )
+
+
+class _FailingReconcileRuntime:
+    """A runtime whose reconciliation always fails, as when the provider is down."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.module = object()
+
+    async def reconcile(self, _config):
+        self.calls += 1
+        return {"ok": False, "error": "memory_sidecar_unavailable"}
+
+
+def _reconcile_controller(current: MemoryConfig) -> Controller:
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=current)
+    controller.memory_runtime = _FailingReconcileRuntime()
+    controller.memory_module = None
+    return controller
+
+
+def test_a_failed_memory_reconciliation_does_not_adopt_the_candidate_config() -> None:
+    controller = _reconcile_controller(_memory_config())
+
+    result = asyncio.run(controller.reconcile_memory(_memory_config(enabled=False)))
+
+    assert result["ok"] is False
+    assert controller.memory_runtime.calls == 1
+    assert controller.config.memory.enabled is True
+
+
+def test_settling_a_pending_embedding_change_ignores_the_marker_itself():
+    """`_settle_embedding_change_pending` clears the persisted marker only when
+    the candidate still matches what is on disk, so the marker being set cannot
+    itself make the candidate look like a different configuration."""
+
+    from core.memory.runtime import _same_memory_configuration
+
+    persisted = _memory_config(embedding_change_pending=True)
+    candidate = _memory_config()
+
+    assert _same_memory_configuration(persisted, candidate) is True
+    assert (
+        _same_memory_configuration(persisted, _memory_config(llm_model="chat-2")) is False
+    )

@@ -1199,6 +1199,14 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 agent_runs.c.created_at,
                 agent_runs.c.started_at,
                 agent_runs.c.updated_at,
+                message_deliveries.c.state.label("delivery_state"),
+                message_deliveries.c.submitted_at.label("delivery_submitted_at"),
+            )
+            .select_from(
+                agent_runs.outerjoin(
+                    message_deliveries,
+                    message_deliveries.c.id == agent_runs.c.delivery_id,
+                )
             )
             .where(agent_runs.c.callback_session_id == session_id)
             .where(agent_runs.c.run_type == "agent_run")
@@ -1222,13 +1230,22 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
             label = _banner_label(f"{agent_name}: {head}")
         else:
             label = agent_name or head
-        since = str(row["started_at"] or row["created_at"] or "")
+        # A delegated executor can own a Run before its target Session accepts
+        # the queued Delivery. The banner describes that user-visible wait.
+        delivery_is_queued = row["delivery_state"] == "queued"
+        status = "queued" if delivery_is_queued else str(row["status"] or "running")
+        since = str(
+            (row["delivery_submitted_at"] if delivery_is_queued else None)
+            or row["started_at"]
+            or row["created_at"]
+            or ""
+        )
         items.append(
             _harness_banner_item(
                 item_id=f"agent_run:{row['id']}",
                 item_kind="agent_run",
                 session_id=session_id,
-                status=str(row["status"] or "running"),
+                status=status,
                 label=label,
                 since=since,
                 updated_at=str(row["updated_at"] or since),

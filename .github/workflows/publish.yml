@@ -119,8 +119,6 @@ jobs:
             artifact: linux-x64
           - os: ubuntu-24.04-arm
             artifact: linux-arm64
-          - os: macos-15-intel
-            artifact: darwin-x64
           - os: macos-14
             artifact: darwin-arm64
     steps:
@@ -143,7 +141,7 @@ jobs:
           python scripts/build_memory_runtime.py \
             --output-dir runtime-artifacts \
             --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.1.3-${{ matrix.artifact }}.json"
+            --metadata-output "runtime-artifacts/memory-runtime-1.2.1-${{ matrix.artifact }}.json"
 
       - name: Upload Memory Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6

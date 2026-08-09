@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -88,7 +89,19 @@ def _install_slack_stubs() -> None:
 
 
 def _load_local_slack_bot():
-    module = importlib.import_module("modules.im.slack")
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    loaded = sys.modules.get("modules.im.slack")
+    loaded_path = Path(getattr(loaded, "__file__", "")).resolve() if loaded is not None else None
+    local_path = (repo_root / "modules" / "im" / "slack.py").resolve()
+    if loaded is not None and loaded_path == local_path:
+        return loaded.SlackBot
+    sys.modules.pop("modules.im.slack", None)
+    spec = importlib.util.spec_from_file_location("modules.im.slack", local_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["modules.im.slack"] = module
+    spec.loader.exec_module(module)
     return module.SlackBot
 
 

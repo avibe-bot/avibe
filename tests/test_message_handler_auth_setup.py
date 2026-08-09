@@ -65,6 +65,10 @@ class _StubSessions:
         self.recorded = []
         self._claimed = set()
 
+    def seed_legacy_claim(self, channel_id, thread_ts, message_ts):
+        """Simulate a dedup row written before keys were platform-namespaced."""
+        self._claimed.add((channel_id, thread_ts, message_ts))
+
     def is_message_already_processed(self, channel_id, thread_ts, message_ts):
         return (channel_id, thread_ts, message_ts) in self._claimed
 
@@ -236,7 +240,7 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
         )
         handler = MessageHandler(controller)
         handler._is_duplicate_human_delivery = Mock(
-            side_effect=lambda context: handler._native_human_event_processed(context)
+            side_effect=handler._native_human_event_processed
         )
         context = MessageContext(
             user_id="U1",

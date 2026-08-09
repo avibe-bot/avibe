@@ -7,6 +7,7 @@ import { APP_LIST } from '../../../apps/registry';
 import { showAppRoutePath } from '../../apps/mobileDock';
 import { useShowPageInventory } from '../../useShowPages';
 import { useWindowManager } from '../../../context/WindowManagerContext';
+import { openLinkInNewContext } from '../../../lib/pwaNavigation';
 import { filterAppSearchResults, type AppSearchResult } from './appSearch';
 
 export function useAppSearchResults(query: string, enabled = true) {
@@ -56,7 +57,7 @@ export function useOpenSearchApp() {
       if (launch && appLaunchIntent(launch) === 'newTab') {
         const href = appTabHref({ appId: result.appId, sessionId: result.kind === 'showpage' ? result.sessionId : null });
         if (href) {
-          window.open(href, '_blank', 'noopener,noreferrer');
+          openLinkInNewContext(href, 'noopener,noreferrer');
           return;
         }
       }

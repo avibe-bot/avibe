@@ -132,6 +132,19 @@ Memory guidance or a live principal association. This prevents ordinary
 background jobs and scripts from reading personal Memory merely by naming a
 session through supported Avibe flows.
 
+`remember` is the Agent's own write channel. With Memory enabled, the injected
+guidance asks the Agent to call it proactively when a turn yields a durable signal —
+a preference that emerged across several turns, a correction of Agent behavior, a
+decision the conversation reached, or a durable user- or machine-specific
+environment fact. Project conventions, architecture, and workflows stay on the
+`AGENTS.md` surface and never enter personal Memory. The same guidance bounds the
+noise: one self-contained distilled fact per call, nothing that paraphrases a
+plain text message automatic capture already holds, no secrets or transient
+state, and at most one or two calls per turn. The no-paraphrase rule is scoped to
+plain text on purpose: automatic capture drops IM turns carrying files while the
+prompt gate does not, so a durable fact stated only alongside an attachment is
+still the Agent's to record.
+
 `remember` accepts at most 4,000 characters and records
 `provenance="agent"`; automatic capture records `provenance="user_input"`.
 Identical text in one Agent session is idempotent. Exit code 0 means `accepted`
@@ -336,13 +349,14 @@ with different content.
 
 ## Security and Data Disclosure
 
-- Memory Settings and browser content routes require a direct loopback peer and
-  host, a same-origin Origin/Referer, no forwarded metadata, and CSRF for
-  mutations. LAN, proxy, Docker bridge, and Avibe Cloud browser routes cannot
-  read whether Memory is enabled or access its content.
-- Authenticated remote Workbench messages may receive a stable per-user capture
-  and Agent capability, but the remote browser cannot open the local Settings
-  data surface.
+- Memory Settings and browser content routes require either a direct loopback
+  connection or an authenticated Avibe Cloud session. Every request requires a
+  same-origin Origin/Referer, and mutations also require CSRF. LAN, arbitrary
+  proxy, and Docker bridge routes remain unable to read Memory state or content.
+- Authenticated Avibe Cloud browser reads use the same stable per-user principal
+  as that account's remote Workbench messages. The install-wide settings,
+  diagnostics, runtime restart, and Clear all controls remain owner operations
+  protected by the signed Cloud session and same-origin/CSRF checks.
 - The controller socket and EverOS socket are owner-only Unix-domain sockets in
   mode `0600`; the sidecar has no TCP listener and is not exposed through remote
   access.
