@@ -995,7 +995,8 @@ class SQLiteSessionsService:
                 ).where(agent_sessions.c.id == str(session_id))
             ).mappings().first()
             current_backend = str((route_row or {}).get("agent_backend") or "")
-            route_metadata = _json_loads((route_row or {}).get("metadata_json"), {})
+            parsed_route_metadata = _json_loads((route_row or {}).get("metadata_json"), {})
+            route_metadata = parsed_route_metadata if isinstance(parsed_route_metadata, dict) else {}
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
             backend_changes = bool(requested_backend) and requested_backend != current_backend
             if backend_changes and not already_bound:

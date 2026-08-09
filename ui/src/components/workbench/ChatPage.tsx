@@ -999,7 +999,7 @@ export const ChatPage: React.FC = () => {
     const read = async (allowRetry: boolean): Promise<void> => {
       const id = sessionIdRef.current;
       if (!id) return;
-      const isCurrent = sessionRowRefreshGateRef.current.begin();
+      const isCurrent = await sessionRowRefreshGateRef.current.begin();
       try {
         // cache:false — an earlier refresh (page open / reconnect) may have
         // cached a stale row; reusing it inside the read cache's TTL is exactly
@@ -1338,7 +1338,7 @@ export const ChatPage: React.FC = () => {
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
-      const bootstrapIsCurrent = sessionRowRefreshGateRef.current.begin();
+      const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Dropped if the user switched chats while this load was in flight.
       if (sessionId !== sessionIdRef.current) return;
@@ -2221,17 +2221,12 @@ export const ChatPage: React.FC = () => {
     async (changes: Partial<WorkbenchSession>) => {
       if (!session) return;
       const patchedId = session.id;
-      const patchIsCurrent = sessionRowRefreshGateRef.current.begin();
+      const finishPatch = sessionRowRefreshGateRef.current.beginMutation();
       try {
-        const updated = await api.updateSession(session.id, changes as any);
-        // Drop a stale response after a chat switch: if the user navigated to a
-        // different chat (this ChatPage instance is reused) before the PATCH
-        // resolved, installing A's session into B would show A's title/picker on
-        // B and make later edits patch the wrong session.id (Codex P2). Mirrors
-        // the sessionIdRef guards on send/cancel.
-        if (patchedId !== sessionIdRef.current) return;
-        if (!patchIsCurrent()) return;
-        setSession(updated);
+        await api.updateSession(session.id, changes as any);
+        // Do not install the PATCH response: it is only a mutation snapshot and
+        // can be older than another committed write. The authoritative refresh
+        // in finally is guarded by session id and runs after every active write.
       } catch (err) {
         if (patchedId !== sessionIdRef.current) return;
         // The archive itself has already converged through the shared
@@ -2241,7 +2236,9 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
-        if (patchIsCurrent()) void refreshSessionRow();
+      } finally {
+        finishPatch();
+        if (patchedId === sessionIdRef.current) void refreshSessionRow();
       }
     },
     [api, session, t, refreshSessionRow],
