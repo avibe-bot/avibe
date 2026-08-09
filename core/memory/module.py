@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from config import paths
+from core.memory.blocking import run_blocking
 from core.memory.attachments import (
     AttachmentPinError,
     AttachmentPinStore,
@@ -293,7 +294,7 @@ class MemoryModule:
         pinned_bundle: PinnedBundle | None = None
         try:
             if request.attachments:
-                pinned_bundle = await self._thread_call(
+                pinned_bundle = await run_blocking(
                     self._attachment_store.pin,
                     request.attachments,
                 )
@@ -363,7 +364,7 @@ class MemoryModule:
 
     async def _release_unadmitted_bundle(self, bundle_id: str) -> None:
         try:
-            await self._thread_call(self._attachment_store.release, bundle_id)
+            await run_blocking(self._attachment_store.release, bundle_id)
         except Exception:
             # It has no DB reference and boot reconciliation removes the orphan.
             return
@@ -895,26 +896,7 @@ class MemoryModule:
             return
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        return await self._thread_call(method, *args, **kwargs)
-
-    @staticmethod
-    async def _thread_call(method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        """Settle durable thread work before propagating caller cancellation."""
-
-        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
-        cancellation: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as error:
-                cancellation = cancellation or error
-        if cancellation is not None:
-            try:
-                task.result()
-            except (Exception, asyncio.CancelledError):
-                pass
-            raise cancellation
-        return task.result()
+        return await run_blocking(method, *args, **kwargs)
 
     def _default_free_disk_bytes(self) -> int:
         return int(shutil.disk_usage(self._store.path.parent).free)

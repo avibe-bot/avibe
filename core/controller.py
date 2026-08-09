@@ -48,6 +48,7 @@ from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureRequest
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -1733,17 +1734,7 @@ class Controller:
         async def archive_operation() -> dict[str, Any]:
             # Cancelling the socket request must not release Memory admission
             # while SQLite is still committing the terminal transition.
-            task = asyncio.create_task(asyncio.to_thread(archive_session))
-            cancellation: asyncio.CancelledError | None = None
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError as error:
-                    cancellation = cancellation or error
-            result = task.result()
-            if cancellation is not None:
-                raise cancellation
-            return result
+            return await run_blocking(archive_session)
 
         async def run_memory_lifecycle() -> dict[str, Any]:
             live_scope = self.memory_scope_for_cli_session(raw_session_id)

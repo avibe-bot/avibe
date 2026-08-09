@@ -2612,6 +2612,7 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
 
 
 def test_runtime_install_artifact_converts_background_ensure_exception(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     artifact = _installed_artifact(ensure_failure=RuntimeError("install failed"))
@@ -2620,12 +2621,31 @@ def test_runtime_install_artifact_converts_background_ensure_exception(
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
+    housekeeping_calls: list[tuple[str, bool]] = []
 
-    assert asyncio.run(runtime.install_artifact()) == {
-        "ok": False,
-        "reason": "memory_runtime_install_failed",
-        "download_error": None,
-    }
+    async def observe_terminal_gc() -> None:
+        housekeeping_calls.append(("terminal-gc", runtime._artifact_installing))
+
+    async def observe_backup_reconcile() -> None:
+        housekeeping_calls.append(("backup-reconcile", runtime._artifact_installing))
+
+    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", observe_terminal_gc)
+    monkeypatch.setattr(runtime, "_run_backup_stage_reconcile", observe_backup_reconcile)
+
+    async def run() -> None:
+        assert await runtime.install_artifact() == {
+            "ok": False,
+            "reason": "memory_runtime_install_failed",
+            "download_error": None,
+        }
+        await asyncio.sleep(0)
+        assert sorted(housekeeping_calls) == [
+            ("backup-reconcile", False),
+            ("terminal-gc", False),
+        ]
+        await runtime.close()
+
+    asyncio.run(run())
 
 
 def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> None:
@@ -4918,6 +4938,16 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     )
     activations: list[None] = []
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
+    housekeeping_calls: list[tuple[str, bool]] = []
+
+    async def observe_terminal_gc() -> None:
+        housekeeping_calls.append(("terminal-gc", runtime._artifact_installing))
+
+    async def observe_backup_reconcile() -> None:
+        housekeeping_calls.append(("backup-reconcile", runtime._artifact_installing))
+
+    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", observe_terminal_gc)
+    monkeypatch.setattr(runtime, "_run_backup_stage_reconcile", observe_backup_reconcile)
 
     async def run() -> None:
         installing = asyncio.create_task(runtime.install_artifact())
@@ -4935,6 +4965,8 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
             "ok": False,
             "error": "memory_restart_failed",
         }
+        await asyncio.sleep(0)
+        assert housekeeping_calls == []
         assert installing.done() is False
         installing.cancel()
         await asyncio.sleep(0)
@@ -4947,8 +4979,75 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await installing
+        await asyncio.sleep(0)
+        assert sorted(housekeeping_calls) == [
+            ("backup-reconcile", False),
+            ("terminal-gc", False),
+        ]
+        housekeeping_calls.clear()
         assert await runtime.restart() == {"ok": True, "state": "ready"}
         assert activations == [None]
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_queued_backup_stage_reconcile_rechecks_artifact_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_entered = threading.Event()
+    release_install = threading.Event()
+
+    class BlockingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            self.ensure_calls.append(force)
+            install_entered.set()
+            release_install.wait(timeout=2)
+            return dict(self.ensure_payload)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=BlockingArtifact(python=Path(sys.executable)),
+        effective_home=tmp_path,
+    )
+    terminal_gc_entered = asyncio.Event()
+    release_terminal_gc = asyncio.Event()
+    cleanup_calls: list[bool] = []
+
+    async def blocked_terminal_gc() -> None:
+        terminal_gc_entered.set()
+        await release_terminal_gc.wait()
+
+    manager = runtime._backup_manager
+    assert manager is not None
+    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", blocked_terminal_gc)
+    monkeypatch.setattr(
+        manager,
+        "reconcile_unpublished_backup_stages",
+        lambda: cleanup_calls.append(runtime._artifact_installing),
+    )
+
+    async def run() -> None:
+        runtime._ensure_terminal_snapshot_gc()
+        runtime._ensure_backup_stage_reconcile()
+        await terminal_gc_entered.wait()
+        queued_reconcile = runtime._backup_stage_reconcile_task
+        assert queued_reconcile is not None
+
+        installing = asyncio.create_task(runtime.install_artifact())
+        assert await asyncio.to_thread(install_entered.wait, 1)
+        release_terminal_gc.set()
+        await queued_reconcile
+        assert cleanup_calls == []
+
+        release_install.set()
+        assert (await installing)["ok"] is True
+        deferred_reconcile = runtime._backup_stage_reconcile_task
+        assert deferred_reconcile is not None
+        assert deferred_reconcile is not queued_reconcile
+        await deferred_reconcile
+        assert cleanup_calls == [False]
         await runtime.close()
 
     asyncio.run(run())
