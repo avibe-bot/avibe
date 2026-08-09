@@ -600,7 +600,7 @@ as everywhere else in this document.
 | §1.0 | Sources unread | The mirror: `GET /api/models/sources` fails while `health` and per-backend supply both answer `[derived]` | F1, in the region the list would have filled | `upstream.unread`, `upstream.retry` | 重试 succeeds → Ready; a later payload carries the list → Ready |
 | §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The per-model 当前 line is a third read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05 |
-| §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Partial | — | Payload arrives → Ready |
+| §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this row is that same first paint seen from the module | — | Payload arrives → Ready |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock |
 | §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. The card is one tap to 06; **replacing the credential is drawn on no frame** `[contract-gap]` G-12 |
 | §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`; the card is one tap to 06 |
@@ -611,7 +611,7 @@ as everywhere else in this document.
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | Nothing pinned | `mode` reads `hub` and `selected_model_id` is `null`, which is exactly when `supply_status` is `null` on the gateway `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.noSelection` | A pinned model gives the rollup something to answer with → Ready, or whichever rollup state that reading names |
-| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>`, the only read that carries a hop `[contract]` — answers with a serving hop that is not the head **and the head's source reads `cooldown`** — the one `Source.state.status` value that clears itself `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | The cooldown expires → Ready. This is frame 08 (§1.7) |
+| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>`, the only read that carries a hop `[contract]` — answers with a serving hop that is not the head **and the head's source reads `cooldown`** — the one `Source.state.status` value that clears itself `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | A later chain read answers with the head serving → Ready `[contract]`. The cooldown expiring is not that answer: §4.3 recovers by changing execution position **on the next turn**, so a passed `retry_at` makes the head eligible to be attempted and nothing more, and the payload that reports the reroute gone is the only thing that can retire the violet. Same reading as the two rows above give a source and a group — this document keys no exit on a clock. This is frame 08 (§1.7) |
 | §1.1 | Serving past a blocked head | The serving hop is not the head and the head's source reads `needs_action` or `error` — the two `Source.state.status` values no amount of waiting clears `[contract]` | F5 | `gateway.group.status.degraded` | The user clears the block → Ready or Takeover active, whichever the head's source then reads |
 | §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew, and this row's three derived columns render `—`. The engine is not implicated and nothing on the head changes | — | The read answers → Ready or Takeover active |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
@@ -651,11 +651,12 @@ as everywhere else in this document.
 | §1.6 | Manual commit | 添加 pressed on an enabled 添加 — `POST /api/models/sources/<source_id>/models` | F1, on the draft row: **the row and everything typed in it are kept**, and the primary becomes 重试 | `sourceDetail.fail.addModel`, `sourceDetail.retry` | Success → the row becomes an ordinary 手动添加 row → Ready |
 | §1.6 | Removing a manual entry | The row menu's 移除 — `DELETE /api/models/sources/<source_id>/models/<model_id>`, guarded | F3 when the response is a guard refusal, F1 otherwise | `sourceDetail.row.remove` | Success → the row is gone → Ready |
 | §1.6 | Guard refused | The `DELETE` came back refused, naming the hops it would remove | F3 — `Qp6FI`, this product's one guarded-change confirm | `guard.title.removeModel`, `guard.subtitle.removeModel`, `guard.confirm.removeModel`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要移除 re-sends the same `DELETE` with `force` → Removing a manual entry; 取消 → Ready, nothing removed |
-| §1.6 | Not supplying | The source is `standby` or `cooldown`, or `active` with nothing adopting it `[contract]` | F5 | `upstream.state.standby` | The source starts supplying again — only the bar changes |
+| §1.6 | Not supplying | The source is `standby`, or `active` with nothing adopting it `[contract]` | F5 | `upstream.state.standby` | The source starts supplying again — only the bar changes |
+| §1.6 | Cooling | The source is `cooldown` `[contract]` | F5 | `upstream.state.unavailableRetry` | A later payload reports the source in another state → that state; `retry_at` passing is not that payload. Separate from *Not supplying* because the two answer different questions — standby says nothing is drawing from this source, cooling says nothing *can* yet and names when that changes. This section's own status mapping gives `cooldown` the gold `upstream.state.unavailableRetry`; a row that folded it into the muted standby word dropped the one fact the mapping exists to carry |
 | §1.6 | Needs action | The source is `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | The reported cause clears. The bar states which cause `state.detail_key` carries and the table stays live; **no repair control is drawn here or on 01** `[contract-gap]` G-12 |
 | §1.6 | Unclassified error | The source is `error` `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`. The bar reads 异常 and claims no cause; the table and both actions stay live |
-| §1.7 | Nominal | No source is unavailable | F5 | — | A head source becomes unavailable → Takeover |
-| §1.7 | Takeover | The head is unavailable **and** a next candidate is serving | F5 | `takeover.pill`, `takeover.chip` | Recovery → Nominal, on the next turn `[spec §4.3]` |
+| §1.7 | Nominal | No source is unavailable | F5 | — | The head enters `cooldown` while a later candidate serves → Takeover; the head enters `needs_action` or `error` → §1.1 *Serving past a blocked head*, which is not this frame |
+| §1.7 | Takeover | The head is unavailable **for a recoverable quota/cooldown reason** and a next candidate is serving `[contract]` — §4.3 derives takeover from exactly that pair, and the paragraph below says what the other blocker kinds render instead | F5 | `takeover.pill`, `takeover.chip` | Recovery → Nominal, on the next turn `[spec §4.3]` |
 | §1.7 | Exhausted | The head is unavailable and **no** candidate remains | F5 | `gateway.supply.none` | Any candidate recovers → Takeover or Nominal |
 | §1.7 | Multiple takeovers | More than one backend was rerouted | F5 | `takeover.pill` | Each backend recovers independently |
 | §1.7 | Loading / Empty / Unreachable | As §1.0 | As §1.0 | — | As §1.0 |
@@ -713,7 +714,7 @@ a different key.
 | `{{health}}` | One of exactly five words — `gateway.group.status.ok`, `gateway.group.status.degraded`, `gateway.group.status.waiting`, `gateway.group.status.interrupted`, `gateway.group.status.noSelection`. The first four are `supply_status` readings; the fifth is Hub mode with nothing pinned to roll up, which is a state of this backend and not a health of its supply. Supply health, not an HTTP status: nothing here is a code, and the group renders it whether or not any request was made. | Always present | `gateway.group.subtitle.gateway` |
 | `{{reason}}` | The classified cause, from the closed set the state's own copy declares. | Always present | `addKey.inventory.detail`, `adopt.fail.detail` |
 | `{{mode}}` | One of exactly two words — `gateway.group.mode.direct` or `gateway.group.mode.gateway`. The subtitle interpolates the word rather than carrying two whole strings, because the health half varies independently of it. | Always present | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway` |
-| `{{backends}}` | The backends a source is currently supplying, by product name, joined by `、` / `,`. | Always present — `upstream.state.supplying` is entered only when the list is non-empty; a source supplying nothing is 备用 instead | `upstream.state.supplying` |
+| `{{backends}}` | The backends that have this source configured into a route, by product name, joined by `、` / `,` — `adopted_by`'s projection, grouped and de-duplicated, never a computation over live chains (§1.0). | Always present — `upstream.state.supplying` is entered only when the list is non-empty; a source no backend has configured is 备用 instead | `upstream.state.supplying` |
 | `{{component}}` | The gateway component's name, as the manifest names it `[contract]`. | Always present | `adopt.effects.install`, `install.effects.1` |
 | `{{duration}}` | A rough install time — 约 1 分钟 / about a minute. It is an estimate stated as one, never a countdown. | Always present | `adopt.effects.install`, `install.effects.1` |
 
@@ -1155,8 +1156,17 @@ the first `degraded`-without-reroute payload.
 
 **A source's supply line renders `adopted_by`, not the chain** `[contract]` FC-05 —
 **and on any load that is not the creation response it has nothing to render it from**
-`[contract-gap]` G-20. `upstream.state.supplying*` names which backends currently take
-models from this source; FC-05 states that `agent-supply` exposes
+`[contract-gap]` G-20. `upstream.state.supplying*` names which backends have this source
+**configured into a route** — the same reading §1.6's 使用中 gets one surface over, and
+for the same reason. *Stable* is the operative word in the field's own definition: the
+array is unchanged by a cooldown, a revoked credential, or a takeover that routes past
+this hop entirely, so a line that read it as live traffic would be false in precisely the
+states a user opens this page to understand. Two things keep the rendered word honest
+anyway. The line is selected by the source's **state** first — a cooling or blocked source
+shows its state word instead, which is what §1.7's card delta *is* — so it appears only on
+a healthy source; and what it then claims is configuration, not flow. The live question is
+the chain read's (§1.2), and D-28 is the rule that keeps the two projections from standing
+in for each other. FC-05 states that `agent-supply` exposes
 `adopted_by: [{backend, menu_model}]` from the persisted references and that source-card
 attribution reuses that projection, and `api.md` calls that array 「the stable Source-card
 projection」 in as many words — which is what makes the field authority here even though
@@ -2044,9 +2054,13 @@ ban costs nothing here. The recommendation still reads as a recommendation. §0.
 records the reasoning; the rows above are now the strings of record, and the frame
 matches them.
 
-**Extreme data** `[derived]`: vendor name and plan list are interpolated, so both
-locales must survive a long vendor name without wrapping the head into the body;
-the ToS note is per-vendor content, not a shared component — a second vendor with
+**Extreme data** `[derived]`: `{{vendor}}` is this frame's one interpolation, so both
+locales must survive a long vendor name without wrapping the head into the body. The
+subtitle is not a second one, and reading it as one is what the paragraph above withdrew:
+there is no plan list to interpolate, so the extreme case here is a **fixed** localized
+string per vendor that must wrap or truncate legibly — never a list to be generated, and
+never a revival of the retired `{{plans}}`. Any layout rule stated for it is stated about
+a constant. The ToS note is per-vendor content, not a shared component — a second vendor with
 a different restriction gets its own string, never a parameterized one, because
 paraphrasing somebody's terms of service is not a translation problem.
 
@@ -2697,21 +2711,53 @@ Five rules:
   `discovered_at` `[contract]` — all stored fields, so all survive. The harder case is a
   model a chain still *references* that a **successful** refetch no longer returns. This
   table is the discovered set, so its row goes; what must not happen is that the chain
-  quietly stops working. The rule, in one sentence: **一条链引用的型号,若在所有来源上
-  都不再供应,必须在型号菜单上可见地标出,不得静默跳过。** The contract already carries
-  it — §4.6 retains the exact hop and keeps its live non-runnable reason visible until the
-  Source recovers or the user changes it, and §4.4's `model_supply` projects
-  `chain_length: 0` into 「无来源可供」 on the menu. **No new field, no new mechanism, and
-  no stale row on this frame.** The marker itself renders on the model menu, which no
-  frame in this document draws, so **this file states nothing about how it renders** —
-  doing so would specify a surface no frame here draws. It is covered by the AC ledger
-  instead, and nothing about this frame changes.
+  quietly stops working. **On this page it cannot, and the reason is that 重新拉取 is
+  guarded** — §0.8 has said so in three rows all along. `model-hub.md` §4.5 runs the
+  staged inventory past both guards before committing it: if an exact configured hop would
+  cease to be callable the non-forced call is **refused** with `source_model_in_route_chain`
+  and ordered `would_remove_hops`, and 「another Source supplying the same menu model does
+  not make that exact reference disposable」; if no exact hop is lost but a protected route
+  loses its last supplier it is refused with `source_last_supplier`; when both apply the
+  exact-hop error leads and both arrays are still carried. That refusal is *Refetch
+  refused*, drawn in `Qp6FI` with `guard.hint.safe` / `guard.hint.interrupt` naming which
+  of the two the user is looking at. 仍要拉取 re-sends with `force`, and the contract is
+  equally explicit about what that does: it 「applies the inventory change and removes only
+  those invalidated hops in one transaction, preserving the identity and relative order of
+  all survivors and keeping an empty route configured」, reporting every resulting gap —
+  `force` is confirmation, not a claim that the change is interruption-free.
 
-  *What that costs, said here too because this is the page where it is felt.* The source
-  a model came from is exactly what this table used to tell you, and after the refetch it
-  no longer can: the row is gone with no trace that it was ever here. A user diagnosing
-  「无来源可供」 reads the marker on the menu, opens the model's chain, and finds the
-  retained hop naming a source whose inventory no longer lists that id — three surfaces
+  **This is not the chain changing by itself; it is the only way it changes at all.** No
+  path in this product removes a hop without a `409` that names each one and a confirm the
+  user answers — that is what S-1 means by the chain being the user's, and §4.6 says the
+  same thing from the storage side: a hop's live reason stays visible 「until the Source
+  recovers, the user removes or changes the pair, **or a guarded cascade removes it**」.
+  Until this round that sentence was quoted here without its last clause, and the missing
+  clause was exactly this case — which is how a page whose own register already routed
+  重新拉取 through the guard could also promise that a refetch retains the hop. The
+  retention promise is real but it belongs to the other caller: **automatic background
+  discovery** never performs the cascade, records the model `model_unsupported`, keeps the
+  hop visible and non-runnable, and waits for an explicit refresh or edit `[contract]`.
+
+  What survives unchanged is the rule the earlier text was written to protect, and it was
+  never about hops: **一条链引用的型号,若在所有来源上都不再供应,必须在型号菜单上可见地
+  标出,不得静默跳过。** §4.4's `model_supply` projects `chain_length: 0` into 「无来源可供」
+  on the menu, and that projection is reached both by the retained-hop path and by a
+  confirmed cascade that empties a route — an emptied route stays an explicit empty
+  configuration, so the menu still has something to mark. **No new field, no new mechanism,
+  and no stale row on this frame.** The marker renders on the model menu, which no frame in
+  this document draws, so **this file states nothing about how it renders** — doing so would
+  specify a surface no frame here draws. It is covered by the AC ledger instead.
+
+  *What that costs, said here too because this is the page where it is felt.* The source a
+  model came from is exactly what this table used to tell you, and after the refetch it no
+  longer can: the row is gone with no trace that it was ever here. On the forced path the
+  hop goes with it, so the confirm is the **only** place the user ever sees the list of
+  references they are giving up — which is why this page adds no second notice afterwards.
+  The success envelope carries `removed_hops` and `interrupted`, and both re-state what
+  `Qp6FI` just showed; announcing them again would report a surprise where the user had
+  already been asked. On the unforced paths the trail is longer instead of shorter: a user
+  diagnosing 「无来源可供」 reads the marker on the menu, opens the model's chain, and finds
+  a retained hop naming a source whose inventory no longer lists that id — three surfaces
   to answer a question one page could have answered if the inventory remembered its own
   past. The trade is deliberate: nobody gets silently unconfigured by a vendor changing
   `/models`, and the price is that the explanation is assembled rather than read. §0.5
@@ -2941,6 +2987,25 @@ head source really is paused; what is absent is the thing that replaced it. The 
 pill counts backends in takeover, so at zero it is absent, not `0 处接管中`.
 `[contract]` AC-30 fixes the counting rule across grains, and an exhausted chain
 contributes zero to it.
+
+`[derived]`: **A head blocked by `needs_action` or `error` is not takeover either, and
+the word on the pill is the reason.** §4.3 derives takeover from a head that is
+unavailable *for a recoverable quota/cooldown reason*; violet says 临时改走, and
+`model-hub.md` §4.5 is explicit that `error` carries no `retry_at` and that
+`needs_action` waits on the user. Painting violet over either promises a return that
+nothing in the system will deliver — the same defect as the Exhausted case, one condition
+over, and both are why this frame's entry condition is a predicate rather than 「the head
+is unavailable」. That state is §1.1's *Serving past a blocked head* and it renders **01**:
+the group subtitle is 网关 · 降级 through C-6, the serving relation draws as an ordinary
+supply path because that is what it now is — not a deviation from the configuration but
+what the configuration resolves to until the user acts — the model row names its current
+source without the 接管 suffix, and the pill excludes the backend entirely, contributing
+zero to AC-30 exactly as an exhausted chain does. What it keeps from this frame is the
+**gold demotion on the head's own relation**, because gold is 「暂不可用 · 供给已暂停」 — a
+statement that *this path is not carrying traffic*, which is true of both blocker kinds.
+The source's own ink is a different subject with a different owner: §1.6's status mapping
+reads `#FF6B6B` for both, and a surface that derived one from the other would be right
+only for as long as the two happened to agree.
 
 **Copy** — `models.hub.takeover.*`; every other string is shared (§1.0).
 
@@ -3205,12 +3270,22 @@ control and the surface it lives on costs one line and converts a reassurance in
 instruction. This is the same reasoning as D-14 — a way out that cannot be found is not
 a way out.
 
+**The subtitle states this backend's scope, never the other backends' mode** `[derived]`.
+This dialog is not 09's alone: §1.1's register opens it from 01 as well, and on 01 some
+backends are already on 网关. A subtitle reading 「其余后端保持直连」 would therefore be
+false in exactly the situation a partially adopted user is in, and it would be false about
+the one thing the dialog exists to reassure them of. 保持原样 says the same thing without
+naming a mode it cannot know — which is what the element inventory above has always
+claimed the line does. §1.8's `direct.note.perBackend` may still say 直连, and the
+difference is not an inconsistency: that frame's entry condition is *every backend in
+直连*, so there the mode is a fact the surface owns rather than a guess about its callers.
+
 **Copy** — namespace `models.hub.adopt.*`
 
 | Key | 中文 | English |
 | --- | --- | --- |
 | `title` | 把 {{backend}} 切换到网关 | Switch {{backend}} to the gateway |
-| `subtitle` | 只影响 {{backend}},其余后端保持直连 | Affects {{backend}} only; the other backends stay direct |
+| `subtitle` `[derived]` | 只影响 {{backend}},其余后端保持原样 | Affects {{backend}} only; the other backends are unchanged |
 | `section.effects` | 会发生什么 | What will happen |
 | `effects.1` `[contract-gap]` G-14 | 你现在的 {{vendor}} 登录成为第一个来源,继续优先使用 | Your current {{vendor}} login becomes the first source and keeps priority |
 | `effects.2` | 等你添加了别的来源,这个登录用满时会自动换过去 | Once you add other sources, it moves to them when this login is exhausted |
