@@ -15,7 +15,7 @@ import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
 import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
 import type {
-  MemoryMaintenance,
+  MemoryMaintenanceResult,
   MemoryProcessingRecordResult,
   MemorySettingsResult,
   MemoryStatus,
@@ -26,6 +26,7 @@ import { memoryErrorMessage } from '../../lib/memoryRead';
 type MemoryTab = 'processingRecord' | 'profile' | 'search' | 'settings';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
+type MemoryMaintenanceOk = Extract<MemoryMaintenanceResult, { status: 'ok' }>;
 type MemoryProcessingRecordOk = Extract<MemoryProcessingRecordResult, { status: 'ok' }>;
 
 export const SettingsMemoryPage: React.FC = () => {
@@ -51,9 +52,14 @@ export const SettingsMemoryPage: React.FC = () => {
     read: api.getMemoryProcessingRecord,
     failureMessageKey: 'memory.status.loadFailed',
   });
+  const maintenanceRead = useMemoryResource<MemoryMaintenanceOk>({
+    read: api.getMemoryMaintenance,
+    failureMessageKey: 'memory.settings.maintenanceLoadFailed',
+  });
 
   const { reload: loadSettings, setData: setSettings } = settingsRead;
   const { reload: loadProcessingRecord } = processingRecordRead;
+  const { reload: loadMaintenance } = maintenanceRead;
   const settings = settingsRead.data;
   const processingRecord = processingRecordRead.data;
   const status: MemoryStatus | null = processingRecord ? {
@@ -61,19 +67,13 @@ export const SettingsMemoryPage: React.FC = () => {
     source: processingRecord.runtime.source,
     health: processingRecord.runtime.health,
   } : null;
-  const maintenance: MemoryMaintenance | null = processingRecord ? {
-    status: 'ok',
-    data_exists: processingRecord.maintenance.data_exists,
-    can_clear: processingRecord.maintenance.can_clear,
-    clear_recovery: processingRecord.maintenance.clear_recovery,
-  } : null;
   const reloadRecoveryState = useCallback(async () => {
-    await loadProcessingRecord();
-  }, [loadProcessingRecord]);
+    await Promise.all([loadProcessingRecord(), loadMaintenance()]);
+  }, [loadMaintenance, loadProcessingRecord]);
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
-    settingsRead.forbidden || processingRecordRead.forbidden;
+    settingsRead.forbidden || processingRecordRead.forbidden || maintenanceRead.forbidden;
 
   // Dependency readiness comes from the authoritative Dependencies source. Processing Record
   // health is observational and never doubles as installation or enablement state.
@@ -99,8 +99,9 @@ export const SettingsMemoryPage: React.FC = () => {
   useEffect(() => {
     void loadSettings();
     void loadProcessingRecord();
+    void loadMaintenance();
     void loadDependency();
-  }, [loadSettings, loadProcessingRecord, loadDependency]);
+  }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
     setClearing(true);
@@ -113,13 +114,16 @@ export const SettingsMemoryPage: React.FC = () => {
         showToast(t('memory.clear.cleared'), 'success');
         setClearOpen(false);
         void loadProcessingRecord();
+        void loadMaintenance();
         void loadSettings();
       } else {
         void loadProcessingRecord();
+        void loadMaintenance();
         showToast(memoryErrorMessage(t, 'error' in res ? res.error : undefined), 'error');
       }
     } catch {
       void loadProcessingRecord();
+      void loadMaintenance();
       showToast(t('memory.clear.failed'), 'error');
     } finally {
       setClearing(false);
@@ -128,6 +132,7 @@ export const SettingsMemoryPage: React.FC = () => {
 
   const refreshProcessingRecord = () => {
     void loadProcessingRecord();
+    void loadMaintenance();
     setLogRefreshToken((token) => token + 1);
   };
 
@@ -141,6 +146,7 @@ export const SettingsMemoryPage: React.FC = () => {
         showToast(t(`memory.processingRecord.clearRecovery.${action}Success`), 'success');
         setLogGeneration((generation) => generation + 1);
         void loadProcessingRecord();
+        void loadMaintenance();
         void loadSettings();
       } else {
         await reloadRecoveryState();
@@ -184,24 +190,21 @@ export const SettingsMemoryPage: React.FC = () => {
   const settingsPanel = settings ? (
     <MemorySettingsPanel
       settings={settings}
-      maintenance={maintenance}
-      maintenanceError={
-        processingRecord?.maintenance.source.status === 'unavailable'
-          ? memoryErrorMessage(t, processingRecord.maintenance.source.reason)
-          : processingRecordRead.error
-      }
+      maintenance={maintenanceRead.data}
+      maintenanceError={maintenanceRead.error}
       dependencyReady={dependencyReady}
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
         void loadProcessingRecord();
+        void loadMaintenance();
         void loadDependency();
       }}
       onReloadSettings={() => {
         void loadSettings();
       }}
       onReloadMaintenance={() => {
-        void loadProcessingRecord();
+        void loadMaintenance();
         void loadDependency();
       }}
       onClearAll={() => setClearOpen(true)}

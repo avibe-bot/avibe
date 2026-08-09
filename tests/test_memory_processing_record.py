@@ -13,7 +13,7 @@ import core.memory.processing_record as processing_record_module
 import core.memory.snapshot as snapshot_module
 from config.v2_config import MemoryConfig
 from core.memory.everos import ProviderHealthSnapshot
-from core.memory.maintenance import MaintenanceResult
+from core.memory.maintenance import MaintenanceObservation, MaintenanceResult
 from core.memory.processing_record import (
     MemoryProcessingRecord,
     MemoryProcessingRecordPort,
@@ -65,10 +65,23 @@ class _RuntimeObservations:
         self.failure_error: Exception | None = None
         self.maintenance_error: Exception | None = None
 
-    async def observe_health(self) -> RuntimeHealthObservation:
+    async def observe_maintenance(
+        self,
+        operator_ref: str | None,
+    ) -> MaintenanceObservation:
+        self.operator_refs.append(operator_ref)
+        return MaintenanceObservation(None, None, True)
+
+    async def observe_health(
+        self,
+        _maintenance_reason: str | None,
+    ) -> RuntimeHealthObservation:
         return self.health
 
-    async def failure_log(self) -> tuple[MemoryFailureLogEntry, ...]:
+    async def failure_log(
+        self,
+        _maintenance_reason: str | None,
+    ) -> tuple[MemoryFailureLogEntry, ...]:
         if self.failure_error is not None:
             raise self.failure_error
         return self.failures
@@ -76,20 +89,24 @@ class _RuntimeObservations:
     def recorder_health(self) -> dict[str, str | None]:
         return self.recorder
 
-    async def observe_sources(self) -> ProcessingSourceObservations:
+    async def observe_sources(
+        self,
+        _maintenance_reason: str | None,
+    ) -> ProcessingSourceObservations:
         return self.sources
 
     async def maintenance_payload(
         self,
         operator_ref: str | None,
+        _observation: MaintenanceObservation,
     ) -> MaintenanceResult:
-        self.operator_refs.append(operator_ref)
         if self.maintenance_error is not None:
             raise self.maintenance_error
         return self.maintenance
 
     def port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(
+            observe_maintenance=self.observe_maintenance,
             observe_health=self.observe_health,
             failure_log=self.failure_log,
             recorder_health=self.recorder_health,
@@ -109,25 +126,35 @@ class _ConcurrentRuntimeObservations(_RuntimeObservations):
         if self._independent_reads == 3:
             self._independent_reads_started.set()
 
-    async def observe_health(self) -> RuntimeHealthObservation:
+    async def observe_health(
+        self,
+        _maintenance_reason: str | None,
+    ) -> RuntimeHealthObservation:
         await self._independent_reads_started.wait()
         self.recorder = {"state": "degraded", "reason": "writer_failures"}
         return RuntimeHealthObservation(_health(self.recorder))
 
-    async def failure_log(self) -> tuple[MemoryFailureLogEntry, ...]:
+    async def failure_log(
+        self,
+        maintenance_reason: str | None,
+    ) -> tuple[MemoryFailureLogEntry, ...]:
         self._mark_independent_read()
-        return await super().failure_log()
+        return await super().failure_log(maintenance_reason)
 
-    async def observe_sources(self) -> ProcessingSourceObservations:
+    async def observe_sources(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProcessingSourceObservations:
         self._mark_independent_read()
-        return await super().observe_sources()
+        return await super().observe_sources(maintenance_reason)
 
     async def maintenance_payload(
         self,
         operator_ref: str | None,
+        observation: MaintenanceObservation,
     ) -> MaintenanceResult:
         self._mark_independent_read()
-        return await super().maintenance_payload(operator_ref)
+        return await super().maintenance_payload(operator_ref, observation)
 
 
 @pytest.mark.asyncio
@@ -399,7 +426,7 @@ async def test_health_probe_releases_reconcile_lock_and_discards_stale_result(
         return _health({"state": "degraded", "reason": "writer_failures"})
 
     monkeypatch.setattr(runtime._provider, "health_snapshot", blocked_health)
-    probing = asyncio.create_task(runtime._processing_record_health())
+    probing = asyncio.create_task(runtime._processing_record_health(None))
     await asyncio.wait_for(probe_entered.wait(), timeout=0.2)
 
     async with asyncio.timeout(0.2):
@@ -418,6 +445,56 @@ async def test_health_probe_releases_reconcile_lock_and_discards_stale_result(
 
 
 @pytest.mark.asyncio
+async def test_processing_record_keeps_event_loop_responsive_during_journal_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    maintenance = runtime._maintenance
+    assert maintenance is not None
+    restore_journal = maintenance._backup_restore_journal
+    assert restore_journal is not None
+    release_journal = threading.Event()
+    watchdog_released = threading.Event()
+    heartbeat = asyncio.Event()
+    event_loop = asyncio.get_running_loop()
+    journal_reads = 0
+    original_get_open_operation = restore_journal.get_open_operation
+
+    def blocking_get_open_operation():
+        nonlocal journal_reads
+        journal_reads += 1
+        event_loop.call_soon_threadsafe(heartbeat.set)
+        assert release_journal.wait(1)
+        return original_get_open_operation()
+
+    def release_from_watchdog() -> None:
+        watchdog_released.set()
+        release_journal.set()
+
+    monkeypatch.setattr(
+        restore_journal,
+        "get_open_operation",
+        blocking_get_open_operation,
+    )
+    watchdog = threading.Timer(0.5, release_from_watchdog)
+    watchdog.start()
+    reading = asyncio.create_task(runtime.processing_record_payload())
+    try:
+        await asyncio.wait_for(heartbeat.wait(), timeout=1)
+        assert watchdog_released.is_set() is False
+        release_journal.set()
+        await asyncio.wait_for(reading, timeout=1)
+        assert journal_reads == 1
+    finally:
+        release_journal.set()
+        watchdog.cancel()
+        await asyncio.gather(reading, return_exceptions=True)
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -433,6 +510,10 @@ async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
     maintenance._backup_active = False
     restore_journal = maintenance._backup_restore_journal
     assert restore_journal is not None
+
+    def unavailable_clear_journal():
+        raise OSError("clear journal unavailable")
+
     with monkeypatch.context() as restore_patch:
         restore_patch.setattr(
             restore_journal,
@@ -440,6 +521,13 @@ async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
             lambda: object(),
         )
         assert maintenance.observation_block_reason() == "busy"
+        restore_patch.setattr(
+            journal,
+            "get_open_operation",
+            unavailable_clear_journal,
+        )
+        observation = await runtime._processing_record_maintenance_observation(None)
+        assert observation.block_reason == "busy"
     operation = journal.start(
         operation_id="processing-observation-clear",
         operator_ref="user:owner",
@@ -447,15 +535,25 @@ async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
         target_epoch=1,
     )
 
-    busy_health = await runtime._processing_record_health()
-    busy_sources = await runtime._processing_record_sources()
+    busy_observation = await runtime._processing_record_maintenance_observation(None)
+    busy_health = await runtime._processing_record_health(
+        busy_observation.block_reason
+    )
+    busy_sources = await runtime._processing_record_sources(
+        busy_observation.block_reason
+    )
     recovery = journal.mark_recovery_needed(
         operation.operation_id,
         expected_revision=operation.revision,
         execution_token=operation.execution_token,
     )
-    failed_health = await runtime._processing_record_health()
-    failed_sources = await runtime._processing_record_sources()
+    failed_observation = await runtime._processing_record_maintenance_observation(None)
+    failed_health = await runtime._processing_record_health(
+        failed_observation.block_reason
+    )
+    failed_sources = await runtime._processing_record_sources(
+        failed_observation.block_reason
+    )
 
     assert busy_health.unavailable_reason == "busy"
     assert {source.reason for source in (

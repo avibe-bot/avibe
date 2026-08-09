@@ -124,7 +124,7 @@ class MemoryInsightReader:
     def source_observation(self) -> ProcessingSourceObservations:
         """Perform compact representative reads for each Processing Record source."""
 
-        _, system_section = self._read_admin_memcell_page(cursor_key=None, limit=1)
+        system_section = self._memcell_status()
         _, runs_section = self._read_run_summaries([])
         capture_section = self._capture_status()
         _, calls_section = self._read_call_counts(
@@ -570,6 +570,21 @@ class MemoryInsightReader:
                 return list(conn.execute(sql, args)), {"status": "available"}
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
+
+    def _memcell_status(self) -> dict[str, str]:
+        try:
+            with _read_only(self._paths.system_db_path) as conn:
+                conn.execute(
+                    """
+                    SELECT memcell_id, app_id, project_id, message_ids_json,
+                           sender_ids_json, payload_json, timestamp
+                    FROM memcell
+                    LIMIT 1
+                    """
+                ).fetchone()
+            return {"status": "available"}
+        except _Unavailable as unavailable:
+            return {"status": "unavailable", "reason": unavailable.reason}
 
     def _capture_status(self) -> dict[str, str]:
         try:

@@ -39,6 +39,7 @@ from core.memory.module import MemoryModule
 from core.memory.maintenance import (
     ClearRecoveryResult,
     ClearResult,
+    MaintenanceObservation,
     MaintenanceResult,
     MaintenanceRuntimeState,
     MemoryMaintenance,
@@ -365,12 +366,6 @@ class MemoryRuntime:
         maintenance = self._maintenance
         return maintenance is None or maintenance.is_open()
 
-    def _maintenance_observation_reason(self) -> str | None:
-        maintenance = self._maintenance
-        if maintenance is None:
-            return "memory_store_unavailable"
-        return maintenance.observation_block_reason()
-
     def _can_disable_without_maintenance_authority(self, config: MemoryConfig) -> bool:
         """Allow only a pure disable when the journal authority is unreadable."""
 
@@ -395,6 +390,7 @@ class MemoryRuntime:
 
     def _processing_record_port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(
+            observe_maintenance=self._processing_record_maintenance_observation,
             observe_health=self._processing_record_health,
             failure_log=self._processing_record_failure_log,
             recorder_health=lambda: dict(self._recorder_health),
@@ -789,7 +785,23 @@ class MemoryRuntime:
         self._ensure_worker()
         return {"ok": True, "state": "ready"}
 
-    async def _processing_record_health(self) -> RuntimeHealthObservation:
+    async def _processing_record_maintenance_observation(
+        self,
+        operator_ref: str | None,
+    ) -> MaintenanceObservation:
+        maintenance = self._maintenance
+        if maintenance is None:
+            return MaintenanceObservation(
+                block_reason="memory_store_unavailable",
+                clear_recovery=None,
+                can_clear=False,
+            )
+        return await maintenance.observe(operator_ref=operator_ref)
+
+    async def _processing_record_health(
+        self,
+        maintenance_reason: str | None,
+    ) -> RuntimeHealthObservation:
         snapshot: ProviderHealthSnapshot | None = None
         reason: str | None = None
         if not self._config.enabled:
@@ -802,14 +814,13 @@ class MemoryRuntime:
                 snapshot=None,
                 unavailable_reason="memory_sidecar_unavailable",
             )
-        maintenance_reason = self._maintenance_observation_reason()
         if maintenance_reason is not None:
             return RuntimeHealthObservation(
                 snapshot=None,
                 unavailable_reason=maintenance_reason,
             )
         async with self._reconcile_lock:
-            reason = self._processing_record_state_reason()
+            reason = self._processing_record_state_reason(maintenance_reason)
             process = self._process
         if reason is not None:
             return RuntimeHealthObservation(snapshot=None, unavailable_reason=reason)
@@ -820,7 +831,7 @@ class MemoryRuntime:
         except Exception:
             reason = "memory_sidecar_unavailable"
         async with self._reconcile_lock:
-            current_reason = self._processing_record_state_reason()
+            current_reason = self._processing_record_state_reason(maintenance_reason)
             if self._process is not process or current_reason is not None:
                 return RuntimeHealthObservation(
                     snapshot=None,
@@ -830,12 +841,14 @@ class MemoryRuntime:
                 self._update_recorder_health(snapshot.recorder)
         return RuntimeHealthObservation(snapshot=snapshot, unavailable_reason=reason)
 
-    def _processing_record_state_reason(self) -> str | None:
+    def _processing_record_state_reason(
+        self,
+        maintenance_reason: str | None,
+    ) -> str | None:
         if not self._config.enabled:
             return "memory_disabled"
         if not self.available:
             return "memory_sidecar_unavailable"
-        maintenance_reason = self._maintenance_observation_reason()
         if maintenance_reason is not None:
             return maintenance_reason
         if self._process is None or not self._process.running:
@@ -844,13 +857,21 @@ class MemoryRuntime:
 
     async def _processing_record_failure_log(
         self,
+        maintenance_reason: str | None,
     ) -> tuple[MemoryFailureLogEntry, ...]:
         if not self.available:
             raise self._unavailable()
-        return await self.module.failure_log()
+        if maintenance_reason is not None or self.module._clear_active:
+            return ()
+        async with self.module._root_lifecycle_lock():
+            if self.module._clear_active:
+                return ()
+            return await run_blocking(self._store.failure_log, limit=50)
 
-    async def _processing_record_sources(self) -> ProcessingSourceObservations:
-        maintenance_reason = self._maintenance_observation_reason()
+    async def _processing_record_sources(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProcessingSourceObservations:
         if maintenance_reason is not None:
             unavailable = SourceObservation(
                 "unavailable",
@@ -869,9 +890,11 @@ class MemoryRuntime:
     async def _processing_record_maintenance(
         self,
         operator_ref: str | None,
+        observation: MaintenanceObservation,
     ) -> MaintenanceResult:
         return await self._require_maintenance().maintenance_payload(
-            operator_ref=operator_ref
+            operator_ref=operator_ref,
+            observation=observation,
         )
 
     def _update_recorder_health(

@@ -11,6 +11,7 @@ import type { MemoryProcessingRecordSummary } from '../../context/ApiContext';
 const api = vi.hoisted(() => ({
   abortMemoryClear: vi.fn(),
   clearMemory: vi.fn(),
+  getMemoryMaintenance: vi.fn(),
   getMemoryProcessingRecord: vi.fn(),
   getMemorySettings: vi.fn(),
   listDependencies: vi.fn(),
@@ -58,8 +59,17 @@ vi.mock('./memory/MemoryLogPanel', async () => {
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
 vi.mock('./memory/MemorySettingsPanel', () => ({
-  MemorySettingsPanel: ({ onClearAll }: { onClearAll: () => void }) => (
-    <button type="button" onClick={onClearAll}>open-clear</button>
+  MemorySettingsPanel: ({
+    maintenance,
+    onClearAll,
+  }: {
+    maintenance: { can_clear: boolean } | null;
+    onClearAll: () => void;
+  }) => (
+    <div>
+      <span>{maintenance?.can_clear ? 'maintenance-ready' : 'maintenance-unknown'}</span>
+      <button type="button" onClick={onClearAll}>open-clear</button>
+    </div>
   ),
 }));
 
@@ -109,6 +119,12 @@ beforeEach(() => {
     processing: { llm: endpoint, embedding: endpoint },
   });
   api.getMemoryProcessingRecord.mockResolvedValue(readyProcessingRecord());
+  api.getMemoryMaintenance.mockResolvedValue({
+    status: 'ok',
+    data_exists: false,
+    can_clear: true,
+    clear_recovery: null,
+  });
   api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
   api.restartMemoryRuntime.mockResolvedValue({ ok: true, state: 'ready' });
   api.clearMemory.mockResolvedValue({ status: 'completed', operation_id: 'clear-ok', epoch: 1 });
@@ -123,6 +139,17 @@ afterEach(() => {
 });
 
 describe('SettingsMemoryPage Processing Record', () => {
+  it('loads maintenance controls even while the composite summary is stalled', async () => {
+    api.getMemoryProcessingRecord.mockReturnValue(new Promise(() => undefined));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+
+    expect(await screen.findByText('maintenance-ready')).toBeTruthy();
+    expect(api.getMemoryMaintenance).toHaveBeenCalledTimes(1);
+  });
+
   it('loads one summary and keeps timeline pagination separate', async () => {
     const setInterval = vi.spyOn(window, 'setInterval');
     renderPage();

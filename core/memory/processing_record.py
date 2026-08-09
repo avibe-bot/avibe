@@ -10,7 +10,11 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from core.memory.everos import ProviderHealthSnapshot
-from core.memory.maintenance import ClearRecoveryResult, MaintenanceResult
+from core.memory.maintenance import (
+    ClearRecoveryResult,
+    MaintenanceObservation,
+    MaintenanceResult,
+)
 from core.memory.types import MemoryFailureLogEntry
 
 
@@ -70,11 +74,18 @@ class ProcessingRecordSummary:
 class MemoryProcessingRecordPort:
     """Capability-shaped observations supplied by ``MemoryRuntime``."""
 
-    observe_health: Callable[[], Awaitable[RuntimeHealthObservation]]
-    failure_log: Callable[[], Awaitable[tuple[MemoryFailureLogEntry, ...]]]
+    observe_maintenance: Callable[[str | None], Awaitable[MaintenanceObservation]]
+    observe_health: Callable[[str | None], Awaitable[RuntimeHealthObservation]]
+    failure_log: Callable[
+        [str | None],
+        Awaitable[tuple[MemoryFailureLogEntry, ...]],
+    ]
     recorder_health: Callable[[], Mapping[str, str | None]]
-    observe_sources: Callable[[], Awaitable[ProcessingSourceObservations]]
-    maintenance: Callable[[str | None], Awaitable[MaintenanceResult]]
+    observe_sources: Callable[[str | None], Awaitable[ProcessingSourceObservations]]
+    maintenance: Callable[
+        [str | None, MaintenanceObservation],
+        Awaitable[MaintenanceResult],
+    ]
 
 
 class MemoryProcessingRecord:
@@ -94,11 +105,12 @@ class MemoryProcessingRecord:
     async def read(self, operator_ref: str | None) -> ProcessingRecordSummary:
         """Read one independently degrading Processing Record summary."""
 
+        observation = await self._read_maintenance_observation(operator_ref)
         runtime, sources, anomalies, maintenance = await asyncio.gather(
-            self.read_runtime(),
-            self._read_sources(),
-            self._read_durable_anomalies(),
-            self._read_maintenance(operator_ref),
+            self.read_runtime(observation),
+            self._read_sources(observation.block_reason),
+            self._read_durable_anomalies(observation.block_reason),
+            self._read_maintenance(operator_ref, observation),
         )
         return ProcessingRecordSummary(
             runtime=runtime,
@@ -107,10 +119,15 @@ class MemoryProcessingRecord:
             maintenance=maintenance,
         )
 
-    async def read_runtime(self) -> RuntimeHealthProjection:
+    async def read_runtime(
+        self,
+        observation: MaintenanceObservation | None = None,
+    ) -> RuntimeHealthProjection:
         """Project runtime health without reading the durable data sources."""
 
-        runtime = await self._read_health()
+        if observation is None:
+            observation = await self._read_maintenance_observation(None)
+        runtime = await self._read_health(observation.block_reason)
         self.observe_recorder(
             self._runtime.recorder_health(),
             observed_at=(
@@ -128,9 +145,10 @@ class MemoryProcessingRecord:
         """Project compatibility failure facts without probing runtime health."""
 
         self.observe_recorder(self._runtime.recorder_health())
+        observation = await self._read_maintenance_observation(operator_ref)
         anomalies, maintenance = await asyncio.gather(
-            self._read_durable_anomalies(),
-            self._read_maintenance(operator_ref),
+            self._read_durable_anomalies(observation.block_reason),
+            self._read_maintenance(operator_ref, observation),
         )
         return self._merge_recorder_anomaly(anomalies), maintenance
 
@@ -140,11 +158,28 @@ class MemoryProcessingRecord:
     ) -> MaintenanceProjection:
         """Project compatibility maintenance facts without unrelated reads."""
 
-        return await self._read_maintenance(operator_ref)
+        observation = await self._read_maintenance_observation(operator_ref)
+        return await self._read_maintenance(operator_ref, observation)
 
-    async def _read_health(self) -> RuntimeHealthProjection:
+    async def _read_maintenance_observation(
+        self,
+        operator_ref: str | None,
+    ) -> MaintenanceObservation:
         try:
-            observation = await self._runtime.observe_health()
+            return await self._runtime.observe_maintenance(operator_ref)
+        except Exception:
+            return MaintenanceObservation(
+                block_reason="memory_store_unavailable",
+                clear_recovery=None,
+                can_clear=False,
+            )
+
+    async def _read_health(
+        self,
+        maintenance_reason: str | None,
+    ) -> RuntimeHealthProjection:
+        try:
+            observation = await self._runtime.observe_health(maintenance_reason)
         except Exception:
             observation = RuntimeHealthObservation(
                 snapshot=None,
@@ -175,9 +210,12 @@ class MemoryProcessingRecord:
             health=None,
         )
 
-    async def _read_sources(self) -> ProcessingSourceObservations:
+    async def _read_sources(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProcessingSourceObservations:
         try:
-            return await self._runtime.observe_sources()
+            return await self._runtime.observe_sources(maintenance_reason)
         except Exception:
             unavailable = SourceObservation(
                 "unavailable",
@@ -189,9 +227,12 @@ class MemoryProcessingRecord:
                 calls=unavailable,
             )
 
-    async def _read_durable_anomalies(self) -> AnomalyProjection:
+    async def _read_durable_anomalies(
+        self,
+        maintenance_reason: str | None,
+    ) -> AnomalyProjection:
         try:
-            durable = await self._runtime.failure_log()
+            durable = await self._runtime.failure_log(maintenance_reason)
             source = SourceObservation("available", observed_at=_utc_observed_at())
         except Exception:
             durable = ()
@@ -214,9 +255,10 @@ class MemoryProcessingRecord:
     async def _read_maintenance(
         self,
         operator_ref: str | None,
+        observation: MaintenanceObservation,
     ) -> MaintenanceProjection:
         try:
-            result = await self._runtime.maintenance(operator_ref)
+            result = await self._runtime.maintenance(operator_ref, observation)
         except Exception:
             return MaintenanceProjection(
                 source=SourceObservation(
