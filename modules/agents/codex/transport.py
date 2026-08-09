@@ -74,6 +74,10 @@ class CodexTransport:
             + ["app-server"]
             + self._runtime_args
             + self._extra_args
+            # Keep this process-local policy last so user args cannot re-enable
+            # memory. Older Codex builds ignore unknown config keys, while an
+            # unknown ``--disable`` feature would abort startup.
+            + ["-c", "features.memories=false"]
         )
         logger.info("Launching Codex app-server: %s (cwd=%s)", " ".join(cmd), self._cwd)
 

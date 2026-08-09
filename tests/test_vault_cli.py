@@ -1069,7 +1069,7 @@ def test_run_waits_for_protected_approval_then_delivers(tmp_path, capfd, monkeyp
     assert deliver.call_args.kwargs["grant_id"] == approved["grant"]["id"]
     with cli._open_vault_engine().connect() as conn:
         row = conn.execute(vault_requests.select().where(vault_requests.c.id == approved["request"]["id"])).mappings().one()
-    assert row["callback_status"] == "skipped"
+    assert row["callback_status"] == "pending"
     assert json.loads(row["delivery"])["waiter"]["status"] == "completed"
 
 

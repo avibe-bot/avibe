@@ -383,6 +383,7 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
         assert agent.receiver_tasks == {"runtime-key": receiver_task}
         assert agent._pending_requests["runtime-key"] is primary_requests
         assert agent._pending_requests["runtime-key"] == [primary]
+        client._transport.end_input.assert_not_awaited()
         # Steering admission is not execution progress and must not refresh the
         # stuck-runtime clock before assistant/tool output arrives.
         assert agent.session_handler.activity_touches == []
@@ -492,6 +493,37 @@ async def test_claude_preserves_receiver_when_ambiguous_input_half_close_fails()
 
 
 @pytest.mark.anyio
+async def test_claude_accepts_stable_steer_without_closing_native_input() -> None:
+    primary = _primary_request(backend="claude")
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    client = _ClaudeClient()
+    client._transport.end_input = AsyncMock(side_effect=RuntimeError("stdin close failed"))
+    agent = object.__new__(ClaudeAgent)
+    agent.claude_sessions = {"runtime-key": client}
+    agent.receiver_tasks = {"runtime-key": receiver_task}
+    agent.session_handler = _ClaudeSessionHandler("runtime-key")
+    agent._pending_requests = {"runtime-key": [primary]}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, "claude", "avibe-session")
+        assert identity is not None
+
+        receipt = await steer_active_turn(
+            controller,
+            "claude",
+            _steer_request(identity[1]),
+        )
+
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert client.queries[-1] == (STEER_TEXT, "runtime-key")
+        client._transport.end_input.assert_not_awaited()
+        assert not receiver_task.done()
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
 async def test_shared_boundary_finishes_native_reconciliation_before_propagating_cancel() -> None:
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
@@ -529,7 +561,7 @@ async def test_shared_boundary_finishes_native_reconciliation_before_propagating
             await caller
 
         assert agent._steering_generation("runtime-key") == 1
-        assert agent._next_terminal_barrier("runtime-key") == "accepted"
+        assert agent._pending_steering_input_state("runtime-key") == "accepted"
         assert agent._pending_requests["runtime-key"] == [primary]
         assert not receiver_task.done()
     finally:

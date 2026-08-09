@@ -20,6 +20,7 @@ from .base import (
     MessageContext,
 )
 from .formatters import FeishuFormatter
+from .message_facts import is_ordinary_feishu_text
 from config.v2_config import LarkConfig
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
@@ -37,6 +38,7 @@ from modules.agents.native_sessions.types import NativeResumeSession
 
 logger = logging.getLogger(__name__)
 
+
 # Feishu emoji name mapping (common reactions)
 # See: https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
 _EMOJI_MAP: Dict[str, str] = {
@@ -46,6 +48,14 @@ _EMOJI_MAP: Dict[str, str] = {
     "🤖": "SMART",
     "ok_hand": "OK",
     "👌": "OK",
+    # Admission receipts: ✍️ steered, 🤷 not delivered. Lark has no writing-hand
+    # glyph — ``Typing`` (emoji_typing) is its "being written into" equivalent.
+    # Both forms of ✍️ are listed: _normalize_emoji does not strip U+FE0F.
+    "writing_hand": "Typing",
+    "✍️": "Typing",
+    "✍": "Typing",
+    "shrug": "Shrug",
+    "🤷": "Shrug",
     "thumbsup": "THUMBSUP",
     "👍": "THUMBSUP",
     "+1": "THUMBSUP",
@@ -56,14 +66,15 @@ _EMOJI_MAP: Dict[str, str] = {
     "check": "OK",
     "white_check_mark": "OK",
     "✅": "OK",
-    "x": "CROSSMARK",
-    "❌": "CROSSMARK",
-    "rocket": "ROCKET",
-    "🚀": "ROCKET",
+    "x": "CrossMark",
+    "❌": "CrossMark",
+    # Lark has no rocket reaction; ``GoGoGo`` carries the same "ship it" intent.
+    "rocket": "GoGoGo",
+    "🚀": "GoGoGo",
     "smile": "SMILE",
     "😄": "SMILE",
-    "fire": "FIRE",
-    "🔥": "FIRE",
+    "fire": "Fire",
+    "🔥": "Fire",
     "clap": "APPLAUSE",
     "👏": "APPLAUSE",
     "muscle": "MUSCLE",
@@ -1698,6 +1709,11 @@ class FeishuBot(BaseIMClient):
                     "is_dm": is_p2p,
                 },
                 files=file_attachments,
+                is_ordinary_text=is_ordinary_feishu_text(
+                    event_data,
+                    file_attachments,
+                    shared_text=shared_text,
+                ),
             )
 
             # Handle commands (messages starting with /)

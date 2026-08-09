@@ -1708,10 +1708,11 @@ def test_custom_model_preserves_slash_qualified_upstream_id(tmp_path):
 
     updated = asyncio.run(
         service.add_custom_model(
+            source.id,
             {
-                "source_id": source.id,
                 "model_id": "anthropic/claude-sonnet-4",
                 "display_name": "Claude Sonnet 4",
+                "reasoning_efforts": [],
             }
         )
     )
@@ -1814,7 +1815,6 @@ def test_mapping_auto_enrolls_eligible_non_enrolled_source(tmp_path):
         )
     )
 
-    assert agent["sources"]["policy"] == "custom"
     assert agent["sources"]["order"] == [*original_order, added.id]
     assert config.agents["claude"].mappings[0].target_model_id == "mapped-model"
 
@@ -1852,7 +1852,6 @@ def test_opencode_menu_auto_enrolls_eligible_non_enrolled_source(tmp_path):
         )
     )
 
-    assert agent["sources"]["policy"] == "custom"
     assert agent["sources"]["order"] == [*original_order, added.id]
     assert agent["menu"]["checked"] == [
         "openrouter/anthropic/claude-sonnet-4"
@@ -1978,7 +1977,6 @@ def test_follow_order_exhaustively_enrolls_eligible_sources_and_stays_follow(
             if config.source_eligible_for_backend(source, backend)
         }
         assert set(config.effective_source_order(backend)) == eligible
-        assert agent.sources.policy == "follow"
 
     claude = asyncio.run(
         service.set_mappings(
@@ -2001,8 +1999,6 @@ def test_follow_order_exhaustively_enrolls_eligible_sources_and_stays_follow(
         )
     )
 
-    assert claude["sources"]["policy"] == "follow"
-    assert opencode["sources"]["policy"] == "follow"
 
 
 @pytest.mark.parametrize("mutation", ["mapping", "menu"])

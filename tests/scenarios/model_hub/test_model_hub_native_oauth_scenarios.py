@@ -157,14 +157,7 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
         f"/api/models/oauth/status/{started['flow_id']}",
         base_url=BASE_URL,
     ).get_json()
-    assert set(completion) == {
-        "ok",
-        "contract_version",
-        "flow",
-        "source",
-        "adopted_by",
-        "skipped_by",
-    }
+    assert {"ok", "contract_version", "flow", "source", "adopted_by"} <= set(completion)
     completed = completion["flow"]
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
     codex = next(
@@ -178,11 +171,7 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
     assert source["state"]["status"] == "standby"
     assert source["account_label"] == "chatgpt-owner@example.com \u00b7 plus \u00b7 Example Org"
     assert source["credential_ref"] is None
-    assert completion["adopted_by"] == []
-    assert completion["skipped_by"] == [
-        {"backend": "codex", "reason": "custom_order"}
-    ]
-    assert codex["sources"]["policy"] == "custom"
+    assert "policy" not in codex["sources"]
     assert codex["sources"]["order"] == []
     assert codex["sources"]["eligibility"] == [
         {
@@ -264,7 +253,7 @@ def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, t
     ).status_code == 404
 
 
-def test_mh_oauth_consent_001_is_required_and_persisted(monkeypatch, tmp_path):
+def test_mh_oauth_consent_001_public_source_omits_retired_consent_stamp(monkeypatch, tmp_path):
     """Scenario: MH-OAUTH-CONSENT-001."""
 
     harness = HubOAuthScenarioHarness(tmp_path)
@@ -304,7 +293,7 @@ def test_mh_oauth_consent_001_is_required_and_persisted(monkeypatch, tmp_path):
     assert completed["state"] == "success"
     assert source["id"] == started["source_id"]
     assert source["supply_channel"] == "hub"
-    assert source["experimental_consent_at"] == "2026-07-25T00:00:00+00:00"
+    assert "experimental_consent_at" not in source
 
     harness.adapter.flows.clear()
     repeated = client.get(

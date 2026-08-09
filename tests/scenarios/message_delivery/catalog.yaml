@@ -164,6 +164,65 @@ scenarios:
     kind: lifecycle
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_im_p1_materializes_only_after_exact_native_acceptance
+  - id: MESSAGE-DELIVERY-301
+    name: Mid-turn IM input reports its admission outcome to the sender
+    status: covered
+    kind: happy_path
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests
+  - id: MESSAGE-DELIVERY-302
+    name: A queued admission receipt is replaced by the running turn indicator
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_start_clears_the_queued_receipt_before_the_turn_indicator
+  - id: MESSAGE-DELIVERY-303
+    name: Late steer acceptance upgrades the queued admission receipt
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_late_steer_acceptance_upgrades_the_queued_admission_receipt
+  - id: MESSAGE-DELIVERY-304
+    name: A receipt racing the turn start is cleared exactly once
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_receipt_in_flight_when_the_turn_starts_is_still_cleared
+  - id: MESSAGE-DELIVERY-305
+    name: The receipt target survives Delivery hydration into a new process
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::ReactionTargetSurvivalTests
+  - id: MESSAGE-DELIVERY-306
+    name: A native-less quick reply reacts on its persisted echo target
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_quick_reply_receipt_uses_its_persisted_echo_target
+  - id: MESSAGE-DELIVERY-307
+    name: A steer refused after archive replaces its queued receipt
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_definitive_steer_refusal_after_archive_reports_the_retired_receipt
+  - id: MESSAGE-DELIVERY-308
+    name: A reservation revived by recovery still reports its admission
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_recovered_reservation_reports_its_admission_receipt
+  - id: MESSAGE-DELIVERY-309
+    name: One Turn clears the receipt of every Delivery merged into it
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_delivery_ack_reaction.py::AdmissionAckTests::test_start_clears_every_receipt_merged_into_its_turn
+  - id: MESSAGE-DELIVERY-310
+    name: Steer acceptance creates its Message before linking a Show event
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_steer_acceptance_materializes_message_before_show_event_link
 next_priority:
-  - MESSAGE-DELIVERY-301
-  - MESSAGE-DELIVERY-302
+  - MESSAGE-DELIVERY-311

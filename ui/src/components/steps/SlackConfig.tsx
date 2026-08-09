@@ -6,6 +6,7 @@ import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { hasUsableSecret, secretInputValue, withSecretDrafts } from '../../lib/secretFields';
 import { copyTextToClipboard } from '../../lib/utils';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { EmbeddedConfigShell, EyebrowBadge, WizardCard } from '../visual';
 import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
@@ -99,9 +100,9 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
   const openSlackCreateApp = () => {
     if (manifestCompact) {
       const url = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(manifestCompact)}`;
-      window.open(url, '_blank');
+      openLinkInNewContext(url);
     } else {
-      window.open('https://api.slack.com/apps?new_app=1', '_blank');
+      openLinkInNewContext('https://api.slack.com/apps?new_app=1');
     }
   };
 

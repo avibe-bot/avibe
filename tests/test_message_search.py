@@ -71,6 +71,7 @@ def _insert_msg(
     source=None,
     msg_id=None,
     delivered_at=None,
+    native_message_id=None,
 ):
     """Direct insert so a test controls created_at / type / platform / text.
 
@@ -87,6 +88,7 @@ def _insert_msg(
             author=author,
             type=resolved_type,
             source=source,
+            native_message_id=native_message_id,
             content_text=text,
             content_json="{}",
             metadata_json="{}",
@@ -614,6 +616,38 @@ def test_around_unknown_id_returns_empty(isolated_state):
         )
 
     assert page == {"messages": [], "next_after_id": None, "next_before_id": None}
+
+
+def test_around_native_id_resolves_to_durable_anchor(isolated_state):
+    """Legacy platform caller ids center the same durable transcript window."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_native")
+        _insert_msg(conn, scope_id, "ses_native", "user", "before", "2026-06-02T10:01:00Z")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_native",
+            "user",
+            "native anchor",
+            "2026-06-02T10:02:00Z",
+            native_message_id="slack-123",
+        )
+        _insert_msg(conn, scope_id, "ses_native", "agent", "after", "2026-06-02T10:03:00Z")
+
+    with engine.connect() as conn:
+        page = messages_service.list_session_messages(
+            conn,
+            session_id="ses_native",
+            around_native_id="slack-123",
+            limit=1,
+            types=("user", "result"),
+        )
+
+    assert [message["text"] for message in page["messages"]] == ["before", "native anchor", "after"]
+    assert page["next_before_id"] is None
+    assert page["next_after_id"] is None
 
 
 def test_around_takes_precedence_over_before_and_tail(isolated_state):

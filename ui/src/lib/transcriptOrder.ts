@@ -60,6 +60,64 @@ export const isTranscriptWindowDisjoint = (
   tailOldest: WorkbenchMessage,
 ): boolean => byCreatedThenId(tailOldest, previousNewest) > 0;
 
+/** Whether two fetched transcript windows share at least one durable row. */
+export const transcriptWindowsOverlap = (
+  left: WorkbenchMessage[],
+  right: WorkbenchMessage[],
+): boolean => {
+  if (left.length === 0 || right.length === 0) return false;
+  const leftIds = new Set(left.map((message) => message.id));
+  return right.some((message) => leftIds.has(message.id));
+};
+
+const RECONCILE_METADATA_KEYS = [
+  'source_kind',
+  'source_actor',
+  'vault_request_type',
+  'vault_request_status',
+] as const;
+
+function mergeReconcileMetadata(
+  existing: WorkbenchMessage,
+  incoming: WorkbenchMessage,
+): WorkbenchMessage {
+  const existingMetadata = existing.metadata ?? {};
+  const incomingMetadata = incoming.metadata ?? {};
+  const metadata = { ...existingMetadata };
+  let changed = false;
+  for (const key of RECONCILE_METADATA_KEYS) {
+    const value = incomingMetadata[key];
+    if (value !== undefined && value !== null && value !== existingMetadata[key]) {
+      metadata[key] = value;
+      changed = true;
+    }
+  }
+  return changed ? { ...existing, metadata } : existing;
+}
+
+/** Merge a fetched anchor window without trimming away the row it is meant to reveal. */
+export const mergeAnchorWindow = (
+  existing: WorkbenchMessage[],
+  incoming: WorkbenchMessage[],
+  anchorMessageId: string,
+  maxMessages: number,
+  followingTail: boolean,
+): { messages: WorkbenchMessage[]; replaced: boolean; detachedTail: boolean; trimmedOldest: boolean } => {
+  const merged = mergeById(existing, incoming);
+  if (merged.length <= maxMessages) {
+    return { messages: merged, replaced: false, detachedTail: false, trimmedOldest: false };
+  }
+
+  const retained = followingTail ? merged.slice(-maxMessages) : merged.slice(0, maxMessages);
+  const detachedTail = !followingTail;
+  if (retained.some((message) => message.id === anchorMessageId)) {
+    return { messages: retained, replaced: false, detachedTail, trimmedOldest: followingTail };
+  }
+  // The capped union would discard the owning reply. Keep the coherent centered
+  // response instead; the caller marks it historical and can scroll to the anchor.
+  return { messages: incoming, replaced: true, detachedTail, trimmedOldest: false };
+};
+
 // Union two row sets, deduped by id and re-sorted into durable order. Used by the
 // BATCH paths (initial snapshot, reconcile, older-page load), so a fast agent
 // result that arrives over /api/events *before* its prompt row still lands in the
@@ -85,9 +143,13 @@ export const mergeById = (
       inc &&
       ((m.source_session_id == null && inc.source_session_id != null) ||
         (m.author_name == null && inc.author_name != null) ||
-        (m.author_id == null && inc.author_id != null))
+        (m.author_id == null && inc.author_id != null) ||
+        RECONCILE_METADATA_KEYS.some((key) => {
+          const value = inc.metadata?.[key];
+          return value !== undefined && value !== null && value !== m.metadata?.[key];
+        }))
     ) {
-      return {
+      const patchedMessage = {
         ...m,
         ...(m.source_session_id == null && inc.source_session_id != null
           ? {
@@ -99,6 +161,7 @@ export const mergeById = (
         ...(m.author_name == null && inc.author_name != null ? { author_name: inc.author_name } : {}),
         ...(m.author_id == null && inc.author_id != null ? { author_id: inc.author_id } : {}),
       };
+      return mergeReconcileMetadata(patchedMessage, inc);
     }
     return m;
   });

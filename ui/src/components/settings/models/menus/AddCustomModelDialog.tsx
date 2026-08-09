@@ -1,7 +1,7 @@
 // 添加自定义模型 (frame 08). Supplements a source's supply list with a model the
 // auto-discovery missed. OpenCode callers show its provider-prefixed identifier;
 // fixed-backend and source-list callers keep the upstream's raw model id. Persists
-// via POST /custom-models; also used to edit an existing custom entry.
+// through the Source-model subresource; also used to edit an existing custom entry.
 import * as React from 'react';
 import { ChevronDown, Copy, Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -181,7 +181,11 @@ export const AddCustomModelDialog: React.FC<{
     if (!source || source.kind !== 'api_key' || !trimmedId || saving) return;
     setSaving(true);
     try {
-      await modelsApi.addCustomModel({ source_id: source.id, model_id: trimmedId, display_name: displayName.trim() || null });
+      await modelsApi.addCustomModel(source.id, {
+        model_id: trimmedId,
+        display_name: displayName.trim() || null,
+        reasoning_efforts: [],
+      });
       onSaved(identifier);
       onClose();
     } catch {

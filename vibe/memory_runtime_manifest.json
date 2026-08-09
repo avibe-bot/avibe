@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "everos_version": "1.2.1",
+  "python_version": "3.12.12",
+  "lock_sha256": "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f",
+  "lock_id": "uv-lock-sha256:e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f",
+  "uv_version": "0.9.18",
+  "source": "everos",
+  "source_url": "https://github.com/EverMind-AI/EverMemOS",
+  "release_state": "unavailable",
+  "release_tag": "memory-runtime-v1.2.1-1",
+  "provider_root_format": "everos-1.2.1",
+  "archives": {
+    "darwin-arm64": {
+      "name": "memory-runtime-1.2.1-darwin-arm64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/memory-runtime-v1.2.1-1/memory-runtime-1.2.1-darwin-arm64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "bin_path": "bin/python"
+    },
+    "linux-arm64": {
+      "name": "memory-runtime-1.2.1-linux-arm64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/memory-runtime-v1.2.1-1/memory-runtime-1.2.1-linux-arm64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "bin_path": "bin/python"
+    },
+    "linux-x64": {
+      "name": "memory-runtime-1.2.1-linux-x64.tar.gz",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/memory-runtime-v1.2.1-1/memory-runtime-1.2.1-linux-x64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "bin_path": "bin/python"
+    }
+  }
+}

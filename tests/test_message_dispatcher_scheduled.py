@@ -2742,7 +2742,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("record", "run-1", "private output", "suppressed:run-1", "succeeded"),
+                ("record", "run-1", "private output", None, "succeeded"),
                 ("close",),
             ],
         )
@@ -2776,7 +2776,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("record", "run-agent", "private agent output", "suppressed:run-agent", "succeeded"),
+                ("record", "run-agent", "private agent output", None, "succeeded"),
                 ("close",),
             ],
         )
@@ -2851,9 +2851,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("record", "run-1", "private agent output", "suppressed:run-1", "succeeded"),
-                ("record", "run-2", "private agent output", "suppressed:run-1", "succeeded"),
-                ("record", "run-3", "private agent output", "suppressed:run-1", "succeeded"),
+                ("record", "run-1", "private agent output", None, "succeeded"),
+                ("record", "run-2", "private agent output", None, "succeeded"),
+                ("record", "run-3", "private agent output", None, "succeeded"),
                 ("close",),
             ],
         )
@@ -2893,8 +2893,8 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("record", "run-1", "private agent output", "suppressed:run-1", "succeeded"),
-                ("record", "run-3", "private agent output", "suppressed:run-1", "succeeded"),
+                ("record", "run-1", "private agent output", None, "succeeded"),
+                ("record", "run-3", "private agent output", None, "succeeded"),
                 ("close",),
             ],
         )
@@ -3087,7 +3087,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             [
-                ("record", "run-agent", "final result", "suppressed:run-agent", "succeeded"),
+                ("record", "run-agent", "final result", None, "succeeded"),
                 ("close",),
             ],
         )

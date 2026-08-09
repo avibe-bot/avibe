@@ -62,6 +62,7 @@ from vibe.message_types import types_with
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
+from vibe.ui_memory_routes import register_memory_routes
 
 logger = logging.getLogger(__name__)
 
@@ -1266,6 +1267,55 @@ def _is_local_request(config: V2Config | None = None) -> bool:
     return _is_setup_host_request(config)
 
 
+def is_direct_loopback_memory_request() -> bool:
+    """Strict Memory-only browser admission, intentionally narrower than UI local.
+
+    Memory content and settings never accept proxy forwarding, Docker bridge
+    allowances, LAN setup hosts, or remote-access cookies. The browser must be
+    directly connected over loopback and present a same-origin header.
+    """
+
+    if _has_forwarded_metadata() or not _is_loopback_peer() or not _is_loopback_host(request.host):
+        return False
+    origin = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
+    return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
+
+
+def memory_ui_user_key() -> str | None:
+    """Resolve the Memory principal for a trusted browser request.
+
+    Direct loopback keeps the install-local identity. Remote browser access is
+    admitted only through the configured Avibe Cloud origin with a valid signed
+    session cookie; LAN and arbitrary proxy routes remain closed. Reads require
+    the same origin evidence as mutations so a remote session cookie cannot be
+    used as a cross-origin Memory oracle.
+    """
+
+    if is_direct_loopback_memory_request():
+        return "avibe:local"
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return None
+    source = _request_origin(request.headers.get("Origin")) or _request_origin(
+        request.headers.get("Referer")
+    )
+    if not source or not _same_origin(source, _current_origin()):
+        return None
+    try:
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        return None
+    return f"avibe:remote:{subject.strip()}"
+
+
 def _normalized_host(value: str | None) -> str:
     raw_host = (value or "").lower().strip()
     if raw_host.startswith("[") and "]" in raw_host:
@@ -1416,6 +1466,7 @@ def _remote_auth_exempt_path() -> bool:
     path = request.path
     return (
         path == "/health"
+        or path == "/auth/login"
         or path == "/auth/callback"
         or path == "/auth/logout"
         or path == "/api/session"
@@ -1446,6 +1497,11 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         }
         or request.path == "/favicon.ico"
     )
+
+
+def _is_ui_static_request() -> bool:
+    endpoint = request._request.scope.get("endpoint")
+    return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
@@ -1576,6 +1632,14 @@ def _strip_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", query, ""))
 
 
+def _oauth_retry_requested(value: Any) -> bool:
+    target = _safe_remote_redirect_target(value)
+    return any(
+        key == REMOTE_OAUTH_RETRY_PARAM and val == "1"
+        for key, val in parse_qsl(urlsplit(target).query, keep_blank_values=True)
+    )
+
+
 def _add_oauth_retry_param(value: str) -> str:
     target = _strip_oauth_retry_param(value)
     parsed = urlsplit(target)
@@ -1588,20 +1652,20 @@ def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
 
 
-def _redirect_to_vibe_cloud_login(config: V2Config):
+def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None = None):
     from vibe import remote_access
 
     cloud = config.remote_access.vibe_cloud
     code_verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    raw_next = request.full_path if request.query_string else request.path
+    raw_next = next_target if next_target is not None else (request.full_path if request.query_string else request.path)
     next_target = _strip_oauth_retry_param(raw_next)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
         next_target=next_target,
-        retry=request.args.get(REMOTE_OAUTH_RETRY_PARAM) == "1",
+        retry=_oauth_retry_requested(raw_next),
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
@@ -2111,12 +2175,14 @@ def enforce_remote_access_cookie():
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
         return None
-    if request.method == "GET":
-        # Bound unauthenticated login-start floods at the door (this writes a
-        # handshake + sets cookies); a real user spends only a couple per login.
-        if _auth_rate_limited():
-            return _auth_rate_limit_response()
-        return _redirect_to_vibe_cloud_login(config)
+    # The SPA shell is non-sensitive and its APIs remain protected. Serving it
+    # lets AuthGuard keep an iOS Home-Screen cold launch on the installed app's
+    # origin instead of automatically crossing into an OAuth browser sheet.
+    if _is_ui_static_request():
+        return None
+    if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
+        target = request.full_path if request.query_string else request.path
+        return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
 
 
@@ -3013,7 +3079,7 @@ def config_get():
     # default is never mistaken for a completed setup. The write side
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
-    payload = api.config_to_payload(config)
+    payload = api.client_config_payload(config)
     payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
     return jsonify(payload)
 
@@ -3213,26 +3279,52 @@ async def model_hub_opencode_menu_put():
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["POST"])
-async def model_hub_custom_models_post():
+@app.route("/api/models/sources/<source_id>/models", methods=["POST"])
+async def model_hub_source_models_post(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         source = await _model_hub_service().add_custom_model(
-            _model_hub_json_object("source_not_found", status=404)
+            source_id,
+            _model_hub_json_object("mapping_target_unavailable")
         )
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["DELETE"])
-async def model_hub_custom_models_delete():
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["PATCH"],
+)
+async def model_hub_source_models_patch(source_id, model_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().update_model_reasoning_efforts(
+            source_id,
+            model_id,
+            _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["DELETE"],
+)
+async def model_hub_source_models_delete(source_id, model_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        source = await _model_hub_service().delete_custom_model(
+            source_id,
+            model_id,
+            force=payload.get("force") is True,
+        )
         return _model_hub_success(source=source)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -4267,6 +4359,27 @@ def _web_push_user_key() -> str:
     return "local"
 
 
+def _workbench_memory_user_id() -> str | None:
+    """Resolve only identities that may use scoped Memory commands."""
+
+    if is_direct_loopback_memory_request():
+        return "local"
+    config = _load_remote_access_config()
+    if config is None:
+        return None
+    try:
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    return f"remote:{subject}" if isinstance(subject, str) and subject.strip() else None
+
+
 @app.route("/api/web-push/status", methods=["GET", "POST"])
 def web_push_status():
     from core.web_push import load_or_create_vapid_keys
@@ -4691,7 +4804,7 @@ async def config_post():
                         agent_backend_runtime["restart_code"] = restart_result.get("code")
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
-    response_payload = api.config_to_payload(config)
+    response_payload = api.client_config_payload(config)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:
@@ -4803,6 +4916,28 @@ async def remote_access_diagnostics():
             "detail": str(exc),
         }
     return jsonify(result), 200 if result.get("ok") else 409
+
+
+@app.route("/auth/login", methods=["GET"])
+def remote_access_login():
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return jsonify({"error": "remote_access_not_enabled"}), 400
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.enabled:
+        return jsonify({"error": "remote_access_disabled"}), 503
+    if not cloud.session_secret:
+        return jsonify({"error": "remote_access_session_secret_missing"}), 503
+
+    next_target = _safe_remote_redirect_target(request.args.get("next"))
+    session = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
+    if session is not None:
+        return redirect(next_target)
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    return _redirect_to_vibe_cloud_login(config, next_target=next_target)
 
 
 @app.route("/auth/callback", methods=["GET"])
@@ -4995,13 +5130,19 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
+        from core.memory.ui_access import process_ui_read_secret
 
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
+        memory_ui_secret = process_ui_read_secret()
+        spawn_kwargs = (
+            {"memory_ui_secret": memory_ui_secret} if memory_ui_secret is not None else {}
+        )
         pid = runtime.spawn_background(
             [sys.executable, "-c", command],
             config_paths.get_runtime_ui_pid_path(),
             "ui_stdout.log",
             "ui_stderr.log",
+            **spawn_kwargs,
         )
         runtime.write_status(
             status.get("state", "running"),
@@ -5552,7 +5693,7 @@ def backend_restart(name):
     return jsonify(api.restart_backend(name, metadata=metadata))
 
 
-_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "tmux"}
+_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
 
 
 @app.route("/api/dependencies")
@@ -6618,7 +6759,7 @@ async def sessions_bootstrap(session_id: str):
         agents_payload = {"agents": [], "default_agent_name": None}
 
     try:
-        config_payload = vibe_api.config_to_payload(settings_service.load_config_or_default())
+        config_payload = vibe_api.client_config_payload(settings_service.load_config_or_default())
     except Exception:
         logger.exception("sessions_bootstrap: failed to load config")
         config_payload = None
@@ -7130,6 +7271,12 @@ def sessions_messages_list(session_id: str):
     # ``around_id`` centers the window on a specific message (search deep-link
     # jump); it takes precedence over after/before/tail in the service.
     around_id = request.args.get("around_id") or None
+    # Legacy IM caller contexts may carry only the platform-native message id;
+    # storage resolves it to the durable row before applying cursor pagination.
+    around_native_id = request.args.get("around_native_id") or None
+    around_native_platform = request.args.get("around_native_platform") or None
+    around_turn_id = request.args.get("around_turn_id") or None
+    around_run_id = request.args.get("around_run_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -7151,6 +7298,10 @@ def sessions_messages_list(session_id: str):
             after_id=after_id,
             before_id=before_id,
             around_id=around_id,
+            around_native_id=around_native_id,
+            around_native_platform=around_native_platform,
+            around_turn_id=around_turn_id,
+            around_run_id=around_run_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             tail=tail,
@@ -7313,6 +7464,11 @@ async def _parse_file_upload_form(starlette_request: FastAPIRequest, *, max_file
 
 async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
     return await app.dispatch_native_request(starlette_request, handler)
+
+
+# The Memory routes live in their own module; registered here so their position
+# in the app's route table is unchanged.
+register_memory_routes(app)
 
 
 @app.get("/api/files/list", include_in_schema=False)
@@ -8119,6 +8275,8 @@ def asr_telemetry():
         "backlogAtStop",
         "totalDurationMs",
         "stopToInsertionMs",
+        "firstPreviewMs",
+        "stopToFinalMs",
     }
     for key in integer_fields:
         if key not in payload:
@@ -8142,6 +8300,11 @@ def asr_telemetry():
         if not isinstance(payload["retry"], bool):
             return jsonify({"error": "invalid_field", "field": "retry"}), 400
         sanitized["retry"] = payload["retry"]
+
+    if "realtime" in payload:
+        if not isinstance(payload["realtime"], bool):
+            return jsonify({"error": "invalid_field", "field": "realtime"}), 400
+        sanitized["realtime"] = payload["realtime"]
 
     logger.info(
         "voice_reliability %s",
@@ -8221,17 +8384,21 @@ async def sessions_messages_create(session_id: str):
     """
 
     from core.services import sessions as workbench_sessions_service
+    from modules.im.message_facts import is_ordinary_workbench_text
     from storage import messages_service
     from storage.agent_session_rows import session_is_runtime_owned
     from vibe import internal_client
 
     payload = request.json or {}
+    memory_user_id = _workbench_memory_user_id()
+    memory_cli_admitted = memory_user_id is not None
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
+    memory_ordinary_text = is_ordinary_workbench_text(payload, quick_reply_for)
     web_push_user_key = _web_push_user_key()
 
     engine = _projects_engine()
@@ -8311,6 +8478,9 @@ async def sessions_messages_create(session_id: str):
                     metadata={
                         **(payload.get("metadata") or {}),
                         "_web_push_user_key": web_push_user_key,
+                        "_memory_user_id": memory_user_id,
+                        "_memory_cli_admitted": memory_cli_admitted,
+                        "_memory_ordinary_text": memory_ordinary_text,
                     },
                     author_id=web_push_user_key,
                     author_name=payload.get("author_name"),
@@ -8355,6 +8525,10 @@ async def sessions_messages_create(session_id: str):
         "author_id": web_push_user_key,
         "author_name": payload.get("author_name"),
         "files": attachment_specs,
+        "user_id": memory_user_id,
+        "message_id": message.get("id"),
+        "memory_cli_admitted": memory_cli_admitted,
+        "is_ordinary_text": memory_ordinary_text,
     }
 
     def _current_delivery_response() -> dict:
@@ -10856,6 +11030,32 @@ def _show_runtime_config_script(
         "(function(){"
         f"var next={payload};"
         "globalThis.__AVIBE_SHOW__=Object.assign({},globalThis.__AVIBE_SHOW__||{},next);"
+        "function parentNavigate(){"
+        "try{"
+        "var candidate=window.parent!==window&&window.parent.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__;"
+        "return typeof candidate==='function'?candidate:null;"
+        "}catch(_){return null;}"
+        "}"
+        "function isIosStandalone(){"
+        "var ua=navigator.userAgent||'';"
+        "var ios=/iP(hone|ad|od)/.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);"
+        "return ios&&(navigator.standalone===true||(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches));"
+        "}"
+        "document.addEventListener('click',function(event){"
+        "var bridge=parentNavigate();"
+        "if(!bridge&&!isIosStandalone())return;"
+        "var element=event.target instanceof Element?event.target:null;"
+        "var anchor=element&&element.closest('a[href]');"
+        "if(!anchor||String(anchor.target).toLowerCase()!=='_blank'||anchor.hasAttribute('download'))return;"
+        "var target;try{target=new URL(anchor.href,window.location.href);}catch(_){return;}"
+        "if(target.origin!==window.location.origin||!/^https?:$/.test(target.protocol))return;"
+        "event.preventDefault();event.stopImmediatePropagation();"
+        "var path=target.pathname+target.search+target.hash;"
+        "var base=String(next.basePath||'');"
+        "var withinShow=base&&(target.pathname===base.slice(0,-1)||target.pathname.indexOf(base)===0);"
+        "if(window.parent!==window&&!withinShow&&bridge){bridge(target.href);return;}"
+        "window.location.assign(path);"
+        "},true);"
         "}());"
         "</script>"
     )
@@ -11443,6 +11643,10 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
+
+    from core.memory.ui_access import initialize_process_ui_read_secret
+
+    initialize_process_ui_read_secret()
     global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn

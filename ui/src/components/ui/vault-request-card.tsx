@@ -19,25 +19,42 @@ function requestType(request: VaultRequest): RequestType {
 
 type OpenProvisionDialog = (request: VaultRequest) => void;
 
-const VaultProvisionDialogContext = createContext<OpenProvisionDialog | null>(null);
+type VaultProvisionDialogContextValue = {
+  open: OpenProvisionDialog;
+  isDismissed: (requestId: string) => boolean;
+};
+
+const VaultProvisionDialogContext = createContext<VaultProvisionDialogContextValue | null>(null);
 
 export const VaultProvisionDialogProvider: React.FC<{
   requests: VaultRequest[];
   onResolved: () => void;
+  onProvisionRequestHidden?: (requestId: string) => void;
   disabled?: boolean;
   children: ReactNode;
-}> = ({ requests, onResolved, disabled = false, children }) => {
+}> = ({ requests, onResolved, onProvisionRequestHidden, disabled = false, children }) => {
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+  const [dismissedRequestIds, setDismissedRequestIds] = useState<Set<string>>(() => new Set());
   const openProvisionDialog = useCallback((request: VaultRequest) => {
     setActiveRequestId(request.id);
   }, []);
+  const dismissProvisionDialog = useCallback((requestId: string) => {
+    setActiveRequestId(null);
+    onProvisionRequestHidden?.(requestId);
+    setDismissedRequestIds((current) => {
+      if (current.has(requestId)) return current;
+      return new Set(current).add(requestId);
+    });
+  }, [onProvisionRequestHidden]);
   const activeRequest = useMemo(
     () => requests.find((request) => request.id === activeRequestId && requestType(request) === 'provision'),
     [activeRequestId, requests],
   );
 
   return (
-    <VaultProvisionDialogContext.Provider value={disabled ? null : openProvisionDialog}>
+    <VaultProvisionDialogContext.Provider
+      value={disabled ? null : { open: openProvisionDialog, isDismissed: (id) => dismissedRequestIds.has(id) }}
+    >
       {children}
       {activeRequest ? (
         <VaultSecretDialog
@@ -46,7 +63,9 @@ export const VaultProvisionDialogProvider: React.FC<{
             if (!open) setActiveRequestId(null);
           }}
           request={activeRequest}
+          onCancel={() => dismissProvisionDialog(activeRequest.id)}
           onCreated={() => {
+            onProvisionRequestHidden?.(activeRequest.id);
             setActiveRequestId(null);
             onResolved();
           }}
@@ -65,8 +84,8 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const type = useMemo(() => requestType(request), [request]);
-  const openProvisionDialog = useContext(VaultProvisionDialogContext);
-  const externallyOwnedProvision = type === 'provision' && openProvisionDialog !== null;
+  const provisionDialog = useContext(VaultProvisionDialogContext);
+  const externallyOwnedProvision = type === 'provision' && provisionDialog !== null;
   const card = (request.card ?? {}) as {
     kind?: string;
     protection?: string;
@@ -94,6 +113,8 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
         ? { icon: <PenTool className="size-4" />, tint: 'bg-violet/15 text-violet', title: t('vaults.approval.signTitle'), action: t('vaults.requests.review') }
         : { icon: <LockKeyhole className="size-4" />, tint: 'bg-gold/15 text-gold', title: t('vaults.approval.accessTitle'), action: t('vaults.requests.review') };
 
+  if (type === 'provision' && provisionDialog?.isDismissed(request.id)) return null;
+
   return (
     <>
       <div className="flex items-center gap-3 rounded-xl border border-border bg-surface px-3.5 py-3">
@@ -116,7 +137,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           size="sm"
           className="shrink-0"
           onClick={() => {
-            if (externallyOwnedProvision) openProvisionDialog(request);
+            if (externallyOwnedProvision) provisionDialog.open(request);
             else setOpen(true);
           }}
         >

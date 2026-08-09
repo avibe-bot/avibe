@@ -25,7 +25,12 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
             stdout=_Stream(),
             stderr=_Stream(),
         )
-        transport = CodexTransport(binary="codex", cwd="/tmp")
+        transport = CodexTransport(
+            binary="codex",
+            cwd="/tmp",
+            runtime_args=["-c", 'model_provider="avibe"'],
+            extra_args=["-c", "features.memories=true"],
+        )
 
         async def wait_for_initialize(_method, _params):
             initialize_started.set()
@@ -36,11 +41,12 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
 
         transport.send_request = AsyncMock(side_effect=wait_for_initialize)
         transport.stop = AsyncMock(side_effect=stop_transport)
+        spawn = AsyncMock(return_value=process)
 
         with (
             patch(
                 "modules.agents.codex.transport.asyncio.create_subprocess_exec",
-                new=AsyncMock(return_value=process),
+                new=spawn,
             ),
             patch("modules.agents.codex.transport.process_identity", return_value={}),
             patch("modules.agents.codex.transport.log_process_snapshot"),
@@ -52,6 +58,20 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 await task
 
         transport.stop.assert_awaited_once_with()
+        self.assertEqual(
+            spawn.await_args.args,
+            (
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "app-server",
+                "-c",
+                'model_provider="avibe"',
+                "-c",
+                "features.memories=true",
+                "-c",
+                "features.memories=false",
+            ),
+        )
 
     async def test_reader_task_failure_marks_transport_not_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")

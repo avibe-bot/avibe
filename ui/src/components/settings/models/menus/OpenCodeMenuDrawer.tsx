@@ -44,7 +44,7 @@ const ModelRow: React.FC<{
       <button type="button" onClick={onToggle} className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 text-left sm:min-h-0">
         {/* Never truncate the model id: frame 05r's contract is that the full
             identifier is visible by construction, and custom ids are unbounded
-            (add_custom_model sets no length limit). break-all wraps instead, so
+            (the Source-model create route sets no length limit). break-all wraps instead, so
             a long id can't overflow the row without hiding its suffix. */}
         <span className="min-w-0 break-all font-mono text-[14px] font-medium text-foreground">{row.modelId}</span>
         {row.displayName && <span className="truncate text-[13px] text-muted">{row.displayName}</span>}
@@ -250,7 +250,8 @@ export const OpenCodeMenuDrawer: React.FC<{
                           // so saving unchanged can't overwrite it with another source's name.
                           const custom = row.sources.find((s) => s.models.some((m) => m.id === row.modelId && m.provenance === 'manual'));
                           const manual = custom?.models.find((m) => m.id === row.modelId && m.provenance === 'manual');
-                          setEditTarget({ sourceId: (custom ?? row.sources[0]).id, modelId: row.modelId, displayName: manual?.display_name ?? null });
+                          if (!custom || !manual) return;
+                          setEditTarget({ sourceId: custom.id, modelId: row.modelId, displayName: manual.display_name ?? null });
                           setCustomOpen(true);
                         }}
                       />

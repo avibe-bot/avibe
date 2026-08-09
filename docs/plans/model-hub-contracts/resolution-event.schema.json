@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/resolution-event.schema.json",
   "title": "ResolutionEvent",
-  "description": "v4-targeted source-resolution feed entry. Adapter-owned and redacted: ids, classified causes, and bounded human summaries only; never credential material or raw upstream error bodies. The record stays single-grained. Consumers derive current per-backend and per-Agent impact live instead of storing fan-out.",
+  "description": "Source-resolution feed entry. Adapter-owned and redacted: ids, classified causes, and bounded human summaries only; never credential material or raw upstream error bodies. The record stays single-grained. Consumers derive current per-backend and per-Agent impact live instead of storing fan-out.",
   "type": "object",
-  "required": ["id", "ts", "agent", "kind", "model_id", "reason", "human_zh", "human_en"],
+  "required": ["id", "ts", "agent", "kind", "model_id", "reason", "severity", "human_zh", "human_en"],
   "additionalProperties": false,
   "properties": {
     "id": { "type": "string" },
@@ -19,7 +19,6 @@
         "cooldown",
         "recover",
         "skip",
-        "mapping_applied",
         "channel_switch",
         "needs_action",
         "supply_interrupted"
@@ -47,7 +46,6 @@
         "network",
         "recovery",
         "manual",
-        "mapping",
         "credential_expired",
         "credential_revoked",
         "balance_exhausted",
@@ -59,7 +57,7 @@
         "model_unsupported"
       ],
       "description": "Adapter classification. The five non-self-healing source causes map bijectively to Source.state.detail_key: credential_expired→models.source.needs_action.oauth_expired; credential_revoked→models.source.needs_action.credential_revoked; balance_exhausted→models.source.needs_action.balance_exhausted; account_banned→models.source.needs_action.account_banned; unclassified_error→models.source.error.unclassified. permission_denied is request-scoped and has no Source-state mirror. The machine-readable mirror registry enforces the attempt-failure relation.",
-      "$comment": "Targeted v4c, review finding 3680338859: vibe/model_hub_runtime/client.py:21-44 preserves the exact permission_error machine code while redacting arbitrary bodies. core/handlers/model_hub/classification.py:98-125 previously collapsed every remaining 403 into credential_revoked, which claimed source-global knowledge the signal did not carry. permission_denied records only that this request attempt was denied."
+      "$comment": "permission_denied preserves a request-scoped denial while redacting arbitrary upstream bodies; it does not claim Source-global credential state."
     },
     "billing_note": {
       "enum": [null, "entered_metered", "left_metered"]
@@ -116,7 +114,7 @@
       }
     },
     {
-      "$comment": "Targeted v4c totality: request-scoped permission_denied can explain only a successful fallback switch. It cannot create source-global cooldown, recovery, skip, or needs_action state.",
+      "$comment": "Request-scoped permission_denied can explain only a successful fallback switch. It cannot create Source-global cooldown, recovery, skip, or needs_action state.",
       "if": {
         "properties": { "reason": { "const": "permission_denied" } },
         "required": ["reason"]
@@ -151,7 +149,7 @@
       }
     },
     {
-      "$comment": "Presence of severity remains optional only for byte-faithful legacy examples. The API boundary requires it.",
+      "$comment": "Every event carries its presentation severity; informational and action-required branches are closed below.",
       "if": {
         "properties": {
           "kind": {
@@ -160,7 +158,6 @@
               "cooldown",
               "recover",
               "skip",
-              "mapping_applied",
               "channel_switch"
             ]
           }
@@ -245,19 +242,6 @@
       }
     },
     {
-      "if": {
-        "properties": { "kind": { "const": "mapping_applied" } },
-        "required": ["kind"]
-      },
-      "then": {
-        "required": ["agent", "model_id"],
-        "properties": {
-          "agent": { "enum": ["claude", "codex", "opencode"] },
-          "model_id": { "type": "string" }
-        }
-      }
-    },
-    {
       "$comment": "v3 AC-11: null model_id is allowed only for a source-scoped system event. The converse is deliberately open because a system test of one explicit model may honestly name that model.",
       "if": {
         "properties": { "model_id": { "type": "null" } },
@@ -312,6 +296,7 @@
       "to_source": "src_anthkey01",
       "reason": "quota_exhausted",
       "billing_note": "entered_metered",
+      "severity": "info",
       "human_zh": "Claude Code:Claude Pro 本周期额度用完 → 已切到 Anthropic API Key(按量)",
       "human_en": "Claude Code: Claude Pro cycle quota exhausted → switched to Anthropic API Key (metered)"
     },

@@ -50,9 +50,19 @@ async def dispatch_model_hub_rpc(
     if operation == "set_opencode_menu":
         return await service.set_opencode_menu(payload.get("menu"))
     if operation == "add_custom_model":
-        return await service.add_custom_model(payload.get("model"))
+        return await service.add_custom_model(payload.get("source_id"), payload.get("model"))
+    if operation == "update_model_reasoning_efforts":
+        return await service.update_model_reasoning_efforts(
+            payload.get("source_id"),
+            payload.get("model_id"),
+            payload.get("model"),
+        )
     if operation == "delete_custom_model":
-        return await service.delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        return await service.delete_custom_model(
+            payload.get("source_id"),
+            payload.get("model_id"),
+            force=payload.get("force") is True,
+        )
     if operation == "list_events":
         return service.list_events(limit=payload.get("limit", 20), before=payload.get("before"))
     if operation == "get_agent_chain":

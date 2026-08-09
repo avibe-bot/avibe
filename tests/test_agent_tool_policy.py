@@ -393,7 +393,9 @@ def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
     hooks = handler._build_claude_tool_policy_hooks()
 
     assert list(hooks) == ["PreToolUse"]
-    assert set(captured["matcher"].split("|")) == set(policy.session_only_background_tool_names())
+    assert set(captured["matcher"].split("|")) == set(
+        policy.session_only_background_tool_names()
+    )
     assert captured["hooks"] == [handler._guard_session_only_background_tools]
     # The precise hook path owns enforcement, so nothing extra is denied by name.
     assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS

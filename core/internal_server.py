@@ -27,10 +27,17 @@ changing the bind contract.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import errno
+import hashlib
 import json
 import logging
 import os
+import re
 import socket
+import stat
+import tempfile
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +57,62 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
+_SOCKET_MODE = 0o600
+_SOCKET_UMASK_MODE = 0o700
+_UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+    )
+    if value is not None
+)
+_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+
+
+def _memory_log_list_query(request: Request) -> tuple[str | None, int]:
+    items = list(request.query_params.multi_items())
+    keys = [key for key, _value in items]
+    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
+        raise ValueError("invalid memory log query")
+    values = dict(items)
+    cursor = values.get("cursor")
+    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid memory log cursor")
+    raw_limit = values.get("limit", "20")
+    if not raw_limit.isascii() or not raw_limit.isdecimal():
+        raise ValueError("invalid memory log limit")
+    limit = int(raw_limit)
+    if not 1 <= limit <= 50:
+        raise ValueError("invalid memory log limit")
+    return cursor, limit
+
+
+def _memory_log_entry_query(request: Request) -> str:
+    items = list(request.query_params.multi_items())
+    if len(items) != 1 or items[0][0] != "memcell_id":
+        raise ValueError("invalid memory log entry query")
+    memcell_id = items[0][1]
+    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid memory log entry id")
+    return memcell_id
+
+
+def _create_controller_loop_server(config: Any) -> Any:
+    """Create a uvicorn server without taking over process signal handlers."""
+
+    import uvicorn
+
+    class _ControllerLoopServer(uvicorn.Server):
+        def capture_signals(self):
+            return contextlib.nullcontext()
+
+        def install_signal_handlers(self) -> None:
+            return None
+
+    return _ControllerLoopServer(config)
 
 
 def default_socket_path() -> Path:
@@ -67,7 +130,11 @@ def default_socket_path() -> Path:
     return paths.get_state_dir() / "dispatch.sock"
 
 
-def create_app(controller: "Controller") -> FastAPI:
+def create_app(
+    controller: "Controller",
+    *,
+    memory_ui_secret: str | None = None,
+) -> FastAPI:
     """Build the minimal FastAPI app the internal server exposes.
 
     Factored out so tests can mount the same routes against a fake
@@ -76,6 +143,11 @@ def create_app(controller: "Controller") -> FastAPI:
     from core.inbox_events import mark_controller_process
 
     mark_controller_process()
+    if memory_ui_secret is None:
+        from core.memory.ui_access import process_ui_read_secret
+
+        memory_ui_secret = process_ui_read_secret()
+    from core.memory.runtime import MemoryStoreUnavailableError
 
     app = FastAPI(
         title="avibe internal dispatch",
@@ -790,6 +862,396 @@ def create_app(controller: "Controller") -> FastAPI:
         except Exception as exc:
             logger.exception("internal backend auth test failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+    def _memory_runtime():
+        return getattr(controller, "memory_runtime", None)
+
+    @app.post("/internal/reconcile-memory")
+    async def _reconcile_memory() -> Any:
+        """Hot-apply persisted Memory configuration on the controller loop."""
+
+        from core.memory.artifact import MemoryRuntimeActivationError
+
+        try:
+            from config.v2_config import V2Config
+
+            config = await asyncio.to_thread(V2Config.load)
+            result = await controller.reconcile_memory(config.memory)
+            return JSONResponse(status_code=200, content=result)
+        except MemoryRuntimeActivationError:
+            # Only the runtime install/activation bridge earns the "install
+            # failed" message. Everything else reported it too, which sent an
+            # incident caused by a pause/probe timeout in the wrong direction.
+            logger.exception("internal memory runtime activation failed during reconcile")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
+        except Exception:
+            logger.exception("internal memory reconcile failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_reconcile_failed"})
+
+    @app.post("/internal/memory/restart")
+    async def _memory_restart() -> Any:
+        """Replace the live Memory sidecar through the Runtime lifecycle."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing"},
+            )
+        try:
+            result = await runtime.restart()
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.exception("internal memory restart failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_restart_failed"},
+            )
+
+    @app.post("/internal/memory/install-runtime")
+    async def _memory_install_runtime() -> Any:
+        """Install or repair the managed runtime on the controller lifecycle."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
+        try:
+            result = await runtime.install_artifact()
+            return JSONResponse(status_code=200, content=result)
+        except Exception:
+            logger.exception("internal memory runtime install failed")
+            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
+
+    def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        if not session_id:
+            return None
+        resolve = getattr(controller, "memory_scope_for_cli_session", None)
+        scope = resolve(session_id) if callable(resolve) else None
+        from core.memory.store import is_principal_id, is_project_id
+
+        if (
+            isinstance(scope, tuple)
+            and len(scope) == 2
+            and is_principal_id(scope[0])
+            and is_project_id(scope[1])
+        ):
+            return scope
+        return None
+
+    def _verified_memory_ui_user_key(request: Request) -> str | None:
+        from core.memory.http_headers import (
+            CALLER_SESSION_HEADER,
+            MEMORY_USER_KEY_HEADER,
+        )
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
+        remote_prefix = "avibe:remote:"
+        if session_id or not (
+            user_key == "avibe:local"
+            or (user_key.startswith(remote_prefix) and len(user_key) > len(remote_prefix))
+        ):
+            return None
+        from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+
+        proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
+        if memory_ui_secret is None or not verify_ui_read_proof(
+            memory_ui_secret,
+            proof,
+            method=request.method,
+            path=request.url.path,
+            user_key=user_key,
+        ):
+            return None
+        return user_key
+
+    def _memory_read_scope(request: Request) -> tuple[str, str] | None:
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+
+        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+            user_key = _verified_memory_ui_user_key(request)
+            if user_key is None:
+                return None
+            runtime = _memory_runtime()
+            try:
+                principal_id = runtime.principal_for_user_key(user_key) if runtime is not None else None
+                resolve_project = getattr(controller, "default_memory_project_id", None)
+                project_id = resolve_project() if callable(resolve_project) else None
+                from core.memory.store import is_principal_id, is_project_id
+
+                if is_principal_id(principal_id) and is_project_id(project_id):
+                    return principal_id, project_id
+                return None
+            except MemoryStoreUnavailableError:
+                raise
+            except Exception as exc:
+                raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
+        return _memory_cli_scope(request)
+
+    memory_admin_log_access = object()
+
+    def _memory_log_access(request: Request) -> object | tuple[str, str] | None:
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+
+        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+            return (
+                memory_admin_log_access
+                if _verified_memory_ui_user_key(request) is not None
+                else None
+            )
+        return _memory_cli_scope(request)
+
+    @app.get("/internal/memory/status")
+    async def _memory_status() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.status_payload()
+        except Exception:
+            logger.warning("internal memory status failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/failures")
+    async def _memory_failures() -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.failure_log_payload()
+        except Exception:
+            logger.warning("internal memory failure log failed")
+            return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/profile")
+    async def _memory_profile(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        try:
+            return await runtime.profile_payload(principal_id, project_id)
+        except Exception:
+            logger.warning("internal memory profile failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.get("/internal/memory/log")
+    async def _memory_log(request: Request) -> Any:
+        try:
+            cursor, limit = _memory_log_list_query(request)
+            access = _memory_log_access(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if access is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        try:
+            if access is memory_admin_log_access:
+                return await runtime.admin_log_entries_payload(cursor, limit)
+            principal_id, project_id = access
+            return await runtime.log_entries_payload(
+                principal_id,
+                project_id,
+                cursor,
+                limit,
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal memory log failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+
+    @app.get("/internal/memory/log/entry")
+    async def _memory_log_entry(request: Request) -> Any:
+        try:
+            memcell_id = _memory_log_entry_query(request)
+            access = _memory_log_access(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if access is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_runtime_missing"},
+            )
+        try:
+            if access is memory_admin_log_access:
+                payload = await runtime.admin_log_entry_payload(memcell_id)
+            else:
+                principal_id, project_id = access
+                payload = await runtime.log_entry_payload(
+                    principal_id,
+                    project_id,
+                    memcell_id,
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except Exception:
+            logger.warning("internal memory log entry failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
+        if payload.get("status") == "not_found":
+            return JSONResponse(
+                status_code=404,
+                content={"status": "failed", "error": "memory_log_entry_not_found"},
+            )
+        return payload
+
+    @app.post("/internal/memory/search")
+    async def _memory_search(request: Request) -> Any:
+        try:
+            scope = _memory_read_scope(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"query", "limit"}
+            or not isinstance(payload.get("query"), str)
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        limit = payload.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
+        except Exception:
+            logger.warning("internal memory search failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/remember")
+    async def _memory_remember(request: Request) -> Any:
+        scope = _memory_cli_scope(request)
+        if scope is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
+        runtime = _memory_runtime()
+        module = getattr(runtime, "module", None) if runtime is not None else None
+        if module is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"text"}
+            or not isinstance(payload.get("text"), str)
+            or not payload["text"].strip()
+            or len(payload["text"]) > 4_000
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+
+        from core.memory import CaptureRequest
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+
+        session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
+        text = payload["text"]
+        source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        try:
+            receipt = await module.capture(
+                CaptureRequest(
+                    source_message_id=(
+                        f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
+                    ),
+                    session_id=session_id,
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    provenance="agent",
+                    text=text,
+                    occurred_at_ms=int(time.time() * 1000),
+                )
+            )
+        except Exception:
+            logger.warning("internal memory remember failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        response: dict[str, Any] = {"status": receipt.status}
+        reason = getattr(receipt, "reason", None)
+        error = getattr(receipt, "error", None)
+        if reason is not None:
+            response["reason"] = reason
+        if error is not None:
+            response["error"] = error
+        return response
+
+    @app.post("/internal/memory/clear")
+    async def _memory_clear(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            return await runtime.clear()
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except Exception:
+            logger.warning("internal memory clear failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
@@ -986,9 +1448,10 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
         loop="asyncio",
         lifespan="off",
     )
-    server = uvicorn.Server(config)
+    server = _create_controller_loop_server(config)
 
     listener, target = _bind_socket(socket_path)
+    _write_internal_server_status("ready")
     try:
         await server.serve(sockets=[listener])
     finally:
@@ -996,11 +1459,7 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
             listener.close()
         except OSError:
             pass
-        try:
-            if target.exists() or target.is_symlink():
-                target.unlink()
-        except OSError:
-            logger.debug("could not unlink internal dispatch socket %s", target, exc_info=True)
+        _remove_owned_socket(target)
 
 
 def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Path]:
@@ -1014,11 +1473,7 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
 
     target = (socket_path or default_socket_path()).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() or target.is_symlink():
-        try:
-            target.unlink()
-        except OSError:
-            logger.warning("could not unlink stale dispatch socket %s; bind may fail", target)
+    _remove_stale_owned_socket(target)
 
     previous_umask = os.umask(0o077)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1027,15 +1482,111 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
         listener.listen(2048)
         listener.setblocking(False)
         try:
-            os.chmod(target, 0o600)
-        except OSError:
-            logger.warning("failed to chmod internal dispatch socket %s", target, exc_info=True)
+            os.chmod(target, _SOCKET_MODE)
+        except OSError as error:
+            if error.errno not in _UNSUPPORTED_SOCKET_CHMOD_ERRNOS:
+                raise
+            logger.debug("internal dispatch socket chmod is unsupported for %s", target)
+            _verify_owned_socket(target, allow_umask_mode=True)
+        else:
+            _verify_owned_socket(target)
         return listener, target
     except Exception:
         listener.close()
+        _remove_socket_after_bind_failure(target)
         raise
     finally:
         os.umask(previous_umask)
+
+
+def _remove_stale_owned_socket(target: Path) -> None:
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise OSError("internal dispatch socket owner mismatch")
+    # lstat + unlink removes the directory entry itself, including a symlink;
+    # it never follows or mutates the path the stale entry may point at.
+    target.unlink()
+
+
+def _remove_owned_socket(target: Path) -> None:
+    try:
+        _verify_owned_socket(target, allow_umask_mode=True)
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.debug("could not unlink internal dispatch socket %s", target, exc_info=True)
+
+
+def _remove_socket_after_bind_failure(target: Path) -> None:
+    """Remove only a socket still owned by this user after a failed hardening step."""
+
+    try:
+        info = target.lstat()
+        if stat.S_ISSOCK(info.st_mode) and (not hasattr(os, "getuid") or info.st_uid == os.getuid()):
+            target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.debug("could not remove failed internal dispatch socket %s", target, exc_info=True)
+
+
+def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> None:
+    info = target.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISSOCK(info.st_mode):
+        raise OSError("internal dispatch socket is unsafe")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise OSError("internal dispatch socket owner mismatch")
+    allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
+    if stat.S_IMODE(info.st_mode) not in allowed_modes:
+        raise OSError("internal dispatch socket mode mismatch")
+
+
+def _write_internal_server_status(
+    state: str,
+    *,
+    error: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Persist internal-server lifecycle state for the out-of-process CLI."""
+
+    target = paths.get_internal_server_status_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "state": state,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if error is not None:
+            payload["error"] = error
+        if detail is not None:
+            payload["detail"] = detail
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(file_descriptor, 0o600)
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, separators=(",", ":"))
+            file_descriptor = -1
+            os.replace(temporary, target)
+        except Exception:
+            if file_descriptor >= 0:
+                try:
+                    os.close(file_descriptor)
+                except OSError:
+                    pass
+            temporary.unlink(missing_ok=True)
+            raise
+    except OSError:
+        logger.warning("could not persist internal dispatch server status", exc_info=True)
 
 
 def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> asyncio.Task:
@@ -1047,17 +1598,38 @@ def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> as
     """
 
     loop = asyncio.get_event_loop()
+    _write_internal_server_status("starting")
     task = loop.create_task(serve(controller, socket_path=socket_path), name="internal-dispatch-server")
 
     def _on_done(t: asyncio.Task) -> None:
         if t.cancelled():
+            _write_internal_server_status("stopped")
             return
         exc = t.exception()
         if exc:
             logger.error("internal dispatch server exited with exception: %r", exc)
+            _write_internal_server_status(
+                "error",
+                error="internal_server_unavailable",
+                detail=str(exc)[:500],
+            )
+        else:
+            _write_internal_server_status("stopped")
 
     task.add_done_callback(_on_done)
     return task
+
+
+def note_stopped() -> None:
+    """Record the server as stopped from a shutdown path.
+
+    ``start``'s done callback is scheduled with ``call_soon``, so a shutdown
+    that cancels the task and then closes the loop can finish before it runs.
+    Shutdown calls this directly; a duplicate write from the callback is
+    harmless because both record the same terminal state.
+    """
+
+    _write_internal_server_status("stopped")
 
 
 # --- Internals --------------------------------------------------------
@@ -1111,6 +1683,8 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         thread_id=payload.get("thread_id"),
         message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
+        memory_cli_admitted=payload.get("memory_cli_admitted") is True,
+        is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
     if context.platform_specific is None:
         context.platform_specific = {}
@@ -1137,6 +1711,8 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
+    memory_cli_admitted: bool = False,
+    is_ordinary_text: bool = False,
 ) -> MessageContext:
     """Rebuild a Session's routing context from its durable scope and target.
 
@@ -1151,7 +1727,6 @@ def _build_session_context(
     from core.scheduled_tasks import resolve_session_id_target
 
     target_info = resolve_session_id_target(session_id)
-    session_row = _lookup_session(session_id)
     resolved_platform = platform or target_info.session_key.platform or "avibe"
     is_dm = target_info.session_key.scope_type == "user"
     resolved_channel_id = channel_id or (
@@ -1162,6 +1737,17 @@ def _build_session_context(
     resolved_user_id = user_id or (
         target_info.session_key.scope_id if is_dm else "workbench"
     )
+    if not channel_id and is_dm and resolved_platform != "avibe":
+        # A DM Session's scope_id is the USER id, which is not a channel. Every
+        # other resolver (``running_agents._resolve_session_key_context``,
+        # ``ScheduledTasks._resolve_target_context``) swaps in the bound
+        # ``dm_chat_id``; this builder must too. Slack's ``chat.postMessage``
+        # silently tolerates a user id (it opens the DM for you) so sending kept
+        # working, but ``reactions.add`` rejects it with ``channel_not_found`` —
+        # the reaction ack then failed and silently downgraded to an ack message.
+        bound_dm_channel_id = _lookup_dm_channel_id(resolved_platform, str(resolved_user_id))
+        if bound_dm_channel_id:
+            resolved_channel_id = bound_dm_channel_id
     platform_specific: dict[str, Any] = {
         "agent_session_id": session_id,
         "platform": resolved_platform,
@@ -1169,6 +1755,9 @@ def _build_session_context(
     }
     if resolved_platform == "avibe":
         platform_specific["workbench_session_id"] = session_id
+    if memory_cli_admitted:
+        platform_specific["memory_cli_admitted"] = True
+    session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {
             "id": session_row.get("id"),
@@ -1200,7 +1789,41 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
+        is_ordinary_text=is_ordinary_text,
     )
+
+
+def _lookup_dm_channel_id(platform: str, user_id: str) -> Optional[str]:
+    """Return the bound DM channel id for ``user_id`` on ``platform``.
+
+    Reads the persisted user scope settings directly (no controller / settings
+    manager in scope here). Returns ``None`` when the user is unbound or has no
+    recorded ``dm_chat_id`` — callers then keep the scope_id fallback.
+    """
+
+    if not platform or not user_id:
+        return None
+    try:
+        from sqlalchemy import select
+
+        from storage.models import scope_settings
+        from storage.settings_service import make_scope_id
+
+        scope_id = make_scope_id(platform, "user", user_id)
+        engine = get_cached_sqlite_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(scope_settings.c.settings_json).where(scope_settings.c.scope_id == scope_id)
+            ).first()
+        if row is None or not row[0]:
+            return None
+        payload = json.loads(row[0])
+    except Exception:
+        logger.debug("internal_server: failed to resolve dm_chat_id for %s/%s", platform, user_id, exc_info=True)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return str(payload.get("dm_chat_id") or "").strip() or None
 
 
 def _lookup_session(session_id: str) -> Optional[dict[str, Any]]:

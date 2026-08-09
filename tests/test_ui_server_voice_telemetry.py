@@ -24,6 +24,9 @@ def test_voice_telemetry_logs_only_allowlisted_metadata(caplog):
                 "elapsedMs": 820,
                 "httpStatus": 200,
                 "attemptCount": 1,
+                "realtime": True,
+                "firstPreviewMs": 360,
+                "stopToFinalMs": 420,
                 "browserFamily": "chrome",
                 "transcript": "private words",
                 "audio": "private bytes",
@@ -39,6 +42,9 @@ def test_voice_telemetry_logs_only_allowlisted_metadata(caplog):
     assert metric["dictationId"] == "dictation-123"
     assert metric["sizeBytes"] == 240_000
     assert metric["httpStatus"] == 200
+    assert metric["realtime"] is True
+    assert metric["firstPreviewMs"] == 360
+    assert metric["stopToFinalMs"] == 420
     assert metric["release"]
     assert "transcript" not in metric
     assert "audio" not in metric

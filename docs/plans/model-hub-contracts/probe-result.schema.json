@@ -2,12 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/probe-result.schema.json",
   "title": "ProbeResult",
-  "description": "v4 (2026-07-29 targeted amendment): outcome of walking an agent's current chain in spec §4.3 order and selecting the first runnable source. An unavailable chain item is never probed. For channel=hub the selected source is probed upstream exactly as in v3. For channel=native_cli readiness is re-verified after selection, so an item that was available during resolution may honestly return not-ready if that process-local fact went stale. Readiness is not completion evidence: a native result never claims an upstream request ran or completed. Classified outcomes only, never raw diagnostics. `reachable` remains distinct from the envelope's `ok`.",
+  "description": "v5 (2026-07-29 targeted amendment): outcome of walking an agent's current chain in spec §4.3 order and selecting the first runnable source. An unavailable chain item is never probed. For channel=hub the selected source is probed upstream exactly as in v3. For channel=native_cli readiness is re-verified after selection, so an item that was available during resolution may honestly return not-ready if that process-local fact went stale. Readiness is not completion evidence: a native result never claims an upstream request ran or completed. Classified outcomes only, never raw diagnostics. `reachable` remains distinct from the envelope's `ok`.",
   "type": "object",
   "required": ["contract_version", "backend", "channel", "reachable", "source_id", "model_id", "latency_ms", "via_mapping", "error"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 4 },
+    "contract_version": { "const": 5 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "channel": {
       "enum": ["hub", "native_cli"],
@@ -137,7 +137,7 @@
       "then": { "properties": { "latency_ms": { "type": "null" } } }
     },
     {
-      "$comment": "v4 (07-29, escalations #2+#3): probe selection walks §4.3 order and touches the first runnable item; a source already present in unavailable_source_ids is excluded by core/handlers/model_hub/resolver.py:83-87,267-273 at master 807d1eee and is never probed. For a selected native_cli item, modules/agents/model_hub.py:323-348 re-verifies process-local readiness, which may have gone stale. reachable=true is readiness only — this process can launch the sanctioned CLI under its own login now. No upstream request ran, so readiness is not completion evidence and latency is null rather than a measured local check.",
+      "$comment": "v5 (07-29, escalations #2+#3): probe selection walks §4.3 order and touches the first runnable item; a source already present in unavailable_source_ids is excluded by core/handlers/model_hub/resolver.py:83-87,267-273 at master 807d1eee and is never probed. For a selected native_cli item, modules/agents/model_hub.py:323-348 re-verifies process-local readiness, which may have gone stale. reachable=true is readiness only — this process can launch the sanctioned CLI under its own login now. No upstream request ran, so readiness is not completion evidence and latency is null rather than a measured local check.",
       "if": {
         "properties": {
           "channel": { "const": "native_cli" },
@@ -153,7 +153,7 @@
       }
     },
     {
-      "$comment": "v4 forward half: native_cli reachable=false is the same process-availability concept as agent-chain reason=native_cli_unavailable, spelled as a closed i18n key in this error slot. It is a readiness failure, not a completed CLI call, so latency is null.",
+      "$comment": "native_cli reachable=false uses the same process-availability concept as AgentChain reason=native_cli_unavailable, spelled as a closed i18n key here. It is a readiness failure rather than a completed CLI call, so latency is null.",
       "if": {
         "properties": {
           "channel": { "const": "native_cli" },
@@ -170,7 +170,7 @@
       }
     },
     {
-      "$comment": "v4 converse half: the native CLI readiness key cannot appear on a hub probe or a reachable result. Together with the two channel branches, this closes every channel × reachable × latency × error combination in both directions.",
+      "$comment": "The native CLI readiness key cannot appear on a hub probe or a reachable result. Together with the channel branches, this closes channel, reachability, latency, and error in both directions.",
       "if": {
         "properties": {
           "error": { "const": "models.probe.native_cli_unavailable" }
@@ -189,7 +189,7 @@
   ],
   "examples": [
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "codex",
       "channel": "hub",
       "reachable": true,
@@ -200,7 +200,7 @@
       "via_mapping": false
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "claude",
       "channel": "hub",
       "reachable": false,
@@ -211,7 +211,7 @@
       "via_mapping": true
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "claude",
       "channel": "hub",
       "reachable": false,
@@ -222,7 +222,7 @@
       "via_mapping": true
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "codex",
       "channel": "native_cli",
       "reachable": true,
@@ -233,7 +233,7 @@
       "via_mapping": false
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "codex",
       "channel": "native_cli",
       "reachable": false,

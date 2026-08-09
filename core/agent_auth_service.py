@@ -1144,7 +1144,10 @@ class AgentAuthService:
         # api_key / base_url overrides apply uniformly. Without this, an
         # OAuth-mode user with ``ANTHROPIC_API_KEY`` in their shell would
         # still get the key into the control-channel SDK client.
-        from vibe.claude_config import build_claude_subprocess_env
+        from vibe.claude_config import (
+            CLAUDE_MEMORY_DISABLED_SETTINGS,
+            build_claude_subprocess_env,
+        )
 
         # ``force_oauth=True`` because this code path IS the OAuth
         # setup flow — the control-channel SDK client must run with
@@ -1166,6 +1169,7 @@ class AgentAuthService:
         option_kwargs = {
             "cwd": working_path,
             "env": claude_env,
+            "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
             "setting_sources": ["user", "project", "local"],
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
         }
@@ -2332,7 +2336,10 @@ class AgentAuthService:
     ) -> str:
         """Run an isolated turn through the same Claude Agent SDK transport."""
         from modules.agents.model_hub import claude_setting_sources_for_launch
-        from vibe.claude_config import build_claude_subprocess_env
+        from vibe.claude_config import (
+            CLAUDE_MEMORY_DISABLED_SETTINGS,
+            build_claude_subprocess_env,
+        )
 
         stderr_lines: list[str] = []
 
@@ -2354,6 +2361,7 @@ class AgentAuthService:
             "tools": [],
             "max_turns": 1,
             "env": claude_env,
+            "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
             "stderr": capture_stderr,
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
         }
