@@ -31,6 +31,7 @@ from _github_wait_common import (  # noqa: E402
     filter_new,
     get_token,
     github_get,
+    github_graphql,
     is_retryable_http_error,
     LAST_DELIVERY_ENV,
     later_since,
@@ -79,6 +80,7 @@ STATE_CURSOR_KEYS = (
 REVIEW_FINGERPRINTS_KEY = "review_fingerprints"
 REVIEW_COMMENT_FINGERPRINTS_KEY = "review_comment_fingerprints"
 ISSUE_COMMENT_FINGERPRINTS_KEY = "issue_comment_fingerprints"
+REVIEW_THREAD_STATES_KEY = "review_thread_states"
 PR_FINGERPRINT_KEYS = (
     REVIEW_FINGERPRINTS_KEY,
     REVIEW_COMMENT_FINGERPRINTS_KEY,
@@ -88,6 +90,18 @@ PR_FINGERPRINT_KEYS = (
 # few times while the burst is still arriving turns it into one Agent turn instead
 # of one turn per fragment that happened to cross a poll boundary.
 SETTLE_MAX_ROUNDS = 3
+REVIEW_THREADS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
 
 
 class StateFileError(RuntimeError):
@@ -279,6 +293,22 @@ def _format_pr_head_event(pr: dict[str, Any], previous_head: str, current_head: 
     )
 
 
+def _format_review_thread_event(
+    pr: dict[str, Any],
+    thread_id: str,
+    previous_resolved: bool,
+    current_resolved: bool,
+) -> str:
+    url = pr.get("html_url") or ""
+    previous = "resolved" if previous_resolved else "unresolved"
+    current = "resolved" if current_resolved else "unresolved"
+    return (
+        f"- review_thread {thread_id} {previous} -> {current}\n"
+        "  Review thread state changed; re-evaluate unresolved threads across the entire PR.\n"
+        f"  {url}"
+    )
+
+
 def _format_pull_request(pr: dict[str, Any]) -> str:
     pr_number = pr.get("number")
     author = ((pr.get("user") or {}).get("login")) or "unknown"
@@ -295,6 +325,52 @@ def _with_since(url: str, since: str | None) -> str:
     return f"{url}{separator}since={urllib.parse.quote(since)}"
 
 
+def _fetch_review_threads(
+    repo: str,
+    pr_number: int,
+    token: str | None,
+) -> tuple[list[dict[str, Any]], int]:
+    if token is None:
+        return [], 0
+    try:
+        owner, repo_name = repo.split("/", 1)
+    except ValueError as err:
+        raise RuntimeError(f"Invalid repository name: {repo}") from err
+
+    threads: list[dict[str, Any]] = []
+    end_cursor: str | None = None
+    request_count = 0
+    while True:
+        data = github_graphql(
+            REVIEW_THREADS_QUERY,
+            {
+                "owner": owner,
+                "repo": repo_name,
+                "number": pr_number,
+                "endCursor": end_cursor,
+            },
+            token,
+        )
+        request_count += 1
+        repository = data.get("repository")
+        pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+        connection = pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
+        if not isinstance(connection, dict):
+            raise RuntimeError("GitHub GraphQL response has no reviewThreads connection")
+        nodes = connection.get("nodes")
+        if not isinstance(nodes, list):
+            raise RuntimeError("GitHub GraphQL reviewThreads response has no nodes list")
+        threads.extend(node for node in nodes if isinstance(node, dict))
+        page_info = connection.get("pageInfo")
+        if not isinstance(page_info, dict) or page_info.get("hasNextPage") is not True:
+            break
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise RuntimeError("GitHub GraphQL reviewThreads page has no endCursor")
+        end_cursor = next_cursor
+    return threads, request_count
+
+
 def _fetch_state(
     repo: str,
     pr_number: int,
@@ -303,7 +379,7 @@ def _fetch_state(
     cache: ResponseCache | None = None,
     review_comment_since: str | None = None,
     issue_comment_since: str | None = None,
-) -> tuple[dict[str, list[dict[str, Any]]], int]:
+) -> tuple[dict[str, Any], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
     base_url = f"https://api.github.com/repos/{encoded_repo}"
     pull_request = github_get(f"{base_url}/pulls/{pr_number}", token, cache=cache)
@@ -334,6 +410,7 @@ def _fetch_state(
         token,
         cache=cache,
     )
+    review_threads, review_thread_requests = _fetch_review_threads(repo, pr_number, token)
     return (
         {
             "pull_request": pull_request,
@@ -341,8 +418,16 @@ def _fetch_state(
             "review_comments": review_comments,
             "issue_comments": issue_comments,
             "reactions": reactions,
+            "review_threads": review_threads,
         },
-        1 + review_requests + review_comment_requests + issue_comment_requests + reaction_requests,
+        (
+            1
+            + review_requests
+            + review_comment_requests
+            + issue_comment_requests
+            + reaction_requests
+            + review_thread_requests
+        ),
     )
 
 
@@ -385,11 +470,20 @@ def _render_activity(
     review_fingerprints: dict[str, str] | None = None,
     review_comment_fingerprints: dict[str, str] | None = None,
     issue_comment_fingerprints: dict[str, str] | None = None,
+    review_thread_states: dict[str, bool] | None = None,
 ) -> tuple[str | None, int, int, int, int, str, str]:
     ignored_authors = ignored_authors or set()
     ignore_patterns = ignore_patterns or []
     current_pr_status = _current_pr_status(state.get("pull_request"))
     current_head_sha = _current_pr_head_sha(state.get("pull_request"))
+    review_threads = state.get("review_threads")
+    current_review_thread_states = _review_thread_state_map(
+        review_threads if isinstance(review_threads, list) else []
+    )
+    review_thread_changes = _review_thread_state_changes(
+        current_review_thread_states,
+        review_thread_states or {},
+    )
     new_reviews = _filter_review_changes(state["reviews"], review_cursor, review_fingerprints or {})
     new_review_comments = _filter_comment_changes(
         state["review_comments"],
@@ -432,6 +526,7 @@ def _render_activity(
         or new_review_comments
         or new_issue_comments
         or new_reactions
+        or review_thread_changes
         or has_pr_status_event
         or has_head_event
     ):
@@ -464,6 +559,11 @@ def _render_activity(
     # A Codex +1 is durable pass evidence, not just another activity line. It must
     # survive a small --event-limit even when a large review batch lands with it.
     required_events.extend(_format_reaction(reaction) for reaction in new_reactions)
+    if isinstance(state.get("pull_request"), dict):
+        required_events.extend(
+            _format_review_thread_event(state["pull_request"], *change)
+            for change in review_thread_changes
+        )
     optional_events = [_format_review(review) for review in visible_reviews]
     optional_events.extend(_format_review_comment(comment) for comment in visible_review_comments)
     optional_events.extend(_format_issue_comment(comment) for comment in visible_issue_comments)
@@ -591,6 +691,25 @@ def _merge_fingerprint_map(
     """Retain fingerprints omitted by a later updated-since fetch."""
 
     return {**baseline, **observed}
+
+
+def _review_thread_state_map(threads: list[dict[str, Any]]) -> dict[str, bool]:
+    return {
+        str(thread["id"]): bool(thread["isResolved"])
+        for thread in threads
+        if isinstance(thread.get("id"), str) and isinstance(thread.get("isResolved"), bool)
+    }
+
+
+def _review_thread_state_changes(
+    current: dict[str, bool],
+    baseline: dict[str, bool],
+) -> list[tuple[str, bool, bool]]:
+    return [
+        (thread_id, baseline[thread_id], resolved)
+        for thread_id, resolved in current.items()
+        if thread_id in baseline and baseline[thread_id] != resolved
+    ]
 
 
 def _filter_review_changes(
@@ -740,6 +859,7 @@ def _cursorless_state_file(path: Path) -> bool:
             "pr_status",
             "head_sha",
             *PR_FINGERPRINT_KEYS,
+            REVIEW_THREAD_STATES_KEY,
             STAGED_KEY,
         )
     )
@@ -1182,6 +1302,17 @@ def _saved_fingerprints(saved: dict[str, Any], key: str) -> dict[str, str]:
     return {str(item_key): item for item_key, item in value.items() if isinstance(item, str)}
 
 
+def _saved_review_thread_states(saved: dict[str, Any]) -> dict[str, bool]:
+    value = saved.get(REVIEW_THREAD_STATES_KEY)
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(item_key): item
+        for item_key, item in value.items()
+        if isinstance(item, bool)
+    }
+
+
 def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
     missing = []
     if _saved_str(saved, "head_sha") is None:
@@ -1190,6 +1321,11 @@ def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
         value = saved.get(key)
         if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
             missing.append(key)
+    thread_states = saved.get(REVIEW_THREAD_STATES_KEY)
+    if not isinstance(thread_states, dict) or any(
+        not isinstance(item, bool) for item in thread_states.values()
+    ):
+        missing.append(REVIEW_THREAD_STATES_KEY)
     return missing
 
 
@@ -1645,6 +1781,7 @@ def main() -> int:
             saved,
             ISSUE_COMMENT_FINGERPRINTS_KEY,
         )
+        review_thread_states = _saved_review_thread_states(saved)
         pr_status = (
             args.since_pr_status
             or (_saved_str(saved, "pr_status") if resumed else None)
@@ -1696,6 +1833,7 @@ def main() -> int:
                 review_fingerprints=review_fingerprints,
                 review_comment_fingerprints=review_comment_fingerprints,
                 issue_comment_fingerprints=issue_comment_fingerprints,
+                review_thread_states=review_thread_states,
             )
 
         def _advance_since() -> None:
@@ -1714,6 +1852,7 @@ def main() -> int:
                 REVIEW_FINGERPRINTS_KEY: review_fingerprints,
                 REVIEW_COMMENT_FINGERPRINTS_KEY: review_comment_fingerprints,
                 ISSUE_COMMENT_FINGERPRINTS_KEY: issue_comment_fingerprints,
+                REVIEW_THREAD_STATES_KEY: review_thread_states,
                 "review_comment_since": review_comment_since,
                 "issue_comment_since": issue_comment_since,
                 "viewer_login": viewer_login,
@@ -1841,6 +1980,8 @@ def main() -> int:
             issue_comment_fingerprints,
             _comment_fingerprint_map(state["issue_comments"]),
         )
+        if token is not None:
+            review_thread_states = _review_thread_state_map(state["review_threads"])
         (
             initial_output,
             review_cursor,
@@ -2021,6 +2162,8 @@ def main() -> int:
                 issue_comment_fingerprints,
                 _comment_fingerprint_map(state["issue_comments"]),
             )
+            if token is not None:
+                review_thread_states = _review_thread_state_map(state["review_threads"])
             (
                 output,
                 review_cursor,

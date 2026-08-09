@@ -206,7 +206,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   <path>`. The state file records the repository, PR/filter, and watch
   identity; resolve PR viewer identity before claiming it, claim it under a lock,
   and treat a foreign, corrupt, or unwritable file as terminal. A PR state also
-  persists the head SHA plus review and comment fingerprints. Each detected
+  persists the head SHA, review/comment fingerprints, and the full review-thread
+  resolution map. Each detected
   batch stages its rendered output together with the next cursors under one pending record, then
   promotes both only after `AVIBE_WATCH_LAST_DELIVERY` changes. An unchanged
   delivery stamp replays the stored output before GitHub polling or viewer
@@ -228,6 +229,9 @@ turn ends because you armed a watch and are waiting, say exactly that.
   Every settle candidate is computed from the same committed cursor and
   review/comment-fingerprint snapshot; only the final candidate updates the
   next state.
+- Authenticated PR polling fetches every review-thread page through GraphQL
+  `endCursor`; resolving or reopening a cursor-covered thread is gate activity
+  even when no new comment object is created.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and

@@ -15,7 +15,15 @@ sys.modules[SPEC.name] = wait_pr
 SPEC.loader.exec_module(wait_pr)
 
 
-def _pr_state(*, reviews=None, review_comments=None, issue_comments=None, reactions=None, head="head"):
+def _pr_state(
+    *,
+    reviews=None,
+    review_comments=None,
+    issue_comments=None,
+    reactions=None,
+    review_threads=None,
+    head="head",
+):
     return {
         "pull_request": {
             "number": 1213,
@@ -28,6 +36,7 @@ def _pr_state(*, reviews=None, review_comments=None, issue_comments=None, reacti
         "review_comments": list(review_comments or []),
         "issue_comments": list(issue_comments or []),
         "reactions": list(reactions or []),
+        "review_threads": list(review_threads or []),
     }
 
 
@@ -49,6 +58,7 @@ def _seeded_state(path: Path, *, review_fingerprints=None, head="head"):
                 "review_fingerprints": review_fingerprints or {},
                 "review_comment_fingerprints": {},
                 "issue_comment_fingerprints": {},
+                "review_thread_states": {},
             }
         )
     )
@@ -60,6 +70,13 @@ def _include_self_watch_identity():
             ["--repo", "avibe-bot/avibe", "--pr", "1213", "--include-self-comments"]
         )
     )
+
+
+def test_token_precedence_matches_github_cli(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "preferred")
+    monkeypatch.setenv("GITHUB_TOKEN", "stale")
+
+    assert wait_pr.get_token() == "preferred"
 
 
 def test_settle_keeps_one_review_baseline_for_every_candidate(monkeypatch, tmp_path, capsys):
@@ -308,6 +325,7 @@ def test_resume_requires_all_persisted_activity_baselines(monkeypatch, tmp_path)
         "review_fingerprints",
         "review_comment_fingerprints",
         "issue_comment_fingerprints",
+        "review_thread_states",
     }
 
 
@@ -394,6 +412,50 @@ def test_event_limit_never_omits_codex_pass_reaction():
 
     assert "pr_reaction #9" in result[0]
     assert "2 additional event(s) omitted" in result[0]
+
+
+def test_review_thread_state_changes_are_paginated_and_reported(monkeypatch):
+    cursors = []
+
+    def _graphql(_query, variables, _token):
+        cursors.append(variables["endCursor"])
+        if variables["endCursor"] is None:
+            nodes = [{"id": "thread-1", "isResolved": True}]
+            page_info = {"hasNextPage": True, "endCursor": "cursor-1"}
+        else:
+            nodes = [{"id": "thread-2", "isResolved": False}]
+            page_info = {"hasNextPage": False, "endCursor": "cursor-2"}
+        return {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {"nodes": nodes, "pageInfo": page_info},
+                }
+            }
+        }
+
+    monkeypatch.setattr(wait_pr, "github_graphql", _graphql)
+    threads, request_count = wait_pr._fetch_review_threads("avibe-bot/avibe", 1213, "token")
+
+    assert request_count == 2
+    assert cursors == [None, "cursor-1"]
+    assert [thread["id"] for thread in threads] == ["thread-1", "thread-2"]
+
+    result = wait_pr._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=1213,
+        state=_pr_state(review_threads=threads),
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        head_sha="head",
+        event_limit=1,
+        ignore_self_comments=False,
+        review_thread_states={"thread-1": False, "thread-2": False},
+    )
+
+    assert "review_thread thread-1 unresolved -> resolved" in result[0]
 
 
 def test_head_change_is_reported_as_pr_activity():
