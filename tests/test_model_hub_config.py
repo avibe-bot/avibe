@@ -400,6 +400,54 @@ def test_model_hub_ui_state_completeness_is_generated_from_live_files():
             "`[contract]` `[contract-gap]` G-99 carries",
             "A",
         ),
+        # Round 11. `api.md` puts request and response in one cell, and a check
+        # that unions the two sides accepts the answer's vocabulary as a legal
+        # request body. Dropping the word that introduces this body as an answer
+        # must move it to the request side and fail there.
+        (
+            "a response body written as the request",
+            "and returns `{agent: AgentSupply}`",
+            "and sends `{agent: AgentSupply}`",
+            "E",
+        ),
+        # Round 11. A `[contract]` header asserts that some schema owns the
+        # vocabulary below it. When the field name resolves to no declaration,
+        # the set comparison has nothing to compare and used to skip in silence
+        # — the one outcome a gate that exists to catch drift may not have.
+        (
+            "mapping table names a field no schema declares",
+            "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
+            "| `AgentSupply.supply_stat` `[contract]` | Subtitle | Key |",
+            "E",
+        ),
+        # Round 11. Condition keys are stored bare and cited namespace-qualified,
+        # so the citation test has to resolve both spellings to one copy row.
+        # Matching on prefixes instead let a citation drift onto a longer key and
+        # still vouch for the row it left behind.
+        (
+            "a citation drifts onto a longer key",
+            "`sourceDetail.fail.tier`, `sourceDetail.retry`",
+            "`sourceDetail.fail.tiers`, `sourceDetail.retry`",
+            "D",
+        ),
+        # Round 11. Two rows in one table under one key ship whichever the
+        # loader read last. The key is legitimately re-used across namespaces —
+        # every table has a `title` — so only the qualified spelling collides.
+        (
+            "one qualified key defined twice",
+            "| `tiers.addFirst` | + 添加档位 | + Add tier |",
+            "| `tiers.add` | + 添加档位 | + Add tier |",
+            "B",
+        ),
+        # Round 11. The mirror of class A, and the generator behind five
+        # findings across two heads: a contracted mutation no surface reaches.
+        # Out of scope is a legitimate answer; not saying anything is not.
+        (
+            "a contracted mutation stops being accounted for",
+            "| `POST /api/models/migration/scan` | The migration surface.",
+            "| `POST /api/models/migration/scans` | The migration surface.",
+            "A",
+        ),
     ],
 )
 def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, label, before, after, expect):

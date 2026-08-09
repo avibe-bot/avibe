@@ -103,6 +103,10 @@ API_CONTRACT = CONTRACTS / "api.md"
 
 API_ROW_RE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`$")
 BODY_RE = re.compile(r"`(\{[^`{}]*\})`")
+# What immediately introduces a body as the server's answer rather than the
+# client's request. `api.md` writes both sides in one cell, so a claim has to
+# say which side it is quoting, and these are the ways this document says it.
+ANSWER_CUE_RE = re.compile(r"(?:→|returns|answers|echoes|responds with|re-echoes)\s*$")
 JSONISH_RE = re.compile(r"\{[^{}]*\}")
 SCHEMA_CITE_RE = re.compile(r"`([a-z][a-z-]*\.schema\.json)`")
 DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
@@ -212,8 +216,16 @@ def load_authorities(root: Path) -> dict[str, Any]:
         if not m:
             continue
         table_spans.append(line)
+        # `request → response` in one cell, and only the left side is what a
+        # client may send. Reading the whole cell let a response field stand in
+        # for a request field: the source-order row answers `{agent: AgentSupply}`,
+        # so a spec that posted `{agent: [...]}` to it passed a check the server
+        # would reject. `guarded` still reads the whole cell, because that is
+        # where the refusal envelope is named.
+        request, _, response = cells[1].partition("→")
         routes[normalize_route(m.group(1), m.group(2))] = {
-            "keys": literal_keys(cells[1]),
+            "keys": literal_keys(request),
+            "response_keys": literal_keys(response),
             "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
             "cell": cells[1],
         }
@@ -377,6 +389,7 @@ def parse(text: str) -> dict[str, Any]:
     # ink names, schema fields — and reading those as key definitions is how a
     # checker invents keys nobody wrote.
     defined: dict[str, dict[str, str]] = {}
+    duplicates: list[tuple[int, str, int]] = []
     namespaces: set[str] = set()
     tables = 0
     rows = 0
@@ -409,7 +422,17 @@ def parse(text: str) -> dict[str, Any]:
         rows += 1
         if not ns:
             namespaces.add(key.split(".")[0])
-        for spelling in {key, f"{ns}.{key}" if ns else key}:
+        # Two rows spelling the same *qualified* key are two answers to one
+        # question, and the reader has no way to know which one ships.
+        # Overwriting silently keeps the later one and reports nothing, so the
+        # checker would call a document with contradictory copy clean. The bare
+        # spelling is only an alias — `title` recurring once per namespace is
+        # the document reading normally, not a collision.
+        qualified = f"{ns}.{key}" if ns else key
+        prior = defined.get(qualified)
+        if prior and (prior["zh"], prior["en"]) != (zh, en):
+            duplicates.append((i + 1, qualified, prior["line"]))
+        for spelling in {key, qualified}:
             defined[spelling] = {"zh": zh, "en": en, "line": i + 1, "raw": key}
 
     # A citation is a copy key only when its first segment is a namespace some
@@ -451,6 +474,7 @@ def parse(text: str) -> dict[str, Any]:
         "register": register,
         "slots": slots,
         "defined": defined,
+        "duplicates": duplicates,
         "tables": tables,
         "rows": rows,
         "refs": refs,
@@ -490,7 +514,35 @@ def resolves(key: str, defined: dict[str, Any]) -> bool:
     return False
 
 
-MAPPING_HEADER_RE = re.compile(r"^\|\s*`([A-Za-z][A-Za-z0-9_.\[\]]*)`(?:\s*`\[[a-z-]+\]`)*\s*\|")
+def _bare(key: str) -> str:
+    return key[len("models.hub.") :] if key.startswith("models.hub.") else key
+
+
+def cited_rows(tokens: set[str], defined: dict[str, Any]) -> set[int]:
+    """Lines of the copy rows the backticked `tokens` name.
+
+    A citation is a token resolved against the copy tables, not a substring of
+    the prose. Searching one concatenated string let `fail.auth` count as a
+    citation of `auth`, and let a key count as cited because a *longer*
+    unrelated key contained it — the gate reporting covered for a comparison it
+    never made. Resolution is by line, because a key is written twice, bare
+    inside its own table and namespaced outside it, and both spellings are the
+    same row.
+    """
+    lines: set[int] = set()
+    for token in tokens:
+        for cand in (token, _bare(token)):
+            if cand.endswith("*"):
+                prefix = cand.rstrip("*.")
+                lines.update(d["line"] for s, d in defined.items() if s.startswith(prefix))
+                continue
+            for spelling in (cand, f"{cand}_one", f"{cand}_other"):
+                if spelling in defined:
+                    lines.add(defined[spelling]["line"])
+    return lines
+
+
+MAPPING_HEADER_RE = re.compile(r"^\|\s*`([A-Za-z][A-Za-z0-9_.\[\]]*)`((?:\s*`\[[a-z-]+\]`)*)\s*\|")
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 
 
@@ -513,7 +565,7 @@ def mapping_tables(lines: list[str]) -> list[tuple[int, str, set[str]]]:
     legitimately occupy two rows (one value, two renderings) and a count would
     call that a drift.
     """
-    found: list[tuple[int, str, set[str], set[str]]] = []
+    found: list[tuple[int, str, set[str], set[str], bool]] = []
     for i, line in enumerate(lines):
         m = MAPPING_HEADER_RE.match(line)
         if not m or i + 1 >= len(lines) or not SEPARATOR_RE.match(lines[i + 1].strip()):
@@ -538,7 +590,7 @@ def mapping_tables(lines: list[str]) -> list[tuple[int, str, set[str]]]:
                     break
                 continue  # the blank line every table is separated from its lead-in by
             lead.append(above)
-        found.append((i + 1, m.group(1), values, set(SCHEMA_CITE_RE.findall("\n".join(lead)))))
+        found.append((i + 1, m.group(1), values, set(SCHEMA_CITE_RE.findall("\n".join(lead))), "[contract]" in m.group(2)))
     return found
 
 
@@ -615,7 +667,7 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
     # simply written on the wrong row — so a registered gap cannot excuse it.
     every_contracted_key: set[str] = set(auth["envelope"])
     for row in auth["routes"].values():
-        every_contracted_key |= row["keys"]
+        every_contracted_key |= row["keys"] | row["response_keys"]
 
     guarded_named: dict[str, int] = {}
     for line_no, scope in claim_scopes(text.split("\n")):
@@ -634,7 +686,8 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
             elif auth["routes"][route]["guarded"]:
                 guarded_named.setdefault(route, line_no)
 
-        for literal in BODY_RE.findall(scope):
+        for m_body in BODY_RE.finditer(scope):
+            literal = m_body.group(1)
             scale["bodies"] += 1
             keys = literal_keys(literal)
             if not keys:
@@ -646,11 +699,23 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
                 if not exempt:
                     add(f"L{line_no}", f"`{literal}` names no route — an unbound body claim cannot be checked")
                 continue
+            # Which side of the cell a claim belongs to is not a guess. A `GET`
+            # has no request body, so a body written against one is quoting the
+            # answer; so is a body the document itself introduces as one, with
+            # `→` or with the word. Everything else is what the client sends,
+            # and letting a request borrow the response vocabulary is how
+            # `{agent: [...]}` posted to the order route would pass a check the
+            # server rejects.
+            answer = bool(ANSWER_CUE_RE.search(scope[: m_body.start()])) or all(
+                r.startswith("GET ") for r in named
+            )
             allowed: set[str] = set()
             for route in named:
                 row = auth["routes"].get(route)
                 if row:
-                    allowed |= row["keys"] | (auth["envelope"] if row["guarded"] else set())
+                    allowed |= row["response_keys"] if answer else row["keys"]
+                    if row["guarded"]:
+                        allowed |= auth["envelope"]
             # A registered gap forgives a field the contract does not have
             # anywhere — that is what the gap *is*, a behaviour the document
             # states and no route carries yet. It does not forgive a field some
@@ -749,7 +814,7 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
     # reads as a per-backend one); only after both does the row set mean
     # anything. Values are compared as sets — not counted — because one value
     # may legitimately occupy two rows.
-    for line_no, field, drawn, cited in mapping_tables(text.split("\n")):
+    for line_no, field, drawn, cited, contracted in mapping_tables(text.split("\n")):
         scale["contract mapping tables"] += 1
         owners = {
             path: values
@@ -759,6 +824,20 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
             if path == field or path.endswith(f".{field}")
         }
         if not owners:
+            # A header that carries `[contract]` has asserted that some schema
+            # owns this vocabulary. Skipping the lookup when nothing resolves is
+            # the silent-green failure this class exists to prevent: a mistyped
+            # field or a wrong schema citation would leave the table mapping no
+            # contracted field at all, and the gate would call it covered. A
+            # header without the marker is drawing something the spec itself
+            # decided, and owes no lookup.
+            if contracted:
+                add(
+                    f"L{line_no}",
+                    f"`{field}` is marked `[contract]` and rendered totally, but no contract schema "
+                    f"declares it{' among ' + ', '.join(sorted(cited)) if cited else ''} — "
+                    f"the table maps no contracted field",
+                )
             continue
         if len(owners) > 1:
             add(
@@ -799,6 +878,7 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         findings.append({"class": cls, "where": where, "message": msg})
 
     # ---- A ------------------------------------------------------------------
+    auth = load_authorities(ROOT)
     covered_routes: set[str] = set()
     for r in reg:
         cells = f"{r['entry']} {r['exit']} {r['failure']}"
@@ -846,6 +926,34 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
                 continue
         add("A", f"L{r['line']}", f"「{r['state']}」 failure cell names no F1–F5 and no known state: {cell!r}")
 
+    # Class A asks that every route the document names have a state. Nothing
+    # asked the mirror, and the mirror is where this document keeps breaking: a
+    # capability `api.md` contracts that no surface reaches. Three §0.5 rows and
+    # two review findings across two heads were all this one shape, each found by
+    # hand. A read may go undrawn — a screen chooses what to show. A mutation is
+    # a user action, and an action nobody can take is either a frame that was
+    # never written or an absence the document owes the reader out loud.
+    # Two registers can account for a route the states do not reach, and both
+    # cost a written sentence: §0.5 says the affordance is missing here, §0.4
+    # says the affordance belongs to another surface. Silence is the only
+    # answer this refuses.
+    accounted: set[str] = set(covered_routes)
+    in_scope_note = False
+    for line in text.split("\n"):
+        if line.startswith("### 0.4"):
+            in_scope_note = True
+        elif line.startswith("### ") and not line.startswith("### 0.4"):
+            in_scope_note = False
+        if in_scope_note or GAP_ROW_RE.match(line):
+            accounted.update(normalize_route(m, path) for m, path in ANY_ROUTE_RE.findall(line))
+    contracted_mutations = sorted(
+        r for r in auth["routes"] if r.startswith(("POST ", "PUT ", "PATCH ", "DELETE "))
+    )
+    for route in contracted_mutations:
+        if route in accounted:
+            continue
+        add("A", "§0.8", f"{route} is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row")
+
     # ---- B ------------------------------------------------------------------
     cited: set[tuple[str, str]] = set()
     for sec, line, k in p["refs"]:
@@ -864,6 +972,8 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         for slot in sorted(set(SLOT_RE.findall(d["zh"] + d["en"]))):
             if slot not in p["slots"]:
                 add("B", f"L{d['line']}", f"key `{key}` interpolates `{{{{{slot}}}}}` with no §0.9 row")
+    for line_no, spelling, prior_line in p["duplicates"]:
+        add("B", f"L{line_no}", f"key `{spelling}` is defined twice with different text (also L{prior_line})")
 
     # ---- C ------------------------------------------------------------------
     for r in reg:
@@ -897,17 +1007,15 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
             )
 
     # ---- D ------------------------------------------------------------------
-    reg_copy = " ".join(r["copy"] for r in reg)
+    reg_cited = cited_rows({t for r in reg for t in KEY_REF_RE.findall(r["copy"])}, p["defined"])
     conditions = [k for k, d in p["defined"].items() if k == d["raw"] and CONDITION_RE.search(k)]
     for key in sorted(conditions):
         d = p["defined"][key]
-        base = re.sub(r"_(one|other)$", "", key)
-        if base in reg_copy or key in reg_copy:
+        if d["line"] in reg_cited:
             continue
         add("D", f"L{d['line']}", f"condition key `{key}` is cited by no §0.8 row")
 
     # ---- E ------------------------------------------------------------------
-    auth = load_authorities(ROOT)
     e_findings, e_scale = authority_claims(text, auth, ROOT, reg)
     findings.extend(e_findings)
 
@@ -917,6 +1025,7 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         "frames with a register row": len(reg_frames),
         "frame sections with an element inventory": len(p["inventories"]),
         "mutating calls scanned": len(seen),
+        "contracted mutations to reach": len(contracted_mutations),
         "copy tables / rows": f"{p['tables']} / {p['rows']}",
         "copy keys defined": len({d["raw"] for d in p["defined"].values()}),
         "condition-named keys": len(conditions),

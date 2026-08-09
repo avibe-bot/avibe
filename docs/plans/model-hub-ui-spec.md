@@ -178,6 +178,22 @@ frames surfaced a *missing* behaviour invariant, it is listed in the PR
 description under 「建议移交 AC 账本」 for routing — not written here, and not
 written into §8 by this lane.
 
+**Contracted mutations these ten frames do not draw.** `api.md` contracts twenty
+state-changing routes; this document reaches most of them and states an absence
+in §0.5 for the ones whose affordance is missing. The four below are neither:
+they belong to a surface outside this frame set, so silence about them here is a
+boundary, not an omission. The distinction matters because the two are fixed
+differently — a §0.5 row is work someone still owes, a row here is work that
+lives somewhere else — and because leaving either unwritten reads identically
+from inside this file: a capability the product has and nobody can find.
+
+| Contracted route | Where it is drawn instead |
+| --- | --- |
+| `POST /api/models/migration/scan` | The migration surface. Neither of these ten frames offers an import, and a scan with nothing to show it is not a screen |
+| `POST /api/models/migration/apply` | The migration surface, following its own scan |
+| `PUT /api/models/agents/opencode/menu` | The open-menu configuration surface, which is where a menu is chosen; frame 01 renders the resulting supply and never edits the menu behind it |
+| `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these ten frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
+
 ### 0.5 Contract-gap registry
 
 Every `[contract-gap]` in this file, in one place. A `[contract-gap]` statement
@@ -198,10 +214,12 @@ than in a moving one.
 | G-9 | 03 order save that drops sources | the guarded-change response for the whole-order `PUT` | `api.md`'s `PUT /api/models/agents/<backend>/sources` takes `{order: string[]}` and returns `{agent: AgentSupply}` — the success echo and nothing else, with no `force` in the body and no `409` branch. The gap narrowed at `ceace07f` but did not close: the shared refusal envelope `{error, would_remove_hops, would_interrupt}` is now contracted, and the route-chain `PUT /api/models/agents/<backend>/chain` uses it, so the field this frame needs exists and is spelled as `model-hub.md`'s matrix spells it. What is still missing is only its application to the order save. §1.3's Guard-refused row states the surface anyway, as a `[contract-gap]` and not as a requirement |
 | G-10 | 01 shell pill, install in flight | a server-side install state, and the route that enters it | `runtime-dependency.schema.json` v5's `status.health` runs `ok · degraded · down · not_started · not_installed` with nothing between the last two, and `api.md` contracts exactly two runtime routes — `GET /api/models/runtime/status` and `POST /api/models/runtime/start` — with no install route at all. So *installing* exists on the client and nowhere else, and a reload during one reads back as `not_installed`. §0.8's Installing and Install failed rows are the client-side states that gap forces, and they are marked as such |
 | G-11 | 09 direct-only home, zero backends | an installation flag per agent backend, and the payload that carries it | No property of `AgentSupply` (`agent-supply.schema.json`) reports whether a backend's CLI is present, and `core/handlers/model_hub/service.py:list_agents` builds its array from a literal three-backend tuple, so the payload is length 3 unconditionally and the zero-backend state cannot be produced from it |
-| G-12 | 01 upstream card and 06 header, `needs_action` | the control that replaces a dead credential, on either surface | §1.1 sends repair to 06 and §1.6 sends it back to 01, and no frame draws it. `api.md` contracts a credential-replacement route with the guarded envelope, so the behaviour exists and only its affordance is missing. Both sections now state the absence instead of pointing at each other |
+| G-12 | 01 upstream card and 06 header, `needs_action` | the control that replaces a dead credential, on either surface | §1.1 sends repair to 06 and §1.6 sends it back to 01, and no frame draws it. `api.md` contracts both replacement routes — `PUT /api/models/sources/<id>/credential` for a key and `POST /api/models/sources/<id>/reauth` for a subscription — the first with the guarded envelope, so the behaviour exists and only its affordance is missing. Both sections now state the absence instead of pointing at each other |
 | G-13 | 03 order drawer, chains that already exist | an action that re-applies the current order to chains built before it, and the route behind it | `api.md` contracts `PUT /api/models/agents/<backend>/sources` for the order itself and `PUT /api/models/agents/<backend>/chain` for one model's hops; nothing bulk-rewrites stored chains, and `model-hub.md`'s `placement-v1` runs "only during Add Source". So the order genuinely cannot reach an existing chain, and §1.3 says that rather than implying the drawer keeps chains in sync |
 | G-14 | 08 adopt-gateway confirm, `effects.1` | the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source | `core/handlers/model_hub/service.py:set_agent_mode` (`ceace07f:2197`) validates the mode, assigns `agent.mode`, saves, and returns the payload — it creates no Source, writes no order, and has no other caller that does. The promise is a product decision and stays, because a switch that silently drops the user's working login is not a switch anybody would accept; what is missing is the code that keeps it |
 | G-15 | 06 source detail, a source's own name and Base URL | any affordance that edits them | `api.md` contracts `PATCH /api/models/sources/<id>` with `{display_name?, base_url?}`, and no frame draws a control that sends it: 06's inventory edits model rows only, and 05 sets both fields at creation and never again. So the route is named in §1.5 as evidence of what it *cannot* carry, never as a call this spec places on a screen |
+| G-16 | 01 upstream card and 06 source detail | any affordance that removes a **source** | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除 any of these ten frames draws is 06's row menu, which sends `DELETE /api/models/sources/<id>/models/<model_id>` — one manual model, not the source. So a source added by mistake, or left behind by a flow the user abandoned, can be seen on 01 and not removed from it. §1.4 said the opposite until this round: it told the reader 移除 was one press away, which was reading the model-row menu as if it removed the source |
+| G-17 | 04 add-subscription, a flow that expects something pasted back | the field that takes it, and the control that sends it | `oauth-flow.schema.json`'s `presentation.expects` runs `none · paste_code · paste_callback_url`, and `api.md` contracts `POST /api/models/oauth/submit` with `{flow_id, value}` for the second and third. Frame 04's foot is 取消 / 去登录 and draws no input, so only `expects: none` — the browser round trip — has a surface. §1.4 states the declaration rather than the browser assumption it carried before, and states this absence rather than describing a field no frame draws |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -574,7 +592,7 @@ as everywhere else in this document.
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | Takeover active | Head source unavailable, next one serving | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Recovery → Ready. This is frame 08 (§1.7) |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
-| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 | F1, in place on the group head | `gateway.switchToDirect` | Success → the group re-renders in its 直连 form, and the page becomes 09 when it was the last one |
+| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect` | Success → the group re-renders in its 直连 form, and the page becomes 09 when it was the last one |
 | §1.3 | Ready | Drawer opened and the eligible sources resolved | → §1.0 Unreachable | `order.title`, `order.subtitle`, `order.section.ordered`, `order.section.ordered.note`, `order.section.heldOut` | 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |
 | §1.3 | Zero eligible sources | No source is eligible for this backend | F5 | `order.empty.noEligible` | 关闭. A source becomes eligible → Ready. 保存顺序 is disabled |
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
@@ -583,13 +601,13 @@ as everywhere else in this document.
 | §1.3 | Guard refused | The `PUT` came back refused, naming the hops it would remove | F3 — the shared confirm (§1.6 `Qp6FI`) renders it; this drawer starts no second one | `guard.title.saveOrder`, `guard.subtitle.saveOrder`, `guard.confirm.saveOrder`, `guard.label`, `guard.count`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要保存 re-sends the same `PUT` with `force` → Saving; 取消 → back to Dirty, nothing persisted |
 | §1.4 | Default | Opened | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 → Awaiting sign-in |
 | §1.4 | Second pass `[derived]` | Re-opened for an account that already has one of the two channels | F5 | `addSub.opt.added` | The taken option is inert; the remaining one is selected on open, whatever the recommendation says |
-| §1.4 | Awaiting sign-in | 去登录 pressed | → OAuth failed | `addSub.signIn` | OAuth completes → source created, dialog closes; dismissed any of the three ways → Dismissing |
+| §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start` | → OAuth failed | `addSub.signIn` | OAuth completes → source created, dialog closes; dismissed any of the three ways → Dismissing |
 | §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
 | §1.4 | OAuth failed | Provider or engine failure; classified `needs_action` `[spec §4.5]` | F1 | `addSub.error.oauthFailed`, `addSub.retry` | 重试 → Awaiting sign-in; 取消 → Dismissing |
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown` | 重试 once the engine recovers; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Already bound | This account is already another source `[spec §4.1]` | F1 | `addSub.error.alreadyBound` | Sign in with another account; 取消 → dismiss, nothing bound `[derived]` |
 | §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit` | 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
-| §1.5 | ② Adding | 添加 pressed | → ③ / ④ / ⑤ | `addKey.adding`, `addKey.adding.detail` | Success → the dialog closes into 06 |
+| §1.5 | ② Adding | 添加 pressed — `POST /api/models/sources` | → ③ / ④ / ⑤ | `addKey.adding`, `addKey.adding.detail` | Success → the dialog closes into 06 |
 | §1.5 | ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | → ③′ / ④′ / ⑤′ | `addKey.adding`, `addKey.adding.detail` | Success → the inline model count in ①, persisting nothing |
 | §1.5 | ③ Failure, **Add origin** | A probe run *as part of* 添加 classified the failure | F1 | `addKey.fail.subtitle`, `addKey.fail.auth`, `addKey.fail.auth.detail`, `addKey.fail.address`, `addKey.fail.network`, `addKey.retry` | 重试 → ② |
 | §1.5 | ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | F1 | as ③ | 重试 → **another 拉取型号, not ②** |
@@ -605,8 +623,8 @@ as everywhere else in this document.
 | §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Error (refetch failed) | `sourceDetail.action.refetch` | New list arrives → Ready, diffed; a refusal → Refetch refused |
 | §1.6 | Refetch refused | The refresh came back refused, naming the hops a shorter inventory would remove | F3 — `Qp6FI`, the same confirm this page already starts for a removal | `guard.title.refetch`, `guard.subtitle.refetch`, `guard.confirm.refetch`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要拉取 re-sends the same `POST` with `force` → Refetching; 取消 → Ready, the previous list kept |
 | §1.6 | Error (refetch failed) | The refetch was rejected | F2 lands here — the **previous list is kept** | `sourceDetail.status.error`, `sourceDetail.fail.refetch` | The bar carries the failure; 重新拉取 stays enabled → Refetching |
-| §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter → Tier commit; blur / Escape → Ready, discarding the uncommitted chip |
-| §1.6 | Tier commit | Enter committed a tier — `PATCH /api/models/sources/<source_id>/models/<model_id>` | F1, on the row: the chip stays in the input, the row states the failure and offers 重试 | `sourceDetail.fail.tier`, `sourceDetail.retry` | Success → the chip lands on the row, still in Tiers editing |
+| §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter, or a chip's × → Tier commit; blur / Escape → Ready, discarding whatever is still uncommitted in the input |
+| §1.6 | Tier commit | A tier was added by Enter **or** removed by a chip's × — either way `PATCH /api/models/sources/<source_id>/models/<model_id>` carries the complete `reasoning_efforts` list `[contract]` | F1, on the row: the row keeps the pre-request list, states the failure and offers 重试 — an add leaves its text in the input, a removal puts its chip back | `sourceDetail.fail.tier`, `sourceDetail.retry` | Success → the answered list is what the row renders, still in Tiers editing |
 | §1.6 | Manual draft | 添加模型 pressed | F5 — a local draft, sent by nothing | `sourceDetail.entry.manual`, `sourceDetail.addRow.hint` | 添加 → Manual commit; 取消 discards the row and nothing is persisted |
 | §1.6 | Manual commit | 添加 pressed on the draft row — `POST /api/models/sources/<source_id>/models` | F1, on the draft row: **the row and everything typed in it are kept**, and the primary becomes 重试 | `sourceDetail.fail.addModel`, `sourceDetail.retry` | Success → the row becomes an ordinary 手动添加 row → Ready |
 | §1.6 | Removing a manual entry | The row menu's 移除 — `DELETE /api/models/sources/<source_id>/models/<model_id>`, guarded | F3 when the response is a guard refusal, F1 otherwise | `sourceDetail.row.remove` | Success → the row is gone → Ready |
@@ -624,7 +642,7 @@ as everywhere else in this document.
 | §1.8 | No backend found | The rows resolve to zero `[derived]` `[contract-gap]` G-11 | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; the page leaves this state only when a backend appears in the payload. This is the one state on the page with no in-product action, and the copy says so rather than leaving the user to guess |
 | §1.8 | Retained sources, all direct | Every backend is in 直连 and at least one source exists — reachable through `adopt.undo.3` | F5 | — | The page is 01 with every gateway group in its 直连 form, not this frame |
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
-| §1.9 | Committing | The confirm's primary was pressed | F1 → Failed | — | Success → the dialog closes and the page becomes 01 with this backend in 网关 mode |
+| §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success → the dialog closes and the page becomes 01 with this backend in 网关 mode |
 | §1.9 | Failed | The mode change did not persist | F1 lands here | `adopt.fail.title`, `adopt.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable |
 | §1.9 | Dependency missing `[derived]` D-26 | Runtime `health` is `not_installed` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press, three steps, reported as one outcome. 取消 is unchanged |
 
@@ -1218,9 +1236,13 @@ and transparent stroke** — it is a row-shaped affordance, not a card. Legend 1
 
 Credential-invalid is the one worth stating precisely `[derived]`: a
 `needs_action` source **stays in the list, in place**, with its status line
-replaced by the cause and a one-tap repair action. It is not removed, not moved to
-the bottom, and not silently dropped from the chains that name it — a source you
-cannot see is a source you cannot fix.
+replaced by the cause. It is not removed, not moved to the bottom, and not
+silently dropped from the chains that name it — a source you cannot see is a
+source you cannot fix. What the card offers is the cause and the way to the
+detail page; the control that *replaces* the credential is drawn on neither
+surface and is registered as G-12, so this paragraph states the visibility rule
+and stops there. It said 「a one-tap repair action」 until this round, which is
+the whole gap written as if it were a feature.
 
 **A backend with zero model rows is a different emptiness from a backend with no usable
 source, and they must not share a message** `[derived]`. 没有可用来源 says *this backend
@@ -1606,6 +1628,21 @@ the browser hand-off, with 「网关没有响应,请重试」 — sending someon
 OAuth flow that has nowhere to land is the most expensive possible way to report
 that the engine is down.
 
+**去登录 does not mean 「open a browser and wait」; it means 「start the flow and render
+what the flow declares」** `[contract]` `[contract-gap]` G-17. `POST /api/models/oauth/start`
+answers with an `OAuthFlow`, and `oauth-flow.schema.json` puts the whole step-2 shape in
+`presentation`: `auth_url`, `device_code`, `instructions_key`, and `expects`, which runs
+`none · paste_code · paste_callback_url`. The declaration is what the dialog renders —
+never a vendor→form table on the client, which is the thing the schema's own description
+rules out. Only `expects: none` is a browser round trip that finishes by itself, and
+that is the one this frame draws. The other two end with the user holding a value the
+dialog has to take and send to `POST /api/models/oauth/submit` as `{flow_id, value}`, and
+frame 04's foot is 取消 / 去登录 with no field between them. So *Awaiting sign-in* here
+is the `expects: none` branch, stated as that branch rather than as all of OAuth, and
+the input the other two need is registered as G-17: a contracted behaviour with no drawn
+affordance. The schema's own Claude example uses `paste_code`, so this is not a
+hypothetical vendor — it is the first one.
+
 **All three failure rows keep the same foot** `[derived]`. The dialog's foot is 取消 /
 去登录 (`[frame]`), and a failure replaces the message, not the buttons: 去登录 becomes
 重试 and 取消 stays exactly where it was. So each of the three has a way out that binds
@@ -1637,13 +1674,17 @@ nothing on screen, renders no error, and offers no retry. Two reasons, and the s
 the load-bearing one. Keeping someone inside a dialog to finish cleaning up an operation
 they just abandoned is the opposite of what 取消 means, and D-15 already says a failure
 never makes a mutation the only way out — a *forward* control on a dismissal would be
-exactly that. And the residual risk is small and already visible: a cancel that never
-lands leaves a flow that may still complete, in which case a source the user did not
-keep appears in the list — where D-16's rule applies unchanged, since the list reports
-what exists rather than what was intended, and 移除 is one press away. What this section
-will **not** do is claim the guarantee is stronger than the call: 「no flow outlives its
-dialog」 holds when the route answers, and the source list is the surface of truth when
-it does not.
+exactly that. And the residual risk is **visible but not yet recoverable** `[contract-gap]` G-16: a
+cancel that never lands leaves a flow that may still complete, in which case a source the
+user did not keep appears in the list — where D-16's rule applies unchanged, since the
+list reports what exists rather than what was intended. `api.md` contracts
+`DELETE /api/models/sources/<id>`, and no frame here draws it; 06's 移除 removes one
+manual model row, not the source. So the state this paragraph leaves the user in is
+*seeing* the unwanted source, and G-16 is the affordance that would end it. This section
+said 移除 was one press away until this round, which was the model-row menu read as if it
+removed the source. What it will **not** do is claim the guarantee is stronger than the
+call: 「no flow outlives its dialog」 holds when the route answers, and the source list is
+the surface of truth when it does not.
 
 **There is no partial-completion state here, and that is a property of the rebuild, not
 an omission.** An earlier draft of this section carried a `[contract-gap]` (G-5) for the
@@ -2213,11 +2254,14 @@ to re-authenticate, while 异常 deliberately claims no cause. Naming a cause th
 did not classify would be worse than admitting it has none; what the user can still do is
 drawn either way, since 重新拉取 is enabled in every state.
 
-**No repair control is drawn here, and that is deliberate.** A second upstream-contacting
-action would be exactly the invention the 重新拉取 rule below forbids. Repair has one
-owner — the upstream card, where a `needs_action` source must stay visible and
-repairable — and `iGcAi` returns there. A stated
-cause plus one tap beats a second repair control that can disagree with the first.
+**No repair control is drawn here, and that is deliberate up to a point** `[contract-gap]`
+G-12. A second upstream-contacting action would be exactly the invention the 重新拉取 rule
+below forbids: repair needs one owner, not two that can disagree, and this page states the
+cause and returns to 01 through `iGcAi`. What this section will not do is claim the owner
+it names has the control. Neither frame draws credential replacement, `api.md` contracts
+both routes that would perform it, and G-12 is that absence — so 01 is where the control
+*belongs*, not where it currently is, and a build that follows this paragraph puts the
+cause on both screens and the repair on neither.
 
 **The 录入 pill is a second witness for D-19's neutral pair** `[frame]`. 自动拉取
 renders `#FFFFFF0A` / `$--border` / `$--muted`; 手动添加 renders `#FFFFFF14` /
@@ -2300,6 +2344,22 @@ Five rules:
   form to `design.pen`. So the chips-plus-freetext-input treatment in the metrics
   above is normative, and 「未设置档位」 is the real empty state rather than a
   synthesized default — see D-5.
+
+  **Adding a tier and removing one are the same mutation** `[contract]` D-31. The route
+  「replaces the complete capability list」, so the request body is the whole
+  `reasoning_efforts` array the row should end up with, never a delta and never a
+  per-chip operation — pressing Enter sends the list plus the typed tier, pressing a
+  chip's × sends the list minus that chip, and removing the last one sends `[]`, which
+  is how a row gets back to 「未设置档位」. That is why §0.8 gives the two one `Tier
+  commit` row instead of two: one route, one body shape, one failure treatment, one
+  string. Both directions are optimistic in the same way — the chip appears or
+  disappears on Enter or ×, and F1 restores the pre-request list on rejection rather
+  than leaving the row showing a list the server never accepted. The only asymmetry is
+  where the undone edit is put back: an add returns its text to the input, where the
+  user was already typing, and a removal returns its chip to the row, in its original
+  position. The list is ordered and this route replaces it wholesale, so a rejected
+  removal that re-appended the chip would silently reorder the tiers as the price of a
+  failed request.
 
 **Copy** — `models.hub.sourceDetail.*`
 
@@ -3116,6 +3176,18 @@ frames already do this correctly; the rule is written down so a lane reading the
 files does not "fix" the page title to match them. Note that the design file's frame
 names do contain 模型网关: they are canvas labels for the author, and D-17 already says
 a frame's shell is not the shipped shell.
+
+**D-31 — A tier edit commits the whole `reasoning_efforts` list, so adding and removing
+are one state, not two.** `PATCH /api/models/sources/<source_id>/models/<model_id>`
+「replaces the complete capability list」, and §0.8 gives both directions the single
+`Tier commit` row.
+*Why:* the alternative is to model the chip UI's two gestures as two states, which then
+owe two entry conditions, two failure treatments and — under the frozen rule against
+enumerating request-level failure kinds — two strings for one rejection. Nothing
+downstream distinguishes them: the body is the same array, the route is the same route,
+and the server cannot tell an add from a removal either. The one place they genuinely
+differ is where a rejected edit is put back, and that is a sentence inside the failure
+treatment rather than a second row. See §1.6.
 
 ---
 
