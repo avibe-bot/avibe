@@ -700,6 +700,11 @@ what `scripts/check_model_hub_ui_states.py` reports as a class B gap.
 
 ### 0.10 The state-completeness gate
 
+**The path below is a forward reference.** This section specifies the gate; the
+script it names is added by a separate change, so the file is not in the same
+commit as this document. Naming it is what a specification has to do; running it
+is what the other change delivers.
+
 `scripts/check_model_hub_ui_states.py` regenerates its input from this file in the
 same run it reports — it reads the live document, never a snapshot committed
 beside it — and reports five gap classes, each of which is a set it computes
