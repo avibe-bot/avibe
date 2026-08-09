@@ -229,23 +229,40 @@ class SessionFlushCoordinator:
         if self._paused or not self._enabled():
             return False
         task = self._schedule(provider_session_ref, force=True)
+        joined_existing = task is None
         if task is None:
             key = provider_session_ref.serialize()
             task = self._flush_tasks.get(key)
         if task is None:
             return True
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=_positive_timeout(deadline_seconds),
-            )
-        except asyncio.TimeoutError:
-            return False
+        deadline = (
+            asyncio.get_running_loop().time()
+            + _positive_timeout(deadline_seconds)
+        )
+        while task is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                return False
+            if not joined_existing:
+                break
+            joined_existing = False
+            task = self._schedule(provider_session_ref, force=True)
+            if task is None:
+                task = self._flush_tasks.get(provider_session_ref.serialize())
         state = await self._store_call(
             self._store.get_session_flush_state,
             provider_session_ref,
         )
-        return state is None or state.state == "idle"
+        return state is None or (
+            state.state == "idle" and state.unflushed_count == 0
+        )
 
     async def pause_and_wait(self, *, timeout_seconds: float = 5.0) -> bool:
         """Stop scheduling and wait a bounded time for current session operations."""

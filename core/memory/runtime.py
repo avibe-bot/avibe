@@ -27,6 +27,11 @@ from core.memory.artifact import (
     PROVIDER_ROOT_CONTROL_FILES,
     get_memory_artifact_manager,
 )
+from core.memory.backup_restore_journal import (
+    BackupRestoreConflict,
+    BackupRestoreOperation,
+    MemoryBackupRestoreJournal,
+)
 from core.memory.clear_journal import (
     ClearOperation,
     ClearSurface,
@@ -135,22 +140,28 @@ class MemoryRuntime:
         self._restart_config = deepcopy(config)
         self._effective_home = effective_home or paths.get_vibe_remote_dir()
         self._backup_active = False
+        self._backup_restore_journal: MemoryBackupRestoreJournal | None = None
         self._clear_journal: MemoryClearJournal | None = None
         self._snapshot_manager: MemorySnapshotManager | None = None
         self._backup_manager: MemorySnapshotManager | None = None
         self._clear_journal_error: Exception | None = None
         try:
+            self._backup_restore_journal = MemoryBackupRestoreJournal(
+                self._effective_home
+            )
             self._clear_journal = MemoryClearJournal(self._effective_home)
             self._snapshot_manager = MemorySnapshotManager(self._effective_home)
             self._backup_manager = MemorySnapshotManager._for_backup(
                 self._effective_home,
                 operation_guard=self._clear_journal.assert_backup_allowed,
             )
+            self._backup_restore_journal.mark_boot_recovery_needed()
             self._clear_journal.mark_boot_recovery_needed()
-            self._reconcile_terminal_clear_snapshots()
         except Exception as exc:
             self._clear_journal_error = exc
-            logger.exception("Memory clear journal initialization failed; maintenance is fenced")
+            logger.exception(
+                "Memory maintenance journal initialization failed; maintenance is fenced"
+            )
         self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
         self._process_factory: EverOSProcessFactory = process_factory or EverOSProcess
         self._processing_event = processing_event
@@ -162,6 +173,8 @@ class MemoryRuntime:
         self._reconcile_lock = asyncio.Lock()
         self._restart_task: asyncio.Task[dict[str, Any]] | None = None
         self._ready_activation_task: asyncio.Task[None] | None = None
+        self._terminal_snapshot_gc_task: asyncio.Task[None] | None = None
+        self._closing = False
         self._ready_event: EverOSProcessPort | None = None
         # Single-flight state for the drain-side processing gate. Deliberately a
         # flag and a cached verdict rather than a lock: the gate must answer
@@ -263,6 +276,14 @@ class MemoryRuntime:
 
         if self._backup_active:
             return True
+        restore_journal = self._backup_restore_journal
+        if restore_journal is None:
+            return True
+        try:
+            if restore_journal.get_open_operation() is not None:
+                return True
+        except Exception:
+            return True
         journal = self._clear_journal
         if journal is None or self._clear_journal_error is not None:
             return True
@@ -360,7 +381,10 @@ class MemoryRuntime:
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
-        return await self._reconcile(config)
+        try:
+            return await self._reconcile(config)
+        finally:
+            self._ensure_terminal_snapshot_gc()
 
     async def _reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Run one reconciliation owned by the public lifecycle operation."""
@@ -369,7 +393,8 @@ class MemoryRuntime:
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
         # acquires later is a separate, sequential acquisition.
-        if await self._reap_recorded_sidecar_if_unowned():
+        recorded_sidecar_reaped = await self._reap_recorded_sidecar_if_unowned()
+        if recorded_sidecar_reaped and not self._maintenance_open():
             # Retention may run while artifact/store/credential preflight is
             # failing, but only after recovery proved no previous recorder can
             # still own the database. A recorder launch fences this task again
@@ -394,7 +419,14 @@ class MemoryRuntime:
             # save cannot race a root wipe or replace sidecar credentials halfway
             # through an active provider call.
             async with self.module._lifecycle_lock:
-                if self._maintenance_open():
+                restore_operation = self._open_backup_restore_operation()
+                if restore_operation is not None and not recorded_sidecar_reaped:
+                    self.module._worker.pause_claims()
+                    return {"ok": False, "error": "memory_clear_failed"}
+                if (
+                    self._maintenance_open()
+                    and restore_operation is None
+                ):
                     self.module._worker.pause_claims()
                     return {"ok": False, "error": "memory_clear_failed"}
                 result = await self._reconcile_locked(config)
@@ -412,11 +444,16 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Reconcile while both controller and module lifecycle locks are held."""
 
+        if self._open_backup_restore_operation() is not None:
+            recovered = await self._recover_backup_restore_locked()
+            if not recovered:
+                self.module._worker.pause_claims()
+                self._runtime_error = "memory_clear_failed"
+                return {"ok": False, "error": self._runtime_error}
+
         if self._maintenance_open():
             self.module._worker.pause_claims()
             return {"ok": False, "error": "memory_clear_failed"}
-
-        await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
 
         embedding_changed = not skip_embedding_guard and (
             config.embedding_change_pending or _embedding_configuration_changed(self._config, config)
@@ -901,13 +938,70 @@ class MemoryRuntime:
     ) -> MemorySnapshot:
         """Restore one verified ordinary Memory backup under the same fence."""
 
-        return await self._run_backup_operation(
-            lambda manager: manager.restore(
-                backup_id,
-                expected_manifest_sha256=expected_manifest_sha256,
-                expected_surface_digests=expected_surface_digests,
-            ),
-        )
+        if not self.available:
+            raise self._unavailable()
+        clear_journal = self._require_clear_journal()
+        restore_journal = self._require_backup_restore_journal()
+        manager = self._require_backup_manager()
+        async with self._reconcile_lock, self.module._lifecycle_lock:
+            async with self.module._root_lifecycle_lock():
+                clear_journal.assert_backup_allowed()
+                operation = restore_journal.get_open_operation()
+                if operation is not None:
+                    if (
+                        operation.state != "recovery_needed"
+                        or operation.backup_id != backup_id
+                        or operation.manifest_sha256 != expected_manifest_sha256
+                        or operation.digest_mapping() != dict(expected_surface_digests)
+                    ):
+                        raise BackupRestoreConflict(
+                            "a different Memory backup restore owns the recovery fence"
+                        )
+                self._backup_active = True
+                self.module._clear_active = True
+                try:
+                    await self._quiesce_for_clear()
+                    if operation is not None:
+                        operation = await self._run_maintenance_io(
+                            lambda: restore_journal.claim_retry(
+                                operation.operation_id,
+                                expected_revision=operation.revision,
+                                actor_ref="system:runtime",
+                            )
+                        )
+
+                    def begin_restore(snapshot: MemorySnapshot) -> None:
+                        nonlocal operation
+                        operation = restore_journal.start(snapshot)
+
+                    restored = await self._run_maintenance_io(
+                        lambda: manager.restore(
+                            backup_id,
+                            expected_manifest_sha256=expected_manifest_sha256,
+                            expected_surface_digests=expected_surface_digests,
+                            before_replace=None if operation is not None else begin_restore,
+                        )
+                    )
+                    if operation is None:
+                        raise RuntimeError("Memory backup restore intent was not recorded")
+                    operation = await self._run_maintenance_io(
+                        lambda: restore_journal.mark_completed(
+                            operation.operation_id,
+                            expected_revision=operation.revision,
+                            execution_token=self._backup_restore_execution_token(operation),
+                        )
+                    )
+                    return restored
+                except BaseException:
+                    await self._mark_backup_restore_recovery(operation)
+                    raise
+                finally:
+                    self._backup_active = False
+                    try:
+                        if restore_journal.get_open_operation() is None:
+                            await self._resume_after_clear()
+                    finally:
+                        self.module._clear_active = False
 
     async def _run_backup_operation(
         self,
@@ -916,10 +1010,12 @@ class MemoryRuntime:
         if not self.available:
             raise self._unavailable()
         journal = self._require_clear_journal()
+        restore_journal = self._require_backup_restore_journal()
         manager = self._require_backup_manager()
         async with self._reconcile_lock, self.module._lifecycle_lock:
             async with self.module._root_lifecycle_lock():
                 journal.assert_backup_allowed()
+                restore_journal.assert_idle()
                 self._backup_active = True
                 self.module._clear_active = True
                 try:
@@ -1255,6 +1351,76 @@ class MemoryRuntime:
         await self._stop_call_log_retention()
         self._recorder_health = dict(_RECORDER_DISABLED)
 
+    async def _recover_backup_restore_locked(self) -> bool:
+        """Converge an interrupted restore before any boot-time activation."""
+
+        journal = self._require_backup_restore_journal()
+        operation = journal.get_open_operation()
+        if operation is None:
+            return True
+        if operation.state != "recovery_needed":
+            return False
+        manager = self._require_backup_manager()
+        self._backup_active = True
+        self.module._clear_active = True
+        try:
+            async with self.module._root_lifecycle_lock():
+                await self._quiesce_for_clear()
+                operation = await self._run_maintenance_io(
+                    lambda: journal.claim_retry(
+                        operation.operation_id,
+                        expected_revision=operation.revision,
+                        actor_ref="system:boot",
+                    )
+                )
+                await self._run_maintenance_io(
+                    lambda: manager.restore(
+                        operation.backup_id,
+                        expected_manifest_sha256=operation.manifest_sha256,
+                        expected_surface_digests=operation.digest_mapping(),
+                    )
+                )
+                await self._run_maintenance_io(
+                    lambda: journal.mark_completed(
+                        operation.operation_id,
+                        expected_revision=operation.revision,
+                        execution_token=self._backup_restore_execution_token(operation),
+                        actor_ref="system:boot",
+                    )
+                )
+            return True
+        except asyncio.CancelledError:
+            await self._mark_backup_restore_recovery(operation)
+            raise
+        except Exception:
+            await self._mark_backup_restore_recovery(operation)
+            return False
+        finally:
+            self._backup_active = False
+            self.module._clear_active = False
+
+    async def _mark_backup_restore_recovery(
+        self,
+        operation: BackupRestoreOperation | None,
+    ) -> BackupRestoreOperation | None:
+        journal = self._backup_restore_journal
+        if journal is None or operation is None:
+            return None
+        try:
+            current = journal.get_operation(operation.operation_id)
+            if current is None or current.state != "restoring":
+                return current
+            return await self._run_maintenance_io(
+                lambda: journal.mark_recovery_needed(
+                    current.operation_id,
+                    expected_revision=current.revision,
+                    execution_token=self._backup_restore_execution_token(current),
+                )
+            )
+        except Exception:
+            logger.exception("Memory backup restore failure could not be journaled")
+            return None
+
     async def _mark_clear_recovery(
         self,
         operation: ClearOperation | None = None,
@@ -1331,6 +1497,91 @@ class MemoryRuntime:
                     exc_info=True,
                 )
 
+    def _ensure_terminal_snapshot_gc(self) -> None:
+        """Schedule one runtime-owned retry after activation has returned."""
+
+        task = self._terminal_snapshot_gc_task
+        if (
+            self._closing
+            or self._clear_journal is None
+            or self._snapshot_manager is None
+            or self._clear_journal_error is not None
+            or (task is not None and not task.done())
+        ):
+            return
+        task = asyncio.create_task(
+            self._run_terminal_snapshot_gc(),
+            name="memory-terminal-snapshot-gc",
+        )
+        self._terminal_snapshot_gc_task = task
+
+        def clear_gc(completed: asyncio.Task[None]) -> None:
+            if self._terminal_snapshot_gc_task is completed:
+                self._terminal_snapshot_gc_task = None
+
+        task.add_done_callback(clear_gc)
+
+    async def _run_terminal_snapshot_gc(self) -> None:
+        """Remove terminal snapshots without occupying the activation path."""
+
+        journal = self._require_clear_journal()
+        manager = self._require_snapshot_manager()
+        try:
+            permits = await self._run_maintenance_io(
+                journal.terminal_snapshot_permits
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Terminal Memory clear snapshot permits could not be loaded",
+                exc_info=True,
+            )
+            return
+        for permit in permits:
+            try:
+                # A cancellation settles the current filesystem operation but
+                # stops before the next permit. Remaining permits stay durable
+                # for the next reconcile or restart.
+                await self._run_maintenance_io(
+                    lambda permit=permit: manager.remove(permit)
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Terminal Memory clear snapshot %s could not be removed",
+                    permit.snapshot_id,
+                    exc_info=True,
+                )
+
+    async def _stop_terminal_snapshot_gc(self) -> None:
+        """Cancel GC and retain ownership until its current I/O call settles."""
+
+        task = self._terminal_snapshot_gc_task
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        settlement = asyncio.gather(task, return_exceptions=True)
+        caller_cancellation: asyncio.CancelledError | None = None
+        while not settlement.done():
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
+        try:
+            result = settlement.result()[0]
+        finally:
+            if self._terminal_snapshot_gc_task is task:
+                self._terminal_snapshot_gc_task = None
+        if isinstance(result, BaseException) and not isinstance(
+            result,
+            asyncio.CancelledError,
+        ):
+            raise result
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
     async def _resume_after_clear(self) -> None:
         """Keep lifecycle ownership until runtime reconciliation settles."""
 
@@ -1366,6 +1617,15 @@ class MemoryRuntime:
             self._restart_config = deepcopy(self._config)
         else:
             self._runtime_error = "memory_sidecar_unavailable"
+
+    def _open_backup_restore_operation(self) -> BackupRestoreOperation | None:
+        journal = self._backup_restore_journal
+        if journal is None:
+            return None
+        try:
+            return journal.get_open_operation()
+        except Exception:
+            return None
 
     def _open_clear_operation(self) -> ClearOperation | None:
         journal = self._clear_journal
@@ -1425,6 +1685,16 @@ class MemoryRuntime:
             raise MemoryStoreUnavailableError("Memory clear journal is unavailable")
         return self._clear_journal
 
+    def _require_backup_restore_journal(self) -> MemoryBackupRestoreJournal:
+        if (
+            self._backup_restore_journal is None
+            or self._clear_journal_error is not None
+        ):
+            raise MemoryStoreUnavailableError(
+                "Memory backup restore journal is unavailable"
+            )
+        return self._backup_restore_journal
+
     def _require_snapshot_manager(self) -> MemorySnapshotManager:
         if self._snapshot_manager is None or self._clear_journal_error is not None:
             raise MemoryStoreUnavailableError("Memory snapshot manager is unavailable")
@@ -1434,6 +1704,14 @@ class MemoryRuntime:
         if self._backup_manager is None or self._clear_journal_error is not None:
             raise MemoryStoreUnavailableError("Memory backup manager is unavailable")
         return self._backup_manager
+
+    @staticmethod
+    def _backup_restore_execution_token(
+        operation: BackupRestoreOperation,
+    ) -> str:
+        if operation.execution_token is None:
+            raise RuntimeError("Memory backup restore execution claim is missing")
+        return operation.execution_token
 
     @staticmethod
     def _clear_execution_token(operation: ClearOperation) -> str:
@@ -1578,6 +1856,8 @@ class MemoryRuntime:
         except Exception:
             logger.exception("Memory sidecar restart failed")
             return {"ok": False, "error": "memory_restart_failed"}
+        finally:
+            self._ensure_terminal_snapshot_gc()
 
     async def _restart_locked(self) -> dict[str, Any]:
         """Replace the sidecar while ``_reconcile_lock`` is held."""
@@ -1708,6 +1988,7 @@ class MemoryRuntime:
             return {"ok": True, "state": "ready"}
 
     async def close(self) -> None:
+        self._closing = True
         restart_task = self._restart_task
         if restart_task is not None and restart_task is not asyncio.current_task():
             try:
@@ -1740,6 +2021,7 @@ class MemoryRuntime:
         self._process_records_calls = False
         await self._stop_call_log_retention()
         self._artifact_manager.set_activation_coordinator(None)
+        await self._stop_terminal_snapshot_gc()
 
     async def _apply_active_artifact_metadata(self) -> None:
         provider_root_format = await asyncio.to_thread(self._artifact_manager.provider_root_format)

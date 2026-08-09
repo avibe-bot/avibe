@@ -453,13 +453,15 @@ class MemorySnapshotManager:
         *,
         expected_manifest_sha256: str,
         expected_surface_digests: Mapping[str, str | None],
+        before_replace: Callable[[MemorySnapshot], None] | None = None,
     ) -> MemorySnapshot:
         """Restore every surface relative to this manager's effective home.
 
         The complete snapshot is verified before any target is touched.  All
         replacement payloads are staged first, and an in-process failure rolls
-        already-swapped targets back.  The caller remains responsible for the
-        process-wide maintenance fence and crash recovery journal.
+        already-swapped targets back. ``before_replace`` runs after staging and
+        before the first target mutation so the caller can publish its durable
+        crash-recovery intent while holding the process-wide maintenance fence.
         """
 
         self._assert_operation_allowed()
@@ -502,6 +504,9 @@ class MemorySnapshotManager:
                             payload_root,
                             staged,
                         )
+
+            if before_replace is not None:
+                before_replace(snapshot)
 
             for index, plan in enumerate(plans):
                 candidates = [plan.target]

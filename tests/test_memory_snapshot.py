@@ -521,6 +521,35 @@ def test_snapshot_verify_fails_before_restore_on_tampered_payload(tmp_path: Path
     assert manager.snapshot_path("tamper").exists()
 
 
+def test_restore_intent_failure_happens_before_any_live_replacement(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    queue_connection = _build_all_surfaces(home)
+    manager = MemorySnapshotManager(home)
+    snapshot = manager.create("intent-failure")
+    queue_connection.close()
+    provider = home / "memory/everos-root/profiles/user.json"
+    provider.write_bytes(b"live generation")
+
+    def reject_intent(_snapshot) -> None:
+        raise OSError("journal unavailable")
+
+    with pytest.raises(OSError, match="journal unavailable"):
+        manager.restore(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+            before_replace=reject_intent,
+        )
+
+    assert provider.read_bytes() == b"live generation"
+    assert _sqlite_values(home / "state/memory/memory.sqlite") == [
+        "queued-before-clear"
+    ]
+    assert not any(".restore-intent-failure-" in path.name for path in home.rglob("*"))
+
+
 def test_snapshot_rejects_symlinks_special_files_and_public_modes(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir(mode=0o700)

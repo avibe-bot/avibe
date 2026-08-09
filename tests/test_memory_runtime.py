@@ -59,6 +59,7 @@ from core.memory.process import (
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
 from core.memory.sidecar import _request_rejection
 from core.memory.everos_insight.recorder import initialize_call_log
+from core.memory.snapshot import MemorySnapshotManager
 from core.memory.store import MemoryStore
 from core.memory.types import (
     CaptureAccepted,
@@ -3269,6 +3270,141 @@ def _processing_config() -> MemoryProcessingConfig:
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
     )
+
+
+async def _retain_terminal_clear_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+) -> Path:
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=home)
+    manager = runtime._snapshot_manager
+    assert manager is not None
+
+    def retain(_permit) -> None:
+        raise OSError("retain terminal snapshot for startup GC")
+
+    monkeypatch.setattr(manager, "remove", retain)
+    completed = await runtime.clear(operator_ref="user:owner")
+    snapshot_path = manager.snapshot_path(completed["operation_id"])
+    assert completed["status"] == "completed"
+    assert snapshot_path.is_dir()
+    await runtime.close()
+    return snapshot_path
+
+
+def test_terminal_snapshot_gc_does_not_block_construction_or_ready_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    synchronous_calls: list[str] = []
+    original_remove = MemorySnapshotManager.remove
+
+    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            synchronous_calls.append(permit.snapshot_id)
+            raise AssertionError("terminal snapshot GC ran on the activation loop")
+        entered.set()
+        assert release.wait(timeout=2)
+        try:
+            original_remove(manager, permit)
+        finally:
+            finished.set()
+
+    async def run() -> None:
+        snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+        monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+        factory = FakeEverOSProcessFactory()
+        runtime = MemoryRuntime(
+            MemoryConfig(enabled=True, processing=_processing_config()),
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+
+        assert synchronous_calls == []
+        assert await runtime.reconcile(runtime._config) == {
+            "ok": True,
+            "state": "ready",
+        }
+        assert factory.supervised[0].running is True
+        assert entered.is_set() is False
+
+        gc_task = runtime._terminal_snapshot_gc_task
+        assert gc_task is not None
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not gc_task.done()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(gc_task), timeout=1)
+
+        assert finished.is_set()
+        assert not snapshot_path.exists()
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_terminal_snapshot_gc_shutdown_owns_cancelled_io_until_it_settles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_remove = MemorySnapshotManager.remove
+
+    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        try:
+            original_remove(manager, permit)
+        finally:
+            finished.set()
+
+    async def run() -> None:
+        snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+        monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+        assert await runtime.reconcile(MemoryConfig()) == {
+            "ok": True,
+            "state": "disabled",
+        }
+        gc_task = runtime._terminal_snapshot_gc_task
+        assert gc_task is not None
+        assert await asyncio.to_thread(entered.wait, 1)
+
+        stop_entered = asyncio.Event()
+        original_stop = runtime._stop_terminal_snapshot_gc
+
+        async def observed_stop() -> None:
+            stop_entered.set()
+            await original_stop()
+
+        monkeypatch.setattr(runtime, "_stop_terminal_snapshot_gc", observed_stop)
+        closing = asyncio.create_task(runtime.close())
+        await stop_entered.wait()
+        assert not closing.done()
+        closing.cancel()
+        await asyncio.sleep(0)
+        assert not closing.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, timeout=1)
+
+        assert finished.is_set()
+        assert gc_task.done()
+        assert runtime._terminal_snapshot_gc_task is None
+        assert not snapshot_path.exists()
+
+    asyncio.run(run())
 
 
 def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:

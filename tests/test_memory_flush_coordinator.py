@@ -149,6 +149,72 @@ def test_accumulated_add_waits_for_idle_flush(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_final_flush_upgrades_joined_due_flush_after_due_at_shifts(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        current = [datetime(2026, 1, 1, tzinfo=UTC)]
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+        )
+        first = _enqueue(store, "first-final-flush-race")
+        assert await worker.drain_once() == 1
+
+        current[0] += timedelta(minutes=5)
+        session_lock = worker.coordinator._session_lock(
+            first.provider_session_ref.serialize()
+        )
+        await session_lock.acquire()
+        assert await worker.coordinator.run_due() == 1
+        ordinary_flush = worker.coordinator._flush_tasks[
+            first.provider_session_ref.serialize()
+        ]
+        assert not ordinary_flush.done()
+
+        second = _enqueue(store, "second-final-flush-race")
+        claimed = store.claim_due(
+            lease_owner="blocked-add",
+            now="2026-01-01T00:05:00.000Z",
+        )
+        assert claimed is not None
+        assert claimed.source_message_digest == second.source_message_digest
+        assert store.settle_add_ack(
+            claimed,
+            AddAck("second-add", "accumulated"),
+            lease_owner="blocked-add",
+            now=current[0],
+        ).settled
+        state = store.get_session_flush_state(first.provider_session_ref)
+        assert state is not None
+        assert state.due_at == "2026-01-01T00:10:00.000Z"
+
+        final_flush = asyncio.create_task(
+            worker.coordinator.final_flush(
+                first.provider_session_ref,
+                deadline_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        assert (
+            worker.coordinator._flush_tasks[first.provider_session_ref.serialize()]
+            is ordinary_flush
+        )
+        session_lock.release()
+
+        assert await final_flush
+        assert provider.flushes == [first.provider_session_ref]
+        state = store.get_session_flush_state(first.provider_session_ref)
+        assert state is not None
+        assert (state.state, state.unflushed_count) == ("idle", 0)
+
+    asyncio.run(run())
+
+
 def test_extracted_add_is_a_natural_boundary_without_flush(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)

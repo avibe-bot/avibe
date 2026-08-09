@@ -8,7 +8,9 @@ import threading
 
 import pytest
 
+import core.memory.snapshot as snapshot_module
 from config.v2_config import MemoryConfig
+from core.memory.process import SidecarOwnership
 from core.memory.runtime import MemoryRuntime
 from core.memory.snapshot import MemorySnapshotManager
 from core.memory.store import AmbiguousAdd
@@ -572,6 +574,9 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
 
     monkeypatch.setattr(manager, "remove", original_remove)
     assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
+    reconcile_gc = runtime._terminal_snapshot_gc_task
+    assert reconcile_gc is not None
+    await reconcile_gc
     assert not snapshot_path.exists()
 
     monkeypatch.setattr(manager, "remove", fail_removal)
@@ -582,9 +587,17 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
 
     restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
-    assert not restart_snapshot_path.exists()
+    assert restart_snapshot_path.is_dir()
     assert restarted._clear_journal is not None
     assert restarted._clear_journal.get_open_operation() is None
+    assert await restarted.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    restart_gc = restarted._terminal_snapshot_gc_task
+    assert restart_gc is not None
+    await restart_gc
+    assert not restart_snapshot_path.exists()
     await restarted.close()
 
 
@@ -637,6 +650,9 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
 
     monkeypatch.setattr(manager, "remove", original_remove)
     assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
+    reconcile_gc = runtime._terminal_snapshot_gc_task
+    assert reconcile_gc is not None
+    await reconcile_gc
     assert not snapshot_path.exists()
 
     monkeypatch.setattr(manager, "remove", fail_removal)
@@ -647,9 +663,17 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
 
     restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
-    assert not restart_snapshot_path.exists()
+    assert restart_snapshot_path.is_dir()
     assert restarted._clear_journal is not None
     assert restarted._clear_journal.get_open_operation() is None
+    assert await restarted.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    restart_gc = restarted._terminal_snapshot_gc_task
+    assert restart_gc is not None
+    await restart_gc
+    assert not restart_snapshot_path.exists()
     await restarted.close()
 
 
@@ -1067,3 +1091,164 @@ async def test_runtime_backup_restore_round_trips_queue_state(
     assert len(rows) == 1
     assert rows[0].source_message_digest
     await runtime.close()
+
+
+@pytest.mark.parametrize(
+    ("crash_surface", "crash_target"),
+    (
+        ("queue", "state/memory/memory.sqlite"),
+        ("provider", "memory/everos-root"),
+        ("call_log", "memory/call-log/call-log.db"),
+        ("attachments", "memory/attachments"),
+    ),
+)
+async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    crash_surface: str,
+    crash_target: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    _enqueue(runtime, "backup-queue")
+
+    provider_marker = tmp_path / "memory/everos-root/generation.txt"
+    attachment_marker = tmp_path / "memory/attachments/generation.txt"
+    call_log = tmp_path / "memory/call-log/call-log.db"
+    for marker in (provider_marker, attachment_marker):
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.parent.chmod(0o700)
+        marker.write_text("backup")
+        marker.chmod(0o600)
+    call_log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    call_log.parent.chmod(0o700)
+    with sqlite3.connect(call_log) as connection:
+        connection.execute("CREATE TABLE generation (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO generation VALUES ('backup')")
+    call_log.chmod(0o600)
+
+    backup = await runtime.create_backup("crash-safe-restore")
+    _enqueue(runtime, "live-queue")
+    provider_marker.write_text("live")
+    attachment_marker.write_text("live")
+    with sqlite3.connect(call_log) as connection:
+        connection.execute("UPDATE generation SET value = 'live'")
+
+    target = tmp_path / crash_target
+    real_replace = snapshot_module.os.replace
+    crashed = False
+    intent_visible_before_replace = False
+
+    class InjectedProcessDeath(BaseException):
+        pass
+
+    def crash_after_surface_install(source, destination, *args, **kwargs):
+        nonlocal crashed, intent_visible_before_replace
+        if (
+            not crashed
+            and Path(destination) == target
+            and f".restore-{backup.snapshot_id}-" in Path(source).name
+        ):
+            open_operation = runtime._backup_restore_journal.get_open_operation()
+            assert open_operation is not None
+            assert open_operation.state == "restoring"
+            intent_visible_before_replace = True
+            real_replace(source, destination, *args, **kwargs)
+            crashed = True
+            raise InjectedProcessDeath(crash_surface)
+        return real_replace(source, destination, *args, **kwargs)
+
+    async def process_died_before_cleanup(_operation):
+        return None
+
+    monkeypatch.setattr(snapshot_module.os, "replace", crash_after_surface_install)
+    monkeypatch.setattr(runtime, "_mark_backup_restore_recovery", process_died_before_cleanup)
+    with pytest.raises(InjectedProcessDeath):
+        await runtime.restore_backup(
+            backup.snapshot_id,
+            expected_manifest_sha256=backup.manifest_sha256,
+            expected_surface_digests=backup.surface_digests(),
+        )
+    monkeypatch.setattr(snapshot_module.os, "replace", real_replace)
+
+    assert crashed is True
+    assert intent_visible_before_replace is True
+    interrupted = runtime._backup_restore_journal.get_open_operation()
+    assert interrupted is not None
+    assert interrupted.state == "restoring"
+    assert [
+        event.event
+        for event in runtime._backup_restore_journal.get_events(
+            interrupted.operation_id
+        )
+    ] == ["started"]
+
+    restarted = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+    )
+    recovery = restarted._backup_restore_journal.get_open_operation()
+    assert recovery is not None
+    assert recovery.state == "recovery_needed"
+    assert restarted._maintenance_open() is True
+    assert restarted.module._worker._claims_paused is True
+    assert restarted._worker_task is None
+    assert restarted._process is None
+    blocked = await restarted.module.capture(
+        CaptureRequest(
+            source_message_id="blocked-before-restore-recovery",
+            session_id="session",
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            provenance="user_input",
+            text="must remain fenced",
+            occurred_at_ms=2,
+        )
+    )
+    assert blocked == CaptureSkipped(reason="memory_clear_failed")
+
+    if crash_surface == "queue":
+        original_reap = SidecarOwnership.reap
+
+        async def fail_reap(_ownership) -> None:
+            raise OSError("recorded sidecar is still live")
+
+        monkeypatch.setattr(SidecarOwnership, "reap", fail_reap)
+        assert await restarted.reconcile(MemoryConfig()) == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        still_fenced = restarted._backup_restore_journal.get_open_operation()
+        assert still_fenced == recovery
+        assert restarted.module._worker._claims_paused is True
+        monkeypatch.setattr(SidecarOwnership, "reap", original_reap)
+
+    assert await restarted.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert len(restarted._store.list_queue_rows()) == 1
+    assert provider_marker.read_text() == "backup"
+    assert attachment_marker.read_text() == "backup"
+    with sqlite3.connect(call_log) as connection:
+        assert connection.execute("SELECT value FROM generation").fetchone() == (
+            "backup",
+        )
+
+    completed = restarted._backup_restore_journal.get_operation(
+        recovery.operation_id
+    )
+    assert completed is not None
+    assert completed.state == "completed"
+    assert completed.attempt_count == 2
+    assert restarted._backup_restore_journal.get_open_operation() is None
+    assert [
+        event.event
+        for event in restarted._backup_restore_journal.get_events(
+            completed.operation_id
+        )
+    ] == ["started", "recovery_needed", "retry_started", "completed"]
+    assert restarted._maintenance_open() is False
+
+    await runtime.close()
+    await restarted.close()
