@@ -35,6 +35,8 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
+import { canMarkConversationRead, readPageActivity } from '../../lib/pageActivity';
+import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
@@ -203,6 +205,24 @@ export const ChatPage: React.FC = () => {
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
+  const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
+  const isDesktop = useIsDesktop();
+  const [pageActive, setPageActive] = useState(() => readPageActivity());
+  useEffect(() => {
+    const syncPageActivity = () => setPageActive(readPageActivity());
+    document.addEventListener('visibilitychange', syncPageActivity);
+    window.addEventListener('focus', syncPageActivity);
+    window.addEventListener('blur', syncPageActivity);
+    window.addEventListener('pageshow', syncPageActivity);
+    window.addEventListener('pagehide', syncPageActivity);
+    return () => {
+      document.removeEventListener('visibilitychange', syncPageActivity);
+      window.removeEventListener('focus', syncPageActivity);
+      window.removeEventListener('blur', syncPageActivity);
+      window.removeEventListener('pageshow', syncPageActivity);
+      window.removeEventListener('pagehide', syncPageActivity);
+    };
+  }, []);
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -242,6 +262,7 @@ export const ChatPage: React.FC = () => {
   // before the composer bridge target, which depends on showPageMode.
   const [showPageMode, setShowPageMode] = useState(false);
   const [showPageBusy, setShowPageBusy] = useState(false);
+  const [showPageViewResolved, setShowPageViewResolved] = useState(false);
   // One authority invalidates an in-flight restore/open when the user explicitly
   // chooses Chat (including a same-session ?view=chat navigation).
   const showPageRequestRef = useRef(0);
@@ -311,6 +332,7 @@ export const ChatPage: React.FC = () => {
     // once the new session row loads, the restore effect below applies its own
     // remembered view through the same open path as a user click.
     showPageRestoreAttemptRef.current = null;
+    setShowPageViewResolved(false);
     selectChatView(sessionId ?? '', false);
     setShowPageUrl(null);
   }, [selectChatView, sessionId]);
@@ -324,6 +346,7 @@ export const ChatPage: React.FC = () => {
     const sid = sessionId ?? '';
     showPageRestoreAttemptRef.current = sid || null;
     selectChatView(sid, true);
+    setShowPageViewResolved(true);
     const next = new URLSearchParams(window.location.search);
     next.delete('view');
     setSearchParams(next, { replace: true });
@@ -1900,10 +1923,18 @@ export const ChatPage: React.FC = () => {
     showPageRestoreAttemptRef.current = sid;
     if (readOnly) {
       writeChatViewMode(sid, 'chat');
+      setShowPageViewResolved(true);
       return;
     }
-    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') return;
-    void openShowPage(sid);
+    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') {
+      setShowPageViewResolved(true);
+      return;
+    }
+    void openShowPage(sid).finally(() => {
+      if (sessionIdRef.current === sid && showPageRestoreAttemptRef.current === sid) {
+        setShowPageViewResolved(true);
+      }
+    });
   }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal]);
 
   // When the share control resolves the page (open) or flips its visibility, the
@@ -2171,18 +2202,37 @@ export const ChatPage: React.FC = () => {
     };
   }, []);
 
-  // The user is actively viewing this session, so an agent reply here is seen,
+  // The user is actively viewing this session's live transcript, so an agent reply is seen,
   // not "new". Clear unread whenever it appears — on open, or when a realtime
   // inbox.session.updated lands after a reply — so the Inbox/sidebar never badge
   // the chat you're looking at. Reactive to the unread map, so it's race-free
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
-    if (historicalWindow) return;
+    if (!canMarkConversationRead({
+      pageActive,
+      sessionReady: !loading && session?.id === sessionId,
+      viewResolved: showPageViewResolved,
+      historicalWindow,
+      showPageActive,
+      foregroundAppWindow: isDesktop && foregroundAppWindowId !== null,
+    })) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead, historicalWindow]);
+  }, [
+    sessionId,
+    unreadBySession,
+    markInboxRead,
+    loading,
+    session?.id,
+    showPageViewResolved,
+    historicalWindow,
+    pageActive,
+    showPageActive,
+    isDesktop,
+    foregroundAppWindowId,
+  ]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn
@@ -2440,6 +2490,7 @@ export const ChatPage: React.FC = () => {
       <div
         ref={chatSurfaceRef}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
+        onPointerDownCapture={focusCanvas}
         {...fileDropHandlers}
       >
         {/* Drag-and-drop overlay: shown while files hover anywhere over the chat
@@ -3380,7 +3431,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
     const pathLabel = recentPathLabel(target.path);
-    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    const desktop = isDesktopViewport();
     const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
       if (desktop) {
         openApp('preview', { title: name, params: { path: target.path, name } });
