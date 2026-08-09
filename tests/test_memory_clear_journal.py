@@ -239,12 +239,14 @@ def test_failed_recovery_claim_is_released_without_changing_direction(
     operation = _record_all_snapshots(journal, operation)
     recovery = journal.mark_boot_recovery_needed()
     assert recovery is not None
+    assert journal.can_resume(recovery.operation_id) is True
     assert journal.can_abort(recovery.operation_id) is True
     claimed = journal.claim_abort(
         operation.operation_id,
         operator_ref="user:owner",
         expected_revision=recovery.revision,
     )
+    assert journal.can_resume(claimed.operation_id) is False
     assert journal.can_abort(claimed.operation_id) is False
     assert claimed.execution_token is not None
 
@@ -258,6 +260,7 @@ def test_failed_recovery_claim_is_released_without_changing_direction(
     assert released.resolution == "abort"
     assert released.execution_token is None
     assert released.closed_error == "memory_clear_failed"
+    assert journal.can_resume(released.operation_id) is False
     assert journal.can_abort(released.operation_id) is True
     assert journal.get_events(operation.operation_id)[-1].event == "recovery_claim_failed"
     reclaimed = journal.claim_abort(

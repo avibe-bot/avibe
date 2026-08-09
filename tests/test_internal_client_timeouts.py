@@ -14,8 +14,6 @@ import re
 from pathlib import Path
 
 from core.memory.module import (
-    CLEAR_CLEANUP_TIMEOUT_SECONDS,
-    CLEAR_DRAIN_TIMEOUT_SECONDS,
     PROVIDER_READ_TIMEOUT_SECONDS,
 )
 from core.memory.process import (
@@ -25,13 +23,14 @@ from core.memory.process import (
 )
 from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
-    MEMORY_CLEAR_TIMEOUT_SECONDS,
     MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_SEARCH_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
+    memory_clear,
+    memory_clear_recovery,
     memory_profile,
     memory_final_flush,
     memory_profile_sync,
@@ -109,13 +108,12 @@ def test_restart_client_has_no_reporting_timeout() -> None:
     assert "timeout" not in inspect.signature(memory_restart).parameters
 
 
-def test_clear_client_outlasts_clear_and_enabled_reconciliation() -> None:
-    clear_lifecycle_budget = (
-        CLEAR_DRAIN_TIMEOUT_SECONDS
-        + CLEAR_CLEANUP_TIMEOUT_SECONDS
-        + _reconcile_lifecycle_budget_seconds()
-    )
-    assert MEMORY_CLEAR_TIMEOUT_SECONDS > clear_lifecycle_budget
+def test_clear_clients_have_no_reporting_timeout() -> None:
+    # Snapshot and restore copy user-owned trees whose size has no runtime
+    # bound. A transport deadline would report failure while the controller's
+    # journaled operation continues and make a destructive retry possible.
+    for operation in (memory_clear, memory_clear_recovery):
+        assert "timeout" not in inspect.signature(operation).parameters
 
 
 def test_install_client_covers_the_dependency_job_budget() -> None:

@@ -13,6 +13,16 @@ class AddAck:
 
 
 @dataclass(frozen=True)
+class AddRejected:
+    request_id: str | None
+    error_code: str | None
+    server_fault: bool
+
+
+AddResult: TypeAlias = AddAck | AddRejected
+
+
+@dataclass(frozen=True)
 class FlushSucceeded:
     request_id: str | None
     status: Literal["extracted", "no_extraction"] | None

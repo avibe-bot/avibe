@@ -318,7 +318,12 @@ class MemorySnapshotManager:
         _ensure_private_directory(self._effective_home, self._snapshot_root)
         final = self.snapshot_path(identifier)
         _require_absent(final, "Memory snapshot already exists")
-        stage = self._snapshot_root / f".{identifier}.{uuid.uuid4().hex}.tmp"
+        # A process death bypasses exception cleanup. Reusing one operation-
+        # scoped stage lets the explicit retry reclaim that unpublished copy
+        # without scanning or trusting arbitrary entries in the snapshot root.
+        stage = self._snapshot_root / f".{identifier}.tmp"
+        _remove_safe_path(self._effective_home, stage)
+        _fsync_directory(self._snapshot_root)
         payload_root = stage / _PAYLOAD_DIRNAME
         published = False
         try:

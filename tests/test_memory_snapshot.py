@@ -457,6 +457,33 @@ def test_restore_retry_converges_after_crash_between_backup_and_install(
     )
 
 
+def test_create_retry_reclaims_stage_left_by_process_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    manager = MemorySnapshotManager(home)
+    real_replace = snapshot_module.os.replace
+
+    def crash_before_publish(source, destination, *args, **kwargs):
+        if Path(destination) == manager.snapshot_path("stage-crash"):
+            raise SystemExit("injected snapshot process death")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module.os, "replace", crash_before_publish)
+    with pytest.raises(SystemExit):
+        manager.create("stage-crash")
+
+    orphaned = list(manager.snapshot_root.glob(".stage-crash*.tmp"))
+    assert len(orphaned) == 1
+
+    monkeypatch.setattr(snapshot_module.os, "replace", real_replace)
+    snapshot = manager.create("stage-crash")
+
+    assert snapshot.snapshot_id == "stage-crash"
+    assert not list(manager.snapshot_root.glob(".stage-crash*.tmp"))
+
+
 def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

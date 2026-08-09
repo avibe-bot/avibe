@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import type { MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import type { MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
@@ -224,7 +224,7 @@ describe('MemoryStatusPanel', () => {
     render(
       <MemoryStatusPanel
         {...baseProps}
-        recovery={{ operation_id: 'clear-42', state: 'recovery_needed', can_abort: true }}
+        recovery={{ operation_id: 'clear-42', state: 'recovery_needed', can_resume: true, can_abort: true }}
         onResumeClear={onResumeClear}
         onAbortClear={onAbortClear}
       />,
@@ -246,7 +246,7 @@ describe('MemoryStatusPanel', () => {
     render(
       <MemoryStatusPanel
         {...baseProps}
-        recovery={{ operation_id: `clear-${state}`, state, can_abort: false }}
+        recovery={{ operation_id: `clear-${state}`, state, can_resume: true, can_abort: false }}
       />,
     );
 
@@ -258,7 +258,7 @@ describe('MemoryStatusPanel', () => {
     render(
       <MemoryStatusPanel
         {...baseProps}
-        recovery={{ operation_id: 'clear-future', state: 'future_state', can_abort: false }}
+        recovery={{ operation_id: 'clear-future', state: 'future_state', can_resume: false, can_abort: false }}
       />,
     );
 
@@ -271,7 +271,7 @@ describe('MemoryStatusPanel', () => {
     render(
       <MemoryStatusPanel
         {...baseProps}
-        recovery={{ operation_id: 'clear-incomplete', state: 'recovery_needed', can_abort: false }}
+        recovery={{ operation_id: 'clear-incomplete', state: 'recovery_needed', can_resume: true, can_abort: false }}
         onAbortClear={onAbortClear}
       />,
     );
@@ -284,5 +284,29 @@ describe('MemoryStatusPanel', () => {
 
     await user.click(abort);
     expect(onAbortClear).not.toHaveBeenCalled();
+  });
+
+  it('keeps resume unavailable after the journal commits to abort', async () => {
+    const onResumeClear = vi.fn();
+    const user = userEvent.setup();
+    const recovery = {
+      operation_id: 'clear-aborting',
+      state: 'recovery_needed',
+      can_resume: false,
+      can_abort: true,
+    } satisfies MemoryClearRecovery;
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={recovery}
+        onResumeClear={onResumeClear}
+      />,
+    );
+
+    const resume = screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' });
+    expect((resume as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(resume);
+    expect(onResumeClear).not.toHaveBeenCalled();
   });
 });

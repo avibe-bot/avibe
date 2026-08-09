@@ -1798,6 +1798,7 @@ export type MemoryFailureLogEntry = {
 export type MemoryClearRecovery = {
   operation_id: string;
   state: string;
+  can_resume: boolean;
   can_abort: boolean;
   occurred_at?: string | null;
   error_code?: string | null;

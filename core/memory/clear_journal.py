@@ -314,6 +314,27 @@ class MemoryClearJournal:
         finally:
             connection.close()
 
+    def can_resume(self, operation_id: str) -> bool:
+        """Report whether the current recovery claim may continue deletion."""
+
+        identifier = _validated_operation_id(operation_id)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM clear_operation WHERE operation_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                raise ClearOperationNotFound(identifier)
+            return bool(
+                row["state"] == "recovery_needed"
+                and row["execution_token"] is None
+                and row["resolution"] != "abort"
+                and row["recovery_from_state"] in {"preparing", "prepared", "deleting"}
+            )
+        finally:
+            connection.close()
+
     def get_events(self, operation_id: str) -> tuple[ClearEvent, ...]:
         identifier = _validated_operation_id(operation_id)
         connection = self._connect()

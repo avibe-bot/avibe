@@ -11,6 +11,7 @@ import pytest
 
 from config import paths
 from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
+from core.memory.observations import AddRejected
 from core.memory.store import (
     AmbiguousAdd,
     MAX_MESSAGE_ATTEMPTS,
@@ -519,6 +520,7 @@ def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None
     stolen = _dt("2026-01-01T00:00:01.000Z")
     for outcome in (
         Delivered(),
+        AddRejected(request_id="stale", error_code="REJECTED", server_fault=False),
         SystemOutage(error="memory_sidecar_unavailable"),
         MessageFailure(error="memory_processing_failed"),
     ):
@@ -530,6 +532,8 @@ def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None
     assert still_claimed is not None
     assert still_claimed.state == "processing"
     assert still_claimed.attempts == 0
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_flush_settlements").fetchone()[0] == 0
 
 
 def test_store_activation_recovery_fences_submitted_and_resumes_unsubmitted_flushes(
@@ -836,6 +840,63 @@ def test_terminal_tombstones_compact_after_90_days_but_retain_settlement_evidenc
         "flush-terminal",
         "2026-01-01T00:00:03.000Z",
     )
+
+
+def test_rejected_add_evidence_survives_terminal_tombstone_compaction(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "rejected-add")
+    row = store.claim_due(lease_owner="boot", now="2099-01-01T00:00:00.000Z")
+    assert row is not None
+    observed_at = _dt("2099-01-01T00:00:01.000Z")
+
+    result = store.settle(
+        row,
+        AddRejected(
+            request_id="rejected-request",
+            error_code="INTERNAL_ERROR",
+            server_fault=True,
+        ),
+        lease_owner="boot",
+        now=observed_at,
+    )
+
+    assert result == SettleResult(settled=True, state="dead", attempts=1)
+    with sqlite3.connect(store.path) as conn:
+        settlement = conn.execute(
+            """
+            SELECT operation_kind, operation_token, observation, request_id,
+                   observed_at, error_code
+            FROM memory_flush_settlements
+            """
+        ).fetchone()
+    assert settlement == (
+        "add",
+        f"add:{row.source_message_digest}:{row.lease_token}",
+        "rejected",
+        "rejected-request",
+        "2099-01-01T00:00:01.000Z",
+        "INTERNAL_ERROR",
+    )
+    failures = store.failure_log()
+    assert len(failures) == 1
+    assert (
+        failures[0].kind,
+        failures[0].state,
+        failures[0].operation,
+        failures[0].error_code,
+        failures[0].request_id,
+    ) == (
+        "delivery_abandoned",
+        "rejected",
+        "add",
+        "INTERNAL_ERROR",
+        "rejected-request",
+    )
+
+    reference = observed_at + TERMINAL_TOMBSTONE_RETENTION + timedelta(seconds=1)
+    assert store.compact_terminal_tombstones(now=reference) == 1
+    assert _row_for_source(store, "rejected-add") is None
+    assert store.failure_log() == failures
 
 
 def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

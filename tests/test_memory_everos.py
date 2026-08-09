@@ -10,6 +10,7 @@ import pytest
 
 from core.memory.everos import (
     AddAck,
+    AddRejected,
     EverOSPort,
     FlushRejected,
     FlushRetryable,
@@ -262,24 +263,33 @@ def test_add_rejects_overlong_receipt_without_truncating() -> None:
 )
 def test_add_provider_rejection_is_terminal(status_code: int) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, json={"error": {"code": "rejected"}})
+        return httpx.Response(
+            status_code,
+            json={
+                "request_id": "rejected-request",
+                "error": {"code": "rejected"},
+            },
+        )
 
-    async def run() -> MemoryProviderFailure:
-        with pytest.raises(MemoryProviderFailure) as raised:
-            await EverOSPort(Path("/tmp/everos.sock")).add(
-                ProviderCapture(
-                    SESSION_REF,
-                    "remember this",
-                    1_725_000_001_234,
-                )
+    async def run() -> AddRejected:
+        result = await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(
+                SESSION_REF,
+                "remember this",
+                1_725_000_001_234,
             )
-        return raised.value
+        )
+        assert isinstance(result, AddRejected)
+        return result
 
     with _sidecar_transport(handler):
-        failure = asyncio.run(run())
+        rejection = asyncio.run(run())
 
-    assert failure.error == "memory_processing_failed"
-    assert failure.retryable is False
+    assert rejection == AddRejected(
+        request_id="rejected-request",
+        error_code="rejected",
+        server_fault=status_code >= 500,
+    )
 
 
 def test_add_treats_missing_provider_configuration_as_terminal_rejection() -> None:
@@ -289,17 +299,21 @@ def test_add_treats_missing_provider_configuration_as_terminal_rejection() -> No
             json={"error": {"code": "PROVIDER_NOT_CONFIGURED"}},
         )
 
-    async def run() -> MemoryProviderFailure:
-        with pytest.raises(MemoryProviderFailure) as raised:
-            await EverOSPort(Path("/tmp/everos.sock")).add(
-                ProviderCapture(SESSION_REF, "capture", 1)
-            )
-        return raised.value
+    async def run() -> AddRejected:
+        result = await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(SESSION_REF, "capture", 1)
+        )
+        assert isinstance(result, AddRejected)
+        return result
 
     with _sidecar_transport(handler):
-        failure = asyncio.run(run())
+        rejection = asyncio.run(run())
 
-    assert failure.retryable is False
+    assert rejection == AddRejected(
+        request_id=None,
+        error_code="PROVIDER_NOT_CONFIGURED",
+        server_fault=False,
+    )
 
 
 def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None:
@@ -824,14 +838,16 @@ def test_sidecar_failure_logs_never_contain_capture_or_response_canaries(caplog)
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=response_canary.encode("utf-8"))
 
-    async def run() -> None:
-        with pytest.raises(MemoryProviderFailure):
-            await EverOSPort(Path("/tmp/everos.sock")).add(
-                ProviderCapture(SESSION_REF, capture_canary, 1_725_000_001_234)
-            )
+    async def run() -> AddRejected:
+        result = await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(SESSION_REF, capture_canary, 1_725_000_001_234)
+        )
+        assert isinstance(result, AddRejected)
+        return result
 
     with _sidecar_transport(handler):
-        asyncio.run(run())
+        rejection = asyncio.run(run())
 
+    assert rejection.error_code is None
     assert capture_canary not in caplog.text
     assert response_canary not in caplog.text

@@ -17,6 +17,7 @@ from core.memory.attachments import (
 )
 from core.memory.everos import (
     AddAck,
+    AddRejected,
     FlushRejected,
     FlushResult,
     FlushRetryable,
@@ -551,6 +552,13 @@ class SessionFlushCoordinator:
             )
             return False
 
+        if isinstance(ack, AddRejected):
+            await self._settle_failure(
+                row,
+                lease_owner=lease_owner,
+                outcome=ack,
+            )
+            return False
         if (
             not isinstance(ack, AddAck)
             or ack.status not in {"accumulated", "extracted"}
@@ -601,7 +609,7 @@ class SessionFlushCoordinator:
         row: QueueRow,
         *,
         lease_owner: str,
-        outcome: AmbiguousAdd | SystemOutage | MessageFailure,
+        outcome: AddRejected | AmbiguousAdd | SystemOutage | MessageFailure,
     ) -> None:
         settled = await self._store_call(
             self._store.settle,
@@ -618,6 +626,8 @@ class SessionFlushCoordinator:
             )
             if outcome.error == "memory_processing_failed":
                 await self._open_processing_fault()
+        elif settled.settled and isinstance(outcome, AddRejected) and outcome.server_fault:
+            await self._open_processing_fault()
 
     async def _open_processing_fault(self) -> None:
         async with self._processing_fault_lock:

@@ -1324,9 +1324,12 @@ class MemoryRuntime:
         operation = self._open_clear_operation()
         if operation is None:
             return None
+        can_resume = False
         can_abort = False
         try:
-            can_abort = self._require_clear_journal().can_abort(operation.operation_id)
+            journal = self._require_clear_journal()
+            can_resume = journal.can_resume(operation.operation_id)
+            can_abort = journal.can_abort(operation.operation_id)
         except Exception:
             pass
         return {
@@ -1334,6 +1337,7 @@ class MemoryRuntime:
             "operation_id": operation.operation_id,
             "occurred_at": operation.updated_at,
             "error_code": operation.closed_error,
+            "can_resume": can_resume,
             "can_abort": can_abort,
         }
 

@@ -20,7 +20,7 @@ from core.memory.everos import (
     MemoryProviderFailure,
     MemoryProviderSystemFailure,
 )
-from core.memory.observations import AddAck, FlushRetryable, FlushSucceeded
+from core.memory.observations import AddAck, AddRejected, FlushRetryable, FlushSucceeded
 from core.memory.store import MemoryStore, MessageFailure, QueueRow
 from core.memory.types import CaptureAttachment, ProviderSessionRef
 from core.memory.worker import MemoryWorker
@@ -265,6 +265,75 @@ def test_processing_fault_emits_one_fault_and_recovery_edge(tmp_path: Path) -> N
             ("recovered", None),
         ]
         assert events[1][3] == 0
+
+    asyncio.run(run())
+
+
+def test_server_rejected_add_is_terminal_but_opens_processing_fault(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=False)
+        provider.add_results.append(
+            AddRejected(
+                request_id="server-rejection",
+                error_code="INTERNAL_ERROR",
+                server_fault=True,
+            )
+        )
+        current = [datetime(2099, 1, 1, tzinfo=UTC)]
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            now=lambda: current[0],
+            processing_event=record_event,
+        )
+        _enqueue(store, "server-rejection")
+
+        assert await worker.drain_once() == 1
+        rejected = store.list_queue_rows()[0]
+        assert (rejected.state, rejected.attempts, rejected.add_request_id) == (
+            "dead",
+            1,
+            "server-rejection",
+        )
+        assert len(provider.captures) == 1
+        assert await worker.drain_once() == 0
+        assert len(provider.captures) == 1
+        opened = store.get_meta()
+        assert opened is not None
+        assert opened.processing_fault_kind == "credential"
+        assert opened.processing_alert_active is True
+        assert [event[:2] for event in events] == [("fault", "credential")]
+        failures = store.failure_log()
+        assert len(failures) == 1
+        assert (failures[0].operation, failures[0].state, failures[0].request_id) == (
+            "add",
+            "rejected",
+            "server-rejection",
+        )
+
+        provider.processing_healthy_flag = True
+        _enqueue(store, "recovery")
+        assert await worker.drain_once() == 1
+        closed = store.get_meta()
+        assert closed is not None
+        assert closed.processing_fault_since is None
+        assert [event[:2] for event in events] == [
+            ("fault", "credential"),
+            ("recovered", None),
+        ]
 
     asyncio.run(run())
 

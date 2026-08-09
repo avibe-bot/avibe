@@ -316,7 +316,12 @@ const ClearRecoveryCard: React.FC<{
       </div>
       <div className="grid gap-1.5">
         <div className="flex flex-wrap gap-2">
-          <Button size="xs" variant="secondary" disabled={action !== null} onClick={() => onResume(recovery.operation_id)}>
+          <Button
+            size="xs"
+            variant="secondary"
+            disabled={action !== null || !recovery.can_resume}
+            onClick={() => onResume(recovery.operation_id)}
+          >
             {action === 'resume' ? <Loader2 className="animate-spin" /> : <RotateCcw />}
             {t('memory.processingRecord.clearRecovery.resume')}
           </Button>

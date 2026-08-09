@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Literal
 
 from config import paths
-from core.memory.observations import AddAck, FlushRejected, FlushResult, FlushSucceeded, FlushUnknown
+from core.memory.observations import (
+    AddAck,
+    AddRejected,
+    FlushRejected,
+    FlushResult,
+    FlushSucceeded,
+    FlushUnknown,
+)
 from core.memory.types import (
     MemoryErrorCode,
     MemoryFailureLogEntry,
@@ -179,7 +186,7 @@ class MessageFailure:
 
 
 #: Every way a claimed row can leave the ``processing`` state.
-DeliveryOutcome = Delivered | AmbiguousAdd | SystemOutage | MessageFailure
+DeliveryOutcome = Delivered | AddRejected | AmbiguousAdd | SystemOutage | MessageFailure
 
 
 @dataclass(frozen=True)
@@ -823,12 +830,21 @@ class MemoryStore:
                 now=now_iso,
             )
             return SettleResult(settled=settled, state="pending" if settled else None)
+        if isinstance(outcome, AddRejected):
+            error: MemoryErrorCode = "memory_processing_failed"
+            retryable = False
+            rejection = outcome
+        else:
+            error = outcome.error
+            retryable = outcome.retryable
+            rejection = None
         failure = self._record_message_failure(
             row,
             lease_owner=lease_owner,
-            error=outcome.error,
-            retryable=outcome.retryable,
+            error=error,
+            retryable=retryable,
             now=now,
+            rejection=rejection,
         )
         return SettleResult(
             settled=failure.state is not None,
@@ -1752,6 +1768,7 @@ class MemoryStore:
         error: MemoryErrorCode,
         retryable: bool,
         now: datetime,
+        rejection: AddRejected | None = None,
     ) -> MessageFailureResult:
         """Spend one message failure attempt, retrying or terminally scrubbing it."""
 
@@ -1787,13 +1804,16 @@ class MemoryStore:
                     SET state = 'dead', attempts = ?, payload_text = NULL,
                         payload_attachments = NULL, attachment_bundle_id = NULL,
                         next_retry_at = NULL, lease_owner = NULL, lease_at = NULL,
-                        last_error = ?, completed_at = ?
+                        last_error = ?, add_request_id = ?, completed_at = ?
                     WHERE source_message_digest = ? AND epoch = ?
                       AND state = 'processing' AND lease_owner = ? AND lease_token = ?
                     """,
                     (
                         attempts,
                         error,
+                        _bounded_opaque_text(
+                            rejection.request_id if rejection is not None else None
+                        ),
                         now_iso,
                         row.source_message_digest,
                         row.epoch,
@@ -1809,6 +1829,27 @@ class MemoryStore:
                         WHERE bundle_id = ? AND state = 'pinned'
                         """,
                         (now_iso, bundle_id),
+                    )
+                if rejection is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO memory_flush_settlements (
+                            provider_session_ref, epoch, generation, operation_kind,
+                            operation_token, observation, request_id,
+                            confirmed_watermark_ms, observed_at, error_code
+                        ) VALUES (?, ?, ?, 'add', ?, 'rejected', ?, NULL, ?, ?)
+                        """,
+                        (
+                            row.provider_session_ref.serialize(),
+                            row.epoch,
+                            row.generation,
+                            f"add:{row.source_message_digest}:{row.lease_token}",
+                            _bounded_opaque_text(rejection.request_id),
+                            now_iso,
+                            _bounded_opaque_text(
+                                rejection.error_code or "memory_processing_failed"
+                            ),
+                        ),
                     )
                 state: Literal["pending", "dead"] = "dead"
                 self._compact_terminal_tombstones_in_connection(conn, now)
@@ -2039,14 +2080,27 @@ class MemoryStore:
                         add_request_id AS request_id,
                         attempts,
                         source_message_digest AS sort_key
-                    FROM memory_capture_queue
-                    WHERE epoch = ? AND state IN ('dead', 'manual_required')
+                    FROM memory_capture_queue AS capture
+                    WHERE capture.epoch = ?
+                      AND capture.state IN ('dead', 'manual_required')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_flush_settlements AS settlement
+                          WHERE settlement.provider_session_ref = capture.provider_session_ref
+                            AND settlement.epoch = capture.epoch
+                            AND settlement.generation = capture.generation
+                            AND settlement.operation_kind = 'add'
+                            AND settlement.observation = 'rejected'
+                            AND settlement.operation_token =
+                                'add:' || capture.source_message_digest || ':' || capture.lease_token
+                      )
 
                     UNION ALL
 
                     SELECT
                         CASE
-                            WHEN observation = 'rejected' THEN 'distillation_rejected'
+                            WHEN observation = 'rejected' AND operation_kind = 'flush'
+                                THEN 'distillation_rejected'
+                            WHEN observation = 'rejected' THEN 'delivery_abandoned'
                             ELSE 'result_unknown'
                         END AS kind,
                         observation AS state,
@@ -2058,8 +2112,11 @@ class MemoryStore:
                         0 AS attempts,
                         printf('%020d', settlement_id) AS sort_key
                     FROM memory_flush_settlements
-                    WHERE epoch = ? AND operation_kind = 'flush'
-                      AND observation IN ('rejected', 'manual_required')
+                    WHERE epoch = ? AND (
+                        (operation_kind = 'flush'
+                            AND observation IN ('rejected', 'manual_required'))
+                        OR (operation_kind = 'add' AND observation = 'rejected')
+                    )
                 )
                 ORDER BY occurred_at DESC, sort_key DESC
                 LIMIT ?

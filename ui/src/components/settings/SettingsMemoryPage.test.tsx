@@ -203,6 +203,7 @@ describe('SettingsMemoryPage Processing Record', () => {
       clear_recovery: {
         operation_id: 'clear-maintenance',
         state: 'recovery_required',
+        can_resume: true,
         can_abort: true,
       },
     });
@@ -223,6 +224,7 @@ describe('SettingsMemoryPage Processing Record', () => {
       recovery: {
         operation_id: 'clear-42',
         state: 'recovery_required',
+        can_resume: true,
         can_abort: true,
       },
     });
@@ -247,6 +249,7 @@ describe('SettingsMemoryPage Processing Record', () => {
       clear_recovery: {
         operation_id: 'clear-refreshed',
         state: 'recovery_needed',
+        can_resume: true,
         can_abort: false,
       },
     }],
@@ -264,6 +267,7 @@ describe('SettingsMemoryPage Processing Record', () => {
         recovery: {
           operation_id: 'clear-stale',
           state: 'recovery_needed',
+          can_resume: true,
           can_abort: true,
         },
       });
@@ -318,6 +322,7 @@ describe('SettingsMemoryPage Processing Record', () => {
       recovery: {
         operation_id: 'clear-interrupted',
         state: 'recovery_needed',
+        can_resume: true,
         can_abort: false,
       },
     });
@@ -329,6 +334,7 @@ describe('SettingsMemoryPage Processing Record', () => {
         recovery: {
           operation_id: 'clear-interrupted',
           state: 'recovery_needed',
+          can_resume: true,
           can_abort: false,
         },
       });

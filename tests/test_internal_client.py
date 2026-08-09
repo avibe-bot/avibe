@@ -424,6 +424,7 @@ def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
         captured["headers"] = dict(request.headers)
         captured["path"] = request.url.path
         captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions.get("timeout")
         return httpx.Response(200, json={"status": "completed", "epoch": 2})
 
     async def _go():
@@ -442,6 +443,12 @@ def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
     assert result["status_code"] == 200
     assert captured["path"] == "/internal/memory/clear"
     assert captured["payload"] == {"confirm": True}
+    assert captured["timeout"] == {
+        "connect": 5.0,
+        "read": None,
+        "write": None,
+        "pool": None,
+    }
     assert headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
     assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
         "test-ui-controller-secret",

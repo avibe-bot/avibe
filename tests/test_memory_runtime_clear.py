@@ -99,6 +99,7 @@ async def test_recovery_payload_disables_abort_before_initial_snapshot(
         "operation_id": operation.operation_id,
         "occurred_at": recovery.updated_at,
         "error_code": "memory_clear_failed",
+        "can_resume": True,
         "can_abort": False,
     }
     await runtime.close()
@@ -620,6 +621,7 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     assert pending.state == "recovery_needed"
     assert pending.resolution == "abort"
     assert pending.execution_token is None
+    assert runtime._clear_recovery_payload()["can_resume"] is False
 
     monkeypatch.setattr(MemorySnapshotManager, "restore", original_restore)
     journal = runtime._clear_journal

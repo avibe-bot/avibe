@@ -28,6 +28,8 @@ from core.memory.types import (
 )
 from core.memory.observations import (
     AddAck,
+    AddRejected,
+    AddResult,
     FlushRejected,
     FlushRetryable,
     FlushResult,
@@ -176,7 +178,7 @@ class EverOSPort:
 
         return False
 
-    async def add(self, capture: ProviderCapture) -> AddAck:
+    async def add(self, capture: ProviderCapture) -> AddResult:
         """Durably hand one capture to EverOS and return its acknowledgement."""
 
         content: str | list[dict[str, str]] = capture.text
@@ -212,17 +214,18 @@ class EverOSPort:
             },
             timeout_seconds=self._add_timeout_seconds,
         )
+        envelope = _optional_json_object(raw)
         if not 200 <= status_code < 300:
             logger.warning("EverOS add rejected status=%s", status_code)
-            # A request the provider rejects on its own terms fails identically
-            # however often it is replayed. Retrying one keeps a poison row
-            # cycling the shared processing-fault breaker, which freezes capture
-            # for every session, so it is sent straight to terminal instead.
-            raise MemoryProviderFailure(
-                "memory_processing_failed",
-                retryable=False,
+            error = envelope.get("error") if envelope is not None else None
+            error_code = error.get("code") if isinstance(error, dict) else None
+            return AddRejected(
+                request_id=_bounded_opaque_string(
+                    envelope.get("request_id") if envelope else None
+                ),
+                error_code=_bounded_opaque_string(error_code),
+                server_fault=status_code >= 500,
             )
-        envelope = _optional_json_object(raw)
         data = envelope.get("data") if envelope is not None else None
         status = data.get("status") if isinstance(data, dict) else None
         if envelope is None:
@@ -606,36 +609,6 @@ class EverOSPort:
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
-
-
-#: 4xx statuses that describe a passing condition rather than a request the
-#: provider can never accept. Everything else in 4xx is deterministic, and the
-#: default is deliberately the strict one because the two mistakes do not cost
-#: the same: a wrongly retryable capture is replayed up to MAX_MESSAGE_ATTEMPTS
-#: times, and every replay can re-open the shared processing-fault breaker, which
-#: freezes capture for BREAKER_RETRY_SECONDS across every session; a wrongly
-#: terminal one drops a single capture for a single session.
-_TRANSIENT_CLIENT_STATUS_CODES = frozenset({408, 409, 423, 425, 429})
-
-
-def _deterministic_client_rejection(status_code: int, raw: bytes | None = None) -> bool:
-    """Whether a status means this exact request can never be accepted.
-
-    EverOS 1.2.1 uses 422 both for deterministic DTO rejection and for a
-    missing provider configuration. The latter can recover after settings are
-    repaired, so its machine-readable envelope overrides the status taxonomy.
-
-    408, 425 and 429 are temporary by definition; 409 and 423 describe a state
-    a later attempt may find cleared, which is worth the bounded replay even
-    though a conflict can also be permanent.
-    """
-
-    envelope = _optional_json_object(raw)
-    error = envelope.get("error") if envelope is not None else None
-    error_code = error.get("code") if isinstance(error, dict) else None
-    if status_code == 422 and error_code == "PROVIDER_NOT_CONFIGURED":
-        return False
-    return 400 <= status_code < 500 and status_code not in _TRANSIENT_CLIENT_STATUS_CODES
 
 
 async def _read_bounded_response(response: httpx.Response) -> bytes:
@@ -1057,7 +1030,7 @@ def _elapsed_ms(started: float) -> int:
 
 @runtime_checkable
 class MemoryProviderPort(Protocol):
-    async def add(self, capture: ProviderCapture) -> AddAck: ...
+    async def add(self, capture: ProviderCapture) -> AddResult: ...
 
     async def flush(self, session_ref: ProviderSessionRef) -> FlushResult: ...
 
@@ -1103,7 +1076,7 @@ class FakeMemoryProvider:
         tuple[str, bool, ProviderSessionRef | None]
     ] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
-    add_results: Deque[AddAck] = field(default_factory=deque)
+    add_results: Deque[AddResult] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
@@ -1129,7 +1102,7 @@ class FakeMemoryProvider:
         )
     )
 
-    async def add(self, capture: ProviderCapture) -> AddAck:
+    async def add(self, capture: ProviderCapture) -> AddResult:
         if self.ingest_failures:
             raise self.ingest_failures.popleft()
         self.captures.append(capture)

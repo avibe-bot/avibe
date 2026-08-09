@@ -310,6 +310,8 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
                 "clear_recovery": {
                     "operation_id": "clear-42",
                     "state": "recovery_needed",
+                    "can_resume": False,
+                    "can_abort": True,
                 },
             },
         }
@@ -324,6 +326,7 @@ def test_memory_maintenance_proxies_the_local_clear_facts(monkeypatch, tmp_path)
 
     assert response.status_code == 200
     assert response.get_json()["clear_recovery"]["operation_id"] == "clear-42"
+    assert response.get_json()["clear_recovery"]["can_resume"] is False
     assert response.headers["cache-control"] == "no-store"
 
 

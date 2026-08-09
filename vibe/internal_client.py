@@ -52,10 +52,6 @@ MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
 MEMORY_RECONCILE_TIMEOUT_SECONDS = 120.0
-# An enabled clear first drains and cleans the provider (5s + 20s), then runs
-# the same replacement lifecycle as reconcile. A retry must not begin while the
-# first destructive request is still completing in the controller.
-MEMORY_CLEAR_TIMEOUT_SECONDS = 150.0
 # Install waits on the controller's download/extract/activate. The Dependencies
 # UI polls the job for 310s (``startAndPollDependencyInstall``), so anything
 # shorter reports a false failure on a slow link while the install continues.
@@ -507,8 +503,9 @@ async def memory_clear(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    """Wait for the journaled clear, whose snapshot copy is size-unbounded."""
+
     return await _memory_request(
         "POST",
         "/internal/memory/clear",
@@ -519,7 +516,7 @@ async def memory_clear(
             user_key,
         ),
         socket_path=socket_path,
-        timeout=timeout,
+        timeout=None,
     )
 
 
@@ -529,7 +526,6 @@ async def memory_clear_recovery(
     action: str,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     if action not in {"resume", "abort"}:
         raise ValueError("invalid Memory clear recovery action")
@@ -540,7 +536,7 @@ async def memory_clear_recovery(
         payload={"operation_id": operation_id},
         headers=_memory_user_key_headers("POST", path, user_key),
         socket_path=socket_path,
-        timeout=timeout,
+        timeout=None,
     )
 
 
