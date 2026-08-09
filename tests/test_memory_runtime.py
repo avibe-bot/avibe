@@ -34,6 +34,7 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
 )
 from core.memory.clear_journal import MemoryClearJournal
+from core.memory.maintenance import MemoryMaintenance
 from core.memory.attachments import AttachmentPinStore, attachment_pin_root
 from core.memory.everos import (
     AddAck,
@@ -93,6 +94,12 @@ from config.v2_config import (
 
 
 PROJECT = "p-22222222222222222222222222222222"
+
+
+def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:
+    maintenance = runtime._maintenance
+    assert maintenance is not None
+    return maintenance
 
 
 def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
@@ -887,14 +894,14 @@ def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
         assert runtime._worker_task is not None
         assert runtime._process_records_calls is True
 
-        terminal_gc = runtime._terminal_snapshot_gc_task
-        backup_reconcile = runtime._backup_stage_reconcile_task
+        terminal_gc = _maintenance(runtime)._terminal_snapshot_gc_task
+        backup_reconcile = _maintenance(runtime)._backup_stage_reconcile_task
         if terminal_gc is not None:
             await terminal_gc
         if backup_reconcile is not None:
             await backup_reconcile
 
-        journal = getattr(runtime, journal_attribute)
+        journal = getattr(_maintenance(runtime), journal_attribute)
         assert journal is not None
 
         def unreadable_journal() -> None:
@@ -904,7 +911,7 @@ def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
             raise AssertionError("disable must not mutate an unreadable journal")
 
         monkeypatch.setattr(journal, "get_open_operation", unreadable_journal)
-        monkeypatch.setattr(runtime, "_recover_backup_restore_locked", recovery_must_not_run)
+        monkeypatch.setattr(_maintenance(runtime), "recover_boot", recovery_must_not_run)
 
         changed = replace(
             enabled,
@@ -1441,11 +1448,12 @@ def test_runtime_effective_home_owns_the_attachment_pipeline(
     assert runtime.module._attachment_store._effective_home == runtime_home
     assert runtime.module._attachment_store._root == expected_pin_root
     assert runtime.module._attachment_store._source_root == source_root
-    assert runtime._snapshot_manager is not None
-    assert runtime._snapshot_manager.effective_home == runtime_home
+    manager = _maintenance(runtime)._snapshot_manager
+    assert manager is not None
+    assert manager.effective_home == runtime_home
     assert any(
         surface.path == "memory/attachments"
-        for surface in runtime._snapshot_manager.surfaces
+        for surface in manager.surfaces
     )
 
     process = EverOSProcess(
@@ -2402,7 +2410,7 @@ def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Pa
 
     asyncio.run(run())
     assert started == []
-    recovery = runtime._clear_journal.get_open_operation()
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert recovery is not None
     assert recovery.operation_id == "interrupted-clear"
     assert recovery.state == "recovery_needed"
@@ -2434,7 +2442,6 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
 
 
 def test_runtime_install_artifact_converts_background_ensure_exception(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     artifact = _installed_artifact(ensure_failure=RuntimeError("install failed"))
@@ -2443,28 +2450,12 @@ def test_runtime_install_artifact_converts_background_ensure_exception(
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
-    housekeeping_calls: list[tuple[str, bool]] = []
-
-    async def observe_terminal_gc() -> None:
-        housekeeping_calls.append(("terminal-gc", runtime._artifact_installing))
-
-    async def observe_backup_reconcile() -> None:
-        housekeeping_calls.append(("backup-reconcile", runtime._artifact_installing))
-
-    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", observe_terminal_gc)
-    monkeypatch.setattr(runtime, "_run_backup_stage_reconcile", observe_backup_reconcile)
-
     async def run() -> None:
         assert await runtime.install_artifact() == {
             "ok": False,
             "reason": "memory_runtime_install_failed",
             "download_error": None,
         }
-        await asyncio.sleep(0)
-        assert sorted(housekeeping_calls) == [
-            ("backup-reconcile", False),
-            ("terminal-gc", False),
-        ]
         await runtime.close()
 
     asyncio.run(run())
@@ -3773,141 +3764,6 @@ def _processing_config() -> MemoryProcessingConfig:
     )
 
 
-async def _retain_terminal_clear_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-    home: Path,
-) -> Path:
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=home)
-    manager = runtime._snapshot_manager
-    assert manager is not None
-
-    def retain(_permit) -> None:
-        raise OSError("retain terminal snapshot for startup GC")
-
-    monkeypatch.setattr(manager, "remove", retain)
-    completed = await runtime.clear(operator_ref="user:owner")
-    snapshot_path = manager.snapshot_path(completed["operation_id"])
-    assert completed["status"] == "completed"
-    assert snapshot_path.is_dir()
-    await runtime.close()
-    return snapshot_path
-
-
-def test_terminal_snapshot_gc_does_not_block_construction_or_ready_activation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    entered = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
-    synchronous_calls: list[str] = []
-    original_remove = MemorySnapshotManager.remove
-
-    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            synchronous_calls.append(permit.snapshot_id)
-            raise AssertionError("terminal snapshot GC ran on the activation loop")
-        entered.set()
-        assert release.wait(timeout=2)
-        try:
-            original_remove(manager, permit)
-        finally:
-            finished.set()
-
-    async def run() -> None:
-        snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
-        monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
-        factory = FakeEverOSProcessFactory()
-        runtime = MemoryRuntime(
-            MemoryConfig(enabled=True, processing=_processing_config()),
-            artifact_manager=_installed_artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-
-        assert synchronous_calls == []
-        assert await runtime.reconcile(runtime._config) == {
-            "ok": True,
-            "state": "ready",
-        }
-        assert factory.supervised[0].running is True
-        assert entered.is_set() is False
-
-        gc_task = runtime._terminal_snapshot_gc_task
-        assert gc_task is not None
-        assert await asyncio.to_thread(entered.wait, 1)
-        assert not gc_task.done()
-        release.set()
-        await asyncio.wait_for(asyncio.shield(gc_task), timeout=1)
-
-        assert finished.is_set()
-        assert not snapshot_path.exists()
-        await runtime.close()
-
-    asyncio.run(run())
-
-
-def test_terminal_snapshot_gc_shutdown_owns_cancelled_io_until_it_settles(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    entered = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
-    original_remove = MemorySnapshotManager.remove
-
-    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
-        entered.set()
-        assert release.wait(timeout=2)
-        try:
-            original_remove(manager, permit)
-        finally:
-            finished.set()
-
-    async def run() -> None:
-        snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
-        monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
-        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-
-        assert await runtime.reconcile(MemoryConfig()) == {
-            "ok": True,
-            "state": "disabled",
-        }
-        gc_task = runtime._terminal_snapshot_gc_task
-        assert gc_task is not None
-        assert await asyncio.to_thread(entered.wait, 1)
-
-        stop_entered = asyncio.Event()
-        original_stop = runtime._stop_terminal_snapshot_gc
-
-        async def observed_stop() -> None:
-            stop_entered.set()
-            await original_stop()
-
-        monkeypatch.setattr(runtime, "_stop_terminal_snapshot_gc", observed_stop)
-        closing = asyncio.create_task(runtime.close())
-        await stop_entered.wait()
-        assert not closing.done()
-        closing.cancel()
-        await asyncio.sleep(0)
-        assert not closing.done()
-
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(closing, timeout=1)
-
-        assert finished.is_set()
-        assert gc_task.done()
-        assert runtime._terminal_snapshot_gc_task is None
-        assert not snapshot_path.exists()
-
-    asyncio.run(run())
-
-
 def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:
     factory = FakeEverOSProcessFactory()
     runtime = MemoryRuntime(
@@ -4411,7 +4267,7 @@ def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery
     )
 
     meta = recovering._store.ensure_meta()
-    recovering._clear_journal.start(
+    _maintenance(recovering)._clear_journal.start(
         operation_id="restart-recovery",
         operator_ref="user:owner",
         pre_epoch=meta.epoch,
@@ -4546,7 +4402,7 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
                 await release.wait()
                 raise RuntimeError("injected clear pause")
 
-            monkeypatch.setattr(runtime, "_prepare_clear", blocked_prepare)
+            monkeypatch.setattr(_maintenance(runtime), "_prepare_clear", blocked_prepare)
             operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
         elif lifecycle == "reconcile":
             async def blocked_reconcile(*_args, **_kwargs):
@@ -4663,17 +4519,6 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     )
     activations: list[None] = []
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
-    housekeeping_calls: list[tuple[str, bool]] = []
-
-    async def observe_terminal_gc() -> None:
-        housekeeping_calls.append(("terminal-gc", runtime._artifact_installing))
-
-    async def observe_backup_reconcile() -> None:
-        housekeeping_calls.append(("backup-reconcile", runtime._artifact_installing))
-
-    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", observe_terminal_gc)
-    monkeypatch.setattr(runtime, "_run_backup_stage_reconcile", observe_backup_reconcile)
-
     async def run() -> None:
         installing = asyncio.create_task(runtime.install_artifact())
         assert await asyncio.to_thread(entered.wait, 1.0)
@@ -4691,7 +4536,6 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
             "error": "memory_restart_failed",
         }
         await asyncio.sleep(0)
-        assert housekeeping_calls == []
         assert installing.done() is False
         installing.cancel()
         await asyncio.sleep(0)
@@ -4704,75 +4548,8 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await installing
-        await asyncio.sleep(0)
-        assert sorted(housekeeping_calls) == [
-            ("backup-reconcile", False),
-            ("terminal-gc", False),
-        ]
-        housekeeping_calls.clear()
         assert await runtime.restart() == {"ok": True, "state": "ready"}
         assert activations == [None]
-        await runtime.close()
-
-    asyncio.run(run())
-
-
-def test_queued_backup_stage_reconcile_rechecks_artifact_install(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    install_entered = threading.Event()
-    release_install = threading.Event()
-
-    class BlockingArtifact(FakeMemoryArtifactManager):
-        def ensure(self, *, force: bool = False) -> dict:
-            self.ensure_calls.append(force)
-            install_entered.set()
-            release_install.wait(timeout=2)
-            return dict(self.ensure_payload)
-
-    runtime = MemoryRuntime(
-        MemoryConfig(enabled=False),
-        artifact_manager=BlockingArtifact(python=Path(sys.executable)),
-        effective_home=tmp_path,
-    )
-    terminal_gc_entered = asyncio.Event()
-    release_terminal_gc = asyncio.Event()
-    cleanup_calls: list[bool] = []
-
-    async def blocked_terminal_gc() -> None:
-        terminal_gc_entered.set()
-        await release_terminal_gc.wait()
-
-    manager = runtime._backup_manager
-    assert manager is not None
-    monkeypatch.setattr(runtime, "_run_terminal_snapshot_gc", blocked_terminal_gc)
-    monkeypatch.setattr(
-        manager,
-        "reconcile_unpublished_backup_stages",
-        lambda: cleanup_calls.append(runtime._artifact_installing),
-    )
-
-    async def run() -> None:
-        runtime._ensure_terminal_snapshot_gc()
-        runtime._ensure_backup_stage_reconcile()
-        await terminal_gc_entered.wait()
-        queued_reconcile = runtime._backup_stage_reconcile_task
-        assert queued_reconcile is not None
-
-        installing = asyncio.create_task(runtime.install_artifact())
-        assert await asyncio.to_thread(install_entered.wait, 1)
-        release_terminal_gc.set()
-        await queued_reconcile
-        assert cleanup_calls == []
-
-        release_install.set()
-        assert (await installing)["ok"] is True
-        deferred_reconcile = runtime._backup_stage_reconcile_task
-        assert deferred_reconcile is not None
-        assert deferred_reconcile is not queued_reconcile
-        await deferred_reconcile
-        assert cleanup_calls == [False]
         await runtime.close()
 
     asyncio.run(run())

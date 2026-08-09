@@ -6,6 +6,7 @@ import os
 import sqlite3
 import stat
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 import threading
@@ -14,7 +15,14 @@ import pytest
 
 import core.memory.snapshot as snapshot_module
 from config.v2_config import MemoryConfig
+from core.memory.artifact import FakeMemoryArtifactManager
+from core.memory.clear_journal import MemoryClearJournal
 from core.memory.process import SidecarOwnership
+from core.memory.maintenance import (
+    ClearRecoveryResult,
+    ClearResult,
+    MemoryMaintenance,
+)
 from core.memory.runtime import MemoryRuntime
 from core.memory.snapshot import MemorySnapshotManager
 from core.memory.store import AmbiguousAdd, Delivered
@@ -23,6 +31,126 @@ from core.memory.types import CaptureAccepted, CaptureRequest, CaptureSkipped
 
 PRINCIPAL = "u-11111111111111111111111111111111"
 PROJECT = "p-22222222222222222222222222222222"
+
+
+def _maintenance(runtime: MemoryRuntime) -> MemoryMaintenance:
+    maintenance = runtime._maintenance
+    assert maintenance is not None
+    return maintenance
+
+
+def _replace_runtime_port(runtime: MemoryRuntime, **changes) -> None:
+    maintenance = _maintenance(runtime)
+    maintenance._runtime = replace(maintenance._runtime, **changes)
+
+
+def _clear_payload(result: ClearResult) -> dict:
+    if result.status == "failed":
+        recovery = result.recovery
+        return {
+            "status": "failed",
+            "error": result.error,
+            "recovery": (
+                None
+                if recovery is None
+                else {
+                    "state": recovery.state,
+                    "operation_id": recovery.operation_id,
+                    "occurred_at": recovery.occurred_at,
+                    "error_code": recovery.error_code,
+                    "can_resume": recovery.can_resume,
+                    "can_abort": recovery.can_abort,
+                }
+            ),
+        }
+    return {
+        "status": result.status,
+        "operation_id": result.operation_id,
+        "epoch": result.epoch,
+    }
+
+
+async def _clear(runtime: MemoryRuntime, *, operator_ref: str) -> dict:
+    return _clear_payload(
+        await _maintenance(runtime).clear(operator_ref=operator_ref)
+    )
+
+
+async def _resume_clear(
+    runtime: MemoryRuntime,
+    operation_id: str,
+    *,
+    operator_ref: str,
+) -> dict:
+    return _clear_payload(
+        await _maintenance(runtime).resume_clear(
+            operation_id,
+            operator_ref=operator_ref,
+        )
+    )
+
+
+async def _abort_clear(
+    runtime: MemoryRuntime,
+    operation_id: str,
+    *,
+    operator_ref: str,
+) -> dict:
+    return _clear_payload(
+        await _maintenance(runtime).abort_clear(
+            operation_id,
+            operator_ref=operator_ref,
+        )
+    )
+
+
+async def test_runtime_preserves_public_clear_payloads_when_delegating(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    results = iter(
+        (
+            ClearResult(status="completed", operation_id="clear-1", epoch=3),
+            ClearResult(
+                status="failed",
+                error="memory_clear_failed",
+                recovery=ClearRecoveryResult(
+                    state="recovery_needed",
+                    operation_id="clear-2",
+                    occurred_at="2026-01-01T00:00:00.000Z",
+                    error_code="memory_clear_failed",
+                    can_resume=True,
+                    can_abort=False,
+                ),
+            ),
+        )
+    )
+
+    async def delegated_clear(*, operator_ref: str) -> ClearResult:
+        assert operator_ref == "user:owner"
+        return next(results)
+
+    monkeypatch.setattr(_maintenance(runtime), "clear", delegated_clear)
+
+    assert await runtime.clear(operator_ref="user:owner") == {
+        "status": "completed",
+        "operation_id": "clear-1",
+        "epoch": 3,
+    }
+    assert await runtime.clear(operator_ref="user:owner") == {
+        "status": "failed",
+        "error": "memory_clear_failed",
+        "recovery": {
+            "state": "recovery_needed",
+            "operation_id": "clear-2",
+            "occurred_at": "2026-01-01T00:00:00.000Z",
+            "error_code": "memory_clear_failed",
+            "can_resume": True,
+            "can_abort": False,
+        },
+    }
+    await runtime.close()
 
 
 @pytest.mark.parametrize(
@@ -40,7 +168,7 @@ async def test_maintenance_refuses_clear_when_a_journal_cannot_initialize(
         raise OSError("injected journal initialization failure")
 
     monkeypatch.setattr(
-        f"core.memory.runtime.{failed_dependency}",
+        f"core.memory.maintenance.{failed_dependency}",
         fail_initialization,
     )
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
@@ -76,6 +204,38 @@ async def test_maintenance_refuses_clear_when_the_store_is_unavailable(
 
     assert runtime.available is False
     assert (await runtime.maintenance_payload())["can_clear"] is False
+    await runtime.close()
+
+
+async def test_unavailable_store_still_projects_durable_clear_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    operation = MemoryClearJournal(tmp_path).start(
+        operation_id="clear-before-store-failure",
+        operator_ref="user:owner",
+        pre_epoch=2,
+        target_epoch=3,
+    )
+
+    def fail_initialization(*_args, **_kwargs):
+        raise OSError("injected store initialization failure")
+
+    monkeypatch.setattr("core.memory.runtime.MemoryStore", fail_initialization)
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    payload = await runtime.maintenance_payload(operator_ref="user:owner")
+    assert payload["status"] == "ok"
+    assert payload["data_exists"] is True
+    assert payload["can_clear"] is False
+    assert payload["clear_recovery"] == {
+        "state": "recovery_needed",
+        "operation_id": operation.operation_id,
+        "occurred_at": payload["clear_recovery"]["occurred_at"],
+        "error_code": "memory_clear_failed",
+        "can_resume": True,
+        "can_abort": False,
+    }
     await runtime.close()
 
 
@@ -137,7 +297,7 @@ async def test_processing_record_does_not_compact_queue_during_clear_snapshot(
         "_compact_terminal_tombstones_in_connection",
         observed_compaction,
     )
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     assert await asyncio.to_thread(snapshot_copied.wait, 1)
     runtime._observe_recorder_health(
         {"state": "degraded", "reason": "call_log_corrupt"},
@@ -153,7 +313,7 @@ async def test_processing_record_does_not_compact_queue_during_clear_snapshot(
         "recorder_degraded"
     ]
     assert result["status"] == "completed"
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     await runtime.close()
 
 
@@ -177,7 +337,7 @@ async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    manager = runtime._snapshot_manager
+    manager = _maintenance(runtime)._snapshot_manager
     assert manager is not None
     provider_root = tmp_path / "memory/everos-root"
     runtime._provider_root_owner.ensure(
@@ -209,16 +369,16 @@ async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
     previous_recursion_limit = sys.getrecursionlimit()
     try:
         sys.setrecursionlimit(recursion_limit)
-        result = await runtime.clear(operator_ref="user:owner")
-        gc_task = runtime._terminal_snapshot_gc_task
+        result = await _clear(runtime, operator_ref="user:owner")
+        gc_task = _maintenance(runtime)._terminal_snapshot_gc_task
         if gc_task is not None:
             await gc_task
     finally:
         sys.setrecursionlimit(previous_recursion_limit)
 
     assert result["status"] == "completed"
-    assert runtime._clear_journal is not None
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal is not None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     assert not leaf.exists()
     assert not manager.snapshot_path(result["operation_id"]).exists()
     await runtime.close()
@@ -271,8 +431,8 @@ async def test_clear_refuses_manual_required_fence_without_mutating_evidence(
                 """
             ).fetchall()
 
-    journal = runtime._clear_journal
-    manager = runtime._snapshot_manager
+    journal = _maintenance(runtime)._clear_journal
+    manager = _maintenance(runtime)._snapshot_manager
     assert journal is not None
     assert manager is not None
     with sqlite3.connect(journal.database_path) as connection:
@@ -340,7 +500,7 @@ async def test_clear_refuses_manual_required_fence_without_mutating_evidence(
     monkeypatch.setattr(runtime, "_stop_worker", observed_stop_worker)
     monkeypatch.setattr(journal, "start", observed_start)
 
-    result = await runtime.clear(operator_ref="user:owner")
+    result = await _clear(runtime, operator_ref="user:owner")
 
     assert result == {
         "status": "failed",
@@ -389,7 +549,7 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     other_operator = runtime.principal_for_user_key("avibe:remote:other-subject")
     _enqueue(runtime, "resume-source")
     pre_epoch = runtime._store.ensure_meta().epoch
-    journal = runtime._clear_journal
+    journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     original_record = journal.record_surface_deleted
     interrupted = False
@@ -403,7 +563,7 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
 
     monkeypatch.setattr(journal, "record_surface_deleted", interrupt_queue_receipt)
 
-    failed = await runtime.clear(operator_ref=owner)
+    failed = await _clear(runtime, operator_ref=owner)
 
     assert failed["status"] == "failed"
     recovery = journal.get_open_operation()
@@ -431,7 +591,7 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     assert "operator_ref" not in owner_maintenance["clear_recovery"]
     assert owner not in repr(owner_maintenance)
 
-    rejected = await runtime.resume_clear(
+    rejected = await _resume_clear(runtime,
         recovery.operation_id,
         operator_ref=other_operator,
     )
@@ -440,7 +600,7 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     assert journal.get_open_operation() == recovery
 
     monkeypatch.setattr(journal, "record_surface_deleted", original_record)
-    completed = await runtime.resume_clear(
+    completed = await _resume_clear(runtime,
         recovery.operation_id,
         operator_ref=owner,
     )
@@ -472,14 +632,14 @@ async def test_attachment_clear_failure_does_not_record_surface_deleted(
 
     monkeypatch.setattr(attachment_store, "clear_all", inject_unsafe_entry_then_clear)
 
-    failed = await runtime.clear(operator_ref="user:owner")
+    failed = await _clear(runtime, operator_ref="user:owner")
 
     assert failed["status"] == "failed"
-    recovery = runtime._clear_journal.get_open_operation()
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert recovery is not None and recovery.state == "recovery_needed"
     surfaces = {
         surface.surface: surface.state
-        for surface in runtime._clear_journal.get_surfaces(recovery.operation_id)
+        for surface in _maintenance(runtime)._clear_journal.get_surfaces(recovery.operation_id)
     }
     assert surfaces["attachments"] == "snapshotted"
     assert unsafe.is_symlink()
@@ -493,7 +653,7 @@ async def test_recovery_payload_disables_abort_before_initial_snapshot(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    journal = runtime._clear_journal
+    journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     operation = journal.start(
         operation_id="incomplete-snapshot",
@@ -522,7 +682,7 @@ async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    journal = runtime._clear_journal
+    journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     start_entered = threading.Event()
     start_release = threading.Event()
@@ -535,7 +695,7 @@ async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
         return operation
 
     monkeypatch.setattr(journal, "start", blocking_start)
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     assert await asyncio.to_thread(start_entered.wait, 1)
 
     clearing.cancel()
@@ -568,7 +728,7 @@ async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
 
     monkeypatch.setattr(journal, "claim_resume", blocking_claim_resume)
     resuming = asyncio.create_task(
-        runtime.resume_clear(recovery.operation_id, operator_ref="user:owner")
+        _resume_clear(runtime, recovery.operation_id, operator_ref="user:owner")
     )
     assert await asyncio.to_thread(claim_entered.wait, 1)
 
@@ -591,7 +751,7 @@ async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
     assert claimed_recovery.execution_token is None
 
     monkeypatch.setattr(journal, "claim_resume", original_claim_resume)
-    completed = await runtime.resume_clear(
+    completed = await _resume_clear(runtime,
         claimed_recovery.operation_id,
         operator_ref="user:owner",
     )
@@ -606,7 +766,7 @@ async def test_cancelled_completed_clear_resumes_runtime_once(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    journal = runtime._clear_journal
+    journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     completed_entered = threading.Event()
     completed_release = threading.Event()
@@ -621,7 +781,7 @@ async def test_cancelled_completed_clear_resumes_runtime_once(
         return operation
 
     resume_calls = 0
-    original_resume = runtime._resume_after_clear
+    original_resume = _maintenance(runtime)._runtime.resume
 
     async def counted_resume() -> None:
         nonlocal resume_calls
@@ -629,8 +789,8 @@ async def test_cancelled_completed_clear_resumes_runtime_once(
         await original_resume()
 
     monkeypatch.setattr(journal, "mark_completed", blocking_mark_completed)
-    monkeypatch.setattr(runtime, "_resume_after_clear", counted_resume)
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    _replace_runtime_port(runtime, resume=counted_resume)
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     assert await asyncio.to_thread(completed_entered.wait, 1)
 
     clearing.cancel()
@@ -669,10 +829,10 @@ async def test_cancelled_post_terminal_resume_holds_lifecycle_fences(
         return {"ok": True, "state": "running"}
 
     monkeypatch.setattr(runtime, "_reconcile_locked", blocking_reconcile)
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     await asyncio.wait_for(resume_entered.wait(), timeout=1)
 
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     assert runtime.module._worker._claims_paused is True
     assert runtime.module._worker._coordinator._paused is True
     clearing.cancel()
@@ -702,23 +862,23 @@ async def test_abort_restores_all_surfaces_after_destructive_work(
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "abort-source")
     pre_meta = runtime._store.ensure_meta()
-    original_delete = runtime._delete_clear_surface
+    original_delete = _maintenance(runtime)._runtime.delete_surface
 
-    async def interrupt_provider(surface, *, target_epoch):
+    async def interrupt_provider(surface, target_epoch):
         if surface.surface == "provider":
             raise OSError("injected provider delete failure")
-        await original_delete(surface, target_epoch=target_epoch)
+        await original_delete(surface, target_epoch)
 
-    monkeypatch.setattr(runtime, "_delete_clear_surface", interrupt_provider)
-    failed = await runtime.clear(operator_ref="user:owner")
-    recovery = runtime._clear_journal.get_open_operation()
+    _replace_runtime_port(runtime, delete_surface=interrupt_provider)
+    failed = await _clear(runtime, operator_ref="user:owner")
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
 
     assert failed["status"] == "failed"
     assert recovery is not None and recovery.destructive_started
     assert runtime._store.list_queue_rows() == ()
 
-    monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
-    aborted = await runtime.abort_clear(
+    _replace_runtime_port(runtime, delete_surface=original_delete)
+    aborted = await _abort_clear(runtime,
         recovery.operation_id,
         operator_ref="user:owner",
     )
@@ -728,11 +888,11 @@ async def test_abort_restores_all_surfaces_after_destructive_work(
     assert restored_meta.epoch == pre_meta.epoch
     assert restored_meta.clear_in_progress is False
     assert len(runtime._store.list_queue_rows()) == 1
-    assert runtime._clear_journal.get_open_operation() is None
-    operation = runtime._clear_journal.get_operation(recovery.operation_id)
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
+    operation = _maintenance(runtime)._clear_journal.get_operation(recovery.operation_id)
     assert operation is not None and operation.state == "aborted"
-    assert runtime._snapshot_manager is not None
-    assert not runtime._snapshot_manager.snapshot_path(recovery.operation_id).exists()
+    assert _maintenance(runtime)._snapshot_manager is not None
+    assert not _maintenance(runtime)._snapshot_manager.snapshot_path(recovery.operation_id).exists()
     await runtime.close()
 
 
@@ -755,11 +915,11 @@ async def test_clear_accepts_corrupt_diagnostic_call_log(
         path.write_bytes(payload)
         path.chmod(0o600)
 
-    result = await runtime.clear(operator_ref="user:owner")
+    result = await _clear(runtime, operator_ref="user:owner")
 
     assert result["status"] == "completed"
     assert all(not path.exists() for path in files)
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     await runtime.close()
 
 
@@ -789,23 +949,23 @@ async def test_abort_restores_exact_corrupt_call_log_files_after_deletion(
         )
         for path in files
     }
-    original_delete = runtime._delete_clear_surface
+    original_delete = _maintenance(runtime)._runtime.delete_surface
 
-    async def fail_after_call_log(surface, *, target_epoch):
+    async def fail_after_call_log(surface, target_epoch):
         if surface.surface == "attachments":
             raise OSError("injected failure after call-log deletion")
-        await original_delete(surface, target_epoch=target_epoch)
+        await original_delete(surface, target_epoch)
 
-    monkeypatch.setattr(runtime, "_delete_clear_surface", fail_after_call_log)
-    failed = await runtime.clear(operator_ref="user:owner")
-    recovery = runtime._clear_journal.get_open_operation()
+    _replace_runtime_port(runtime, delete_surface=fail_after_call_log)
+    failed = await _clear(runtime, operator_ref="user:owner")
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
 
     assert failed["status"] == "failed"
     assert recovery is not None and recovery.destructive_started
     assert all(not path.exists() for path in files)
 
-    monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
-    aborted = await runtime.abort_clear(
+    _replace_runtime_port(runtime, delete_surface=original_delete)
+    aborted = await _abort_clear(runtime,
         recovery.operation_id,
         operator_ref="user:owner",
     )
@@ -816,7 +976,7 @@ async def test_abort_restores_exact_corrupt_call_log_files_after_deletion(
         assert restored_bytes == expected_bytes
         assert stat.S_IMODE(path.stat().st_mode) == expected_mode
         assert hashlib.sha256(restored_bytes).hexdigest() == expected_digest
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     await runtime.close()
 
 
@@ -826,7 +986,7 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    manager = runtime._snapshot_manager
+    manager = _maintenance(runtime)._snapshot_manager
     assert manager is not None
     original_remove = manager.remove
     removal_attempts: list[str] = []
@@ -838,7 +998,7 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
         original_remove(permit)
 
     monkeypatch.setattr(manager, "remove", fail_removal)
-    completed = await runtime.clear(operator_ref="user:owner")
+    completed = await _clear(runtime, operator_ref="user:owner")
     snapshot_path = manager.snapshot_path(completed["operation_id"])
 
     assert completed["status"] == "completed"
@@ -847,13 +1007,13 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
 
     monkeypatch.setattr(manager, "remove", original_remove)
     assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
-    reconcile_gc = runtime._terminal_snapshot_gc_task
+    reconcile_gc = _maintenance(runtime)._terminal_snapshot_gc_task
     assert reconcile_gc is not None
     await reconcile_gc
     assert not snapshot_path.exists()
 
     monkeypatch.setattr(manager, "remove", fail_removal)
-    completed_before_restart = await runtime.clear(operator_ref="user:owner")
+    completed_before_restart = await _clear(runtime, operator_ref="user:owner")
     restart_snapshot_path = manager.snapshot_path(completed_before_restart["operation_id"])
     assert restart_snapshot_path.is_dir()
     await runtime.close()
@@ -861,17 +1021,109 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
     restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
     assert restart_snapshot_path.is_dir()
-    assert restarted._clear_journal is not None
-    assert restarted._clear_journal.get_open_operation() is None
+    assert _maintenance(restarted)._clear_journal is not None
+    assert _maintenance(restarted)._clear_journal.get_open_operation() is None
     assert await restarted.reconcile(MemoryConfig()) == {
         "ok": True,
         "state": "disabled",
     }
-    restart_gc = restarted._terminal_snapshot_gc_task
+    restart_gc = _maintenance(restarted)._terminal_snapshot_gc_task
     assert restart_gc is not None
     await restart_gc
     assert not restart_snapshot_path.exists()
     await restarted.close()
+
+
+async def _retain_terminal_clear_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+) -> Path:
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=home)
+    manager = _maintenance(runtime)._snapshot_manager
+    assert manager is not None
+
+    def retain(_permit) -> None:
+        raise OSError("retain terminal snapshot for startup GC")
+
+    monkeypatch.setattr(manager, "remove", retain)
+    completed = await _clear(runtime, operator_ref="user:owner")
+    snapshot_path = manager.snapshot_path(completed["operation_id"])
+    assert completed["status"] == "completed"
+    assert snapshot_path.is_dir()
+    await runtime.close()
+    return snapshot_path
+
+
+async def test_terminal_snapshot_gc_is_scheduled_after_lifecycle_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    original_remove = MemorySnapshotManager.remove
+    snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+
+    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        original_remove(manager, permit)
+
+    monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert entered.is_set() is False
+    gc_task = _maintenance(runtime)._terminal_snapshot_gc_task
+    assert gc_task is not None
+    assert await asyncio.to_thread(entered.wait, 1)
+
+    release.set()
+    await asyncio.wait_for(asyncio.shield(gc_task), timeout=1)
+    assert not snapshot_path.exists()
+    await runtime.close()
+
+
+async def test_terminal_snapshot_gc_shutdown_joins_cancelled_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_remove = MemorySnapshotManager.remove
+    snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+
+    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        try:
+            original_remove(manager, permit)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    await runtime.reconcile(MemoryConfig())
+    gc_task = _maintenance(runtime)._terminal_snapshot_gc_task
+    assert gc_task is not None
+    assert await asyncio.to_thread(entered.wait, 1)
+
+    closing = asyncio.create_task(_maintenance(runtime).close())
+    await asyncio.sleep(0)
+    closing.cancel()
+    await asyncio.sleep(0)
+    assert not closing.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(closing, timeout=1)
+    assert finished.is_set()
+    assert gc_task.done()
+    assert _maintenance(runtime)._terminal_snapshot_gc_task is None
+    assert not snapshot_path.exists()
 
 
 async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
@@ -880,18 +1132,18 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    journal = runtime._clear_journal
-    manager = runtime._snapshot_manager
+    journal = _maintenance(runtime)._clear_journal
+    manager = _maintenance(runtime)._snapshot_manager
     assert journal is not None
     assert manager is not None
-    original_delete = runtime._delete_clear_surface
+    original_delete = _maintenance(runtime)._runtime.delete_surface
     original_remove = manager.remove
     removal_attempts: list[str] = []
 
-    async def interrupt_provider(surface, *, target_epoch):
+    async def interrupt_provider(surface, target_epoch):
         if surface.surface == "provider":
             raise OSError("injected provider delete failure")
-        await original_delete(surface, target_epoch=target_epoch)
+        await original_delete(surface, target_epoch)
 
     def fail_removal(permit) -> None:
         if manager.snapshot_path(permit.snapshot_id).exists():
@@ -900,13 +1152,13 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
         original_remove(permit)
 
     async def abort_after_interrupted_clear() -> dict:
-        monkeypatch.setattr(runtime, "_delete_clear_surface", interrupt_provider)
-        failed = await runtime.clear(operator_ref="user:owner")
+        _replace_runtime_port(runtime, delete_surface=interrupt_provider)
+        failed = await _clear(runtime, operator_ref="user:owner")
         recovery = journal.get_open_operation()
         assert failed["status"] == "failed"
         assert recovery is not None
-        monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
-        return await runtime.abort_clear(
+        _replace_runtime_port(runtime, delete_surface=original_delete)
+        return await _abort_clear(runtime,
             recovery.operation_id,
             operator_ref="user:owner",
         )
@@ -923,7 +1175,7 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
 
     monkeypatch.setattr(manager, "remove", original_remove)
     assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
-    reconcile_gc = runtime._terminal_snapshot_gc_task
+    reconcile_gc = _maintenance(runtime)._terminal_snapshot_gc_task
     assert reconcile_gc is not None
     await reconcile_gc
     assert not snapshot_path.exists()
@@ -937,13 +1189,13 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
     restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
     assert restart_snapshot_path.is_dir()
-    assert restarted._clear_journal is not None
-    assert restarted._clear_journal.get_open_operation() is None
+    assert _maintenance(restarted)._clear_journal is not None
+    assert _maintenance(restarted)._clear_journal.get_open_operation() is None
     assert await restarted.reconcile(MemoryConfig()) == {
         "ok": True,
         "state": "disabled",
     }
-    restart_gc = restarted._terminal_snapshot_gc_task
+    restart_gc = _maintenance(restarted)._terminal_snapshot_gc_task
     assert restart_gc is not None
     await restart_gc
     assert not restart_snapshot_path.exists()
@@ -962,19 +1214,19 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
     original_create = MemorySnapshotManager.create
 
     def blocking_create(manager: MemorySnapshotManager, snapshot_id: str | None = None):
-        if manager is runtime._snapshot_manager:
+        if manager is _maintenance(runtime)._snapshot_manager:
             started.set()
             assert release.wait(2)
         try:
             return original_create(manager, snapshot_id)
         finally:
-            if manager is runtime._snapshot_manager:
+            if manager is _maintenance(runtime)._snapshot_manager:
                 finished.set()
 
     monkeypatch.setattr(MemorySnapshotManager, "create", blocking_create)
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     assert await asyncio.to_thread(started.wait, 1)
-    operation = runtime._clear_journal.get_open_operation()
+    operation = _maintenance(runtime)._clear_journal.get_open_operation()
     assert operation is not None
 
     clearing.cancel()
@@ -984,7 +1236,7 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
     assert runtime._reconcile_lock.locked()
     assert runtime.module._lifecycle_lock.locked()
     resuming = asyncio.create_task(
-        runtime.resume_clear(operation.operation_id, operator_ref="user:owner")
+        _resume_clear(runtime, operation.operation_id, operator_ref="user:owner")
     )
     await asyncio.sleep(0)
     assert resuming.done() is False
@@ -997,7 +1249,7 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
         await clearing
 
     assert finished.is_set()
-    recovery = runtime._clear_journal.get_open_operation()
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert recovery is not None
     assert recovery.state == "recovery_needed"
     assert recovery.recovery_from_state == "preparing"
@@ -1008,18 +1260,18 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
     original_discard = MemorySnapshotManager.discard_unrecorded
 
     def blocking_discard(manager: MemorySnapshotManager, permit) -> None:
-        if manager is runtime._snapshot_manager:
+        if manager is _maintenance(runtime)._snapshot_manager:
             discard_started.set()
             assert discard_release.wait(2)
         try:
             original_discard(manager, permit)
         finally:
-            if manager is runtime._snapshot_manager:
+            if manager is _maintenance(runtime)._snapshot_manager:
                 discard_finished.set()
 
     monkeypatch.setattr(MemorySnapshotManager, "discard_unrecorded", blocking_discard)
     resuming = asyncio.create_task(
-        runtime.resume_clear(recovery.operation_id, operator_ref="user:owner")
+        _resume_clear(runtime, recovery.operation_id, operator_ref="user:owner")
     )
     assert await asyncio.to_thread(discard_started.wait, 1)
     resuming.cancel()
@@ -1033,13 +1285,13 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
         await resuming
 
     assert discard_finished.is_set()
-    pending = runtime._clear_journal.get_open_operation()
+    pending = _maintenance(runtime)._clear_journal.get_open_operation()
     assert pending is not None
     assert pending.state == "recovery_needed"
     assert pending.resolution == "resume"
 
     monkeypatch.setattr(MemorySnapshotManager, "discard_unrecorded", original_discard)
-    completed = await runtime.resume_clear(pending.operation_id, operator_ref="user:owner")
+    completed = await _resume_clear(runtime, pending.operation_id, operator_ref="user:owner")
     assert completed["status"] == "completed"
     await runtime.close()
 
@@ -1056,17 +1308,17 @@ async def test_cancelled_clear_waits_for_snapshot_verification_before_releasing_
     original_verify = MemorySnapshotManager.verify
 
     def blocking_verify(manager: MemorySnapshotManager, snapshot_id: str, **kwargs):
-        if manager is runtime._snapshot_manager:
+        if manager is _maintenance(runtime)._snapshot_manager:
             started.set()
             assert release.wait(2)
         try:
             return original_verify(manager, snapshot_id, **kwargs)
         finally:
-            if manager is runtime._snapshot_manager:
+            if manager is _maintenance(runtime)._snapshot_manager:
                 finished.set()
 
     monkeypatch.setattr(MemorySnapshotManager, "verify", blocking_verify)
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     assert await asyncio.to_thread(started.wait, 1)
 
     clearing.cancel()
@@ -1080,13 +1332,13 @@ async def test_cancelled_clear_waits_for_snapshot_verification_before_releasing_
         await clearing
 
     assert finished.is_set()
-    recovery = runtime._clear_journal.get_open_operation()
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert recovery is not None
     assert recovery.state == "recovery_needed"
     assert recovery.recovery_from_state == "prepared"
 
     monkeypatch.setattr(MemorySnapshotManager, "verify", original_verify)
-    completed = await runtime.resume_clear(recovery.operation_id, operator_ref="user:owner")
+    completed = await _resume_clear(runtime, recovery.operation_id, operator_ref="user:owner")
     assert completed["status"] == "completed"
     await runtime.close()
 
@@ -1119,7 +1371,7 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
         "recreate_empty",
         blocking_recreate,
     )
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     assert await asyncio.to_thread(started.wait, 1)
 
     clearing.cancel()
@@ -1134,7 +1386,7 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
         await clearing
 
     assert finished.is_set()
-    recovery = runtime._clear_journal.get_open_operation()
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert recovery is not None
     assert recovery.state == "recovery_needed"
     assert recovery.recovery_from_state == "deleting"
@@ -1144,7 +1396,7 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
         "recreate_empty",
         original_recreate,
     )
-    completed = await runtime.resume_clear(
+    completed = await _resume_clear(runtime,
         recovery.operation_id,
         operator_ref="user:owner",
     )
@@ -1159,19 +1411,19 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "cancel-abort-source")
-    original_delete = runtime._delete_clear_surface
+    original_delete = _maintenance(runtime)._runtime.delete_surface
 
-    async def interrupt_provider(surface, *, target_epoch):
+    async def interrupt_provider(surface, target_epoch):
         if surface.surface == "provider":
             raise OSError("injected provider delete failure")
-        await original_delete(surface, target_epoch=target_epoch)
+        await original_delete(surface, target_epoch)
 
-    monkeypatch.setattr(runtime, "_delete_clear_surface", interrupt_provider)
-    failed = await runtime.clear(operator_ref="user:owner")
-    recovery = runtime._clear_journal.get_open_operation()
+    _replace_runtime_port(runtime, delete_surface=interrupt_provider)
+    failed = await _clear(runtime, operator_ref="user:owner")
+    recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert failed["status"] == "failed"
     assert recovery is not None
-    monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
+    _replace_runtime_port(runtime, delete_surface=original_delete)
 
     started = threading.Event()
     release = threading.Event()
@@ -1179,18 +1431,18 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     original_restore = MemorySnapshotManager.restore
 
     def blocking_restore(manager: MemorySnapshotManager, snapshot_id: str, **kwargs):
-        if manager is runtime._snapshot_manager:
+        if manager is _maintenance(runtime)._snapshot_manager:
             started.set()
             assert release.wait(2)
         try:
             return original_restore(manager, snapshot_id, **kwargs)
         finally:
-            if manager is runtime._snapshot_manager:
+            if manager is _maintenance(runtime)._snapshot_manager:
                 finished.set()
 
     monkeypatch.setattr(MemorySnapshotManager, "restore", blocking_restore)
     aborting = asyncio.create_task(
-        runtime.abort_clear(recovery.operation_id, operator_ref="user:owner")
+        _abort_clear(runtime, recovery.operation_id, operator_ref="user:owner")
     )
     assert await asyncio.to_thread(started.wait, 1)
 
@@ -1205,15 +1457,15 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
         await aborting
 
     assert finished.is_set()
-    pending = runtime._clear_journal.get_open_operation()
+    pending = _maintenance(runtime)._clear_journal.get_open_operation()
     assert pending is not None
     assert pending.state == "recovery_needed"
     assert pending.resolution == "abort"
     assert pending.execution_token is None
-    assert runtime._clear_recovery_payload()["can_resume"] is False
+    assert _maintenance(runtime).recovery().can_resume is False
 
     monkeypatch.setattr(MemorySnapshotManager, "restore", original_restore)
-    journal = runtime._clear_journal
+    journal = _maintenance(runtime)._clear_journal
     terminal_entered = threading.Event()
     terminal_release = threading.Event()
     original_mark_aborted = journal.mark_aborted
@@ -1225,7 +1477,7 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
         return operation
 
     resume_calls = 0
-    original_resume = runtime._resume_after_clear
+    original_resume = _maintenance(runtime)._runtime.resume
 
     async def counted_resume() -> None:
         nonlocal resume_calls
@@ -1233,9 +1485,9 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
         await original_resume()
 
     monkeypatch.setattr(journal, "mark_aborted", blocking_mark_aborted)
-    monkeypatch.setattr(runtime, "_resume_after_clear", counted_resume)
+    _replace_runtime_port(runtime, resume=counted_resume)
     aborting = asyncio.create_task(
-        runtime.abort_clear(pending.operation_id, operator_ref="user:owner")
+        _abort_clear(runtime, pending.operation_id, operator_ref="user:owner")
     )
     assert await asyncio.to_thread(terminal_entered.wait, 1)
 
@@ -1253,12 +1505,12 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     aborted = journal.get_operation(pending.operation_id)
     assert aborted is not None
     assert aborted.state == "aborted"
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     assert resume_calls == 1
     await runtime.close()
 
 
-async def test_runtime_backup_fences_capture_and_clear_for_the_full_copy(
+async def test_maintenance_backup_fences_capture_and_clear_for_the_full_copy(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1287,7 +1539,7 @@ async def test_runtime_backup_fences_capture_and_clear_for_the_full_copy(
 
     monkeypatch.setattr(MemorySnapshotManager, "create", blocking_create)
     monkeypatch.setattr(runtime._store, "enqueue_request", blocking_enqueue)
-    monkeypatch.setattr(runtime, "_resume_after_clear", resume_without_sidecar)
+    _replace_runtime_port(runtime, resume=resume_without_sidecar)
 
     capturing = asyncio.create_task(
         runtime.module.capture(
@@ -1303,13 +1555,13 @@ async def test_runtime_backup_fences_capture_and_clear_for_the_full_copy(
         )
     )
     assert await asyncio.to_thread(enqueue_entered.wait, 1)
-    creating = asyncio.create_task(runtime.create_backup("runtime-fence"))
+    creating = asyncio.create_task(_maintenance(runtime).create_backup("runtime-fence"))
     await asyncio.sleep(0)
     assert entered.is_set() is False
     release_enqueue.set()
     assert await capturing == CaptureAccepted()
     assert await asyncio.to_thread(entered.wait, 1)
-    assert runtime._maintenance_open() is True
+    assert _maintenance(runtime).is_open() is True
     receipt = await runtime.module.capture(
         CaptureRequest(
             source_message_id="blocked-capture",
@@ -1323,10 +1575,10 @@ async def test_runtime_backup_fences_capture_and_clear_for_the_full_copy(
     )
     assert receipt == CaptureSkipped(reason="memory_clear_failed")
 
-    clearing = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
     await asyncio.sleep(0)
     assert clearing.done() is False
-    assert runtime._clear_journal.get_open_operation() is None
+    assert _maintenance(runtime)._clear_journal.get_open_operation() is None
 
     clearing.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1334,12 +1586,12 @@ async def test_runtime_backup_fences_capture_and_clear_for_the_full_copy(
     creating.cancel()
     await asyncio.sleep(0)
     assert creating.done() is False
-    assert runtime._maintenance_open() is True
+    assert _maintenance(runtime).is_open() is True
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await creating
     assert (tmp_path / "state" / "memory" / "backups" / "runtime-fence").is_dir()
-    assert runtime._maintenance_open() is False
+    assert _maintenance(runtime).is_open() is False
     await runtime.close()
 
 
@@ -1349,7 +1601,7 @@ async def test_reconcile_schedules_auto_id_backup_stage_cleanup(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    manager = runtime._backup_manager
+    manager = _maintenance(runtime)._backup_manager
     assert manager is not None
     stage = manager.snapshot_root / f".{('a' * 32)}.tmp"
     stage.mkdir(parents=True, mode=0o700)
@@ -1362,7 +1614,7 @@ async def test_reconcile_schedules_auto_id_backup_stage_cleanup(
         "ok": True,
         "state": "disabled",
     }
-    task = runtime._backup_stage_reconcile_task
+    task = _maintenance(runtime)._backup_stage_reconcile_task
     if task is not None:
         await task
 
@@ -1376,8 +1628,8 @@ async def test_backup_stage_cleanup_waits_for_terminal_snapshot_gc(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    journal = runtime._clear_journal
-    manager = runtime._backup_manager
+    journal = _maintenance(runtime)._clear_journal
+    manager = _maintenance(runtime)._backup_manager
     assert journal is not None
     assert manager is not None
     terminal_entered = threading.Event()
@@ -1410,8 +1662,8 @@ async def test_backup_stage_cleanup_waits_for_terminal_snapshot_gc(
     assert backup_entered.is_set() is False
 
     terminal_release.set()
-    terminal_gc = runtime._terminal_snapshot_gc_task
-    backup_reconcile = runtime._backup_stage_reconcile_task
+    terminal_gc = _maintenance(runtime)._terminal_snapshot_gc_task
+    backup_reconcile = _maintenance(runtime)._backup_stage_reconcile_task
     assert terminal_gc is not None
     assert backup_reconcile is not None
     await terminal_gc
@@ -1427,7 +1679,7 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    manager = runtime._backup_manager
+    manager = _maintenance(runtime)._backup_manager
     assert manager is not None
     entered = threading.Event()
     release = threading.Event()
@@ -1443,14 +1695,14 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
         "state": "disabled",
     }
     assert await asyncio.to_thread(entered.wait, 1)
-    assert runtime._maintenance_open() is False
+    assert _maintenance(runtime).is_open() is False
 
     closing = asyncio.create_task(runtime.close())
     await asyncio.sleep(0)
     assert closing.done() is False
     release.set()
     await closing
-    assert runtime._backup_stage_reconcile_task is None
+    assert _maintenance(runtime)._backup_stage_reconcile_task is None
 
 
 async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fence(
@@ -1459,7 +1711,7 @@ async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fe
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
-    manager = runtime._backup_manager
+    manager = _maintenance(runtime)._backup_manager
     assert manager is not None
     entered = threading.Event()
     release = threading.Event()
@@ -1470,7 +1722,7 @@ async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fe
         return ()
 
     monkeypatch.setattr(manager, "reconcile_unpublished_backup_stages", blocking_reconcile)
-    cleanup = asyncio.create_task(runtime._run_backup_stage_reconcile())
+    cleanup = asyncio.create_task(_maintenance(runtime)._run_backup_stage_reconcile())
     assert await asyncio.to_thread(entered.wait, 1)
     assert runtime._reconcile_lock.locked()
     assert runtime.module._lifecycle_lock.locked()
@@ -1502,7 +1754,65 @@ async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fe
     await runtime.close()
 
 
-async def test_runtime_backup_restore_round_trips_queue_state(
+async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_entered = threading.Event()
+    release_install = threading.Event()
+
+    class BlockingArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            self.ensure_calls.append(force)
+            install_entered.set()
+            release_install.wait(timeout=2)
+            return dict(self.ensure_payload)
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=BlockingArtifact(python=Path(sys.executable)),
+        effective_home=tmp_path,
+    )
+    terminal_gc_entered = asyncio.Event()
+    release_terminal_gc = asyncio.Event()
+    cleanup_calls: list[bool] = []
+    maintenance = _maintenance(runtime)
+
+    async def blocked_terminal_gc() -> None:
+        terminal_gc_entered.set()
+        await release_terminal_gc.wait()
+
+    manager = maintenance._backup_manager
+    assert manager is not None
+    monkeypatch.setattr(maintenance, "_run_terminal_snapshot_gc", blocked_terminal_gc)
+    monkeypatch.setattr(
+        manager,
+        "reconcile_unpublished_backup_stages",
+        lambda: cleanup_calls.append(runtime._artifact_installing),
+    )
+
+    maintenance.ensure_housekeeping()
+    await terminal_gc_entered.wait()
+    queued_reconcile = maintenance._backup_stage_reconcile_task
+    assert queued_reconcile is not None
+
+    installing = asyncio.create_task(runtime.install_artifact())
+    assert await asyncio.to_thread(install_entered.wait, 1)
+    release_terminal_gc.set()
+    await queued_reconcile
+    assert cleanup_calls == []
+
+    release_install.set()
+    assert (await installing)["ok"] is True
+    deferred_reconcile = maintenance._backup_stage_reconcile_task
+    assert deferred_reconcile is not None
+    assert deferred_reconcile is not queued_reconcile
+    await deferred_reconcile
+    assert cleanup_calls == [False]
+    await runtime.close()
+
+
+async def test_maintenance_backup_restore_round_trips_queue_state(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1510,12 +1820,12 @@ async def test_runtime_backup_restore_round_trips_queue_state(
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "backup-source")
 
-    backup = await runtime.create_backup("runtime-round-trip")
+    backup = await _maintenance(runtime).create_backup("runtime-round-trip")
     meta = runtime._store.ensure_meta()
     runtime._store.reset_for_clear(target_epoch=meta.epoch + 1)
     assert runtime._store.list_queue_rows() == ()
 
-    restored = await runtime.restore_backup(
+    restored = await _maintenance(runtime).restore_backup(
         backup.snapshot_id,
         expected_manifest_sha256=backup.manifest_sha256,
         expected_surface_digests=backup.surface_digests(),
@@ -1562,7 +1872,7 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         connection.execute("INSERT INTO generation VALUES ('backup')")
     call_log.chmod(0o600)
 
-    backup = await runtime.create_backup("crash-safe-restore")
+    backup = await _maintenance(runtime).create_backup("crash-safe-restore")
     _enqueue(runtime, "live-queue")
     provider_marker.write_text("live")
     attachment_marker.write_text("live")
@@ -1584,7 +1894,7 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
             and Path(destination) == target
             and f".restore-{backup.snapshot_id}-" in Path(source).name
         ):
-            open_operation = runtime._backup_restore_journal.get_open_operation()
+            open_operation = _maintenance(runtime)._backup_restore_journal.get_open_operation()
             assert open_operation is not None
             assert open_operation.state == "restoring"
             intent_visible_before_replace = True
@@ -1597,9 +1907,13 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         return None
 
     monkeypatch.setattr(snapshot_module.os, "replace", crash_after_surface_install)
-    monkeypatch.setattr(runtime, "_mark_backup_restore_recovery", process_died_before_cleanup)
+    monkeypatch.setattr(
+        _maintenance(runtime),
+        "_mark_backup_restore_recovery",
+        process_died_before_cleanup,
+    )
     with pytest.raises(InjectedProcessDeath):
-        await runtime.restore_backup(
+        await _maintenance(runtime).restore_backup(
             backup.snapshot_id,
             expected_manifest_sha256=backup.manifest_sha256,
             expected_surface_digests=backup.surface_digests(),
@@ -1608,12 +1922,12 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
 
     assert crashed is True
     assert intent_visible_before_replace is True
-    interrupted = runtime._backup_restore_journal.get_open_operation()
+    interrupted = _maintenance(runtime)._backup_restore_journal.get_open_operation()
     assert interrupted is not None
     assert interrupted.state == "restoring"
     assert [
         event.event
-        for event in runtime._backup_restore_journal.get_events(
+        for event in _maintenance(runtime)._backup_restore_journal.get_events(
             interrupted.operation_id
         )
     ] == ["started"]
@@ -1622,10 +1936,10 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         MemoryConfig(enabled=True),
         effective_home=tmp_path,
     )
-    recovery = restarted._backup_restore_journal.get_open_operation()
+    recovery = _maintenance(restarted)._backup_restore_journal.get_open_operation()
     assert recovery is not None
     assert recovery.state == "recovery_needed"
-    assert restarted._maintenance_open() is True
+    assert _maintenance(restarted).is_open() is True
     assert restarted.module._worker._claims_paused is True
     assert restarted._worker_task is None
     assert restarted._process is None
@@ -1653,7 +1967,7 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
             "ok": False,
             "error": "memory_clear_failed",
         }
-        still_fenced = restarted._backup_restore_journal.get_open_operation()
+        still_fenced = _maintenance(restarted)._backup_restore_journal.get_open_operation()
         assert still_fenced == recovery
         assert restarted.module._worker._claims_paused is True
         monkeypatch.setattr(SidecarOwnership, "reap", original_reap)
@@ -1670,20 +1984,20 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
             "backup",
         )
 
-    completed = restarted._backup_restore_journal.get_operation(
+    completed = _maintenance(restarted)._backup_restore_journal.get_operation(
         recovery.operation_id
     )
     assert completed is not None
     assert completed.state == "completed"
     assert completed.attempt_count == 2
-    assert restarted._backup_restore_journal.get_open_operation() is None
+    assert _maintenance(restarted)._backup_restore_journal.get_open_operation() is None
     assert [
         event.event
-        for event in restarted._backup_restore_journal.get_events(
+        for event in _maintenance(restarted)._backup_restore_journal.get_events(
             completed.operation_id
         )
     ] == ["started", "recovery_needed", "retry_started", "completed"]
-    assert restarted._maintenance_open() is False
+    assert _maintenance(restarted).is_open() is False
 
     await runtime.close()
     await restarted.close()
