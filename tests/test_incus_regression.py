@@ -535,9 +535,23 @@ def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None
     assert before != after
 
 
+def test_voice_realtime_build_flag_is_part_of_ui_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
+    before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
+    after = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    assert before != after
+
+
 def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", "main")
     monkeypatch.setenv("REGRESSION_SLACK_CHANNEL", "C123")
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     payload = incus_regression.runtime_env_payload().decode()
@@ -548,7 +562,39 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     assert "VIBE_SHOW_RUNTIME_SOURCE=github-source" in payload
     assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload
+    assert "VITE_VOICE_REALTIME_ENABLED=true" in payload
     assert "OPENAI_API_KEY=sk-test" in payload
+
+
+def test_runtime_env_payload_rejects_invalid_voice_realtime_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "enabled")
+
+    with pytest.raises(
+        incus_regression.RegressionError,
+        match="REGRESSION_VOICE_REALTIME_ENABLED must be true or false",
+    ):
+        incus_regression.runtime_env_payload()
+
+
+def test_up_rejects_invalid_voice_realtime_flag_before_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "enabled")
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: calls.append("require_incus"))
+
+    with pytest.raises(
+        incus_regression.RegressionError,
+        match="REGRESSION_VOICE_REALTIME_ENABLED must be true or false",
+    ):
+        incus_regression.cmd_up(argparse.Namespace(env_file=None, dry_run=False))
+
+    assert calls == []
 
 
 def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1994,8 +2040,11 @@ def test_update_builds_ui_before_editable_install() -> None:
     assert build_index < install_index
 
 
-def test_force_ui_rebuilds_even_when_fingerprints_match() -> None:
+def test_force_ui_rebuilds_with_exported_voice_realtime_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     commands = []
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
 
     class RecordingRunner:
         def run(self, command, **kwargs):
@@ -2025,7 +2074,7 @@ def test_force_ui_rebuilds_even_when_fingerprints_match() -> None:
 
     joined = "\n".join(commands)
     assert "cd ui && npm ci" in joined
-    assert "cd ui && npm run build" in joined
+    assert "cd ui && VITE_VOICE_REALTIME_ENABLED=true npm run build" in joined
     assert "pip install -e ." not in joined
 
 
@@ -2101,7 +2150,7 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
 
     joined = "\n".join(commands)
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
-    assert "cd ui && npm run build" in joined
+    assert "VITE_VOICE_REALTIME_ENABLED=false npm run build" in joined
     assert "pip install -e ." not in joined
 
 
