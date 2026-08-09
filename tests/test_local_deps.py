@@ -868,6 +868,7 @@ def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: _MemoryMgr())
     out = api.dependencies_status()
     assert out["ok"]
+    assert out["reconciling"] is False
     by = {d["id"]: d for d in out["deps"]}
     assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
@@ -968,7 +969,7 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     assert by["node"]["installed"] is False and by["node"]["status"] == "missing"
 
 
-def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepare(monkeypatch):
+def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(monkeypatch):
     askill_calls = []
     avault_calls = []
 
@@ -1011,9 +1012,9 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
     assert out["ok"] is True
     assert askill_calls == [False]
     assert avault_calls == [False]
-    assert manager.prepared == []
+    assert manager.prepared == [False]
     assert out["node"]["status"] == "ready"
-    assert out["show_runtime"] == {"ok": True, "status": "pending_prewarm", "reason": None}
+    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
 
 
 def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(monkeypatch):

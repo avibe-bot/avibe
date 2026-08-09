@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -24,17 +24,24 @@ import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
 import type { DependencyItem, InstallResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { dependencyHasInstallAction } from './SettingsDependenciesPage.logic';
+import {
+  dependenciesNeedAutomaticRefresh,
+  dependencyHasInstallAction,
+  dependencyIsStartupManaged,
+} from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
-// action), reusing the Backends-page card shape. askill + the Show Page
-// runtime auto-install during `vibe runtime prepare`; this page surfaces their
-// status and offers manual re-check / install / repair. Backend CLIs are
+// action), reusing the Backends-page card shape. Startup reconciliation and
+// `vibe runtime prepare` auto-install askill + the Show Page runtime; this page
+// surfaces their status and offers manual re-check / install / repair. Backend CLIs are
 // managed on the Backends tab — linked, not duplicated.
 
 type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
+
+const STARTUP_REFRESH_INTERVAL_MS = 1_500;
+const STARTUP_REFRESH_WINDOW_MS = 120_000;
 
 const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
@@ -52,18 +59,49 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const [deps, setDeps] = useState<DependencyItem[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [reconciling, setReconciling] = useState(false);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const res = await api.listDependencies();
-      setDeps(res.deps ?? []);
+      if (sequence === refreshSequence.current) {
+        setDeps(res.deps ?? []);
+        setReconciling(Boolean(res.reconciling));
+      }
+      return res;
     } catch {
-      setDeps([]);
+      if (sequence === refreshSequence.current) {
+        setDeps([]);
+        setReconciling(false);
+      }
+      return null;
     }
   }, [api]);
 
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    let timer: number | undefined;
+    const deadline = Date.now() + STARTUP_REFRESH_WINDOW_MS;
+
+    const pollUntilSettled = async () => {
+      const result = await refresh();
+      if (
+        !cancelled &&
+        result !== null &&
+        dependenciesNeedAutomaticRefresh(result) &&
+        Date.now() < deadline
+      ) {
+        timer = window.setTimeout(() => void pollUntilSettled(), STARTUP_REFRESH_INTERVAL_MS);
+      }
+    };
+
+    void pollUntilSettled();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [refresh]);
 
   // A closed backend reason/message is often a snake_case token (e.g.
@@ -97,6 +135,9 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusText = (d: DependencyItem) => {
+    if (reconciling && dependencyIsStartupManaged(d) && !d.installed) {
+      return t('settings.dependencies.installing');
+    }
     // Closed non-installed failure states render distinctly, ahead
     // of the generic "not installed" fallback.
     if (d.status === 'unsupported') return t('settings.dependencies.statusUnsupported');
@@ -108,6 +149,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusVariant = (d: DependencyItem): 'success' | 'warning' | 'destructive' => {
+    if (reconciling && dependencyIsStartupManaged(d) && !d.installed) return 'warning';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
     return d.installed ? 'success' : 'destructive';
@@ -137,6 +179,7 @@ export const SettingsDependenciesPage: React.FC = () => {
           {deps.map((d) => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
+            const startupInstalling = reconciling && dependencyIsStartupManaged(d) && !d.installed;
             const showAction = dependencyHasInstallAction(d);
             return (
               <SettingsResourceRow
@@ -167,15 +210,20 @@ export const SettingsDependenciesPage: React.FC = () => {
                       </Button>
                     )}
                     {showAction && (
-                      <Button variant={d.installed ? 'secondary' : 'brand'} size="xs" disabled={installing} onClick={() => void install(d)}>
-                        {installing ? (
+                      <Button
+                        variant={d.installed ? 'secondary' : 'brand'}
+                        size="xs"
+                        disabled={installing || startupInstalling}
+                        onClick={() => void install(d)}
+                      >
+                        {installing || startupInstalling ? (
                           <Loader2 className="size-3.5 animate-spin" />
                         ) : d.installed ? (
                           <RefreshCw className="size-3.5" />
                         ) : (
                           <Download className="size-3.5" />
                         )}
-                        {installing
+                        {installing || startupInstalling
                           ? t('settings.dependencies.installing')
                           : d.installed
                             ? d.id === 'show-runtime' || d.id === 'memory-runtime'

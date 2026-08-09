@@ -7646,7 +7646,11 @@ def dependencies_status(*, offline: bool = False) -> dict:
         }
     )
 
-    return {"ok": True, "deps": deps}
+    return {
+        "ok": True,
+        "deps": deps,
+        "reconciling": _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked(),
+    }
 
 
 def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
@@ -7862,10 +7866,12 @@ def reconcile_startup_dependencies() -> dict:
             }
 
             if node_ok:
+                prepared = manager.prepare(force=False)
+                runtime_ok = bool(prepared.get("ok"))
                 result["show_runtime"] = {
-                    "ok": True,
-                    "status": "pending_prewarm",
-                    "reason": None,
+                    "ok": runtime_ok,
+                    "status": "ready" if runtime_ok else "failed",
+                    "reason": prepared.get("reason"),
                 }
             else:
                 result["show_runtime"] = {

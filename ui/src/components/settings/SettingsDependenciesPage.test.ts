@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { dependencyHasInstallAction } from './SettingsDependenciesPage.logic';
+import {
+  dependenciesNeedAutomaticRefresh,
+  dependencyHasInstallAction,
+  dependencyIsStartupManaged,
+} from './SettingsDependenciesPage.logic';
 
 describe('dependencyHasInstallAction', () => {
   it('hides install and repair actions for unsupported dependencies', () => {
@@ -11,5 +15,47 @@ describe('dependencyHasInstallAction', () => {
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'missing' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'ready' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'node', status: 'missing' })).toBe(false);
+  });
+});
+
+describe('startup dependency refresh', () => {
+  const dependency = (id: string, installed: boolean) => ({
+    id,
+    kind: 'tool' as const,
+    required: true,
+    installed,
+    version: null,
+    status: installed ? ('ready' as const) : ('missing' as const),
+  });
+
+  it('tracks every dependency repaired by the startup reconciler', () => {
+    for (const id of ['askill', 'avault', 'show-runtime', 'tmux', 'node']) {
+      expect(dependencyIsStartupManaged({ id })).toBe(true);
+    }
+    expect(dependencyIsStartupManaged({ id: 'memory-runtime' })).toBe(false);
+  });
+
+  it('keeps polling until startup-managed dependencies settle', () => {
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [dependency('show-runtime', false)],
+      }),
+    ).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: true,
+        deps: [dependency('show-runtime', true)],
+      }),
+    ).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [dependency('show-runtime', true), dependency('memory-runtime', false)],
+      }),
+    ).toBe(false);
   });
 });

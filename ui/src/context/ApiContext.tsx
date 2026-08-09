@@ -1717,7 +1717,7 @@ export type DependencyItem = {
   download_error?: DependencyDownloadError | null;
 };
 
-export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
+export type DependenciesResult = { ok: boolean; deps: DependencyItem[]; reconciling?: boolean };
 
 // Memory plugin contract: docs/plans/memory-plugin-system.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
