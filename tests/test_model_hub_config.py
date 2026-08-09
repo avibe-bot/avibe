@@ -337,6 +337,11 @@ class GateCase(NamedTuple):
 #
 #   token      — a *near miss*: a name a substring, prefix or suffix matcher
 #                would have credited. This is the one that regressed twice.
+#                A cell filled with one direction is not filled: prefix and
+#                suffix fail differently, and set intersection catches the
+#                prefix for free while an unbounded extraction reads the suffix
+#                as a hit. Every direction the extraction admits needs a case,
+#                or the grid reads full over a rule that was never exercised.
 #   empty      — a *total miss*: nothing resolves, and the gate reports it
 #                instead of skipping the comparison in silence.
 #   duplicate  — one canonical token declared twice with different content.
@@ -429,6 +434,19 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "gap marker cites a prefix of a registered number",
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-1 carries",
+        "is named by no §0.8 row",
+    ),
+    # The other direction, and the one the cell above was standing in for: the
+    # extraction stopped at the last digit it wanted rather than at the end of
+    # the number, so `G-15x` was read as `G-15` and a route stayed silenced by a
+    # registration written about something else. A prefix resolves to nothing
+    # and fails loudly; a suffix resolved to a real row, which is why filling
+    # this cell with the prefix alone left the rule untested for two rounds.
+    GateCase(
+        "A", "gaps", "token",
+        "gap marker cites a suffix of a registered number",
+        "`[contract]` `[contract-gap]` G-15 carries",
+        "`[contract]` `[contract-gap]` G-15x carries",
         "is named by no §0.8 row",
     ),
     # Reviewer's repro, round 14: a route first mentioned inside a
@@ -678,6 +696,18 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.",
         "the surface of truth when it does not.\n\nA 409 conflict answer to "
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-1.",
+        "a 409 branch is claimed for",
+    ),
+    # The same suffix miss on the other arm that honours the marker. Both ask
+    # through one comparison, so one boundary fixes both — and one direction
+    # tested on one arm proves neither, which is how a cell that reads full in
+    # two classes at once can still be describing a rule nobody ran.
+    GateCase(
+        "E", "gaps", "token",
+        "a silenced claim cites a suffix of a registered number",
+        "the surface of truth when it does not.",
+        "the surface of truth when it does not.\n\nA 409 conflict answer to "
+        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9x.",
         "a 409 branch is claimed for",
     ),
     # A total rendering of a contracted vocabulary that quietly drops a row. The

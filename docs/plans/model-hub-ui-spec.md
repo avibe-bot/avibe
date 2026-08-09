@@ -583,7 +583,7 @@ as everywhere else in this document.
 | §1.0 | Impaired | `health` reads `degraded` `[contract]` | F2 | `shell.degraded` | `health` returns to `ok` → Ready |
 | §1.0 | Unreachable (engine down) | Status request fails, or `health` reads `down` `[contract]` | F2 | `shell.stopped` | Recovery → Ready |
 | §1.0 | Partial | Sources load, per-backend supply does not | F2 | `gateway.supply.none` | Retry succeeds → Ready |
-| §1.1 | Ready | Sources + per-backend supply both loaded | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
+| §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The per-model 当前 line is a third read and this state does not wait on it | → §1.0 Unreachable, for the one read it leaves outstanding | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable | — | Payload arrives → Ready |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock |
@@ -593,7 +593,7 @@ as everywhere else in this document.
 | §1.1 | Group interrupted | The native CLI that backend depends on is unavailable **in this process** `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it is a different word from 等待重试 |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
-| §1.1 | Takeover active | Head source unavailable, next one serving | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Recovery → Ready. This is frame 08 (§1.7) |
+| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>`, the only read that carries a hop `[contract]` — answers with a serving hop that is not the head | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Recovery → Ready. This is frame 08 (§1.7) |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
 | §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect` | Success → the group re-renders in its 直连 form, and the page becomes 09 when it was the last one |
 | §1.3 | Ready | Drawer opened and the eligible sources resolved | → §1.0 Unreachable | `order.title`, `order.subtitle`, `order.section.ordered`, `order.section.ordered.note`, `order.section.heldOut` | 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |
@@ -606,7 +606,7 @@ as everywhere else in this document.
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start`, then `GET /api/models/oauth/status/<flow_id>` polled every 2s until `OAuthFlow.state` is terminal `[contract]` | → OAuth failed | `addSub.signIn` | `state` reads `success` → source created, dialog closes; `failed` → OAuth failed; `cancelled` → OAuth failed as well `[contract]` — it is one of the six readings the flow's own enum admits, so it arrives here while this dialog is still open and polling, which is the sign-in being abandoned on the provider's surface rather than this dialog's dismissal; the unsuccessful terminals share one destination because 重试 is the affordance either of them wants; `OAuthFlow.expires_at` passes with no terminal reading → OAuth failed, the same state and the same sentence `[contract]`; dismissed any of the three ways → Dismissing |
 | §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
-| §1.4 | OAuth failed | Provider or engine failure; classified `needs_action` `[spec §4.5]` | F1 | `addSub.error.oauthFailed`, `addSub.retry` | 重试 → Awaiting sign-in; 取消 → Dismissing |
+| §1.4 | OAuth failed | The flow reached an unsuccessful terminal — `OAuthFlow.state` reads `failed` or `cancelled`, or `expires_at` passed with no terminal reading `[contract]`. Read off the flow, never off a source | F1 | `addSub.error.oauthFailed`, `addSub.retry` | 重试 → Awaiting sign-in; 取消 → Dismissing |
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown` | 重试 once the engine recovers; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Already bound | This account is already another source `[spec §4.1]` | F1 | `addSub.error.alreadyBound` | Sign in with another account; 取消 → dismiss, nothing bound `[derived]` |
 | §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit` | 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
@@ -1229,6 +1229,31 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `FZUYI` wire layer | one path per supply relation + endpoint dots | derived supply set | no | — |
 | `ftWgW` legend info icon | the legend's note — **the string is measured from the frame, not specified here** (§0.2) | static | hover / focus | Tooltip |
 
+**The 当前 line is a third read, and the page does not wait on it** `[contract]`. Every
+element above it is drawn from the two page-level payloads — tile, name, count, the mode
+and status line, the head buttons, the collapse row — but the serving hop is in neither:
+`api.md` states that AgentSupply projects no backend-level serving head, and that
+`model_supply` carries only `chain_length`. The one read that answers with a hop is
+`GET /api/models/agents/<backend>/chain?model=<id>`, per model and Hub only — a 直连
+backend gets the documented `direct_mode` refusal. So 「Ready」 is defined on the two
+payloads on purpose: waiting on the third would hold the whole page for one row's
+projection, and on a 直连 group it would wait for a read the contract refuses. That
+refusal is also why a 直连 group draws no 当前 line and no takeover rather than an empty
+one — there is nothing there to be pending about.
+
+**Until that read answers, the derived columns say so** `[derived]`. Current source,
+chain and takeover render `—` while the chain read is outstanding, and again when it
+comes back failed or refused. This is not a new rendering: it is the one §1.0 already
+gives those same three columns when the engine is unreachable, for the same reason (D-3
+— a surface that cannot prove a fact must say so), which is why 「Ready」 points its
+failure at that state instead of naming a treatment of its own. A stale last-known hop
+is specifically excluded. AC-30 makes takeover a projection of the chain the surface
+displays, so a takeover badge drawn from a chain no longer in hand is a projection of
+nothing — the one failure that rule exists to prevent. And a failed chain read degrades
+those columns and nothing else, which is §1.0's Partial rule read at row grain: only the
+sub-tree that failed degrades, and the group keeps everything the other two payloads
+drew.
+
 **The three head buttons are mutually constrained** `[frame]`, and the constraint is
 the whole model in one line: a backend is either on the gateway or not. On the gateway
 it carries 来源顺序 + 切换到直连; in 直连 it carries 切换到网关 and **nothing else** —
@@ -1703,6 +1728,27 @@ ends a flow no terminal reading ever comes back for is `OAuthFlow.expires_at`, a
 lands on *OAuth failed*: the same state and the same sentence as a provider refusal,
 because 重试 is the same one thing to do and a second message would promise a second
 remedy that does not exist.
+
+**This state is read off the flow, and there is no source to read it off** `[contract]`.
+It said 「classified `needs_action`」 until this round, which named a real status and put
+it in the one place it cannot be: `api.md` states outright that a failed create flow has
+no prior `Source` to mark `needs_action`, and its *OAuth completion* rules give a flow
+that is non-terminal, failed or canceled the flow object and nothing else — so there is
+no source in hand to carry a verdict, and nowhere for the reader to see one if there
+were. The entry condition is therefore the flow's own reading, which is exactly the three
+unsuccessful exits *Awaiting sign-in* already lists. `needs_action` keeps the meaning it
+has everywhere else in this document: a source that exists and needs the user to act.
+That is the re-auth path, which §1.1's per-source row already renders
+(`sourceDetail.status.needsAction.oauthExpired`) — a grant that lapsed on a source that
+was created, not a source that never was.
+
+**And the one sentence must not depend on the cause** `[derived]`. `error_key` is
+declared nullable, and `cancelled` — the terminal a user reaches by abandoning the
+provider's page — is the one of the three most likely to carry nothing. Per-key copy
+would need a fallback for the most ordinary failure here, so the dialog renders one
+sentence for all three and offers 重试. That is the reasoning the expiry exit uses one
+paragraph above, on the other axis: a second message promises a second remedy, and there
+is only one.
 
 **All three failure rows keep the same foot** `[derived]`. The dialog's foot is 取消 /
 去登录 (`[frame]`), and a failure replaces the message, not the buttons: 去登录 becomes

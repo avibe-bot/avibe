@@ -1171,7 +1171,7 @@ def mapping_tables(doc: Document) -> list[tuple[int, str, set[str], set[str], bo
     return found
 
 
-GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)")
+GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)(?![\w-])")
 GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 
 
@@ -1187,6 +1187,14 @@ def registered_gaps(doc: Document) -> Universe:
     stated missing behaviour, and evidence verified against a named commit. A
     bare `[contract-gap]`, or one citing a number no row defines, exempts
     nothing — the claim is checked as if the marker were not there.
+
+    A reference ends where its digits end. Without that boundary the number was
+    read as a prefix, so `G-9x` borrowed the row written about G-9 and a
+    `G-15`-shaped typo silenced a route on the strength of a registration that
+    was about something else — the same accident as the bare marker, reached by
+    one *extra* keystroke instead of one fewer, and harder to see because the
+    citation looks like it names something. A suffixed citation now resolves to
+    nothing and silences nothing, exactly like a bare one.
 
     Read from §0.5 alone. Scanning the document for the row *shape* let anything
     shaped like `| G-99 |` — a §1 example, a quoted table, a row moved out of the
