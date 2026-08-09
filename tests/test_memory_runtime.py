@@ -1566,6 +1566,162 @@ def test_runtime_effective_home_owns_the_attachment_pipeline(
     assert not attachment_pin_root(global_home).exists()
 
 
+def test_final_flush_fences_capture_before_queue_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("AVIBE_HOME", str(runtime_home))
+    store = MemoryStore()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=runtime_home,
+    )
+    flush_entered = threading.Event()
+    release_flush = threading.Event()
+
+    class BlockingFlushProvider(FakeMemoryProvider):
+        async def flush(self, session_ref: ProviderSessionRef):
+            self.flushes.append(session_ref)
+            flush_entered.set()
+            assert await asyncio.to_thread(release_flush.wait, 2.0)
+            return FlushSucceeded(request_id="old-session-flush", status="extracted")
+
+    provider = BlockingFlushProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+
+    source_root = runtime_home / "attachments" / "avibe"
+    source_root.mkdir(parents=True, mode=0o700)
+    source = source_root / "old.txt"
+    source.write_bytes(b"old session attachment")
+    source.chmod(0o600)
+    old_request = CaptureRequest(
+        source_message_id="old-source",
+        session_id="shared-session",
+        principal_id="u-11111111111111111111111111111111",
+        project_id=PROJECT,
+        provenance="user_input",
+        text="old session message",
+        occurred_at_ms=1_725_000_001_234,
+        attachments=(
+            CaptureAttachment(
+                kind="doc",
+                name=source.name,
+                uri=source.as_uri(),
+                ext="txt",
+            ),
+        ),
+    )
+    later_request = replace(
+        old_request,
+        source_message_id="later-source",
+        text="later session message",
+        occurred_at_ms=1_725_000_001_235,
+        attachments=(),
+    )
+
+    pin_entered = threading.Event()
+    release_pin = threading.Event()
+    original_pin = runtime.module._attachment_store.pin
+
+    def blocking_pin(attachments):
+        pin_entered.set()
+        assert release_pin.wait(timeout=2.0)
+        return original_pin(attachments)
+
+    monkeypatch.setattr(runtime.module._attachment_store, "pin", blocking_pin)
+
+    async def run() -> None:
+        old_capture = asyncio.create_task(runtime.module.capture(old_request))
+        assert await asyncio.to_thread(pin_entered.wait, 1.0)
+
+        final_flush = asyncio.create_task(
+            runtime.final_flush(
+                principal_id=old_request.principal_id,
+                project_id=old_request.project_id,
+                raw_session_id=old_request.session_id,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.sleep(0)
+        later_capture = asyncio.create_task(runtime.module.capture(later_request))
+        await asyncio.sleep(0)
+        assert not final_flush.done()
+        assert not later_capture.done()
+
+        release_pin.set()
+        assert isinstance(await old_capture, CaptureAccepted)
+        drain = asyncio.create_task(runtime.module._worker.drain())
+
+        assert await asyncio.to_thread(flush_entered.wait, 1.0)
+        assert [capture.text for capture in provider.captures] == [
+            "old session message"
+        ]
+        assert len(provider.flushes) == 1
+        assert not final_flush.done()
+        assert not later_capture.done()
+        assert all(
+            row.payload_text != "later session message"
+            for row in store.list_queue_rows()
+        )
+
+        release_flush.set()
+        assert await final_flush
+
+        assert isinstance(await later_capture, CaptureAccepted)
+        await drain
+        later_rows = [
+            row
+            for row in store.list_queue_rows()
+            if row.payload_text == "later session message"
+        ]
+        assert len(later_rows) == 1
+        assert later_rows[0].state == "pending"
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_final_flush_deadline_includes_capture_admission_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = "deadline-session"
+
+    async def run() -> None:
+        admission_lock = runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            session_id=session_id,
+        )
+        await admission_lock.acquire()
+        try:
+            started = asyncio.get_running_loop().time()
+            assert not await runtime.final_flush(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                deadline_seconds=0.02,
+            )
+            assert asyncio.get_running_loop().time() - started < 0.5
+        finally:
+            admission_lock.release()
+            await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
     call_log = tmp_path / "memory" / "call-log" / "call-log.db"
     process = EverOSProcess(

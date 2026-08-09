@@ -829,22 +829,43 @@ class MemoryRuntime:
 
         if not self.available or not self._config.enabled or self._maintenance_open():
             return False
+        timeout = _final_flush_timeout(deadline_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        admission_lock = self.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
+        acquired = False
         try:
+            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
+            acquired = True
+            if not self.available or not self._config.enabled or self._maintenance_open():
+                return False
             session_ref = await asyncio.to_thread(
                 self._store.provider_session_ref,
                 principal_id=principal_id,
                 project_ref=project_id,
                 session_id=raw_session_id,
             )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
             return await self.module._worker.coordinator.final_flush(
                 session_ref,
-                deadline_seconds=deadline_seconds,
+                deadline_seconds=remaining,
             )
+        except asyncio.TimeoutError:
+            return False
         except (TypeError, ValueError):
             return False
         except Exception:
             logger.warning("Memory final flush failed")
             return False
+        finally:
+            if acquired:
+                admission_lock.release()
 
     async def profile_payload(self, principal_id: str, project_id: str) -> dict[str, Any]:
         if not self.available:
@@ -2627,6 +2648,13 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
         "embedding_model": config.processing.embedding.model,
         "embedding_api_key": config.processing.embedding.api_key,
     }
+
+
+def _final_flush_timeout(value: float) -> float:
+    try:
+        return max(float(value), 0.001)
+    except (TypeError, ValueError):
+        return 0.001
 
 
 def _active_compatible_root_formats(artifact_manager: MemoryArtifactPort) -> tuple[str, ...]:

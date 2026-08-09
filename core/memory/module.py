@@ -10,6 +10,7 @@ import secrets
 import shutil
 import stat
 import unicodedata
+import weakref
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -149,6 +150,10 @@ class MemoryModule:
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
         self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
+        self._capture_admission_locks: weakref.WeakValueDictionary[
+            tuple[str, str, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
+        self._invalid_capture_admission_lock = asyncio.Lock()
         self._clear_active = False
         self._attachment_store = attachment_store or AttachmentPinStore(
             effective_home=self._effective_home
@@ -244,26 +249,36 @@ class MemoryModule:
         if self._clear_active or self._is_maintenance_open():
             return CaptureSkipped(reason="memory_clear_failed")
 
-        async with self._root_lifecycle_lock():
-            if not self._is_enabled():
-                return CaptureSkipped(reason="memory_disabled")
-            if self._clear_active or self._is_maintenance_open():
-                return CaptureSkipped(reason="memory_clear_failed")
-            if not isinstance(request, CaptureRequest):
-                return await self._skipped_with_missed("memory_invalid_input")
+        admission_lock = (
+            self._capture_admission_lock(
+                principal_id=request.principal_id,
+                project_id=request.project_id,
+                session_id=request.session_id,
+            )
+            if isinstance(request, CaptureRequest)
+            else self._invalid_capture_admission_lock
+        )
+        async with admission_lock:
+            async with self._root_lifecycle_lock():
+                if not self._is_enabled():
+                    return CaptureSkipped(reason="memory_disabled")
+                if self._clear_active or self._is_maintenance_open():
+                    return CaptureSkipped(reason="memory_clear_failed")
+                if not isinstance(request, CaptureRequest):
+                    return await self._skipped_with_missed("memory_invalid_input")
 
-            normalized_text = self._normalize_text(request.text)
-            validation_error = self._capture_validation_error(request, normalized_text)
-            if validation_error is not None:
-                return await self._skipped_with_missed(validation_error)
+                normalized_text = self._normalize_text(request.text)
+                validation_error = self._capture_validation_error(request, normalized_text)
+                if validation_error is not None:
+                    return await self._skipped_with_missed(validation_error)
 
-            try:
-                disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
-            except Exception:
-                return await self._skipped_with_missed("memory_low_disk_space")
-            if disk_free < MIN_FREE_DISK_BYTES:
-                return await self._skipped_with_missed("memory_low_disk_space")
-            return await self._capture_under_root(request, normalized_text)
+                try:
+                    disk_free = int(await asyncio.to_thread(self._disk_free_bytes))
+                except Exception:
+                    return await self._skipped_with_missed("memory_low_disk_space")
+                if disk_free < MIN_FREE_DISK_BYTES:
+                    return await self._skipped_with_missed("memory_low_disk_space")
+                return await self._capture_under_root(request, normalized_text)
 
     async def _capture_under_root(
         self,
@@ -693,6 +708,27 @@ class MemoryModule:
 
     def _root_lifecycle_lock(self) -> asyncio.Lock:
         return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())
+
+    def _capture_admission_lock(
+        self,
+        *,
+        principal_id: object,
+        project_id: object,
+        session_id: object,
+    ) -> asyncio.Lock:
+        """Return the exact-session fence covering pin through queue commit."""
+
+        if not all(
+            isinstance(value, str)
+            for value in (principal_id, project_id, session_id)
+        ):
+            return self._invalid_capture_admission_lock
+        key = (principal_id, project_id, session_id)
+        lock = self._capture_admission_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._capture_admission_locks[key] = lock
+        return lock
 
     async def _run_owned_provider_cleanup(self) -> None:
         """Await a cleanup task once, retaining it after timeout until it actually ends."""
