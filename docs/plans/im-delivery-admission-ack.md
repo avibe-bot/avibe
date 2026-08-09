@@ -117,10 +117,12 @@ keys.
 - `slack.py`: `writing_hand`, `thinking_face`, `shrug` added.
 - `telegram.py`: `✍️ → ✍` normalization; 👌/🤔/🤷 pass through.
 - `discord.py`: raw unicode, no change.
-- `feishu.py`: 🤔 already maps to `THINKING`. ✍️ and 🤷 are deliberately left
-  unmapped rather than guessed — `add_reaction` logs the exact "add it to
-  `_EMOJI_MAP`" warning and returns `False`, so Lark degrades to no receipt for
-  those two until the `emoji_type` keys are verified against the Lark table.
+- `feishu.py`: 🤔 already maps to `THINKING`; ✍️ → `Typing` and 🤷 → `Shrug`,
+  both verified against the Lark `emoji_type` table (Lark has no writing-hand
+  glyph, so `Typing` — the pen/being-written-into icon — carries the steered
+  receipt). Both `✍️` and `✍` are listed because `_normalize_emoji` does not
+  strip U+FE0F. `emoji_type` keys are case-sensitive: an unmapped emoji stays
+  non-ASCII, so `add_reaction` logs the "add it to `_EMOJI_MAP`" warning.
 
 ### 3.5 Reporting outcomes that settle away from ingress
 
