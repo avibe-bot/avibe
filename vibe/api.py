@@ -7878,7 +7878,7 @@ def reconcile_startup_dependencies() -> dict:
                     # remains available from the Dependencies page.
                     prepared = {"ok": False, "reason": "runtime_auto_install_disabled"}
                 else:
-                    prepared = manager.prepare(force=False)
+                    prepared = manager.prepare(force=False, startup=True)
                 runtime_ok = bool(prepared.get("ok"))
                 result["show_runtime"] = {
                     "ok": runtime_ok,

@@ -151,7 +151,7 @@ class ShowRuntimeManager:
         async with self._lock:
             if self._base_url and await self._healthy(self._base_url):
                 return ShowRuntimeResult(True, self._base_url)
-            await asyncio.to_thread(self._install_lock.acquire)
+            await self._acquire_install_lock()
             try:
                 self.stop()
                 command = _resolve_command(self.command) if self._command_explicit else None
@@ -330,11 +330,26 @@ class ShowRuntimeManager:
 
     async def _resolve_managed_command(self) -> list[str] | None:
         """Resolve a managed runtime while excluding concurrent preparation."""
-        await asyncio.to_thread(self._install_lock.acquire)
+        await self._acquire_install_lock()
         try:
             return await self._resolve_managed_command_locked()
         finally:
             self._install_lock.release()
+
+    async def _acquire_install_lock(self) -> None:
+        """Acquire the cross-thread lock without leaking it on task cancellation."""
+        acquisition = asyncio.create_task(asyncio.to_thread(self._install_lock.acquire))
+        try:
+            await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            def release_after_acquisition(task: asyncio.Task[bool]) -> None:
+                if task.cancelled() or task.exception() is not None:
+                    return
+                if task.result():
+                    self._install_lock.release()
+
+            acquisition.add_done_callback(release_after_acquisition)
+            raise
 
     async def _resolve_managed_command_locked(self) -> list[str] | None:
         """Resolve a managed runtime while the installation lock is held."""
@@ -400,9 +415,9 @@ class ShowRuntimeManager:
         with self._install_lock:
             return self._install_managed_runtime()
 
-    def _prepare_managed_runtime_locked(self) -> list[str] | None:
+    def _prepare_managed_runtime_locked(self, *, startup: bool = False) -> list[str] | None:
         """Reuse a verified install, or install it while the shared lock is held."""
-        if not self.force_install:
+        if startup and not self.force_install:
             status = self.status()
             command = status.get("command")
             if status.get("installed") and isinstance(command, list) and command:
@@ -414,10 +429,10 @@ class ShowRuntimeManager:
             self._managed_command = command
         return command
 
-    def _prepare_managed_runtime_serialized(self) -> list[str] | None:
+    def _prepare_managed_runtime_serialized(self, *, startup: bool = False) -> list[str] | None:
         """Compatibility wrapper for callers that need a serialized preparation."""
         with self._install_lock:
-            return self._prepare_managed_runtime_locked()
+            return self._prepare_managed_runtime_locked(startup=startup)
 
     def _install_managed_runtime(self) -> list[str] | None:
         command: list[str] | None
@@ -716,7 +731,13 @@ class ShowRuntimeManager:
             if path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
 
-    def prepare(self, *, force: bool | None = None, offline: bool | None = None) -> dict[str, Any]:
+    def prepare(
+        self,
+        *,
+        force: bool | None = None,
+        offline: bool | None = None,
+        startup: bool = False,
+    ) -> dict[str, Any]:
         with self._install_lock:
             previous_force = self.force_install
             previous_offline = self.offline
@@ -729,7 +750,7 @@ class ShowRuntimeManager:
                     command = _resolve_command(self.command)
                     self._install_reason = None if command else "runtime_command_missing"
                 else:
-                    command = self._prepare_managed_runtime_locked()
+                    command = self._prepare_managed_runtime_locked(startup=startup)
                 return {
                     "ok": command is not None,
                     "provider": self.runtime_source,
@@ -1272,18 +1293,23 @@ class ShowRuntimeManager:
 
 
 _manager: ShowRuntimeManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_show_runtime_manager() -> ShowRuntimeManager:
     global _manager
     if _manager is None:
-        _manager = ShowRuntimeManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = ShowRuntimeManager()
     return _manager
 
 
 def stop_show_runtime_manager() -> None:
-    if _manager is not None:
-        _manager.stop()
+    with _manager_lock:
+        manager = _manager
+    if manager is not None:
+        manager.stop()
 
 
 def _is_runtime_server_cmdline(cmdline: list[str], workspace_root: str) -> bool:
@@ -1379,7 +1405,9 @@ async def prewarm_show_page_session(session_id: str, *, base_path: str | None = 
 
 def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> None:
     global _manager
-    previous = _manager
+    with _manager_lock:
+        previous = _manager
+        _manager = manager
     # Stop the manager we are replacing before dropping the reference. Serving-path
     # tests that never install a fake cause get_show_runtime_manager() to lazily
     # create the real manager, which spawns a Node cli.js + esbuild subprocess tree
@@ -1391,7 +1419,6 @@ def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> No
             previous.stop()
         except Exception:  # pragma: no cover - defensive cleanup
             logger.debug("failed to stop previous show runtime manager", exc_info=True)
-    _manager = manager
 
 
 def _show_runtime_prewarm_import_paths(

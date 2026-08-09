@@ -112,6 +112,43 @@ def test_set_show_runtime_manager_stops_previous_manager():
     assert second.stopped is True
 
 
+def test_get_show_runtime_manager_initializes_once_across_threads(monkeypatch):
+    import core.show_runtime as srt
+
+    srt.set_show_runtime_manager_for_tests(None)
+    constructor_entered = threading.Event()
+    release_constructor = threading.Event()
+    constructor_calls = 0
+
+    class _Manager:
+        def __init__(self):
+            nonlocal constructor_calls
+            constructor_calls += 1
+            constructor_entered.set()
+            assert release_constructor.wait(timeout=2)
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(srt, "ShowRuntimeManager", _Manager)
+    managers = []
+    threads = [threading.Thread(target=lambda: managers.append(srt.get_show_runtime_manager())) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    assert constructor_entered.wait(timeout=2)
+    release_constructor.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    try:
+        assert all(not thread.is_alive() for thread in threads)
+        assert constructor_calls == 1
+        assert len(managers) == 2
+        assert managers[0] is managers[1]
+    finally:
+        srt.set_show_runtime_manager_for_tests(None)
+
+
 def _create_show_page(session_id: str, visibility: str) -> str | None:
     page_dir = ensure_show_page_dir(session_id)
     (page_dir / "index.html").write_text("<!doctype html><title>Show</title><h1>Show Page</h1>", encoding="utf-8")
@@ -4909,6 +4946,24 @@ def test_show_runtime_manager_status_does_not_read_manifest_for_legacy_sources(t
     assert status["reason"] is None
 
 
+def test_show_runtime_startup_reuses_github_install_but_explicit_prepare_refreshes(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="github",
+    )
+    command = ["/bin/node", str(tmp_path / "runtime.js")]
+    installs = []
+    monkeypatch.setattr(manager, "status", lambda: {"installed": True, "command": command})
+    monkeypatch.setattr(manager, "_install_managed_runtime", lambda: installs.append(True) or command)
+
+    assert manager.prepare(force=False, startup=True)["command"] == command
+    assert installs == []
+
+    assert manager.prepare(force=False)["command"] == command
+    assert installs == [True]
+
+
 def test_show_runtime_manager_can_disable_auto_install(tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
@@ -5183,6 +5238,32 @@ def test_show_runtime_prepare_and_request_install_are_serialized(monkeypatch, tm
     assert prepare_result["ok"] is True
     assert request_result["command"] == command
     assert manager._managed_command == command
+
+
+def test_show_runtime_cancelled_lock_wait_releases_late_acquisition(tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="npm",
+        auto_install=False,
+    )
+    manager._install_lock.acquire()
+
+    async def exercise_cancelled_wait():
+        waiter = asyncio.create_task(manager._resolve_managed_command())
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        manager._install_lock.release()
+        assert await asyncio.wait_for(manager._resolve_managed_command(), timeout=2) is None
+
+    try:
+        asyncio.run(exercise_cancelled_wait())
+    finally:
+        if manager._install_lock.locked():
+            manager._install_lock.release()
 
 
 def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):

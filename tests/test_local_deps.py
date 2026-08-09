@@ -1029,8 +1029,8 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
                 "node_version": "22.12.0",
             }
 
-        def prepare(self, *, force=False):
-            self.prepared.append(force)
+        def prepare(self, *, force=False, startup=False):
+            self.prepared.append((force, startup))
             return {"ok": True, "reason": None}
 
     manager = _Mgr()
@@ -1041,7 +1041,7 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
     assert out["ok"] is True
     assert askill_calls == [False]
     assert avault_calls == [False]
-    assert manager.prepared == [False]
+    assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"
     assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
 
@@ -1063,7 +1063,7 @@ def test_reconcile_startup_dependencies_respects_show_runtime_auto_install_opt_o
                 "node_version": "22.12.0",
             }
 
-        def prepare(self, *, force=False):
+        def prepare(self, *, force=False, startup=False):
             raise AssertionError("startup reconcile must honor the auto-install opt-out")
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
@@ -1094,7 +1094,7 @@ def test_reconcile_startup_dependencies_does_not_reinstall_ready_show_runtime(mo
                 "node_version": "22.12.0",
             }
 
-        def prepare(self, *, force=False):
+        def prepare(self, *, force=False, startup=False):
             raise AssertionError("ready runtime must not invoke its provider installer")
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
@@ -1114,7 +1114,7 @@ def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(mo
         def status(self):
             return {"installed": False, "node_available": False, "node_version": None}
 
-        def prepare(self, *, force=False):
+        def prepare(self, *, force=False, startup=False):
             raise AssertionError("runtime must not prepare without Node")
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
