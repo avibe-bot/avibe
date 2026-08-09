@@ -47,6 +47,7 @@ import {
 import {
   chatTriggerLink,
   harnessChipLabelKey,
+  isVaultCallback,
   needsHarnessProvenanceReconcile,
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
@@ -3954,10 +3955,11 @@ export const MessageRow = memo(function MessageRow({
   const agentAuthored = isAgentAuthored(message);
   const isHarness = row.kind === 'harness';
   const isUser = row.kind === 'user';
+  const isVaultNotification = isNotify && isVaultCallback(message);
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
-  const vaultStatusKey = isHarness ? vaultCallbackStatusKey(message) : null;
+  const vaultStatusKey = isVaultCallback(message) ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
   const resultPresentation = resultFooterParts(message);
 
@@ -4093,7 +4095,10 @@ export const MessageRow = memo(function MessageRow({
           <div className="inline-flex w-fit max-w-full items-start gap-1.5 rounded-2xl rounded-tl-md border border-gold/30 bg-gold/[0.08] px-3 py-1.5 text-[12px] text-gold">
             <Bell className="mt-px size-3 shrink-0" />
             <span className="min-w-0 break-words">
-              <span className="font-semibold">{t('chat.notifyLabel')}</span>
+              <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
+              {vaultStatusKey && (
+                <span className="font-normal text-gold/80"> · {t(vaultStatusKey)}</span>
+              )}
               {resultPresentation.body && (
                 <span className="font-normal text-gold/80"> · {resultPresentation.body}</span>
               )}

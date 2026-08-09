@@ -34,7 +34,7 @@ from storage.models import (
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sessions_service import session_agent_display_label
-from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
+from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES, NOTIFY_TYPE
 from vibe.message_types import types_with
 
 

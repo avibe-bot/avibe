@@ -7154,7 +7154,11 @@ class ScheduledTaskService:
                         message=plan.message,
                     )
                     if not mirrored:
-                        raise RuntimeError("failed to persist Vault waiter outcome")
+                        # The stable native message id makes this mirror safe to retry. Keep the
+                        # callback pending so a transient SQLite/dispatch failure is retried by
+                        # the next sweep instead of losing the waiter's transcript outcome.
+                        logger.warning("failed to persist Vault waiter outcome for %s; will retry", request_id)
+                        return "pending"
                 else:
                     enqueue_session_callback(
                         self.request_store,

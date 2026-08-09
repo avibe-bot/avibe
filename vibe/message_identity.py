@@ -7,6 +7,7 @@ from typing import Optional
 from vibe.message_types import input_author_type_pairs
 
 HARNESS_TYPE = "harness"
+NOTIFY_TYPE = "notify"
 INPUT_TURN_AUTHOR_TYPES = input_author_type_pairs()
 
 

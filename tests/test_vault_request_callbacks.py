@@ -706,6 +706,15 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
         request_store=request_store,
     )
 
+    with monkeypatch.context() as failed_mirror:
+        failed_mirror.setattr(
+            "core.message_mirror.mirror_vault_waiter_outcome",
+            lambda **_: False,
+        )
+        assert service._process_vault_callback_sync(row) == "pending"
+        with engine.connect() as conn:
+            assert _callback_status(conn, req["id"]) == "pending"
+
     asyncio.run(service._drain_vault_callbacks())
     # The stable native message id also closes the crash window between mirror + callback mark.
     assert service._process_vault_callback_sync(row) == "sent"
@@ -718,6 +727,7 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
         ).mappings().all()
     assert message["author"] == "harness"
     assert message["source"] == "harness"
+    assert message["type"] == messages_service.NOTIFY_TYPE
     assert message["author_name"] == "vault"
     assert json.loads(message["metadata_json"]) == {
         "source_kind": "callback",
@@ -725,3 +735,11 @@ def test_legacy_callback_drain_mirrors_completed_waiter_without_second_agent_tur
         "vault_request_type": "access",
         "vault_request_status": terminal_status,
     }
+
+    with engine.connect() as conn:
+        inbox = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+            only_session="ses_vault_waiter",
+        )
+    assert inbox["sessions"][0]["replied"] is False

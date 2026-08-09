@@ -585,12 +585,19 @@ def agent_message_exists(
         return None
 
 
-def mirror_harness_inbound(context: MessageContext, text: str) -> bool:
+def mirror_harness_inbound(
+    context: MessageContext,
+    text: str,
+    *,
+    message_type: str = messages_service.HARNESS_TYPE,
+) -> bool:
     """Record a harness-originated prompt (scheduled task / watch / webhook).
 
-    The backend consumes the prompt as turn input, but the persisted row must
-    not claim the human authored it. ``author`` and ``type`` therefore use the
-    first-class harness role while ``source='harness'`` preserves provenance.
+    The backend consumes the prompt as turn input for the default harness type,
+    but the persisted row must not claim the human authored it. ``author``
+    therefore uses the first-class harness role while ``source='harness'``
+    preserves provenance. Callers that only need a transcript notification can
+    provide a non-input catalog type such as ``notify``.
     ``author_name`` carries the trigger kind (scheduled / watch / webhook / ...)
     and ``author_id`` the run-definition id, per the provenance spec.
 
@@ -661,7 +668,7 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> bool:
                 source="harness",
                 author_name=trigger_kind,
                 author_id=definition_id,
-                message_type=messages_service.HARNESS_TYPE,
+                message_type=message_type,
                 text=text,
                 metadata=provenance_metadata,
                 native_message_id=context.message_id,
@@ -724,6 +731,7 @@ def mirror_vault_waiter_outcome(
             },
         ),
         message,
+        message_type=messages_service.NOTIFY_TYPE,
     )
 
 
