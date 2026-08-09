@@ -1201,9 +1201,7 @@
   },
   "models": {
     "eligibility": {
-      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}",
-      "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
-      "consent_required": "Needs your consent for experimental hub supply first"
+      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}"
     },
     "oauth": {
       "upstream_failed": "The vendor didn't complete this sign-in, please retry",

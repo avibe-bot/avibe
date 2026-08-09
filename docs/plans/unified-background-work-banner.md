@@ -20,8 +20,9 @@ The banner's source of truth is a **union assembled at runtime-state build time*
    keeps the banner correct-by-construction after a restart):
    - enabled watches whose callback session is this session;
    - pending/scheduled tasks targeting this session;
-   - running/queued delegated agent runs whose callback returns to this session (work this
-     session dispatched and is waiting on).
+   - active delegated agent runs whose callback returns to this session (work this session
+     dispatched and is waiting on). A linked Delivery still in the FIFO `queued` state is
+     presented as queued even when its executor Run has already moved to `running`.
 
 Each unified item carries: `kind` (`backend_activity` | `watch` | `task` | `agent_run`),
 `label` (watch name / task summary / target agent + short message head / activity description),
@@ -46,8 +47,9 @@ run detail.
   state payload (search `background_activities` producers in core/vibe; ChatPage consumes
   `runtimeState.background_activities` at ui/src/components/workbench/ChatPage.tsx ~1632).
 - Registry: `core/session_activities.py` (`SessionActivity`, `SessionActivityRegistry`).
-- Harness state: `run_definitions` (watches), scheduled tasks store, `agent_runs`
-  (status running/queued, callback lineage) — read-only queries.
+- Harness state: `run_definitions` (watches), scheduled tasks store, `agent_runs` (executor
+  status and callback lineage), and linked `message_deliveries` (FIFO queue status) — read-only
+  queries.
 - Banner UI: ChatPage banner block (~1626-1670) + `chat.activities.*` i18n keys.
 
 ## Owner design review (2026-07-16 21:15) — five requirements folded in

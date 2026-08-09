@@ -20,7 +20,7 @@
           "masked_detail": { "type": "string", "description": "e.g. 'sk-…dd3c + 自定义 Base URL'; never full secrets" },
           "proposed_action": {
             "enum": ["import", "controlled_import", "keep_native", "reauth"],
-            "description": "Option 1: Claude oauth_native → keep_native (sanctioned as-is; NOT re-authed into the hub). Subscription OAuth (Claude AND Codex) → keep_native always: file-import of OAuth tokens is DEFERRED (2026-07-23, L6 review — adapter v1.2 forbids OAuth material in provision_credential; api_key storage cannot preserve refresh semantics). With subscription_hub_experimental on, hub-held subscriptions are established via the engine's own OAuth connect flow (start_oauth), never by file import. controlled_import remains in the enum only for a future engine-owned OAuth-import capability. Keys/base URLs → import."
+            "description": "Claude and Codex native OAuth logins remain in the sanctioned CLI store via keep_native; subscription OAuth tokens are never copied by this file-import surface. Hub-held subscriptions are established only by the explicit OAuth add flow. controlled_import remains reserved for a future engine-owned import capability. API keys and Base URLs use import."
           },
           "selected": { "type": "boolean" },
           "notes_key": { "type": ["string", "null"], "description": "i18n key for the row's secondary line" }

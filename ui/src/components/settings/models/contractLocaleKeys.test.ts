@@ -67,17 +67,13 @@ const lookup = (bundle: unknown, key: string): unknown =>
 describe('contract i18n key coverage (AC-19)', () => {
   const keys = contractKeys();
 
-  it('reads a non-trivial vocabulary out of the frozen schemas', () => {
-    // Guards the check itself: a broken path or a renamed contract directory
-    // would otherwise make every assertion below pass over an empty list.
-    expect(keys).toContain('models.eligibility.subscription_wrong_client');
-    expect(keys).toContain('models.eligibility.opencode_api_key_only');
-    expect(keys).toContain('models.eligibility.consent_required');
-    // Declared by a `const` in source.schema.json — today ALSO by probe-result's
-    // enum, which is why the enum-only collector still covered it. Asserting it
-    // here keeps the coverage from silently depending on that coincidence.
-    expect(keys).toContain('models.source.error.unclassified');
-    expect(keys.length).toBeGreaterThanOrEqual(13);
+  it('keeps eligibility locale objects equal to the live contract vocabulary', () => {
+    const suffixes = keys
+      .filter((key) => key.startsWith('models.eligibility.'))
+      .map((key) => key.slice('models.eligibility.'.length))
+      .sort();
+    expect(Object.keys(en.models.eligibility).sort()).toEqual(suffixes);
+    expect(Object.keys(zh.models.eligibility).sort()).toEqual(suffixes);
   });
 
   it('collects a key a schema closes with `const`, not only with `enum`', () => {

@@ -3279,26 +3279,52 @@ async def model_hub_opencode_menu_put():
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["POST"])
-async def model_hub_custom_models_post():
+@app.route("/api/models/sources/<source_id>/models", methods=["POST"])
+async def model_hub_source_models_post(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         source = await _model_hub_service().add_custom_model(
-            _model_hub_json_object("source_not_found", status=404)
+            source_id,
+            _model_hub_json_object("mapping_target_unavailable")
         )
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["DELETE"])
-async def model_hub_custom_models_delete():
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["PATCH"],
+)
+async def model_hub_source_models_patch(source_id, model_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().update_model_reasoning_efforts(
+            source_id,
+            model_id,
+            _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["DELETE"],
+)
+async def model_hub_source_models_delete(source_id, model_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        source = await _model_hub_service().delete_custom_model(
+            source_id,
+            model_id,
+            force=payload.get("force") is True,
+        )
         return _model_hub_success(source=source)
     except ModelHubError as exc:
         return _model_hub_error(exc)

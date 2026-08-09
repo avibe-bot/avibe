@@ -1,52 +1,52 @@
 # Model Hub — REST API contract
 
-Status: **FROZEN v4 (targeted)**. All endpoints live under `/api/models/`.
+Status: **FINAL v5 (2026-08-09)**. All endpoints live under `/api/models/`.
 
-Success envelope: `{ok: true, contract_version: 3, ...}`.
+Success envelope: `{ok: true, contract_version: 5, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 3, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 5, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Authentication and CSRF rules are the existing UI-server rules.
 
-The shared envelope remains v3. Targeted v4 amendments version their changed nested
-schema objects independently; the channel class pass also tightens the service-side
-OAuth seam and adds derived fields to the existing AgentSupply/source-creation
-responses without changing the envelope version.
+The shared envelope and every versioned nested contract use terminal version 5. Model
+Hub has not shipped, so there is no internal contract migration or compatibility path.
 
 ## Route table
 
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Array order is never a spend order. |
-| POST `/api/models/sources` | `SourceCreate` → `{source: Source, adopted_by: AdoptedBy[], skipped_by: SkippedBy[]}` | The server assigns `id` and immutable `created_at`; plaintext keys are transient. |
-| PATCH `/api/models/sources/<id>` | `{display_name?, base_url?}` → `{source: Source}` | Metadata only. |
-| PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → `{source, recovered, interrupted_pairs}` | API-key replacement. The optional `force` is a JSON body field, never a query parameter. |
+| POST `/api/models/sources` | `SourceCreate` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. |
+| PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. |
+| PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → guarded Source-mutation envelope | API-key replacement. `force` is a JSON body field, never a query parameter. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
-| DELETE `/api/models/sources/<id>?force=<bool>` | → `{ok}` or `source_last_supplier` + `would_interrupt` | Guard evaluates the post-delete enabled orders. |
-| POST `/api/models/sources/<id>/refresh` | → `{source: Source, discovered: integer}` | Explicit source re-discovery, including blocked-source recovery. The returned source contains the replacement model list and successful `last_discovered_at`. |
+| DELETE `/api/models/sources/<id>?force=<bool>` | → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. |
+| POST `/api/models/sources/<id>/refresh` | `{force?: boolean}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
+| POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
+| PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list on either model origin without changing identity, origin, or Routes. |
+| DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean}` → API-boundary refusal, guarded `409`, or Source-mutation success | Deletes only a user-authored entry. A discovered entry returns `source_model_managed_upstream`. |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include `named_agents`, the enabled named-Agent live projection. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
-| PUT `/api/models/agents/<backend>/sources` | source-order request → `{agent: AgentSupply}` | Full canonical order is re-echoed. |
+| PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. |
-| PUT `/api/models/agents/<backend>/mappings` | `{mappings}` → `{agent: AgentSupply}` | Fixed-menu backends only. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
-| POST `/api/models/custom-models` | `{source_id, model_id, display_name?}` → `{source: Source}` | Adds manual provenance. |
-| DELETE `/api/models/custom-models` | `{source_id, model_id}` → `{source: Source}` | Removes only the named manual model. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | POST `/api/models/oauth/start` | `{vendor, channel}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels and forgets the flow. |
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
-| POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources}` | Imported sources auto-join eligible follow orders; custom orders stay frozen. |
+| POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v4; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v5; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 
-The removed global route `PUT /api/models/priority` has no v3 replacement.
-Ordering is backend-owned through the sources routes.
+The removed global route `PUT /api/models/priority` has no replacement. Backend Source
+order is explicit configuration through the sources route; exact per-model order is
+explicit configuration through the chain route.
 
 ## Identifier rules
 
@@ -57,22 +57,15 @@ Ordering is backend-owned through the sources routes.
 - Claude and Codex requests use fixed-menu built-in ids.
 - OpenCode requests use a prefixed `vendor/model` menu id. The prefix chooses the
   provider; the resolver sends the bare model id upstream.
-- A mapping rewrites a menu id to an upstream model id. A mapping never chooses a
-  source.
-- Without an explicit mapping, a vendor-native fixed menu may resolve a stable menu
-  alias per source. Claude version aliases select the latest dated id for that exact
-  version; `opus`, `sonnet`, `haiku`, `opus[1m]`, and `sonnet[1m]` select the latest
-  discovered id in their family. A dated request remains exact. Alias candidates come
-  only from that source's discovered inventory; manual models, foreign-vendor sources,
-  and undiscovered passthrough ids do not qualify. A native CLI source preserves an
-  exact CLI alias instead of replacing it with a bundled-catalog model. Explicit
-  mappings take precedence.
+- Add-time matching may suggest a sanctioned alias or mapping, but it materializes the
+  accepted result as an exact `{source_id, model_id}` hop before commit. Runtime neither
+  resolves aliases nor substitutes a model.
 - Source event references are checked when emitted. Retained feed entries remain
   valid after a later legal source deletion.
 
 ## AgentSupply read projection
 
-Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
+Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
 
 ```json
 {
@@ -82,7 +75,6 @@ Each backend entry on `GET /api/models/agents` carries the v3 API-boundary keys:
   "selected_model_id": "claude-opus-4-6",
   "selected_model_explicit": true,
   "sources": {
-    "policy": "follow",
     "order": ["src_claudepro1", "src_anthkey01"],
     "eligibility": [
       {
@@ -181,81 +173,65 @@ its process availability but carries `in_current_model_chain: null`.
 
 ## Per-backend source order
 
-Request shapes are total:
+The request is total:
 
 ```json
-{"policy": "follow"}
+{"order": ["src_anthkey01", "src_relay9c1x"]}
 ```
 
-```json
-{"policy": "custom", "order": ["src_anthkey01", "src_relay9c1x"]}
-```
-
-- `follow` accepts no `order`; the server recomputes the live recommended order.
-- `custom` requires the complete desired ordered subset. The empty subset is legal.
-- Any manual order mutation changes policy to `custom`.
-- Restoring `follow` is the explicit restore-to-recommendation operation.
+- `order` is the complete desired ordered subset. The empty subset is legal.
 - Every id is unique, exists, and is eligible for the backend. Otherwise the route
   returns `invalid_source_order`.
-- New eligible sources auto-join `follow` at their recommended position.
-- A `custom` order never changes because a source was created or imported.
+- Add Source and native import invoke `placement-v1` once and persist its chosen
+  position. Refresh, restart, health changes, and turns never recompute this order.
 
 Eligibility is server-authoritative. An ineligible row carries exactly one closed
 `reason_key` from `agent-supply.schema.json`; an eligible row carries null.
 
-### Mapping and menu enrollment
+### Exact Route-chain configuration
 
-A mapping or open-menu target is accepted only when its selected source is enrolled
-in the backend's post-mutation effective order. Under `follow`, the effective order
-is `ModelHubConfig.effective_source_order`'s recommendation and is exhaustive over
-eligible sources, so an eligible-but-non-enrolled target is representable only under
-`custom`. Acceptance auto-appends that source to the custom order, and the confirm
-step must surface the append. Acceptance never converts policy: a selection that
-does not change the order is not an order edit. An ineligible source is never
-auto-enrolled and the request fails with `mapping_target_unavailable`. Evidence at
-master `05f72ae5`:
-`service.py:1955-1985` validates targets against eligible inventory but does not
-yet require or edit effective-order enrollment; the follow-up consumer lane owns
-that acceptance change.
+Every menu model stores one `hops` array. Each hop is an exact
+`{source_id, model_id}` pair; a differing upstream id is the mapping itself, not a
+separate mapping object. A write validates only newly introduced or changed pairs.
+The whole-array PUT uses `force` in the JSON body and the same guarded refusal/reporting
+family as Source mutations. A successful write returns `{chain, removed_hops,
+interrupted}`; a non-forced write that would empty protected supply returns the shared
+`409 {error, would_remove_hops, would_interrupt}` envelope.
+An unchanged stale pair may be retained or reordered so a user can add a working
+fallback without discarding a temporarily unavailable configured hop. Runtime walks
+the stored array verbatim and annotates only live runnability.
 
 ## Source creation outcome
 
-`AdoptedBy` is:
+`AddedTo` is:
 
 ```json
-{"backend": "claude", "policy": "follow", "position": 2}
+{"backend": "claude", "menu_model": "claude-opus-4-6", "source_id": "src_anthkey01", "model_id": "claude-opus-4-6", "position": 2}
 ```
 
-`position` is one-based in the effective order after commit. The array contains only
-eligible `follow` backends that actually adopted the source and is frozen with the
-source response. `custom` backends are absent and retain their prior order.
-
-`SkippedBy` is:
+`position` is one-based in the persisted Route chain after commit. `AdoptedBy` is the
+stable Source-card projection of persisted references:
 
 ```json
-{"backend": "codex", "reason": "custom_order"}
+{"backend": "claude", "menu_model": "claude-opus-4-6"}
 ```
 
-Its closed backend vocabulary is `claude | codex | opencode`; its reason vocabulary
-has one v2 member, `custom_order`. The array contains every eligible custom backend
-that did not adopt the new source. Ineligible backends appear in neither array, so a
-consumer can distinguish “eligible but deliberately skipped” from “cannot use this
-source” without reimplementing the compatibility matrix. Evidence at master
-`05f72ae5`: `service.py:767-783` emits only follow-policy adoption, collapsing
-eligible custom skips into the same absence as ineligibility.
+Neither array carries a policy field. A Source with no accepted automatic match returns
+empty arrays and remains available for explicit Route editing; there is no skipped-order
+reason or “not enabled” state.
 
 The terminal result of both ordinary API-key creation and OAuth creation is:
 
 ```json
 {
   "ok": true,
-  "contract_version": 3,
+  "contract_version": 5,
   "source": {"id": "src_anthkey01", "kind": "api_key"},
-  "adopted_by": [
-    {"backend": "claude", "policy": "follow", "position": 2}
+  "added_to": [
+    {"backend": "claude", "menu_model": "claude-opus-4-6", "source_id": "src_anthkey01", "model_id": "claude-opus-4-6", "position": 2}
   ],
-  "skipped_by": [
-    {"backend": "codex", "reason": "custom_order"}
+  "adopted_by": [
+    {"backend": "claude", "menu_model": "claude-opus-4-6"}
   ]
 }
 ```
@@ -282,20 +258,21 @@ The protected model set for a backend is the union of:
 
 1. explicit models of enabled named Vibe Agents;
 2. checked open-menu models;
-3. the menu-side `builtin_id` of mappings whose `enabled` is true.
+3. every menu model with a persisted Route row, including an empty `hops` array.
 
 The guard evaluates each protected `(backend, model)` against the post-mutation
-state. It counts only runnable suppliers in that backend's enabled effective order,
-never eligible inventory outside the order. A pair with no runnable supplier appears
-once in `would_interrupt` or `interrupted_pairs`.
+state. It counts only runnable exact hops in that model's stored Route chain, never
+eligible inventory or the backend Source order by itself. A pair with no runnable hop
+appears once in `would_interrupt` or `interrupted`.
 
-DELETE and elective replacement of a healthy API key refuse with:
+Every guarded Source/inventory mutation uses the §4.5 envelope matrix. A refusal is:
 
 ```json
 {
   "ok": false,
-  "contract_version": 3,
+  "contract_version": 5,
   "error": "source_last_supplier",
+  "would_remove_hops": [],
   "would_interrupt": [
     {
       "backend": "claude",
@@ -306,10 +283,8 @@ DELETE and elective replacement of a healthy API key refuse with:
 }
 ```
 
-DELETE uses the query `force=true`. API-key replacement uses the JSON body
-`force: true`. A blocked-source repair proceeds and reports the remaining gaps in
-`interrupted_pairs`; refusing it would prevent recovery from the state the route
-exists to repair.
+DELETE uses the query `force=true`; the other guarded mutations use the JSON body
+`force: true`. Success returns the exact envelope selected by the authoritative matrix.
 
 ## Credential replacement and reauth
 
@@ -353,7 +328,7 @@ differently only if all invariants remain true:
    durable record names it. Successful reconciliation removes the record.
 8. **Channel-aware OAuth retained-material partition.** A failed Hub flow reports
    one total `retained_material_disposition` from the adapter seam. `none` preserves
-   the prior source strictly. `flow_source_ref` is the irreversible v4b case:
+   the prior source strictly. `flow_source_ref` is the irreversible retained-material case:
    persist `state.status: needs_action` with
    `state.detail_key: models.source.needs_action.oauth_expired`, clear discovered
    supply, and never route silently. `orphan_ref` preserves the prior source and
@@ -387,7 +362,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 3,
+  "contract_version": 5,
   "source": {"id": "src_relay9c1x", "kind": "api_key"},
   "recovered": true,
   "interrupted_pairs": []
@@ -413,7 +388,7 @@ operation; there is no parallel “test” or “recover” endpoint.
 `OAuthFlow.intent` makes the terminal shape a function of the flow:
 
 - non-terminal, failed, or canceled → `{flow}`;
-- terminal `intent: "create"` → `{flow, source, adopted_by, skipped_by}`;
+- terminal `intent: "create"` → `{flow, source, added_to, adopted_by}`;
 - terminal `intent: "reauth"` → `{flow, source, recovered, interrupted_pairs}`.
 
 Status and submit return the same terminal shape:
@@ -421,7 +396,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 3,
+  "contract_version": 5,
   "flow": {
     "flow_id": "oaf_claude01",
     "intent": "create",
@@ -429,22 +404,24 @@ Status and submit return the same terminal shape:
     "source_id": "src_claudepro1"
   },
   "source": {"id": "src_claudepro1", "kind": "subscription"},
-  "adopted_by": [
-    {"backend": "claude", "policy": "follow", "position": 1}
+  "added_to": [
+    {"backend": "claude", "menu_model": "claude-opus-4-6", "source_id": "src_claudepro1", "model_id": "claude-opus-4-6", "position": 1}
   ],
-  "skipped_by": []
+  "adopted_by": [
+    {"backend": "claude", "menu_model": "claude-opus-4-6"}
+  ]
 }
 ```
 
-`adopted_by` is absent for reauth because the existing source order did not change.
+`added_to` and `adopted_by` are absent for reauth because no new Source or Route
+reference is created.
 
 ## Chain and probe
 
-In Hub mode, `AgentChain.chain` is the effective source order filtered by backend
-eligibility and the server's per-source effective-model derivation. That derivation
-applies an explicit mapping first, otherwise applies the vendor-native alias rule above,
-then verifies the resulting id against source inventory. Cooling, source-blocked and
-process-unavailable native CLI members stay in the chain at their original positions.
+In Hub mode, `AgentChain.chain` is the exact stored per-model Route chain in the same
+order. Runtime does not filter or rebuild it: cooling, missing, model-unsupported,
+source-blocked, and process-unavailable native CLI hops stay at their configured
+positions with live annotations.
 Each item carries `channel`, source-global `health`, process-aware `runnable`, and
 nullable `reason`. The complete axiom is:
 
@@ -460,9 +437,9 @@ remains a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 3,
+  "contract_version": 5,
   "chain": {
-    "contract_version": 4,
+    "contract_version": 5,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "chain": [
@@ -487,7 +464,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 3,
+  "contract_version": 5,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -501,9 +478,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 3,
+  "contract_version": 5,
   "probe": {
-    "contract_version": 4,
+    "contract_version": 5,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -518,7 +495,7 @@ A successful probe nests its result:
 
 The probe walks the same §4.3 chain order and selects the first runnable item;
 items already marked unavailable are never probed. For `channel: "hub"`, that
-candidate keeps v3's total request-result truth table verbatim. For
+candidate keeps v5's total request-result truth table verbatim. For
 `channel: "native_cli"`, the probe re-verifies process readiness after selection;
 the fact may have gone stale, so an available candidate can honestly return
 not-ready. `reachable` is READINESS, not completion evidence: no upstream call is
@@ -527,7 +504,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 4,
+  "contract_version": 5,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -541,7 +518,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 4,
+  "contract_version": 5,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -558,7 +535,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 3,
+  "contract_version": 5,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -576,7 +553,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 3,
+  "contract_version": 5,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -585,7 +562,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 3,
+  "contract_version": 5,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
@@ -608,13 +585,19 @@ when emitted.
 
 ## Error codes
 
-Minimum v3 set:
+Minimum v5 set:
 
 `source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
-`invalid_source_order`, `source_last_supplier`, `mapping_target_unavailable`,
-`mode_switch_blocked`, `engine_down`, `consent_required`,
-`reauth_confirmation_required`, `migration_item_conflict`, `turn_not_found`,
+`invalid_source_order`, `source_last_supplier`, `source_in_route_chain`,
+`source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
+`reauth_confirmation_required`, `source_model_managed_upstream`,
+`migration_item_conflict`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
+
+Boundary-only action-refusal values cover operations the UI already does not offer but
+a script or regression can call directly. `reauth_confirmation_required` and
+`source_model_managed_upstream` are API/test-only truth: they have no product copy key
+or rendering slot.
 
 Removed: `invalid_priority_order`.
 
@@ -623,20 +606,26 @@ Removed: `invalid_priority_order`.
 JSON Schema draft-07 cannot express cross-document or live-state relations. The
 contract harness and API-boundary tests enforce:
 
+<!-- authority-consumer: credential.refresh_once credential.refresh_failed credential.refresh_rejected credential.static_unauthorized credential.account_classified credential.request_nonfallback -->
+<!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.blocked turn.canceled -->
+<!-- authority-consumer: mutation.source_metadata mutation.credential_replace mutation.source_refresh mutation.model_create mutation.model_efforts mutation.model_delete mutation.source_delete mutation.route_replace -->
+<!-- authority-consumer: import.keep_native import.copy_key import.reauth import.controlled -->
+<!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
+
 | Guard | Boundary |
 | --- | --- |
 | every example validates and JSON round-trips | contract harness |
-| mirror registry equality/projection/partition/bijection/mapping, including mutation probes | `mirror-registry.json` harness |
-| every non-null `then` constraint has matching `required`, except a declared fail-safe legacy-example exception | contract harness |
+| authority registry and mirror relations are generated from live files in the same test run; every registered closed branch has a consumer and every registered consumer resolves to one authority | `mirror-registry.json` harness |
+| every non-null `then` constraint has matching `required` | contract harness |
 | every `sources.order` id exists, is unique, and is eligible | config loader + source-order route |
 | eligibility contains one row per source and every ordered source is eligible | AgentSupply assembler |
 | every AgentSupply eligibility row carries `in_current_model_chain` and `process_availability_reason`; membership nullability follows `selected_model_id`, and only a native source may carry `native_cli_unavailable` | AgentSupply assembler |
-| `AgentChain.chain` source ids are unique and preserve effective order, including process-unavailable native CLI items | chain assembler |
+| `AgentChain.chain` re-echoes the stored exact hops in the same order, including missing, model-unsupported, and process-unavailable native CLI items | chain assembler |
 | `model_supply` has one row per menu model with unique ids | AgentSupply assembler |
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, `sources`, `supply_status`, `model_supply`, and `named_agents`; every Source includes persisted `last_discovered_at`; source creation returns both `adopted_by` and `skipped_by`; source refresh returns the updated Source plus count | API payload test |
+| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply`, and `named_agents`; every Source includes persisted `last_discovered_at`; source creation returns `added_to` and `adopted_by`; saved refresh uses the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 

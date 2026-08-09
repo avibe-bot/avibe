@@ -77,15 +77,13 @@ export type SuppliedModel = {
   id: string;
   display_name?: string | null;
   provenance: ModelProvenance;
+  reasoning_efforts?: string[];
   discovered_at?: string | null;
 };
 
 export type Source = {
   id: string;
-  /** v3, immutable once written: the `follow` policy recommends api_key sources
-   *  by creation time ascending, so the rule needs a persisted stamp (the
-   *  sources array itself is explicitly unordered). May be null on rows
-   *  persisted before the field existed; `id` ascending is the tie-breaker. */
+  /** Source creation time; ordinary audit/display metadata only. */
   created_at?: string | null;
   /** Latest successful full model discovery for this source. null means the
    *  source predates the field or has no known successful discovery. */
@@ -145,9 +143,7 @@ export type SourcePolicy = 'follow' | 'custom';
 /** Why a source cannot serve this backend at all. A closed vocabulary — a new
  *  cause ships its enum member and its locale copy in the same change. */
 export type EligibilityReasonKey =
-  | 'models.eligibility.subscription_wrong_client'
-  | 'models.eligibility.opencode_api_key_only'
-  | 'models.eligibility.consent_required';
+  'models.eligibility.subscription_wrong_client';
 
 /** Why a source that MAY serve this backend still cannot be launched on this
  *  machine. Independent of eligibility and of the source's own health: the
@@ -576,12 +572,12 @@ export type SourceRepaired = {
   interrupted_pairs: SupplyGap[];
 };
 
-/** POST /api/models/custom-models — appends a manual-provenance model entry to
- *  a source's supply list (frame 08). */
+/** POST /api/models/sources/<source_id>/models — appends a user-authored model
+ *  entry to a Source inventory (frame 08). */
 export type CustomModelCreate = {
-  source_id: string;
   model_id: string;
   display_name?: string | null;
+  reasoning_efforts: string[];
 };
 
 /** POST /api/models/migration/apply response. */
