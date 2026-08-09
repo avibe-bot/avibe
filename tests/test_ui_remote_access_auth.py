@@ -5,6 +5,7 @@ import logging
 import socket
 import asyncio
 from collections import namedtuple
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -240,19 +241,22 @@ def test_remote_setup_route_serves_shell_before_login(monkeypatch, tmp_path):
     assert "Avibe shell" in response.text
 
 
-def test_remote_config_get_without_session_returns_login_required(monkeypatch, tmp_path):
+@pytest.mark.parametrize("path", ["/api/config", "/status", "/api/events"])
+def test_remote_background_get_without_session_returns_login_required(monkeypatch, tmp_path, path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
-        "/api/config",
+        path,
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
         follow_redirects=False,
     )
 
-    assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
+    assert response.headers.get("Location") is None
+    assert ui_server.REMOTE_OAUTH_COOKIE_NAME not in response.headers.get("Set-Cookie", "")
 
 
 def test_api_config_blocked_host_returns_machine_readable_error(monkeypatch, tmp_path):
@@ -274,22 +278,58 @@ def test_api_config_blocked_host_returns_machine_readable_error(monkeypatch, tmp
     assert response.get_json()["error"] == "remote_access_host_mismatch"
 
 
-def test_remote_host_strips_retry_marker_from_oauth_next(monkeypatch, tmp_path):
+def test_remote_private_document_routes_through_dedicated_login_endpoint(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    _save_config(tmp_path)
 
     response = app.test_client().get(
-        f"/show/ses123/?foo=bar&{ui_server.REMOTE_OAUTH_RETRY_PARAM}=1",
+        "/show/ses123/?foo=bar",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
 
     assert response.status_code == 302
-    state = httpx.URL(response.headers["Location"]).params["state"]
-    state_payload = ui_server._read_oauth_state(config.remote_access.vibe_cloud.session_secret, state)
+    assert response.headers["Location"] == "/auth/login?next=%2Fshow%2Fses123%2F%3Ffoo%3Dbar"
+    assert ui_server.REMOTE_OAUTH_COOKIE_NAME not in response.headers.get("Set-Cookie", "")
+
+
+def test_remote_login_preserves_callback_retry_budget(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _mock_ui_dist(monkeypatch, tmp_path)
+    client = app.test_client()
+    state = ui_server._make_oauth_state(
+        config.remote_access.vibe_cloud.session_secret,
+        next_target="/show/ses123/?tab=flow",
+    )
+
+    callback = client.get(
+        f"/auth/callback?code=test-code&state={state}",
+        base_url="https://alex.avibe.bot",
+        follow_redirects=False,
+    )
+    retry_target = callback.headers["Location"]
+    login_entry = client.get(
+        retry_target,
+        base_url="https://alex.avibe.bot",
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    login = client.get(
+        login_entry.headers["Location"],
+        base_url="https://alex.avibe.bot",
+        follow_redirects=False,
+    )
+
+    assert login_entry.status_code == 302
+    assert login_entry.headers["Location"] == f"/auth/login?{urlencode({'next': retry_target})}"
+    assert login.status_code == 302
+    oauth_state = httpx.URL(login.headers["Location"]).params["state"]
+    state_payload = ui_server._read_oauth_state(config.remote_access.vibe_cloud.session_secret, oauth_state)
     assert state_payload is not None
-    assert state_payload["next"] == "/show/ses123/?foo=bar"
+    assert state_payload["next"] == "/show/ses123/?tab=flow"
     assert state_payload["retry"] is True
 
 

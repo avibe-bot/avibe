@@ -1632,6 +1632,14 @@ def _strip_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", query, ""))
 
 
+def _oauth_retry_requested(value: Any) -> bool:
+    target = _safe_remote_redirect_target(value)
+    return any(
+        key == REMOTE_OAUTH_RETRY_PARAM and val == "1"
+        for key, val in parse_qsl(urlsplit(target).query, keep_blank_values=True)
+    )
+
+
 def _add_oauth_retry_param(value: str) -> str:
     target = _strip_oauth_retry_param(value)
     parsed = urlsplit(target)
@@ -1657,7 +1665,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None =
     state = _make_oauth_state(
         cloud.session_secret,
         next_target=next_target,
-        retry=request.args.get(REMOTE_OAUTH_RETRY_PARAM) == "1",
+        retry=_oauth_retry_requested(raw_next),
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
@@ -2172,12 +2180,9 @@ def enforce_remote_access_cookie():
     # origin instead of automatically crossing into an OAuth browser sheet.
     if _is_ui_static_request():
         return None
-    if request.method == "GET":
-        # Bound unauthenticated login-start floods at the door (this writes a
-        # handshake + sets cookies); a real user spends only a couple per login.
-        if _auth_rate_limited():
-            return _auth_rate_limit_response()
-        return _redirect_to_vibe_cloud_login(config)
+    if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
+        target = request.full_path if request.query_string else request.path
+        return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
 
 

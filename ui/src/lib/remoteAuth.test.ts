@@ -8,6 +8,7 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
   REMOTE_AUTH_REQUIRED_EVENT,
@@ -49,6 +50,26 @@ describe('remote auth navigation', () => {
       expect(remoteLoginPath(target)).toBe('/auth/login?next=%2F');
     },
   );
+
+  it.each(['/admin/logs', '/admin/settings/diagnostics'])(
+    'keeps remote session authentication enabled while bypassing setup checks for %s',
+    async (path) => {
+      const getSession = vi.fn(async () => ({ remote: true, authenticated: false }));
+
+      await expect(checkRemoteAuthForPath(path, getSession)).resolves.toEqual({
+        loginRequired: true,
+        checkSetup: false,
+      });
+      expect(getSession).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('checks setup after an authenticated remote session on regular app routes', async () => {
+    await expect(checkRemoteAuthForPath(
+      '/inbox',
+      async () => ({ remote: true, authenticated: true }),
+    )).resolves.toEqual({ loginRequired: false, checkSetup: true });
+  });
 
   it('signals AuthGuard instead of navigating automatically', () => {
     platform.isIosDevice.mockReturnValue(true);
