@@ -339,6 +339,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
         "tasks": False,
         "supervisor": False,
         "runtime": False,
+        "capture": False,
     }
     stop_order: list[str] = []
 
@@ -363,10 +364,23 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
             await controller.runtime_work_supervisor.run_sync(lambda: None)
             await super().stop()
 
+    class _MemoryRuntime:
+        async def close(self) -> None:
+            assert stopped["capture"] is True
+            stopped["runtime"] = True
+            stop_order.append("memory-runtime")
+
+    class _MessageHandler:
+        async def drain_memory_capture_tasks(self) -> None:
+            stopped["capture"] = True
+            stop_order.append("capture")
+
     controller.scheduled_task_service = _Stopper("tasks")
     controller.runtime_work_supervisor = _Supervisor("supervisor")
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
+    controller.message_handler = _MessageHandler()
+    controller.memory_runtime = _MemoryRuntime()
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
     controller.im_client = None
@@ -381,9 +395,11 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stopped["watch"] is True
     assert stopped["supervisor"] is True
     assert stopped["runtime"] is True
+    assert stopped["capture"] is True
     assert stop_order[0] == "quiesce"
     assert set(stop_order[1:3]) == {"tasks", "watch"}
     assert stop_order[3] == "supervisor"
+    assert stop_order[-2:] == ["capture", "memory-runtime"]
 
 
 @pytest.mark.anyio

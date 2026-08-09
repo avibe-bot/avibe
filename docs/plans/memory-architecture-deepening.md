@@ -1,0 +1,348 @@
+# Memory Architecture Deepening
+
+> Status: complete
+>
+> Follow-up architecture work on the Memory system delivered by
+> [PR #1006](https://github.com/avibe-bot/avibe/pull/1006). Product behavior is
+> unchanged throughout: every item here is a structural change behind existing
+> interfaces, verified by the existing Memory test suite.
+
+## Background
+
+The Memory system landed with one declared port — `MemoryProviderPort` in
+`core/memory/everos.py`, published alongside `FakeMemoryProvider`. That single
+seam is why `tests/test_memory_module.py` needs one `monkeypatch` across 1,612
+lines.
+
+The two dependencies that did not get a port cost the opposite:
+`tests/test_memory_runtime.py` spends 2,151 lines on 58 `monkeypatch.setattr`
+calls and 43 distinct private-attribute pokes, and re-declares the same
+`_Process` and `_Artifact` fakes ten times each.
+
+Three things are already deep and are explicitly out of scope:
+
+- `core/managed_runtime.py` — a real seam with three adapters
+  (`GitRuntimeManager`, `MemoryArtifactManager`, `EngineRuntimeManager`).
+  Manifest parsing, arch selection, checksum verification and safe extraction
+  are shared, and Memory reuses them correctly.
+- `MemoryModule` — six methods over 1,046 lines.
+- `modules/im/message_facts.py` — the five per-platform ordinary-text predicates,
+  consolidated in `2a504b9e`.
+
+## Goal
+
+Raise the depth of the Memory modules that callers and tests actually cross,
+without changing product behavior:
+
+- the interface becomes the test surface, so tests stop reaching past it;
+- rules that exist in more than one place collapse into one;
+- adding a platform, a status counter, or a runtime method stops requiring
+  edits in N files.
+
+## Solution
+
+Six changes, each its own commit, in order. Each keeps
+`tests/test_memory_*.py` and `tests/test_ui_memory_routes.py` green.
+
+### 1. Ports for the process and artifact dependencies
+
+`MemoryRuntime` constructs `EverOSProcess` and `EverOSPort` internally, so tests
+substitute them by patching module globals and private attributes.
+
+The interfaces `MemoryRuntime` actually needs are small:
+
+| Port | Members | Implementation behind it |
+|---|---|---|
+| `EverOSProcessPort` | `running`, `starting`, `start()`, `stop()`, `processing_healthy()` | `EverOSProcess`, 990 lines |
+| `MemoryArtifactPort` | `resolve_python()`, `status()`, `ensure()`, `provider_root_format()`, `artifact_fingerprint()`, `compatible_provider_root_formats()`, `set_provider_root()`, `set_activation_coordinator()` | `MemoryArtifactManager`, 668 lines |
+
+Declare both as `Protocol`s next to their implementations, publish a fake with
+each, and let `MemoryRuntime` accept a process factory plus a typed artifact
+port. The defensive `getattr(self._artifact_manager, "...", None)` checks in
+`runtime.py` exist only because the interface was undeclared; a port removes
+them.
+
+### 2. Collapse `UnavailableMemoryRuntime`
+
+`UnavailableMemoryRuntime` mirrors ten methods of `MemoryRuntime` by hand and
+answers one condition — "the store could not be opened" — three ways: raising
+`MemoryStoreUnavailableError`, returning `{"status": "failed"}`, and returning
+`{"ok": False}`. It is returned as a bare union with no `Protocol`.
+
+Make store acquisition lazy inside `MemoryRuntime`, make "unavailable" one of its
+internal states, and report it through the existing `OperationFailed` result.
+
+### 3. Queue lifecycle behind `MemoryStore`
+
+`MemoryStore` exposes 30 public methods to exactly two callers. Fourteen of them
+form the delivery and fault-breaker state machine, whose rules live in
+`worker.py`: the store does not enforce that a claimed row is settled, or that a
+flush marked in flight reaches a verdict.
+
+Collapse those primitives into transition methods that take an outcome.
+
+`compact_terminal_tombstones` has no caller outside the store, but its retention
+rule has no other direct test, so it stays public rather than losing coverage.
+
+### 4. One status bucket contract
+
+`memory_status_buckets` (`core/memory/presentation.py`) and
+`memoryStatusBuckets` (`ui/src/lib/memoryStatus.ts`) implement the same
+six-bucket rule once per language, each with its own dedicated test, while
+nothing verifies that the backend emits those six counter names.
+
+Emit the buckets from `MemoryModule.status`, delete the TypeScript copy, and
+replace the four ad-hoc result type guards in `SettingsMemoryPage.tsx` with the
+discriminated result the backend already returns. `vibe/cli.py` already consumes
+the Python one.
+
+### 5. `core/memory/admission.py`
+
+Capture admission is decided across `Controller` (six methods, ~130 lines),
+`session_turns`, `ui_server` and the adapters, carried by a nullable
+`is_ordinary_text` bool on `MessageContext` that nothing enforces. The Workbench
+predicate sits in `vibe/ui_server.py` while its five siblings live in
+`modules/im/message_facts.py`.
+
+Move the admission methods into `core/memory/admission.py` taking a facts record
+and returning the existing `CaptureRequest | CaptureSkipped`, and move the
+Workbench predicate next to the others.
+
+This finishes an intent the Memory contract already states — "platform adapters
+classify native events but do not own Memory business logic" — rather than
+revising it.
+
+### 6. Memory read module in the UI
+
+`SettingsMemoryPage.tsx` is 1,122 lines with 32 `useState` calls, where five
+panels each re-implement fetch, loading, error-code mapping and result
+discrimination. The six memory routes plus seventeen helpers are inline in
+`vibe/ui_server.py`.
+
+Extract one read module the panels call, split the panels into their own files,
+and lift the routes into a module of their own.
+
+## Todo
+
+- [x] 1. Ports for `EverOSProcess` and `MemoryArtifactManager` — `d13fef20`
+- [x] 2. Collapse `UnavailableMemoryRuntime` — `a2afdadb`
+- [x] 3. Queue lifecycle behind `MemoryStore` — `3989a8e8`
+- [x] 4. One status bucket contract — `f170ddb3`
+- [x] 5. `core/memory/admission.py` — `3546c638`
+- [x] 6. Memory read module in the UI — `a515f053`
+
+## Validation
+
+Per commit:
+
+- `uv run pytest tests/test_memory_*.py tests/test_ui_memory_routes.py`
+- `ruff check` on changed Python files
+- `cd ui && npm run build` for commits touching `ui/`
+
+Full-suite gates stay on GitHub CI.
+
+## The activation flake, root-caused and fixed
+
+`tests/test_memory_runtime.py -k activation` failed about 1 run in 30 with
+`FileNotFoundError` on `memory.sqlite-shm` surfacing as `memory_clear_failed`.
+Measured at the same rate before this work, so it was not caused by the
+refactors — but `MemoryStore._enforce_private_database_modes` guarded only its
+first `lstat`, leaving `chmod` and the verifying `lstat` exposed when WAL
+checkpointing removed a sidecar between calls. That method runs on every
+`_connection()` entry and exit, so any concurrent connection could trigger it.
+Fixed in `654c55de`; 0 failures in 40 runs after.
+
+## Follow-ups this work deliberately left open
+
+- **`modules/im/slack.py` hardcodes `is_ordinary_text=True`** on the native
+  slash-command context. Reads as drift from `2a504b9e` rather than intent, and
+  the Memory contract treats a slash command as a control event. Latent, not
+  live: slash commands never reach `MessageHandler.handle_message`. Changing it
+  is a product-behavior decision.
+- **Three failure conventions for an unavailable store** remain
+  (`MemoryStoreUnavailableError`, `{"status": "failed"}`, `{"ok": False}`).
+  Unifying them onto `OperationFailed` would turn the 503s in
+  `core/internal_server.py` into 200s, so it needs a product decision.
+- **Profile and search still repeat the item-list markup.** Second occurrence,
+  not third; extract on the next repeat.
+- **`isMemoryForbidden` is a shape probe, not a discriminant.** It matches the
+  loopback-403 body (`status: "failed"` with `error: "memory_disabled"`) because
+  `getJson({handleError: false})` discards the HTTP status. Replacing it properly
+  means exposing the status code from the API layer.
+
+## One behavior nuance worth recording
+
+`failureRetentionDays` used to be sticky: the page updated it only when a
+response carried a numeric `retention_days`, otherwise it kept the previous
+value. It is now `failuresRead.data?.retention_days ?? 90`. The two differ only
+for a response that carries items but omits `retention_days`, which
+`core/memory/runtime.py` never sends and `MemoryFailureLogResult` types as
+required — equivalent under the declared contract, but not literally identical
+code.
+
+## Review round on the pushed range
+
+Two independent reviews ran against `ab9dbb4d`: a local Codex pass
+(`gpt-5.6-sol`, max effort) over the nine-commit range, and the GitHub Codex bot
+over the whole PR. Eleven findings, all fixed in `654c55de..d8bfd0bb`.
+
+Three were introduced by this work:
+
+- `4bfe5318` — admission fail-open on malformed booleans. Extracting the policy
+  into `core/memory/admission.py` left strict boolean normalization behind in
+  `Controller`, so the new security boundary was not self-contained.
+- `6dd7f9df` — boot recovery sampled its clock before reclaiming leases instead
+  of after, because three ordered store calls collapsed into one.
+- `6988a7ca` — the extracted read hook stopped clearing a stale error on retry.
+
+Eight were pre-existing in PR 1006 and are fixed here because they ship in the
+same PR:
+
+- `654c55de` — SQLite sidecar removal races (the flake above).
+- `7f518b43` — **Slack Memory capture was inoperative against real payloads.**
+  Every message from a modern Slack client carries a `rich_text` block, and the
+  predicate rejected any event with truthy `blocks`. The only existing test used
+  a bare `{"text": "hello"}` event, a shape production never delivers.
+- `eb4ab1fa` — status polls could stack and land out of order.
+- `3f8df6ea` — pre-upgrade IM dedup rows were ignored on redelivery.
+- `854529f7` — CLI capabilities never expired.
+- `8c955c85` — overlapping settings saves could roll back over a newer write.
+- `ac4bdecb` — generated control files made an empty provider root look occupied.
+- `d8bfd0bb` — the UI proof secret desynchronized after a partial restart.
+
+### Second review round on `03c4c2cd`
+
+The GitHub Codex bot found six more, all verified against the code and fixed.
+Two are consequences of the first round rather than new ground:
+
+- `3eed43e5` — **`doctor repair` did not carry the proof-secret fix.** It stops
+  the old service and starts a replacement beside a surviving UI, which is the
+  case `cmd_start` handles by restarting the UI; a bare CLI holds no process
+  secret, so the new controller verified with `None`. Not the accepted
+  degradation below — that one is service-*reused*.
+- `879c29b6` — the release guard skipped its backup upload on the six-hourly
+  schedule whenever the probe passed, so a newly published manifest hash had no
+  artifact to recover from until the weekly Sunday run. Fixed by uploading when
+  no live backup exists for the hash, and by resolving the backup's run from the
+  artifact listing rather than a 50-run window that covered ~12 of its 90 days.
+
+Four are independent defects in PR 1006:
+
+- `8bd655f3` identified that Codex and OpenCode persist caller context while
+  Claude passes it in the child environment. Its backend-specific `0600`/`0700`
+  hardening was subsequently removed by product decision: Avibe does not treat
+  arbitrary code running as the same OS account as a Memory isolation boundary,
+  and will not introduce a partial, POSIX-specific permission contract for two
+  backends. A future system-wide Agent sandbox must cover all local private
+  files and every backend rather than special-case Memory storage or one
+  credential transport.
+- `420bc7fc` — the empty-profile warning lived on the shared `EverOSPort`, which
+  one instance serves every principal from. `profile_payload` sampled it after
+  its own await, so a concurrent read for another principal decided what a
+  caller was told; `status_payload` exposed it with no principal at all. Derived
+  from each request's own result now, and dropped from status.
+- `4a199786` — the `engine` fault's Repair button called
+  `installDependency('memory-runtime')`, which returns
+  `memory_runtime_install_requires_disabled_memory` whenever the supervisor is
+  running — exactly the state an engine fault describes, since the worker
+  classifies it after a *successful* processing-health probe. It now reconciles
+  the live sidecar through a new `POST /api/memory/runtime/restart`.
+- `9db312af` — `cleanup_sync` never settled `_internal_server_task`, so the done
+  callback that records `stopped` never ran and `internal-server.json` kept
+  `ready`. Shutdown now cancels and records it directly, and `vibe status`
+  treats a live state with no service owner as stale — which also covers a
+  SIGKILL, where no shutdown path runs at all.
+
+Residual limit worth stating plainly: Agent backends run as the local user with
+arbitrary local file access. The session-to-principal association scopes
+supported Memory API calls; it is not a sandbox against an Agent that
+deliberately explores the user's files. Avibe does not inject internal Memory
+storage locations into Agent-facing prompts or errors. Enforced local-file
+isolation is a system-wide follow-up, not a Memory-specific file-layout promise.
+
+### Third review round on `03c4c2cd`
+
+The bot re-reviewed the same commit before the second round's fixes landed, so
+its `core/memory/runtime.py` profile-warning finding is the one already closed
+by `420bc7fc`. Four were new:
+
+- `4589e020` — **Memory settings leaked through the generic config response.**
+  `/api/sessions/<id>/bootstrap` is reachable by an authenticated remote user
+  over the tunnel and returned `config_to_payload()` whole, including Memory
+  enablement, both processing endpoint URLs and model names, and
+  API-key-presence flags — data otherwise served only by the
+  direct-loopback-only `/api/memory/*` routes. `/api/config` and the config-save
+  response already popped it; bootstrap did not. Fixed at the projection rather
+  than the third call site: responses now go through `api.client_config_payload`,
+  so a new endpoint inherits the exclusion. `config_to_payload` still emits
+  `memory` because the save path deep-merges from it, and an omitted block
+  resets the stored one.
+- `c7ac506c` — two transport deadlines were shorter than the work they waited
+  on. `memory_status` gave up at 10s while `MemoryModule.status` bounds its
+  provider health probe at `PROVIDER_READ_TIMEOUT_SECONDS` (20s), so the
+  Settings page got a generic transport failure exactly during the outage it
+  exists to diagnose; the runtime install gave up at 120s while the Dependencies
+  UI polls for 310s, turning a slow download into a false failure the user could
+  retry into. Both are now named constants, with
+  `tests/test_internal_client_timeouts.py` asserting the ordering against the
+  real sources so raising one bound without the other fails there.
+- `2e1f1203` — the active-runtime pointer was accepted when `platform` and
+  `runtime_version` were merely well-formed strings. Installation rejects a
+  manifest whose version is not `EVEROS_VERSION`, but the pointer outlives that
+  check, so a `~/.avibe` moved between architectures kept resolving an
+  unusable executable. Now compared against `runtime_platform_tag()` and
+  `EVEROS_VERSION`. Three existing pointer fixtures hardcoded `1.0` /
+  `darwin-arm64` and were updated to real values so they still test what they
+  claim.
+
+### Fourth review round on `9601de75cb`
+
+Four new findings were verified and fixed:
+
+- Memory Clear now uses a 150-second transport deadline, beyond its bounded
+  drain/cleanup plus an enabled reconciliation, so the UI cannot report a false
+  failure while the destructive request keeps running.
+- Settings reconciliation now uses a 120-second transport deadline, beyond its
+  processing probe, active-add drain, child stop, and replacement readiness
+  sequence. Tests derive both deadline relationships from the lifecycle's real
+  constants.
+- Artifact activation no longer treats `concurrent.futures.Future.cancel()` as
+  proof that the controller coroutine settled. The installer waits on a result
+  bridge completed by the actual `asyncio.Task` done callback, after cancellation
+  rollback and reconciliation cleanup finish.
+- Slack capture now rejects every nonempty message subtype. Ordinary composer
+  events carry no subtype, so decorated, system, and future subtype forms fail
+  closed instead of depending on an incomplete denylist.
+
+The remaining caller-context thread was resolved as a product threat-model
+decision. Avibe scopes supported Memory API calls through the current Agent
+session and its controller-side principal association, but does not claim that
+Agent backends with arbitrary access as the same OS user are isolated from that
+user's local files. The backend-specific POSIX mode change from `8bd655f3` was
+removed; comprehensive local-file isolation belongs in a shared sandbox
+covering Claude, Codex, OpenCode, and their child processes.
+
+### The proof-secret gap, decided
+
+`d8bfd0bb` fixes only the half it can without weakening the secret's
+stdin-only, never-persisted property. When the service is reused and the UI is
+started fresh, the pair stays desynchronized; the gap is logged and the
+`vibe stop` recovery step is printed.
+
+**Decision: accept the degradation.** Closing it would mean either persisting
+the secret — which would let any same-user process, including an agent backend,
+forge local-owner Memory reads — or restarting a live service on a bare `vibe`
+re-run, which turns an apparently harmless command into a service interruption.
+Neither cost is worth removing a state the CLI already detects, logs, and gives
+a one-line recovery for. Documented as a known limitation under `vibe start` in
+`docs/CLI.md` and `docs/CLI_ZH.md`.
+
+Scope note: the affected surface is the Web UI Memory Settings page. Direct
+loopback reads use the `avibe:local` principal; authenticated Avibe Cloud reads
+use the remote Workbench account's `avibe:remote:<subject>` principal behind the
+same process-private proof. `vibe memory ...` uses the Agent session's
+controller-side principal association and is unaffected.
+
+`d8bfd0bb` also introduces one new behavior, reviewed and kept: when the service
+is freshly started and a UI is already running, the UI is restarted so the pair
+shares the new secret.

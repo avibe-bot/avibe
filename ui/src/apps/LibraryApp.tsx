@@ -25,6 +25,7 @@ import { useShowPages, type ShowPage } from '../components/useShowPages';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { SearchField } from '../components/settings/SettingsPrimitives';
+import { openLinkInNewContext } from '../lib/pwaNavigation';
 
 // The App Library: the app manager, itself a built-in app (§7.1). Two views over
 // the two-layer state (§7.1c): the INSTALLED set (Apps) and the full Show Pages
@@ -62,7 +63,7 @@ function useOpenApp() {
       if (launch && appLaunchIntent(launch) === 'newTab') {
         const href = appTabHref({ appId, sessionId: opts?.sessionId });
         if (href) {
-          window.open(href, '_blank', 'noopener,noreferrer');
+          openLinkInNewContext(href, 'noopener,noreferrer');
           return;
         }
       }

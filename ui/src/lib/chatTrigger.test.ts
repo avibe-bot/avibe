@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { chatTriggerLink, harnessChipLabelKey, needsHarnessProvenanceReconcile } from './chatTrigger';
+import {
+  chatTriggerLink,
+  harnessChipLabelKey,
+  needsHarnessProvenanceReconcile,
+  vaultCallbackStatusKey,
+} from './chatTrigger';
 
 type Msg = Parameters<typeof chatTriggerLink>[0];
 const msg = (over: Partial<Msg>): Msg => ({
@@ -124,6 +129,33 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
     // Source deleted / not yet enriched → no dangling bare "From".
     expect(key({ author_name: 'agent_run', source_session_id: null })).toBe('chat.source.harness');
     expect(key({ author_name: null, source_session_id: null })).toBe('chat.source.harness');
+  });
+
+  it('labels Vault callbacks separately from Agent callbacks', () => {
+    const metadata = {
+      source_kind: 'callback',
+      source_actor: 'vault:vrq_1',
+      vault_request_type: 'access',
+      vault_request_status: 'denied',
+    };
+    expect(key({ author_name: 'agent_run', metadata })).toBe('chat.source.vault');
+    expect(vaultCallbackStatusKey(msg({ author_name: 'agent_run', metadata }))).toBe('chat.source.vaultDenied');
+  });
+
+  it('uses the Vault outcome wording for provision, access, and sign callbacks', () => {
+    const callback = (requestType: string, status: string) =>
+      vaultCallbackStatusKey(msg({
+        metadata: {
+          source_kind: 'callback',
+          source_actor: 'vault:vrq_1',
+          vault_request_type: requestType,
+          vault_request_status: status,
+        },
+      }));
+    expect(callback('provision', 'fulfilled')).toBe('chat.source.vaultProvided');
+    expect(callback('access', 'approved')).toBe('chat.source.vaultAccessApproved');
+    expect(callback('sign', 'approved')).toBe('chat.source.vaultSigned');
+    expect(callback('access', 'expired')).toBe('chat.source.vaultExpired');
   });
 
   it('every non-agent Harness trigger keeps its own self-contained label', () => {

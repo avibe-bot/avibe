@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { showPagePrivatePath } from '../../apps/showPageAvatar';
+import { appTabHref } from '../../apps/appLaunch';
 import { useDock } from '../../context/DockContext';
 import { showDockId } from '../../context/dockDoc';
 import { useShowPageDrag } from '../../context/showPageDrag';
@@ -60,6 +60,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
 
   const canLaunch = !showPageMode && !busy && Boolean(sessionId);
   const windowTitle = title?.trim() || t('chat.untitled');
+  const linkHref = appTabHref({ appId: 'showpage', sessionId });
 
   const clearHoverTimer = useCallback(() => {
     if (hoverTimerRef.current === null) return;
@@ -114,6 +115,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
   const openLink = useCallback(async () => {
     clearHoverTimer();
     setMenuOpen(false);
+    if (!linkHref) return;
     // Open synchronously inside the click gesture, then navigate after ensure;
     // otherwise popup blockers reject window.open after the awaited request.
     const tab = window.open('about:blank', '_blank');
@@ -127,8 +129,8 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       tab.close();
       return;
     }
-    if (!tab.closed) tab.location.replace(showPagePrivatePath(sessionId));
-  }, [clearHoverTimer, prepare, sessionId]);
+    if (!tab.closed) tab.location.replace(linkHref);
+  }, [clearHoverTimer, linkHref, prepare]);
 
   const pinToDock = useCallback(async () => {
     if (!(await prepare())) return;
@@ -298,15 +300,17 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
               <AppWindow className="size-3.5 shrink-0 text-cyan" />
               <span>{t('chat.showPage.newWindow')}</span>
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => void openLink()}
-              className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
-            >
-              <ExternalLink className="size-3.5 shrink-0 text-mint" />
-              <span>{t('chat.showPage.newLink')}</span>
-            </button>
+            {linkHref && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void openLink()}
+                className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
+              >
+                <ExternalLink className="size-3.5 shrink-0 text-mint" />
+                <span>{t('chat.showPage.newLink')}</span>
+              </button>
+            )}
           </div>
         </PopoverContent>
       </Popover>

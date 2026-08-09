@@ -21,7 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_context import build_context_turn_sink_key
 from core.message_dispatcher import _stream_chunk
-from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
 from modules.im import MessageContext
 
 
@@ -107,6 +112,47 @@ def test_result_does_not_overwrite_an_acknowledged_stop_stamp():
     asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
 
     assert sink["settled_by"] == SETTLED_BY_STOPPED
+
+
+def test_result_does_not_overwrite_a_contained_teardown_stamp():
+    """#1204: the same window, the other protected reason.
+
+    The service retired the runtime itself and the release named that settlement.
+    A straggler result landing before the row is written would relabel an
+    infrastructure interruption as a healthy terminal result — the exact
+    disagreement invariant 2 of ``docs/plans/harness-run-reliability.md`` forbids.
+    """
+
+    controller = _ControllerDouble()
+    done = asyncio.Event()
+    controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done)
+    sink = controller.get_turn_sink("avibe::C")
+    sink["settled_by"] = SETTLED_BY_BACKEND_REFRESH
+    done.set()
+
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+
+    assert sink["settled_by"] == SETTLED_BY_BACKEND_REFRESH
+
+
+def test_result_still_upgrades_the_pessimistic_no_result_stamp():
+    """The guard protects two NAMED reasons, not every no-result settlement.
+
+    ``no_terminal_result`` is what a fallback releaser writes when it gives up
+    waiting. Upgrading it when a real result finally lands is the whole point of
+    the line the two guards sit on — widening them to all of
+    ``SETTLEMENTS_WITHOUT_RESULT`` would freeze that pessimistic guess forever.
+    """
+
+    controller = _ControllerDouble()
+    done = asyncio.Event()
+    controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done)
+    sink = controller.get_turn_sink("avibe::C")
+    sink["settled_by"] = SETTLED_BY_NO_TERMINAL_RESULT
+
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+
+    assert sink["settled_by"] == SETTLED_BY_TERMINAL_RESULT
 
 
 def test_notify_kind_leaves_sink_unsettled():

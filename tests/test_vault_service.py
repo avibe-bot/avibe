@@ -13,7 +13,16 @@ from sqlalchemy.exc import IntegrityError
 
 from storage import vault_service as vs, vault_webauthn
 from storage.db import create_sqlite_engine
-from storage.models import metadata, state_meta, vault_auth_factors, vault_grants, vault_requests, vault_secrets
+from storage.models import (
+    agent_sessions,
+    metadata,
+    state_meta,
+    vault_auth_factors,
+    vault_grants,
+    vault_requests,
+    vault_secrets,
+)
+from storage import message_deliveries
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 
@@ -142,6 +151,99 @@ def test_provision_request_rejects_case_only_duplicate_secret(vault):
 
     assert fulfilled["status"] == "fulfilled"
     assert exc.value.existing_name == "OpenAIKey"
+
+
+def test_provision_request_uses_active_turn_as_plain_claude_anchor(vault):
+    now = "2026-08-08T00:00:00+00:00"
+    session_id = "ses_claude_anchor"
+    delivery_id = "del_claude_anchor"
+    turn_id = "turn_claude_anchor"
+    with vault.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=None,
+                agent_id=None,
+                agent_name="claude",
+                agent_backend="claude",
+                agent_variant="claude",
+                model=None,
+                reasoning_effort=None,
+                session_anchor=session_id,
+                workdir="/tmp",
+                native_session_id="",
+                title=None,
+                status="active",
+                visibility="foreground",
+                pinned=0,
+                agent_status="busy",
+                composer_draft_text=None,
+                composer_draft_updated_at=None,
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p0",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=None,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="request a key",
+            ),
+            dispatch_text="request a key",
+            now=now,
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="claude",
+            deliveries=[delivery],
+            dispatch_text="request a key",
+        )
+        request = vs.create_provision_request(
+            conn,
+            "CLAUDE_KEY",
+            requester={"source": "agent-cli", "session_id": session_id},
+        )
+
+    assert request["status"] == "pending"
+    row = request
+    assert row["id"]
+    with vault.connect() as conn:
+        stored = conn.execute(select(vault_requests).where(vault_requests.c.id == row["id"])).mappings().one()
+    assert stored["message_id"] is None
+    assert json.loads(stored["requester"])["turn_id"] == turn_id
+
+
+def test_provision_request_does_not_store_derived_delivery_as_reply_anchor(vault, monkeypatch):
+    monkeypatch.setattr(
+        vs,
+        "_active_session_turn_anchor",
+        lambda conn, session_id: ("msg_initial_delivery", "turn_active"),
+    )
+
+    with vault.begin() as conn:
+        request = vs.create_provision_request(
+            conn,
+            "DERIVED_KEY",
+            requester={"source": "agent-cli", "session_id": "ses_active"},
+        )
+        stored = conn.execute(
+            select(vault_requests).where(vault_requests.c.id == request["id"])
+        ).mappings().one()
+
+    assert stored["message_id"] is None
+    assert json.loads(stored["requester"])["turn_id"] == "turn_active"
 
 
 def test_provision_request_rejects_case_only_duplicate_pending_request(vault):

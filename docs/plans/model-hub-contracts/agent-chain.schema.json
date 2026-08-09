@@ -2,12 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "v4 (2026-07-30 targeted amendment): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by the server's one per-source supply derivation. That derivation applies an explicit mapping first, otherwise resolves a vendor-native fixed-menu alias against discovered inventory only, then tests source capability. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id. Deliberately NOT filtered by runnability: cooling, source-blocked and process-unavailable native_cli members stay at their positions, dimmed, because the user needs to see supply they own. The RUNNABLE candidate list is this chain further filtered to `runnable: true`, where runnable = health-permits AND process-available. Read-only projection, computed per request, never persisted.",
+  "description": "Read projection of one stored per-model Route chain. Items preserve the exact configured Source/model pairs and order; runtime adds only live health, runnability, blocker, and retry annotations. Cooling, missing, model-unsupported, Source-blocked, and process-unavailable native_cli hops remain visible at their configured positions. Runtime never derives membership, resolves aliases, or substitutes a model.",
   "type": "object",
   "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 4 },
+    "contract_version": { "const": 5 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "model_id": {
       "type": "string",
@@ -22,7 +22,7 @@
         "additionalProperties": false,
         "allOf": [
           {
-            "$comment": "v4 (07-29, escalations #2+#3): health that does not permit a turn pins runnability false. `needs_action` and `error` are stampless because neither recovers unattended. The orthogonal process-availability marker may still be present for an unavailable native_cli source; truth takes precedence over suppressing a redundant blocker.",
+            "$comment": "v5 (07-29, escalations #2+#3): health that does not permit a turn pins runnability false. `needs_action` and `error` are stampless because neither recovers unattended. The orthogonal process-availability marker may still be present for an unavailable native_cli source; truth takes precedence over suppressing a redundant blocker.",
             "if": {
               "properties": { "health": { "enum": ["needs_action", "error"] } },
               "required": ["health"]
@@ -35,7 +35,7 @@
             }
           },
           {
-            "$comment": "v4 (07-29, escalations #2+#3): healthy ∧ hub ⇒ runnable. Hub process availability is definitionally true in v2, so round 4's assembler protection survives unchanged for this channel: a healthy hub member flagged unrunnable would hide supply the user owns. The old claim that no other filter remained was false only for native_cli. Evidence at master 807d1eee: core/handlers/model_hub/service.py:1223-1229 and modules/agents/model_hub.py:359-365 pass process-local unavailable_source_ids; core/handlers/model_hub/resolver.py:83-87 and 267-273 apply that filter after the capability chain is built.",
+            "$comment": "v5 (07-29, escalations #2+#3): healthy ∧ hub ⇒ runnable. Hub process availability is definitionally true in v2, so round 4's assembler protection survives unchanged for this channel: a healthy hub member flagged unrunnable would hide supply the user owns. The old claim that no other filter remained was false only for native_cli. Evidence at master 807d1eee: core/handlers/model_hub/service.py:1223-1229 and modules/agents/model_hub.py:359-365 pass process-local unavailable_source_ids; core/handlers/model_hub/resolver.py:83-87 and 267-273 apply that filter after the capability chain is built.",
             "if": {
               "properties": {
                 "health": { "const": "healthy" },
@@ -52,7 +52,7 @@
             }
           },
           {
-            "$comment": "v4 (07-29, escalations #2+#3): healthy ∧ native_cli pairs runnability with this process's CLI readiness. False requires the one closed reason; true requires null. Readiness is distinct from source-global health and is never persisted into it. Evidence at master 807d1eee: core/handlers/model_hub/resolver.py:252-273 keeps the source in matching_sources while excluding unavailable ids from candidates, and lines 95-116 classifies the resulting no-candidate state as interrupted rather than waiting.",
+            "$comment": "v5 (07-29, escalations #2+#3): healthy ∧ native_cli pairs runnability with this process's CLI readiness. False requires the one closed reason; true requires null. Readiness is distinct from source-global health and is never persisted into it. Evidence at master 807d1eee: core/handlers/model_hub/resolver.py:252-273 keeps the source in matching_sources while excluding unavailable ids from candidates, and lines 95-116 classifies the resulting no-candidate state as interrupted rather than waiting.",
             "if": {
               "properties": {
                 "health": { "const": "healthy" },
@@ -86,7 +86,7 @@
             }
           },
           {
-            "$comment": "v4 converse (corrected orchestrator ruling): a non-null availability marker is legal at every health and means this process cannot launch this native_cli source. It therefore always forces runnable false. Hub is definitionally process-available in v2, so the marker is impossible there. Together with the healthy native_cli branches above, this makes healthy ∧ native_cli ∧ runnable:false ⇔ reason=native_cli_unavailable total without collapsing process availability into source-global health.",
+            "$comment": "A non-null process-availability marker is legal at every Source health and means this process cannot launch the native_cli hop. It always forces runnable false. Hub hops are definitionally process-available, so the marker is impossible there.",
             "if": {
               "properties": { "reason": { "type": "string" } },
               "required": ["reason"]
@@ -100,7 +100,7 @@
             }
           },
           {
-            "$comment": "v2 (07-29, review round 4), availability-separated in v4: `cooldown` is the only health value with a stamp, and it always has one — mirroring source.schema.json → state.retry_at, where `cooldown` is the self-healing status whose recovery time is known. For an available item, `runnable` remains the v3 dynamic rule: true exactly when `retry_at` is already in the past, which a schema cannot compare to now. Process unavailability has precedence at every health, so a cooldown native_cli item may also carry the marker; the converse above then pins runnable false while retaining the health stamp.",
+            "$comment": "v2 (07-29, review round 4), availability-separated in v5: `cooldown` is the only health value with a stamp, and it always has one — mirroring source.schema.json → state.retry_at, where `cooldown` is the self-healing status whose recovery time is known. For an available item, `runnable` remains the v3 dynamic rule: true exactly when `retry_at` is already in the past, which a schema cannot compare to now. Process unavailability has precedence at every health, so a cooldown native_cli item may also carry the marker; the converse above then pins runnable false while retaining the health stamp.",
             "if": {
               "properties": { "health": { "const": "cooldown" } },
               "required": ["health"]
@@ -164,7 +164,7 @@
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "The MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair. The predicate is spec §4.5's: `ok` = at least one `runnable: true` item. Otherwise `waiting` iff the chain is non-empty and EVERY member is cooldown, not retry-ready, and process-available; `interrupted` = the chain is empty, or AT LEAST ONE blocker needs the user (`needs_action`, `error`, or process-unavailable native_cli at any health). v4 matches the shipped resolver's availability precedence: even cooldown plus native_cli_unavailable is interrupted, never waiting."
+      "description": "The model-scoped supply state. `ok` means at least one configured hop is runnable. Otherwise `waiting` means the chain is non-empty and every hop is cooling, not retry-ready, and process-available; `interrupted` means the chain is empty or at least one blocker needs action, including process-unavailable native_cli at any Source health. Cooldown plus native_cli_unavailable is interrupted, never waiting."
     }
   },
   "allOf": [
@@ -190,7 +190,7 @@
       }
     },
     {
-      "$comment": "v4: waiting remains the AND-branch — non-empty chain and EVERY member a not-retry-ready cooldown that is process-available. The schema cannot compare retry_at to now, but the blocked-state conditional already forbids runnable members; requiring reason:null additionally excludes unavailable native_cli members. This matches core/handlers/model_hub/resolver.py:109-116 at master 807d1eee: waiting requires every source cooldown and not unavailable, otherwise no-candidate supply is interrupted.",
+      "$comment": "v5: waiting remains the AND-branch — non-empty chain and EVERY member a not-retry-ready cooldown that is process-available. The schema cannot compare retry_at to now, but the blocked-state conditional already forbids runnable members; requiring reason:null additionally excludes unavailable native_cli members. This matches core/handlers/model_hub/resolver.py:109-116 at master 807d1eee: waiting requires every source cooldown and not unavailable, otherwise no-candidate supply is interrupted.",
       "if": { "properties": { "supply_state": { "const": "waiting" } }, "required": ["supply_state"] },
       "then": {
         "properties": {
@@ -232,7 +232,7 @@
       }
     },
     {
-      "$comment": "v4 (07-30 native-alias amendment): Codex has no built-in upstream-id rewrite today, so `via_mapping:false` still means byte-identical and therefore null for that backend. Claude differs: its fixed menu includes stable aliases that may resolve to a dated discovered id without becoming an explicit user mapping.",
+      "$comment": "v5 (07-30 native-alias amendment): Codex has no built-in upstream-id rewrite today, so `via_mapping:false` still means byte-identical and therefore null for that backend. Claude differs: its fixed menu includes stable aliases that may resolve to a dated discovered id without becoming an explicit user mapping.",
       "if": { "properties": { "backend": { "const": "codex" } }, "required": ["backend"] },
       "then": {
         "properties": {
@@ -250,7 +250,7 @@
       }
     },
     {
-      "$comment": "v4 (07-30 native-alias amendment): a non-mapped Claude rewrite is legal only in the vendor-native Claude identifier family. The server additionally proves same-family/version selection against discovered inventory; JSON Schema cannot compare the requested model_id with each row or inspect the source inventory.",
+      "$comment": "v5 (07-30 native-alias amendment): a non-mapped Claude rewrite is legal only in the vendor-native Claude identifier family. The server additionally proves same-family/version selection against discovered inventory; JSON Schema cannot compare the requested model_id with each row or inspect the source inventory.",
       "if": { "properties": { "backend": { "const": "claude" } }, "required": ["backend"] },
       "then": {
         "properties": {
@@ -279,7 +279,7 @@
   ],
   "examples": [
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "chain": [
@@ -307,7 +307,7 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "claude",
       "model_id": "claude-opus-4-5",
       "chain": [
@@ -325,14 +325,14 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "chain": [],
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "codex",
       "model_id": "gpt-5.3-codex",
       "chain": [
@@ -350,7 +350,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "chain": [
@@ -368,7 +368,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 4,
+      "contract_version": 5,
       "backend": "claude",
       "model_id": "claude-sonnet-4-5",
       "chain": [

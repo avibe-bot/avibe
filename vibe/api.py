@@ -909,12 +909,16 @@ def _validate_remote_access_network_change(
 def save_config(
     payload: dict,
     *,
+    allow_memory: bool = False,
     validate_remote_access_network: bool = True,
     generic_remote_access: bool = False,
 ) -> V2Config:
+    """Save general settings while preserving Memory's dedicated settings block."""
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
+    if not allow_memory:
+        payload = {key: value for key, value in payload.items() if key != "memory"}
     # Model Hub mutations must pass through ModelHubService so runtime source
     # bindings and credential lifecycle stay in sync with the persisted config.
     # Generic settings pages round-trip GET /api/config, so treat this section
@@ -930,7 +934,7 @@ def save_config(
         base_config: Optional[V2Config] = None
         try:
             base_config = load_config()
-            base_payload = config_to_payload(base_config, include_secrets=True)
+            base_payload = config_to_payload(base_config, include_secrets=True, include_internal=True)
         except FileNotFoundError:
             # Fresh install: no config file yet. Seed the same workbench-only
             # default the read side (GET /api/config) serves, so a partial
@@ -942,7 +946,7 @@ def save_config(
             # preservation below (which keys off a real prior config) is skipped.
             from core.services.settings import default_config
 
-            base_payload = config_to_payload(default_config(), include_secrets=True)
+            base_payload = config_to_payload(default_config(), include_secrets=True, include_internal=True)
             # Don't let the seed's workbench-only ``platforms`` shadow
             # from_payload's legacy ``platform`` -> ``platforms`` migration: when
             # the request is a legacy single-platform update (``platform`` set,
@@ -1003,6 +1007,22 @@ def save_config(
             pass
         _ensure_builtin_default_agents(config)
         return config
+
+
+def save_memory_config(
+    memory_payload: dict,
+    *,
+    embedding_change_pending: bool = False,
+) -> V2Config:
+    """Persist Memory settings only from the direct-loopback Memory route."""
+
+    if not isinstance(memory_payload, dict):
+        raise ValueError("Memory config payload must be an object")
+    if not isinstance(embedding_change_pending, bool):
+        raise ValueError("Memory embedding compatibility state must be a boolean")
+    payload = dict(memory_payload)
+    payload["embedding_change_pending"] = embedding_change_pending
+    return save_config({"memory": payload}, allow_memory=True)
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
@@ -1086,8 +1106,14 @@ def _default_instance_name(config: V2Config, *, system_hostname: str) -> str:
     return _remote_access_instance_name(config) or system_hostname
 
 
-def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dict:
+def config_to_payload(
+    config: V2Config,
+    *,
+    include_secrets: bool = False,
+    include_internal: bool = False,
+) -> dict:
     from config.platform_registry import platform_descriptors
+    from config.v2_config import memory_config_to_payload
     from modules.agents.catalog import agent_backend_catalog_payload
 
     system_hostname = _system_hostname()
@@ -1140,6 +1166,11 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             # resets ``agents.avault.cli_path`` to the dataclass default.
             "avault": config.agents.avault.__dict__,
         },
+        "memory": memory_config_to_payload(
+            config.memory,
+            include_secrets=include_secrets,
+            include_internal=include_internal,
+        ),
         "model_hub": config.model_hub.to_payload(),
         "gateway": _project_secret_fields(
             config.gateway.__dict__ if config.gateway else None,
@@ -1174,6 +1205,28 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
         "agent_status_no_output_ms": config.agent_status_no_output_ms,
         "setup_completed": config.setup_completed,
     }
+    return payload
+
+
+def client_config_payload(config: V2Config) -> dict:
+    """Project config for an HTTP response rather than for a save.
+
+    ``config_to_payload`` has to emit ``memory`` because the UI save path uses
+    the same projection as its deep-merge base, and an omitted block resets the
+    stored one (the ``agents.avault`` comment above records the same hazard).
+    A response is the opposite case: Memory settings — enablement, both
+    processing endpoint URLs and model names, and API-key-presence flags — are
+    reachable only through the direct-loopback-only ``/api/memory/*`` routes,
+    so returning them from a generic endpoint would hand them to any
+    authenticated remote caller over the tunnel.
+
+    Every endpoint that returns the generic config must project through this
+    function, so a new one inherits the exclusion instead of having to repeat
+    ``payload.pop("memory", None)`` and eventually forgetting.
+    """
+
+    payload = config_to_payload(config)
+    payload.pop("memory", None)
     return payload
 
 
@@ -7528,7 +7581,7 @@ def reconcile_askill_auto_update() -> dict:
 # Dependencies aggregate + manual install jobs (askill / show runtime)
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "tmux"}
+_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
@@ -7536,7 +7589,7 @@ _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
 
 def dependencies_status(*, offline: bool = False) -> dict:
     """Status of the required local runtime dependencies for the Dependencies
-    settings page: askill, the Show Page runtime, and the shared Node.js
+    settings page: askill, local managed runtimes, and the shared Node.js
     prerequisite. (Agent backend CLIs are managed on the Backends tab.)
 
     Returns stable ids + machine-readable status only — display copy (label /
@@ -7595,6 +7648,38 @@ def dependencies_status(*, offline: bool = False) -> dict:
     )
 
     try:
+        from core.memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
+
+        memory_manager = MemoryArtifactManager(offline=True) if offline else get_memory_artifact_manager()
+        memory_runtime = memory_manager.status()
+    except Exception:  # noqa: BLE001
+        memory_runtime = {
+            "installed": False,
+            "status": "missing",
+            "manifest": None,
+            "reason": "memory_runtime_install_failed",
+        }
+    memory_manifest = memory_runtime.get("manifest") if isinstance(memory_runtime.get("manifest"), dict) else {}
+    release_state = memory_manifest.get("release_state")
+    try:
+        memory_required = bool(V2Config.load().memory.enabled)
+    except Exception:  # noqa: BLE001
+        memory_required = False
+    deps.append(
+        {
+            "id": "memory-runtime",
+            "kind": "runtime",
+            "required": memory_required,
+            "installed": bool(memory_runtime.get("installed")),
+            "version": memory_manifest.get("everos_version"),
+            "status": _memory_runtime_dependency_status(memory_runtime),
+            "reason": memory_runtime.get("reason"),
+            "release_state": release_state if release_state in {"published", "unavailable"} else None,
+            "download_error": memory_runtime.get("download_error"),
+        }
+    )
+
+    try:
         from core.tmux_runtime import TmuxRuntimeManager, tmux_status
 
         tmux = TmuxRuntimeManager(offline=True).status() if offline else tmux_status()
@@ -7630,6 +7715,29 @@ def dependencies_status(*, offline: bool = False) -> dict:
     return {"ok": True, "deps": deps}
 
 
+def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
+    """Map managed-runtime failures to the dependency page's closed states."""
+
+    if memory_runtime.get("installed"):
+        return "ready"
+    reported_status = memory_runtime.get("status")
+    reason = memory_runtime.get("reason")
+    if reported_status == "unsupported":
+        return "unsupported"
+    if not isinstance(reason, str):
+        return "error" if reported_status in {"error", "broken", "ready"} else "missing"
+    if "unsupported" in reason:
+        return "unsupported"
+    if reason in {
+        "memory_runtime_unpublished",
+        "memory_runtime_manifest_missing",
+        "memory_runtime_manifest_unavailable",
+        "memory_runtime_archive_unavailable",
+    }:
+        return "missing"
+    return "error"
+
+
 def _prepare_show_runtime_job() -> dict:
     try:
         from core.show_runtime import get_show_runtime_manager
@@ -7651,6 +7759,43 @@ def _prepare_show_runtime_job() -> dict:
         return result
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc), "output": None}
+
+
+def _prepare_memory_runtime_job() -> dict:
+    """Install EverOS through the controller-owned activation lifecycle."""
+
+    try:
+        from vibe import internal_client
+
+        response = internal_client.memory_install_runtime_sync()
+    except Exception:  # noqa: BLE001
+        return {
+            "ok": False,
+            "message": "memory_runtime_install_failed",
+            "output": None,
+            "reason": "memory_runtime_install_failed",
+            "download_error": None,
+        }
+    payload = response.get("body") if isinstance(response.get("body"), dict) else {}
+    if response.get("status_code") != 200:
+        payload = {
+            "ok": False,
+            "reason": (
+                payload.get("reason")
+                if isinstance(payload.get("reason"), str)
+                else "memory_runtime_install_failed"
+            ),
+            "download_error": payload.get("download_error") if isinstance(payload.get("download_error"), dict) else None,
+        }
+    ok = bool(payload.get("ok"))
+    reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
+    return {
+        "ok": ok,
+        "message": "memory_runtime_ready" if ok else (reason or "memory_runtime_install_failed"),
+        "output": None,
+        "reason": None if ok else (reason or "memory_runtime_install_failed"),
+        "download_error": payload.get("download_error"),
+    }
 
 
 def _prepare_tmux_job() -> dict:
@@ -7864,6 +8009,8 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_avault_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
+            elif dep == "memory-runtime":
+                result = _prepare_memory_runtime_job()
             elif dep == "tmux":
                 result = _prepare_tmux_job()
             else:

@@ -1,4 +1,4 @@
-import { deferRemoteAuthRedirect } from './remoteAuth';
+import { deferRemoteAuthRedirect, remoteLoginPath } from './remoteAuth';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
@@ -149,8 +149,6 @@ async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void
   if (deferRemoteAuthRedirect()) return;
 
   redirectingForRemoteAuth = true;
-  // Full-page navigation to the current path: enforce_remote_access_cookie
-  // redirects an unauthenticated browser request to the Avibe Cloud login
-  // (mirrors RemoteLoginRedirect in App.tsx).
-  window.location.assign(window.location.href);
+  const target = window.location.pathname + window.location.search;
+  window.location.assign(remoteLoginPath(target));
 }

@@ -1661,12 +1661,12 @@ scenarios:
     test: tests/test_harness_failure_visibility.py::test_a_notice_stamped_without_a_backoff_field_is_still_reachable
   # Rebase onto #1061's definition read projection.
   - id: HFR-090
-    name: a watch reports derived health on the same terms as a task
+    name: a watch reports processing health without poisoning waiter health
     status: covered
     kind: failure
     layer: contract
     backend: shared
-    test: tests/test_harness_failure_visibility.py::test_a_watch_reports_health_on_the_same_terms_as_a_task
+    test: tests/test_harness_failure_visibility.py::test_a_watch_reports_processing_health_separately_from_waiter_health
   - id: HFR-091
     name: the drain preserves an authoritative interruption identity
     status: covered
@@ -1715,16 +1715,9 @@ scenarios:
     kind: failure
     layer: contract
     backend: shared
-    # The HFR-091 × HFR-092 interaction, pinned where it bites the user. With the
-    # drain's stamped ``failure_id`` authoritative and the stamp keyed by presence, a
-    # ``no_terminal_result`` failure is stamped
-    # ``interrupt:{run}:no_terminal_result`` while the live path keys the same failure
-    # by the run id — so ``agent_message_exists`` cannot see the notification the live
-    # path already persisted and the user is told twice. Neither HFR-081 (identity
-    # equality, computed directly) nor HFR-091 (interruption identity survives) can
-    # see it: one never runs the drain, the other uses a reason that IS in the
-    # interruption set. Drives BOTH paths over one real failure and counts the durable
-    # ``messages`` rows.
+    # A live Turn owns its backend failure message. Its durable Run notice remains
+    # pending until the drain observes the Turn's delivery evidence, then records a
+    # skip without replaying the same error. Separate Turns remain separate failures.
     test: tests/test_harness_failure_visibility.py::test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason
   - id: HFR-094
     name: a failed watch notice renders watch commands
@@ -1944,14 +1937,10 @@ scenarios:
     # ``test_a_dispatch_failure_class_joins_the_per_fire_lane_and_not_the_interrupted_one`` --
     # because "the pin above is an equality between two sets that both grow, so it stays
     # green for a reason added correctly AND for one added to the wrong source vocabulary".
-    # RETIRED IS NOT PAUSED. ``_failure_notice_body`` rendered the resume affordance for
-    # every disabled watch, so a retired one read FINISHED in the lifecycle projection while
-    # its notice offered ``vibe watch resume`` -- "an action that would arm a watch nobody
-    # paused". Root cause is that ``enabled=0`` carries three meanings. FIX: the copy branches
-    # on the ``retired_at`` column -- "the same column the projection's ``ended`` predicate
-    # uses, so the copy and the badge cannot disagree" -- with a new parameterless
-    # ``harness.notice.watchRetired``. A legacy row with no marker keeps the resume copy,
-    # because "its history genuinely cannot prove which of the two happened".
+    # RETIRED IS NOT PAUSED. A processing-failure fallback for a normally retired Watch
+    # names event processing and omits both lifecycle copy and resume affordances: retirement
+    # did not cause the failure. A genuinely paused Watch still carries ``vibe watch resume``.
+    # Interruption notices may still explain retirement because that lifecycle is their subject.
     # THE FIELD CASE IS DRIVEN END TO END, which no previous test did: every existing layer
     # test stubbed one of the four steps. ``test_a_watch_that_outlives_its_delivery_target_dies_visibly``
     # asserts the maintainer note's five outcomes in labelled blocks -- (a) the terminal row
@@ -1964,8 +1953,9 @@ scenarios:
     # neither duplicate nor erase it. ``test_a_forever_watch_repeating_the_field_failure_notifies_once``
     # takes the repetition half with a real waiter subprocess exiting 75/0/0/75 "so the LAST
     # recorded cycle is the sentinel -- the state #1060's row was actually read in", and pins
-    # that the sentinel never retires the watch, the projection reads ``waiting`` while health
-    # reads ``failing``, and the streak still collapses to one notice.
+    # that the sentinel never retires the watch, the projection reads ``waiting`` with
+    # healthy waiter state while ``processing_health`` reads ``failing``, and the
+    # downstream streak still collapses to one notice.
     # WHAT WAS FOUND ALREADY COHERENT IS RECORDED TOO, "because the plan predicted
     # otherwise": ``mark_cycle_result`` already writes ``retired_at``,
     # ``last_finished_at`` and ``last_event_at`` in one guarded stamp, so (c) and half of (a)
@@ -3881,15 +3871,279 @@ scenarios:
     # native evidence either accepts the attempt or closes it terminally.
     test: tests/test_agent_steering.py::test_opencode_keeps_reconciliation_armed_after_post_write_idle
   - id: HFR-435
-    name: a Claude steered Assistant response owns the following terminal result
+    name: Claude input echoes establish steering result ownership
     status: covered
     kind: recovery
     layer: contract
     backend: claude
-    # The accepted steering barrier suppresses only a buffered pre-steer result.
-    # Once the receiver has emitted Assistant text in the current generation,
-    # its ResultMessage is the real continuation and must settle the pending Turn.
-    test: tests/test_claude_agent_sessions.py::test_steered_assistant_and_result_settle_the_pending_turn
+    # A transport write only queues input, while Claude may merge several inputs
+    # into one response. Avibe enables the CLI's replay-user-messages protocol so
+    # each consumed input produces a native top-level UserMessage echo in FIFO
+    # order. A Result before the echo stays nonterminal; a Result after every echo
+    # can settle the shared Turn.
+    test: tests/test_claude_agent_sessions.py::test_user_echo_allows_one_result_to_own_primary_and_steer
+  - id: HFR-436
+    name: Watch waiter health is independent from downstream event processing
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    # A zero-exit waiter remains healthy even when the Agent Run created from its
+    # event fails. The downstream verdict is exposed as processing_health; retry
+    # codes are healthy only while an enabled forever waiter can actually retry;
+    # terminal outcomes stay failing even when their code appears in the retry set.
+    test: tests/test_harness_health_projection.py::test_watch_health_separates_waiter_from_event_processing
+  - id: HFR-437
+    name: one visible Turn failure suppresses every linked Run fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The backend failure notification is the Turn's primary user-visible error.
+    # All Runs accepted by that Turn retain failed audit state without repeating it.
+    # Local persistence under suppress_delivery is not an acknowledgement, so the
+    # durable fallback remains eligible to reach a user-visible target.
+    test: tests/test_harness_failure_visibility.py::test_hfr_437_visible_turn_failure_suppresses_all_linked_run_notices
+  - id: HFR-438
+    name: one linked Run reports a missing Turn failure notification
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # If primary delivery is not acknowledged, Turn identity elects one fallback
+    # across definitions and every other linked Run records the shared outcome.
+    # Canceled or still-deferred participants cannot own notices already owed by a
+    # settled sibling, and late participants reuse the durable Turn-wide election
+    # instead of electing again from their subset. When every participant is deferred,
+    # the first failed settlement propagates its stable ownership to the rest under
+    # the same reserved SQLite writer transaction.
+    test: tests/test_harness_failure_visibility.py::test_hfr_438_missing_turn_notification_delivers_one_fallback
+  - id: HFR-439
+    name: Turn failure notification evidence reaches every linked Run settlement
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Terminal settlement copies the Turn notification identity and delivery proof
+    # into each owed notice atomically with the failed Run transition. The immutable
+    # Turn snapshot supplies the initial fallback owner; the locked participant
+    # settlement validates it against current cancellation and deferral state before
+    # any Run is written. If an Activity still owns the Run, the same evidence is first
+    # committed with its deferred terminal intent and survives into the eventual
+    # transition. Explicit delivery evidence remains authoritative for legacy Harness
+    # contexts that have no Turn token.
+    test: tests/test_scheduled_tasks.py::test_hfr_439_turn_failure_metadata_reaches_every_linked_run
+  - id: HFR-440
+    name: one sibling callback receipt suppresses the complete Turn fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # A callback carries the shared terminal Turn result. Callback delivery facts
+    # are aggregated from one SQLite snapshot across every linked failed Run, so a
+    # successful sibling callback prevents the elected owner from sending again.
+    test: tests/test_harness_failure_visibility.py::test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback
+  - id: HFR-441
+    name: suppressed local history cannot shadow an outward receipt
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # suppress_delivery rows carry an explicit marker and are rejected as receipts.
+    # A later visible fallback sends first, then promotes the stable row under a
+    # guarded update. Local row ids never enter Run transport receipts, and a
+    # suppressed callback row is never delivery evidence.
+    test: tests/test_harness_failure_visibility.py::test_suppressed_history_cannot_shadow_a_later_visible_receipt
+  - id: HFR-442
+    name: bare Turn provenance does not enter notification ownership
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Direct error results retain their Turn id as execution provenance, but only
+    # an explicit turn_failure_notification contract admits the Turn fallback lane.
+    # Definition-level suppression therefore remains active for generic failures.
+    test: tests/test_harness_failure_visibility.py::test_hfr_442_bare_turn_provenance_does_not_enter_the_fallback_lane
+  - id: HFR-443
+    name: deferred callback participant blocks the Turn fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Turn membership is read from either an active owed notice or a deferred
+    # terminal intent. A pending callback on the deferred participant therefore
+    # blocks an immediately settled sibling from sending the same result.
+    test: tests/test_harness_failure_visibility.py::test_hfr_443_deferred_sibling_callback_blocks_the_turn_fallback
+  - id: HFR-444
+    name: first in-flight waiter health remains unknown
+    status: covered
+    kind: observability
+    layer: contract
+    backend: shared
+    # A cycle start is not a waiter outcome. Until a finish, exit code, or error is
+    # recorded, the first cycle cannot project a healthy verdict.
+    test: tests/test_harness_failure_visibility.py::test_hfr_444_first_in_flight_waiter_health_remains_unknown
+  - id: HFR-445
+    name: suppressed history promotion adopts the visible target Session
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The guarded post-send promotion preserves the stable native identity while
+    # rebinding the Message row from its hidden source Session to the visible target.
+    test: tests/test_harness_failure_visibility.py::test_visible_send_promotes_the_stable_suppressed_history_row
+  - id: HFR-446
+    name: promoted history uses visible delivery order
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Promotion stamps delivered_at at the post-send commit point. Transcript
+    # ordering therefore places the stable row after content that was already
+    # visible when the hidden copy was originally created.
+    test: tests/test_harness_failure_visibility.py::test_hfr_446_promoted_receipt_uses_visible_delivery_order
+  - id: HFR-447
+    name: Turn fallback owners can persist their notice
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Immediate and deferred owner election use the exact metadata-writability
+    # predicate used by notice persistence. Malformed legacy rows still settle,
+    # but a writable participant becomes the stable fallback owner.
+    test: tests/test_harness_failure_visibility.py::test_hfr_447_fallback_owner_requires_writable_notice_metadata
+  - id: HFR-448
+    name: canceled deferred callbacks do not block a Turn fallback
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Turn-wide callback membership includes deferred participants only while
+    # they remain live. A canceled or cancel-requested parent cannot later deliver
+    # its callback, so an immediate sibling's fallback is released.
+    test: tests/test_harness_failure_visibility.py::test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback
+  - id: HFR-449
+    name: canceled parents preserve armed callback evidence
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Cancellation removes an unarmed parent from Turn callback membership, but
+    # cannot revoke a child that was already accepted. Pending and delivered child
+    # outcomes continue to defer or suppress the shared fallback.
+    test: tests/test_harness_failure_visibility.py::test_hfr_449_canceled_parent_keeps_armed_callback_evidence
+  - id: HFR-450
+    name: terminal replay promotes newer Turn delivery evidence
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # A duplicate terminal event cannot re-settle the Run, but a later successful
+    # primary notification is monotonic evidence. It upgrades the existing notice
+    # without resetting attempts or fallback ownership.
+    test: tests/test_harness_failure_visibility.py::test_hfr_450_terminal_replay_promotes_new_turn_delivery_evidence
+  - id: HFR-451
+    name: Turn callback membership lookup stays bounded
+    status: covered
+    kind: performance
+    layer: contract
+    backend: shared
+    # The callback snapshot is bounded by explicit participant ids and the indexed
+    # Delivery-to-Turn ownership relation. It never searches Run metadata JSON by
+    # Turn id as history grows.
+    test: tests/test_harness_failure_visibility.py::test_hfr_451_turn_callback_lookup_uses_bounded_ownership
+  - id: HFR-452
+    name: callback children cannot own the Turn fallback
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Owner election uses the same suppression predicate as notice persistence, so
+    # a callback child whose parent already owns a notice cannot silence siblings.
+    test: tests/test_harness_failure_visibility.py::test_hfr_452_callback_children_cannot_own_a_turn_fallback
+  - id: HFR-453
+    name: callback enqueue and parent arming are atomic
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # SQLite exposes the callback child and its parent marker in one commit. A
+    # cancellation cannot open an enqueue-to-stamp window for duplicate fallback.
+    test: tests/test_harness_failure_visibility.py::test_hfr_453_callback_enqueue_arms_the_parent_in_one_transaction
+  - id: HFR-454
+    name: delivery evidence follows the routed target platform
+    status: covered
+    kind: routing
+    layer: contract
+    backend: shared
+    # A transport-only id acknowledges a real IM target but never a synthetic Avibe
+    # target, regardless of the source Session platform before delivery_override.
+    test: tests/test_backend_failure.py::BackendFailureTests::test_hfr_454_delivery_only_ack_uses_the_routed_target_platform
+  - id: HFR-455
+    name: Turn fallback excludes same-batch parent suppression
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # A parent processed before its callback child owns the Turn fallback before
+    # that new parent notice suppresses the child, independent of lexical Run ids.
+    test: tests/test_harness_failure_visibility.py::test_hfr_455_turn_owner_excludes_same_batch_parent_suppression
+  - id: HFR-456
+    name: late-canceled failed parents reject only new callbacks
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    # The SQLite writer refuses a new failure callback after late cancellation but
+    # still arms an already-durable child as authoritative callback evidence.
+    test: tests/test_harness_failure_visibility.py::test_hfr_456_late_canceled_failed_parent_rejects_only_new_callbacks
+  - id: HFR-457
+    name: stale Turn participant ids cannot roll back valid settlement
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Ownership projection and terminal writes use only Runs loaded under the
+    # settlement writer lock; stale attribution is excluded from durable provenance.
+    test: tests/test_harness_failure_visibility.py::test_hfr_457_missing_turn_participant_does_not_rollback_valid_runs
+  - id: HFR-458
+    name: steered callbacks inherit shared Turn output receipts
+    status: covered
+    kind: delivery
+    layer: contract
+    backend: shared
+    # A callback accepted into an active Turn shares the persisted result through
+    # exact Turn and output provenance even when another Run is the primary owner.
+    test: tests/test_harness_failure_visibility.py::test_hfr_458_steered_callback_uses_its_shared_turn_output_receipt
+  - id: HFR-459
+    name: deferred Turn owner election is writer-serialized
+    status: covered
+    kind: concurrency
+    layer: contract
+    backend: shared
+    # Activity completions reserve SQLite's writer slot before reading deferred
+    # participants or their owner, so one Turn cannot elect competing fallbacks.
+    test: tests/test_harness_failure_visibility.py::test_hfr_459_deferred_owner_election_reserves_writer_before_reads
+  - id: HFR-460
+    name: delayed Claude steering remains user-owned across the primary Result
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # Claude can finish the active query before it dequeues an accepted steer.
+    # The primary Result remains visible as nonterminal output, the same logical
+    # Turn stays open, and the later steered Result settles it without creating
+    # an agent-initiated Harness Message.
+    test: tests/test_claude_agent_sessions.py::test_presteer_result_stays_visible_without_agent_initiated_turn
+  - id: HFR-461
+    name: genuine backend-initiated continuation keeps a hidden lifecycle input
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The durable input keeps Turn ownership, Stop, and audit history intact but
+    # is not a human instruction and therefore never renders in the transcript.
+    test: tests/test_session_delivery_fsm.py::test_agent_initiated_continuation_materializes_as_hidden_turn_input
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
@@ -3897,3 +4151,4 @@ plan: docs/plans/harness-session-failure-recovery.md
 plans:
   - docs/plans/harness-session-failure-recovery.md
   - docs/plans/agent-run-zombie-settlement.md
+  - docs/plans/harness-watch-run-failure-boundary.md

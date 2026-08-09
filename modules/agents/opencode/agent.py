@@ -36,7 +36,11 @@ from core.services.agent_steering import (
     SteerResult,
     result as steer_result,
 )
-from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+from core.system_prompt_injection import (
+    build_system_prompt_injection,
+    get_enabled_agents_for_prompt,
+    memory_cli_prompt_admitted,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
     ModelHubLaunch,
@@ -1024,10 +1028,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or self.controller.config.platform
             )
 
+            # Resolve admission once: it associates or clears this turn's Memory
+            # CLI session scope as a side effect, so a second call per turn would
+            # repeat that write.
+            memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+
             system_prompt_injection = build_system_prompt_injection(
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
+                include_memory_cli=memory_cli_admitted,
                 avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
                 context=request.context,
                 fallback_platform=platform,

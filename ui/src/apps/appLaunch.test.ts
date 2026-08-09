@@ -118,6 +118,15 @@ describe('appTabHref', () => {
     expect(appTabHref({ appId: 'showpage', sessionId: '  ' })).toBeNull();
     expect(appTabHref({ appId: '' })).toBeNull();
   });
+
+  it('keeps every internal app in the installed iOS PWA', () => {
+    const iosPwa = { iosStandalone: true };
+
+    expect(appTabHref({ appId: 'showpage', sessionId: 'abc123' }, iosPwa)).toBeNull();
+    expect(appTabHref({ appId: 'files' }, iosPwa)).toBeNull();
+    expect(appTabHref({ appId: 'terminal' }, iosPwa)).toBeNull();
+    expect(appTabHref({ appId: 'editor' }, iosPwa)).toBeNull();
+  });
 });
 
 describe('isStandaloneAppTab', () => {
@@ -142,5 +151,12 @@ describe('appTabHrefForDockId', () => {
     expect(appTabHrefForDockId('terminal')).toBe('/apps/terminal?standalone=1');
     expect(appTabHrefForDockId(showDockId('sess42'))).toBe('/show/sess42/');
     expect(appTabHrefForDockId('library')).toBeNull();
+  });
+
+  it('withdraws new-tab targets for every Dock app in the installed iOS PWA', () => {
+    const iosPwa = { iosStandalone: true };
+
+    expect(appTabHrefForDockId('terminal', iosPwa)).toBeNull();
+    expect(appTabHrefForDockId(showDockId('sess42'), iosPwa)).toBeNull();
   });
 });

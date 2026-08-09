@@ -330,6 +330,9 @@ export type HarnessDefinitionFacts = {
   health?: HarnessDefinitionHealth | string | null;
   consecutive_failures?: number | null;
   recent_failures?: number | null;
+  processing_health?: HarnessDefinitionHealth | string | null;
+  processing_consecutive_failures?: number | null;
+  processing_recent_failures?: number | null;
   // Command-task fields (also present on a watch, which has always run a
   // command). ``/api/harness/tasks`` serves the raw store row, so these arrive
   // exactly as ``_scheduled_task_from_row`` writes them: ``shell_command`` as a
@@ -354,6 +357,11 @@ const HEALTH_STATES = new Set<string>(HARNESS_HEALTH_STATES);
 
 export function definitionHealth(row: HarnessDefinitionFacts): HarnessDefinitionHealth | null {
   const value = row.health;
+  return value && HEALTH_STATES.has(value) ? (value as HarnessDefinitionHealth) : null;
+}
+
+export function definitionProcessingHealth(row: HarnessDefinitionFacts): HarnessDefinitionHealth | null {
+  const value = row.processing_health;
   return value && HEALTH_STATES.has(value) ? (value as HarnessDefinitionHealth) : null;
 }
 

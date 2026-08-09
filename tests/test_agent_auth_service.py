@@ -1968,6 +1968,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertTrue(captured["connected"])
         self.assertEqual(captured["options"].max_buffer_size, CLAUDE_SDK_MAX_BUFFER_SIZE)
         self.assertEqual(captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"], "auth")
+        self.assertEqual(captured["options"].settings, '{"autoMemoryEnabled":false}')
 
     async def test_claude_control_flow_start_in_flight_disables_unknown_pid_guard(self):
         controller = _StubController()

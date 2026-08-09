@@ -337,7 +337,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     runtime = asyncio.run(service.runtime_start())
 
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 4
+    assert runtime["contract_version"] == 5
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -508,7 +508,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 4, "status": {"health": "ok"}}
+        return {"contract_version": 5, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -733,8 +733,9 @@ def test_ui_model_hub_rpc_preserves_structured_guard_data():
         ("PATCH", "/api/models/agents/claude/mode"),
         ("PUT", "/api/models/agents/claude/mappings"),
         ("PUT", "/api/models/agents/opencode/menu"),
-        ("POST", "/api/models/custom-models"),
-        ("DELETE", "/api/models/custom-models"),
+        ("POST", "/api/models/sources/src_test0001/models"),
+        ("PATCH", "/api/models/sources/src_test0001/models/custom-model"),
+        ("DELETE", "/api/models/sources/src_test0001/models/custom-model"),
         ("GET", "/api/models/events?limit=invalid"),
         ("POST", "/api/models/oauth/start"),
         ("GET", "/api/models/oauth/status/oaf_test0001"),
@@ -938,14 +939,14 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     custom = response.get_json()
     _assert_envelope(custom)
-    assert custom["agent"]["sources"]["policy"] == "custom"
+    assert "policy" not in custom["agent"]["sources"]
     assert custom["agent"]["sources"]["order"] == []
 
     codex_sources = client.get(
         "/api/models/agents/codex/sources",
         base_url=base_url,
     ).get_json()["agent"]["sources"]
-    assert codex_sources["policy"] == "follow"
+    assert "policy" not in codex_sources
     assert codex_sources["order"] == [source_id]
 
     restored = client.put(
@@ -954,7 +955,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         headers=headers,
         base_url=base_url,
     ).get_json()
-    assert restored["agent"]["sources"]["policy"] == "follow"
+    assert "policy" not in restored["agent"]["sources"]
     assert restored["agent"]["sources"]["order"] == [source_id]
 
     response = client.patch(
@@ -1015,8 +1016,12 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     service.now = original_now
 
     response = client.post(
-        "/api/models/custom-models",
-        json={"source_id": source_id, "model_id": "custom-model", "display_name": "Custom Model"},
+        f"/api/models/sources/{source_id}/models",
+        json={
+            "model_id": "custom-model",
+            "display_name": "Custom Model",
+            "reasoning_efforts": [],
+        },
         headers=headers,
         base_url=base_url,
     )
@@ -1202,7 +1207,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert oauth_creation["skipped_by"] == []
     consented_source = oauth_creation["source"]
     _assert_valid("source.schema.json", consented_source)
-    assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
+    assert "experimental_consent_at" not in consented_source
     completed_binding = service.oauth_flows.binding(hub_flow["flow_id"])
     assert completed_binding is not None
     assert completed_binding.completed is True
@@ -1223,8 +1228,8 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert all("<" not in asset["url"] for asset in runtime["manifest"]["assets"])
 
     response = client.delete(
-        "/api/models/custom-models",
-        json={"source_id": source_id, "model_id": "custom-model"},
+        f"/api/models/sources/{source_id}/models/custom-model",
+        json={},
         headers=headers,
         base_url=base_url,
     )
@@ -1246,8 +1251,8 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     _assert_envelope(response.get_json())
     response = client.delete(
-        "/api/models/custom-models",
-        json={"source_id": source_id, "model_id": "custom-model"},
+        f"/api/models/sources/{source_id}/models/custom-model",
+        json={},
         headers=headers,
         base_url=base_url,
     )
@@ -1280,6 +1285,21 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         ("/api/models/agents/claude/mode", "patch", "mode_switch_blocked"),
         ("/api/models/agents/claude/mappings", "put", "mapping_target_unavailable"),
         ("/api/models/agents/opencode/menu", "put", "mapping_target_unavailable"),
+        (
+            "/api/models/sources/src_test0001/models",
+            "post",
+            "mapping_target_unavailable",
+        ),
+        (
+            "/api/models/sources/src_test0001/models/custom-model",
+            "patch",
+            "mapping_target_unavailable",
+        ),
+        (
+            "/api/models/sources/src_test0001/models/custom-model",
+            "delete",
+            "mapping_target_unavailable",
+        ),
     ],
 )
 def test_model_hub_routes_reject_non_object_json_with_error_envelope(
@@ -1306,6 +1326,53 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         body = response.get_json()
         _assert_envelope(body, ok=False)
         assert body["error"] == error
+
+
+def test_discovered_source_model_delete_is_rejected_as_upstream_managed(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, _ = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_discovered01",
+        kind="api_key",
+        vendor="openai",
+        display_name="Observed inventory",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="gpt-5", provenance="discovered")],
+        credential_ref="cred_discovered01",
+    )
+    store.config.sources.append(source)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+
+    updated = client.patch(
+        f"/api/models/sources/{source.id}/models/gpt-5",
+        json={"reasoning_efforts": ["high"]},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert updated.status_code == 200
+    updated_model = updated.get_json()["source"]["models"][0]
+    assert updated_model["origin"] == "discovered"
+    assert updated_model["reasoning_efforts"] == ["high"]
+
+    refused = client.delete(
+        f"/api/models/sources/{source.id}/models/gpt-5",
+        json={},
+        headers=csrf_headers(client, base_url),
+        base_url=base_url,
+    )
+
+    assert refused.status_code == 409
+    assert refused.get_json()["error"] == "source_model_managed_upstream"
+    assert [model.id for model in store.config.sources[0].models] == ["gpt-5"]
+    assert store.config.sources[0].models[0].reasoning_efforts == ["high"]
 
 
 def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
@@ -3303,7 +3370,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 4
+    assert runtime["contract_version"] == 5
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
@@ -3353,7 +3420,7 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
     _assert_valid("source.schema.json", source)
     assert source["supply_channel"] == "native_cli"
     assert any(model["id"] == "claude-opus-4-6" for model in source["models"])
-    assert {model["provenance"] for model in source["models"]} == {"discovered"}
+    assert {model["origin"] for model in source["models"]} == {"discovered"}
     assert store.config.effective_source_order("claude") == [source["id"]]
     resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
     assert resolved.source_id == source["id"]
@@ -3483,7 +3550,7 @@ def test_follow_auto_adopts_new_sources_while_custom_stays_frozen(tmp_path):
     }
 
     restored = asyncio.run(service.set_agent_sources("claude", {"policy": "follow"}))
-    assert restored["sources"]["policy"] == "follow"
+    assert "policy" not in restored["sources"]
     assert restored["sources"]["order"] == store.config.recommended_source_order("claude")
 
 
@@ -3638,7 +3705,7 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
             "vendor": "anthropic",
             "display_name": "Safe source",
             "key": "sk-test-transient-only",
-            "models": [{"id": pasted_key, "provenance": "manual"}],
+            "models": [{"id": pasted_key, "origin": "manual"}],
         },
         {
             "kind": "api_key",
@@ -3649,7 +3716,7 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
                 {
                     "id": "safe-model-id",
                     "display_name": pasted_key,
-                    "provenance": "manual",
+                    "origin": "manual",
                 }
             ],
         },
@@ -3673,7 +3740,12 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
         )
     )
     with pytest.raises(ModelHubError) as exc_info:
-        asyncio.run(service.add_custom_model({"source_id": source["id"], "model_id": pasted_key}))
+        asyncio.run(
+            service.add_custom_model(
+                source["id"],
+                {"model_id": pasted_key, "reasoning_efforts": []},
+            )
+        )
 
     assert exc_info.value.code == "mapping_target_unavailable"
     assert pasted_key not in json.dumps(store.config.to_payload())
