@@ -77,6 +77,13 @@ STATE_CURSOR_KEYS = (
     "reaction_cursor",
 )
 REVIEW_FINGERPRINTS_KEY = "review_fingerprints"
+REVIEW_COMMENT_FINGERPRINTS_KEY = "review_comment_fingerprints"
+ISSUE_COMMENT_FINGERPRINTS_KEY = "issue_comment_fingerprints"
+PR_FINGERPRINT_KEYS = (
+    REVIEW_FINGERPRINTS_KEY,
+    REVIEW_COMMENT_FINGERPRINTS_KEY,
+    ISSUE_COMMENT_FINGERPRINTS_KEY,
+)
 # A bot review lands as a burst of inline comments plus an envelope. Re-polling a
 # few times while the burst is still arriving turns it into one Agent turn instead
 # of one turn per fragment that happened to cross a poll boundary.
@@ -376,14 +383,24 @@ def _render_activity(
     ignored_authors: set[str] | None = None,
     ignore_patterns: list[re.Pattern[str]] | None = None,
     review_fingerprints: dict[str, str] | None = None,
+    review_comment_fingerprints: dict[str, str] | None = None,
+    issue_comment_fingerprints: dict[str, str] | None = None,
 ) -> tuple[str | None, int, int, int, int, str, str]:
     ignored_authors = ignored_authors or set()
     ignore_patterns = ignore_patterns or []
     current_pr_status = _current_pr_status(state.get("pull_request"))
     current_head_sha = _current_pr_head_sha(state.get("pull_request"))
     new_reviews = _filter_review_changes(state["reviews"], review_cursor, review_fingerprints or {})
-    new_review_comments = filter_new(state["review_comments"], review_comment_cursor)
-    new_issue_comments = filter_new(state["issue_comments"], issue_comment_cursor)
+    new_review_comments = _filter_comment_changes(
+        state["review_comments"],
+        review_comment_cursor,
+        review_comment_fingerprints or {},
+    )
+    new_issue_comments = _filter_comment_changes(
+        state["issue_comments"],
+        issue_comment_cursor,
+        issue_comment_fingerprints or {},
+    )
 
     def _visible(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Cursors advance over everything new; only the rendering is filtered, so a
@@ -439,17 +456,19 @@ def _render_activity(
         not actionable_only or current_pr_status in ACTIONABLE_PR_STATUSES
     )
 
-    rendered_events: list[str] = []
+    required_events: list[str] = []
     if has_head_event and isinstance(state.get("pull_request"), dict):
-        rendered_events.append(_format_pr_head_event(state["pull_request"], head_sha, current_head_sha))
+        required_events.append(_format_pr_head_event(state["pull_request"], head_sha, current_head_sha))
     if render_pr_status_event and isinstance(state.get("pull_request"), dict):
-        rendered_events.append(_format_pr_status_event(state["pull_request"], pr_status, current_pr_status))
-    rendered_events.extend(_format_review(review) for review in visible_reviews)
-    rendered_events.extend(_format_review_comment(comment) for comment in visible_review_comments)
-    rendered_events.extend(_format_issue_comment(comment) for comment in visible_issue_comments)
-    rendered_events.extend(_format_reaction(reaction) for reaction in new_reactions)
+        required_events.append(_format_pr_status_event(state["pull_request"], pr_status, current_pr_status))
+    # A Codex +1 is durable pass evidence, not just another activity line. It must
+    # survive a small --event-limit even when a large review batch lands with it.
+    required_events.extend(_format_reaction(reaction) for reaction in new_reactions)
+    optional_events = [_format_review(review) for review in visible_reviews]
+    optional_events.extend(_format_review_comment(comment) for comment in visible_review_comments)
+    optional_events.extend(_format_issue_comment(comment) for comment in visible_issue_comments)
 
-    if not rendered_events:
+    if not (required_events or optional_events):
         return (
             None,
             next_review_cursor,
@@ -462,13 +481,15 @@ def _render_activity(
 
     lines = [f"GitHub PR activity detected for {repo}#{pr_number}"]
 
-    visible_limit = max(event_limit, 1)
-    for entry in rendered_events[:visible_limit]:
+    visible_limit = max(event_limit, len(required_events), 1)
+    visible_optional = optional_events[: max(0, visible_limit - len(required_events))]
+    selected_events = [*required_events, *visible_optional]
+    for entry in selected_events:
         lines.append(entry)
 
-    total_events = len(rendered_events)
-    if total_events > visible_limit:
-        lines.append(f"- {total_events - visible_limit} additional event(s) omitted")
+    total_events = len(required_events) + len(optional_events)
+    if total_events > len(selected_events):
+        lines.append(f"- {total_events - len(selected_events)} additional event(s) omitted")
 
     return (
         "\n".join(lines),
@@ -549,6 +570,29 @@ def _review_fingerprint_map(reviews: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
+def _comment_fingerprint(comment: dict[str, Any]) -> str:
+    """Capture fields GitHub can edit without changing a comment id."""
+
+    return "|".join(str(comment.get(field) or "") for field in ("updated_at", "body"))
+
+
+def _comment_fingerprint_map(comments: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        str(comment["id"]): _comment_fingerprint(comment)
+        for comment in comments
+        if isinstance(comment.get("id"), int) and not isinstance(comment.get("id"), bool)
+    }
+
+
+def _merge_fingerprint_map(
+    baseline: dict[str, str],
+    observed: dict[str, str],
+) -> dict[str, str]:
+    """Retain fingerprints omitted by a later updated-since fetch."""
+
+    return {**baseline, **observed}
+
+
 def _filter_review_changes(
     reviews: list[dict[str, Any]],
     cursor: int,
@@ -564,6 +608,26 @@ def _filter_review_changes(
         saved_fingerprint = fingerprints.get(str(review_id))
         if review_id > cursor or (saved_fingerprint is not None and saved_fingerprint != _review_fingerprint(review)):
             changed.append(review)
+    return changed
+
+
+def _filter_comment_changes(
+    comments: list[dict[str, Any]],
+    cursor: int,
+    fingerprints: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Return new comments and edits to comments already covered by the id cursor."""
+
+    changed: list[dict[str, Any]] = []
+    for comment in comments:
+        comment_id = comment.get("id")
+        if not isinstance(comment_id, int) or isinstance(comment_id, bool):
+            continue
+        saved_fingerprint = fingerprints.get(str(comment_id))
+        if comment_id > cursor or (
+            saved_fingerprint is not None and saved_fingerprint != _comment_fingerprint(comment)
+        ):
+            changed.append(comment)
     return changed
 
 
@@ -675,7 +739,7 @@ def _cursorless_state_file(path: Path) -> bool:
             "pr_cursor",
             "pr_status",
             "head_sha",
-            REVIEW_FINGERPRINTS_KEY,
+            *PR_FINGERPRINT_KEYS,
             STAGED_KEY,
         )
     )
@@ -1111,11 +1175,22 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _saved_review_fingerprints(saved: dict[str, Any]) -> dict[str, str]:
-    value = saved.get(REVIEW_FINGERPRINTS_KEY)
+def _saved_fingerprints(saved: dict[str, Any], key: str) -> dict[str, str]:
+    value = saved.get(key)
     if not isinstance(value, dict):
         return {}
-    return {str(key): item for key, item in value.items() if isinstance(item, str)}
+    return {str(item_key): item for item_key, item in value.items() if isinstance(item, str)}
+
+
+def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
+    missing = []
+    if _saved_str(saved, "head_sha") is None:
+        missing.append("head_sha")
+    for key in PR_FINGERPRINT_KEYS:
+        value = saved.get(key)
+        if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
+            missing.append(key)
+    return missing
 
 
 def _last_delivery() -> str | None:
@@ -1126,6 +1201,18 @@ def _last_delivery() -> str | None:
     """
 
     return os.environ.get(LAST_DELIVERY_ENV, "").strip() or None
+
+
+def _staged_replay_output(saved: dict[str, Any], delivery: str | None) -> str | None:
+    staged = saved.get(STAGED_KEY)
+    if not isinstance(staged, dict):
+        return None
+    if not isinstance(staged.get("cursors"), dict):
+        raise StateFileUnusableError("Pending waiter transaction has no usable cursor state")
+    output = staged.get("output")
+    if staged.get("delivered_after") == delivery and isinstance(output, str) and output:
+        return output
+    return None
 
 
 def _resolve_staged_state(
@@ -1152,12 +1239,12 @@ def _resolve_staged_state(
     cursors = staged.get("cursors")
     if not isinstance(cursors, dict):
         raise StateFileUnusableError("Pending waiter transaction has no usable cursor state")
-    output = staged.get("output")
+    replay_output = _staged_replay_output(saved, delivery)
     delivered = staged.get("delivered_after") != delivery
 
-    if not delivered and isinstance(output, str) and output:
+    if replay_output is not None:
         print("An earlier report was never delivered; replaying its persisted output.", file=sys.stderr)
-        return saved, output
+        return saved, replay_output
 
     resolved = {key: value for key, value in saved.items() if key != STAGED_KEY}
     if delivered:
@@ -1295,23 +1382,6 @@ def main() -> int:
     except re.error as err:
         print(f"Invalid --ignore-comment-pattern: {err}", file=sys.stderr)
         return 2
-    if token is None and not args.allow_unauthenticated:
-        print(
-            (
-                "GitHub authentication is required for reliable polling. "
-                "Set GITHUB_TOKEN/GH_TOKEN, run 'gh auth login', or pass "
-                "--allow-unauthenticated for a throttled best-effort run."
-            ),
-            file=sys.stderr,
-        )
-        return 2
-    if args.pr is not None and token is None and not args.include_self_comments:
-        print(
-            "Unauthenticated PR watches require --include-self-comments because viewer identity cannot be resolved.",
-            file=sys.stderr,
-        )
-        return 2
-
     watch_identity = _watch_identity(args)
     watch_id = _managed_watch_id()
     delivery_stamp = _last_delivery()
@@ -1334,6 +1404,30 @@ def main() -> int:
         watch_identity=watch_identity,
         watch_id=watch_id,
     )
+    replay_output = _staged_replay_output(saved, delivery_stamp)
+    if replay_output is not None:
+        print(
+            "An earlier report was never delivered; replaying it before GitHub polling preflight.",
+            file=sys.stderr,
+        )
+        _deliver(replay_output)
+        return 0
+    if token is None and not args.allow_unauthenticated:
+        print(
+            (
+                "GitHub authentication is required for reliable polling. "
+                "Set GITHUB_TOKEN/GH_TOKEN, run 'gh auth login', or pass "
+                "--allow-unauthenticated for a throttled best-effort run."
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    if args.pr is not None and token is None and not args.include_self_comments:
+        print(
+            "Unauthenticated PR watches require --include-self-comments because viewer identity cannot be resolved.",
+            file=sys.stderr,
+        )
+        return 2
     token_fingerprint = _token_fingerprint(token)
     base_interval = max(args.interval, 1.0)
     start = time.monotonic()
@@ -1415,9 +1509,14 @@ def main() -> int:
     # contains the PR's full history.
     resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
     resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
-    if args.pr is not None and args.state_file and resumed and _saved_str(saved, "head_sha") is None:
+    missing_baselines = _missing_pr_baselines(saved) if resumed else []
+    if args.pr is not None and args.state_file and missing_baselines:
         print(
-            "Saved PR state has no head_sha baseline; pass --catch-up to seed it explicitly before resuming.",
+            (
+                "Saved PR state lacks required baseline(s): %s; pass --catch-up "
+                "to seed them explicitly before resuming."
+            )
+            % ", ".join(missing_baselines),
             file=sys.stderr,
         )
         return 2
@@ -1537,7 +1636,15 @@ def main() -> int:
             args.since_issue_comment_id, "issue_comment_cursor", "issue_comments"
         )
         reaction_cursor = _initial_cursor(args.since_reaction_id, "reaction_cursor", "reactions")
-        review_fingerprints = _saved_review_fingerprints(saved)
+        review_fingerprints = _saved_fingerprints(saved, REVIEW_FINGERPRINTS_KEY)
+        review_comment_fingerprints = _saved_fingerprints(
+            saved,
+            REVIEW_COMMENT_FINGERPRINTS_KEY,
+        )
+        issue_comment_fingerprints = _saved_fingerprints(
+            saved,
+            ISSUE_COMMENT_FINGERPRINTS_KEY,
+        )
         pr_status = (
             args.since_pr_status
             or (_saved_str(saved, "pr_status") if resumed else None)
@@ -1587,6 +1694,8 @@ def main() -> int:
                 ignored_authors=ignored_authors,
                 ignore_patterns=ignore_patterns,
                 review_fingerprints=review_fingerprints,
+                review_comment_fingerprints=review_comment_fingerprints,
+                issue_comment_fingerprints=issue_comment_fingerprints,
             )
 
         def _advance_since() -> None:
@@ -1603,6 +1712,8 @@ def main() -> int:
                 "pr_status": pr_status,
                 "head_sha": head_sha,
                 REVIEW_FINGERPRINTS_KEY: review_fingerprints,
+                REVIEW_COMMENT_FINGERPRINTS_KEY: review_comment_fingerprints,
+                ISSUE_COMMENT_FINGERPRINTS_KEY: issue_comment_fingerprints,
                 "review_comment_since": review_comment_since,
                 "issue_comment_since": issue_comment_since,
                 "viewer_login": viewer_login,
@@ -1718,7 +1829,18 @@ def main() -> int:
         initial_result = _render(pending_cursors)
         if initial_result[0] is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
-        review_fingerprints = _review_fingerprint_map(state["reviews"])
+        review_fingerprints = _merge_fingerprint_map(
+            review_fingerprints,
+            _review_fingerprint_map(state["reviews"]),
+        )
+        review_comment_fingerprints = _merge_fingerprint_map(
+            review_comment_fingerprints,
+            _comment_fingerprint_map(state["review_comments"]),
+        )
+        issue_comment_fingerprints = _merge_fingerprint_map(
+            issue_comment_fingerprints,
+            _comment_fingerprint_map(state["issue_comments"]),
+        )
         (
             initial_output,
             review_cursor,
@@ -1887,7 +2009,18 @@ def main() -> int:
             result = _render(pending_cursors)
             if result[0] is not None:
                 result = _settle(result, pending_cursors)
-            review_fingerprints = _review_fingerprint_map(state["reviews"])
+            review_fingerprints = _merge_fingerprint_map(
+                review_fingerprints,
+                _review_fingerprint_map(state["reviews"]),
+            )
+            review_comment_fingerprints = _merge_fingerprint_map(
+                review_comment_fingerprints,
+                _comment_fingerprint_map(state["review_comments"]),
+            )
+            issue_comment_fingerprints = _merge_fingerprint_map(
+                issue_comment_fingerprints,
+                _comment_fingerprint_map(state["issue_comments"]),
+            )
             (
                 output,
                 review_cursor,

@@ -15,7 +15,7 @@ sys.modules[SPEC.name] = wait_pr
 SPEC.loader.exec_module(wait_pr)
 
 
-def _pr_state(*, reviews=None, issue_comments=None, head="head"):
+def _pr_state(*, reviews=None, review_comments=None, issue_comments=None, reactions=None, head="head"):
     return {
         "pull_request": {
             "number": 1213,
@@ -25,9 +25,9 @@ def _pr_state(*, reviews=None, issue_comments=None, head="head"):
             "html_url": "https://github.com/avibe-bot/avibe/pull/1213",
         },
         "reviews": list(reviews or []),
-        "review_comments": [],
+        "review_comments": list(review_comments or []),
         "issue_comments": list(issue_comments or []),
-        "reactions": [],
+        "reactions": list(reactions or []),
     }
 
 
@@ -47,7 +47,17 @@ def _seeded_state(path: Path, *, review_fingerprints=None, head="head"):
                 "pr_status": "open",
                 "head_sha": head,
                 "review_fingerprints": review_fingerprints or {},
+                "review_comment_fingerprints": {},
+                "issue_comment_fingerprints": {},
             }
+        )
+    )
+
+
+def _include_self_watch_identity():
+    return wait_pr._watch_identity(
+        wait_pr._build_parser().parse_args(
+            ["--repo", "avibe-bot/avibe", "--pr", "1213", "--include-self-comments"]
         )
     )
 
@@ -157,6 +167,51 @@ def test_undelivered_staged_report_replays_payload_without_github(tmp_path):
     assert "pending" not in json.loads(state_file.read_text())
 
 
+def test_pending_report_replays_before_authentication_preflight(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "repo": "avibe-bot/avibe",
+                "pr": 1213,
+                "watch": _include_self_watch_identity(),
+                "owner": "watch-1",
+                "pending": {
+                    "delivered_after": None,
+                    "output": "persisted report",
+                    "cursors": {"review_cursor": 2},
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("AVIBE_WATCH_ID", "watch-1")
+    monkeypatch.delenv(wait_pr.LAST_DELIVERY_ENV, raising=False)
+    monkeypatch.setattr(wait_pr, "get_token", lambda: None)
+    monkeypatch.setattr(
+        wait_pr,
+        "_verify_state_file_writable",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "1213",
+            "--include-self-comments",
+            "--state-file",
+            str(state_file),
+        ],
+    )
+
+    assert wait_pr.main() == 0
+    assert "persisted report" in capsys.readouterr().out
+
+
 def test_viewer_failure_does_not_claim_state_file(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     monkeypatch.delenv("AVIBE_WATCH_ID", raising=False)
@@ -210,7 +265,7 @@ def test_cursorless_state_allows_same_watch_to_change_filters(tmp_path):
     assert saved["owner"] == "watch-1"
 
 
-def test_resume_requires_persisted_head_baseline(monkeypatch, tmp_path):
+def test_resume_requires_all_persisted_activity_baselines(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     state_file.write_text(
         json.dumps(
@@ -218,11 +273,7 @@ def test_resume_requires_persisted_head_baseline(monkeypatch, tmp_path):
                 "version": 1,
                 "repo": "avibe-bot/avibe",
                 "pr": 1213,
-                "watch": wait_pr._watch_identity(
-                    wait_pr._build_parser().parse_args(
-                        ["--repo", "avibe-bot/avibe", "--pr", "1213", "--include-self-comments"]
-                    )
-                ),
+                "watch": _include_self_watch_identity(),
                 "owner": "watch-1",
                 "review_cursor": 1,
                 "review_comment_cursor": 2,
@@ -251,6 +302,98 @@ def test_resume_requires_persisted_head_baseline(monkeypatch, tmp_path):
     )
 
     assert wait_pr.main() == 2
+    missing = wait_pr._missing_pr_baselines(json.loads(state_file.read_text()))
+    assert set(missing) == {
+        "head_sha",
+        "review_fingerprints",
+        "review_comment_fingerprints",
+        "issue_comment_fingerprints",
+    }
+
+
+def test_cursor_covered_comment_edits_are_reported():
+    old_review_comment = {
+        "id": 5,
+        "updated_at": "2026-08-10T00:00:00Z",
+        "body": "old inline request",
+        "path": "wait_pr.py",
+        "user": {"login": "reviewer"},
+        "html_url": "https://example.invalid/review-comment/5",
+    }
+    old_issue_comment = {
+        "id": 6,
+        "updated_at": "2026-08-10T00:00:00Z",
+        "body": "old conversation request",
+        "user": {"login": "reviewer"},
+        "html_url": "https://example.invalid/issue-comment/6",
+    }
+    changed_review_comment = {
+        **old_review_comment,
+        "updated_at": "2026-08-10T00:01:00Z",
+        "body": "new inline request",
+    }
+    changed_issue_comment = {
+        **old_issue_comment,
+        "updated_at": "2026-08-10T00:01:00Z",
+        "body": "new conversation request",
+    }
+
+    result = wait_pr._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=1213,
+        state=_pr_state(
+            review_comments=[changed_review_comment],
+            issue_comments=[changed_issue_comment],
+        ),
+        review_cursor=0,
+        review_comment_cursor=5,
+        issue_comment_cursor=6,
+        reaction_cursor=0,
+        pr_status="open",
+        head_sha="head",
+        event_limit=10,
+        ignore_self_comments=False,
+        review_comment_fingerprints={"5": wait_pr._comment_fingerprint(old_review_comment)},
+        issue_comment_fingerprints={"6": wait_pr._comment_fingerprint(old_issue_comment)},
+    )
+
+    assert "review_comment #5" in result[0]
+    assert "issue_comment #6" in result[0]
+
+
+def test_event_limit_never_omits_codex_pass_reaction():
+    issue_comments = [
+        {
+            "id": comment_id,
+            "body": f"comment {comment_id}",
+            "user": {"login": "reviewer"},
+            "html_url": f"https://example.invalid/comment/{comment_id}",
+        }
+        for comment_id in (1, 2)
+    ]
+    reaction = {
+        "id": 9,
+        "content": "+1",
+        "created_at": "2026-08-10T00:00:00Z",
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+    }
+
+    result = wait_pr._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=1213,
+        state=_pr_state(issue_comments=issue_comments, reactions=[reaction]),
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        head_sha="head",
+        event_limit=1,
+        ignore_self_comments=False,
+    )
+
+    assert "pr_reaction #9" in result[0]
+    assert "2 additional event(s) omitted" in result[0]
 
 
 def test_head_change_is_reported_as_pr_activity():

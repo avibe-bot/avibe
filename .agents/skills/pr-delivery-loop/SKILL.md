@@ -206,25 +206,28 @@ turn ends because you armed a watch and are waiting, say exactly that.
   <path>`. The state file records the repository, PR/filter, and watch
   identity; resolve PR viewer identity before claiming it, claim it under a lock,
   and treat a foreign, corrupt, or unwritable file as terminal. A PR state also
-  persists the head SHA and review fingerprints. Each detected batch stages its
-  rendered output together with the next cursors under one pending record, then
+  persists the head SHA plus review and comment fingerprints. Each detected
+  batch stages its rendered output together with the next cursors under one pending record, then
   promotes both only after `AVIBE_WATCH_LAST_DELIVERY` changes. An unchanged
-  delivery stamp replays the stored output, so deleted GitHub activity cannot
-  erase a notification; a head change is itself review-loop activity.
+  delivery stamp replays the stored output before GitHub polling or viewer
+  authentication, so deleted activity or changed credentials cannot erase a
+  notification; a head change is itself review-loop activity.
 - A first managed cycle with an unseeded state file must explicitly use
   `--catch-up` or fail closed; the normal PR-delivery path seeds the complete
   cursor baseline before pushing, then starts the post-push waiter from that
   file so a review that lands during the handoff cannot become the baseline.
-- A resumed PR state without a persisted `head_sha` is also treated as an
-  unseeded baseline; pass `--catch-up` explicitly to establish the head and
-  cursor baseline rather than silently skipping an upgrade-era push.
+- A resumed PR state without a persisted `head_sha` or any review/comment
+  fingerprint map is also treated as an unseeded baseline; pass `--catch-up`
+  explicitly to establish every baseline rather than silently skipping an
+  upgrade-era push or edit.
 - Both modes load saved cursors before deriving their initial baseline:
   `--new-prs` reads `pr_cursor` before limiting the first pagination, and
   `--pr` restores the saved review/comment/reaction cursors before polling.
   Use `--settle 20` for review batches so a Codex review envelope and its inline
   comments are observed together when GitHub writes them in separate requests.
-  Every settle candidate is computed from the same committed cursor and review-
-  fingerprint snapshot; only the final candidate updates the next state.
+  Every settle candidate is computed from the same committed cursor and
+  review/comment-fingerprint snapshot; only the final candidate updates the
+  next state.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and
@@ -271,7 +274,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   for the prior head was already terminal before the push, and the PR head is
   still unchanged. If prior-review completion cannot be established, require
   the bot-authored pass comment instead of accepting a reaction-only pass. The
-  waiter's `pr_reaction` output is the durable evidence for this phase.
+  waiter's `pr_reaction` output is the durable evidence for this phase, so it
+  must never be omitted by `--event-limit` even in a large review batch.
 - Keep reaction meanings distinct: 👀 only says a trigger was picked up; the
   Codex bot's PR-body `+1` says the review completed without comments. Reactions
   from other authors or on other comments are not verdicts.
