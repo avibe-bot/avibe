@@ -49,9 +49,24 @@ describe('internalPwaLinkTarget', () => {
     });
   });
 
+  it('preserves private Show Page query, fragment, and nested route state', () => {
+    expect(internalPwaLinkTarget('/show/ses_123/?tab=flow#top', current)).toEqual({
+      path: '/show/ses_123/?tab=flow#top',
+      navigation: 'document',
+    });
+    expect(internalPwaLinkTarget('/show/ses_123/projects/alpha?mode=edit#node-2', current)).toEqual({
+      path: '/show/ses_123/projects/alpha?mode=edit#node-2',
+      navigation: 'document',
+    });
+  });
+
   it('keeps public Show Pages in context while preserving their server document', () => {
     expect(internalPwaLinkTarget('/p/share_123/?theme=dark#chart', current)).toEqual({
       path: '/p/share_123/?theme=dark#chart',
+      navigation: 'document',
+    });
+    expect(internalPwaLinkTarget('/p/share_123/projects/alpha?theme=dark#chart', current)).toEqual({
+      path: '/p/share_123/projects/alpha?theme=dark#chart',
       navigation: 'document',
     });
   });
@@ -59,6 +74,14 @@ describe('internalPwaLinkTarget', () => {
   it('keeps canonical app routes on the SPA path', () => {
     expect(internalPwaLinkTarget('/chat/session-456?msg=latest#reply', current)).toEqual({
       path: '/chat/session-456?msg=latest#reply',
+      navigation: 'spa',
+    });
+    expect(internalPwaLinkTarget('/admin/settings/models?source=custom', current)).toEqual({
+      path: '/admin/settings/models?source=custom',
+      navigation: 'spa',
+    });
+    expect(internalPwaLinkTarget('/admin/settings/memory#profile', current)).toEqual({
+      path: '/admin/settings/memory#profile',
       navigation: 'spa',
     });
   });
