@@ -2491,11 +2491,6 @@ export const ChatPage: React.FC = () => {
         ref={chatSurfaceRef}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
         onPointerDown={focusCanvas}
-        onFocusCapture={(event) => {
-          // Composer autoFocus during route changes is not user activation and must not
-          // expose the transcript underneath a still-focused AppWindow.
-          if (event.isTrusted) focusCanvas();
-        }}
         {...fileDropHandlers}
       >
         {/* Drag-and-drop overlay: shown while files hover anywhere over the chat

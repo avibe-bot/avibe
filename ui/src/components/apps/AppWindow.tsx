@@ -231,6 +231,9 @@ export const AppWindow: React.FC<{
       inert={win.minimized}
       tabIndex={-1}
       onPointerDown={(e) => {
+        // Pointer activation owns the window even when the clicked control does not
+        // receive DOM focus (notably buttons in macOS Safari).
+        wm.focus(win.id);
         // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus from
         // an inner control/editor/terminal the click lands in. FocusCapture below
         // then gives the same window foreground ownership and raises its z-order.
