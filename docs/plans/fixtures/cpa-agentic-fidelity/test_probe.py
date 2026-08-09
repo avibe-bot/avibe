@@ -3100,7 +3100,7 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("response_start_snapshot_invalid", turn.parse_errors)
 
     def test_chat_nonstream_requires_envelope_discriminator(self) -> None:
-        valid = {"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+        valid = {"id": "chatcmpl_1", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
         self.assertNotIn("chat_object_invalid", probe._parse_chat_document(valid).parse_errors)
         for object_value in (None, "chat.chunk", []):
             document = copy.deepcopy(valid)
@@ -3110,8 +3110,19 @@ class ProbeParserTests(unittest.TestCase):
                 document["object"] = object_value
             self.assertIn("chat_object_invalid", probe._parse_chat_document(document).parse_errors)
 
+    def test_chat_nonstream_requires_completion_id(self) -> None:
+        valid = {"id": "chatcmpl_1", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+        self.assertNotIn("chat_id_invalid", probe._parse_chat_document(valid).parse_errors)
+        for completion_id in (None, "", []):
+            document = copy.deepcopy(valid)
+            if completion_id is None:
+                document.pop("id")
+            else:
+                document["id"] = completion_id
+            self.assertIn("chat_id_invalid", probe._parse_chat_document(document).parse_errors)
+
     def test_chat_nonstream_requires_message_content(self) -> None:
-        valid = {"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": None}, "finish_reason": "tool_calls"}]}
+        valid = {"id": "chatcmpl_1", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": None}, "finish_reason": "tool_calls"}]}
         self.assertNotIn("message_content_missing", probe._parse_chat_document(valid).parse_errors)
         missing = copy.deepcopy(valid)
         missing["choices"][0]["message"].pop("content")

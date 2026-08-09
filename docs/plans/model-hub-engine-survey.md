@@ -731,7 +731,7 @@ primary/fallback run in
 which only the second turn falls back is not verified by the closed semantic
 matrix and may underreport `fallback_used`; such a run remains blocked from
 semantic evidence.
-The focused probe suite contains 203 tests. Per the owner decision recorded on
+The focused probe suite contains 204 tests. Per the owner decision recorded on
 2026-08-08, r45 is sealed M0 evidence: later fixture-only validator hardening
 applies to future collections and does not retroactively rewrite r45 or its
 direction-level decisions without a new, explicitly adopted matrix run.

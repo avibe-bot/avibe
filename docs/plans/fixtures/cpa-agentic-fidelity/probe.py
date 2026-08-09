@@ -2114,6 +2114,8 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
     errors: list[str] = []
     if not isinstance(document, dict) or document.get("object") != "chat.completion":
         errors.append("chat_object_invalid")
+    if not isinstance(document, dict) or not isinstance(document.get("id"), str) or not document["id"]:
+        errors.append("chat_id_invalid")
     choices = document.get("choices") if isinstance(document, dict) else None
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
         errors.append("choice_invalid")
