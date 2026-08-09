@@ -148,6 +148,257 @@ class TransportResult:
 
 
 @dataclass(frozen=True)
+class RequiredEnvelopeField:
+    path: tuple[str | int, ...]
+    rule: str
+    error: str
+    expected: Any = None
+    invalid_error: str | None = None
+
+
+F = RequiredEnvelopeField
+REQUIRED_ENVELOPE_FIELDS: dict[str, tuple[RequiredEnvelopeField, ...]] = {
+    "anthropic.message": (
+        F(("type",), "literal", "message_type_invalid", "message"),
+        F(("role",), "literal", "message_role_invalid", "assistant"),
+        F(("content",), "list", "content_missing"),
+    ),
+    "anthropic.stream.message_start": (
+        F(("type",), "literal", "stream_event_type_invalid", "message_start"),
+        F(("message",), "object", "message_envelope_invalid"),
+        F(("message", "type"), "literal", "message_envelope_invalid", "message"),
+        F(("message", "role"), "literal", "message_envelope_invalid", "assistant"),
+        F(("message", "content"), "empty_list", "message_start_content_invalid"),
+        F(("message", "usage"), "object", "message_start_usage_invalid"),
+        F(
+            ("message", "usage", "input_tokens"),
+            "nonnegative_integer",
+            "message_start_usage_invalid",
+        ),
+        F(
+            ("message", "usage", "output_tokens"),
+            "nonnegative_integer",
+            "message_start_usage_invalid",
+        ),
+        F(("message", "stop_reason"), "literal", "message_start_terminal_invalid", None),
+        F(("message", "stop_sequence"), "literal", "message_start_terminal_invalid", None),
+    ),
+    "anthropic.stream.content_block_start": (
+        F(("type",), "literal", "stream_event_type_invalid", "content_block_start"),
+        F(("index",), "nonnegative_integer", "stream_index_invalid"),
+        F(("content_block",), "object", "content_block_invalid"),
+    ),
+    "anthropic.stream.content_block_delta": (
+        F(("type",), "literal", "stream_event_type_invalid", "content_block_delta"),
+        F(("index",), "nonnegative_integer", "stream_index_invalid"),
+        F(("delta",), "object", "stream_delta_invalid"),
+    ),
+    "anthropic.stream.content_block_stop": (
+        F(("type",), "literal", "stream_event_type_invalid", "content_block_stop"),
+        F(("index",), "nonnegative_integer", "stream_index_invalid"),
+    ),
+    "anthropic.stream.message_delta": (
+        F(("type",), "literal", "stream_event_type_invalid", "message_delta"),
+        F(("delta",), "object", "message_delta_invalid"),
+        F(
+            ("delta", "stop_reason"),
+            "nonempty_string",
+            "message_delta_stop_sequence_invalid",
+        ),
+        F(
+            ("delta", "stop_sequence"),
+            "nullable_string",
+            "message_delta_stop_sequence_invalid",
+        ),
+        F(("usage",), "object", "message_delta_usage_invalid"),
+        F(
+            ("usage", "output_tokens"),
+            "nonnegative_integer",
+            "message_delta_usage_invalid",
+        ),
+    ),
+    "anthropic.stream.message_stop": (
+        F(("type",), "literal", "stream_event_type_invalid", "message_stop"),
+    ),
+    "anthropic.stream.ping": (
+        F(("type",), "literal", "stream_event_type_invalid", "ping"),
+    ),
+    "chat.completion": (
+        F(("id",), "nonempty_string", "chat_id_invalid"),
+        F(("object",), "literal", "chat_object_invalid", "chat.completion"),
+        F(("choices",), "single_object_list", "choice_invalid"),
+        F(("choices", 0, "index"), "zero_index", "choice_index_invalid"),
+        F(("choices", 0, "message"), "object", "message_invalid"),
+        F(
+            ("choices", 0, "message", "role"),
+            "literal",
+            "assistant_role_invalid",
+            "assistant",
+        ),
+        F(
+            ("choices", 0, "message", "content"),
+            "nullable_string",
+            "message_content_missing",
+        ),
+    ),
+    "chat.stream.choice": (
+        F(("id",), "nonempty_string", "stream_completion_id_invalid"),
+        F(("object",), "literal", "stream_object_invalid", "chat.completion.chunk"),
+        F(("choices",), "single_object_list", "choice_invalid"),
+        F(("choices", 0, "index"), "zero_index", "choice_index_invalid"),
+        F(("choices", 0, "delta"), "object", "delta_missing", None, "delta_invalid"),
+    ),
+    "chat.stream.usage": (
+        F(("id",), "nonempty_string", "stream_completion_id_invalid"),
+        F(("object",), "literal", "stream_object_invalid", "chat.completion.chunk"),
+        F(("choices",), "empty_list", "choices_missing"),
+        F(("usage",), "object", "usage_before_finish"),
+    ),
+    "responses.response": (
+        F(("id",), "nonempty_string", "response_id_invalid"),
+        F(("object",), "literal", "response_object_invalid", "response"),
+        F(("output",), "list", "output_missing"),
+    ),
+    "responses.stream.created": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.created"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("response",), "object", "response_start_snapshot_invalid"),
+        F(("response", "id"), "nonempty_string", "response_id_invalid"),
+        F(("response", "object"), "literal", "response_start_snapshot_invalid", "response"),
+        F(("response", "status"), "literal", "response_start_snapshot_invalid", "in_progress"),
+        F(("response", "output"), "empty_list", "response_start_snapshot_invalid"),
+    ),
+    "responses.stream.in_progress": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.in_progress"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("response",), "object", "response_in_progress_snapshot_invalid"),
+        F(("response", "id"), "nonempty_string", "response_in_progress_id_invalid"),
+        F(
+            ("response", "object"),
+            "literal",
+            "response_in_progress_snapshot_invalid",
+            "response",
+        ),
+        F(
+            ("response", "status"),
+            "literal",
+            "response_in_progress_snapshot_invalid",
+            "in_progress",
+        ),
+        F(("response", "output"), "empty_list", "response_in_progress_snapshot_invalid"),
+    ),
+    "responses.stream.terminal": (
+        F(
+            ("type",),
+            "one_of",
+            "terminal_response_type_invalid",
+            ("response.completed", "response.done"),
+        ),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("response",), "object", "terminal_response_invalid"),
+        F(("response", "id"), "nonempty_string", "terminal_response_id_invalid"),
+        F(("response", "object"), "literal", "terminal_response_invalid", "response"),
+        F(("response", "status"), "literal", "terminal_response_status_invalid", "completed"),
+        F(("response", "output"), "list", "terminal_response_output_invalid"),
+    ),
+    "responses.stream.output_item_added": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.output_item.added"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("item",), "object", "output_item_invalid"),
+    ),
+    "responses.stream.output_item_done": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.output_item.done"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("item",), "object", "output_item_invalid"),
+    ),
+    "responses.stream.content_part_added": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.content_part.added"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("content_index",), "nonnegative_integer", "stream_content_index_invalid"),
+        F(("part",), "object", "stream_content_part_invalid"),
+    ),
+    "responses.stream.content_part_done": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.content_part.done"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("content_index",), "nonnegative_integer", "stream_content_index_invalid"),
+        F(("part",), "object", "stream_content_part_invalid"),
+    ),
+    "responses.stream.function_arguments_delta": (
+        F(
+            ("type",),
+            "literal",
+            "stream_event_type_invalid",
+            "response.function_call_arguments.delta",
+        ),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("delta",), "string", "stream_arguments_invalid"),
+    ),
+    "responses.stream.function_arguments_done": (
+        F(
+            ("type",),
+            "literal",
+            "stream_event_type_invalid",
+            "response.function_call_arguments.done",
+        ),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("arguments",), "string", "stream_arguments_done_invalid"),
+    ),
+    "responses.stream.output_text_delta": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.output_text.delta"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("content_index",), "nonnegative_integer", "stream_content_index_invalid"),
+        F(("delta",), "string", "stream_text_delta_invalid"),
+    ),
+    "responses.stream.output_text_done": (
+        F(("type",), "literal", "stream_event_type_invalid", "response.output_text.done"),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("content_index",), "nonnegative_integer", "stream_content_index_invalid"),
+        F(("text",), "string", "stream_text_done_invalid"),
+    ),
+    "responses.stream.reasoning_summary_delta": (
+        F(
+            ("type",),
+            "literal",
+            "stream_event_type_invalid",
+            "response.reasoning_summary_text.delta",
+        ),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("summary_index",), "nonnegative_integer", "stream_summary_index_invalid"),
+        F(("delta",), "string", "stream_reasoning_delta_invalid"),
+    ),
+    "responses.stream.reasoning_summary_done": (
+        F(
+            ("type",),
+            "literal",
+            "stream_event_type_invalid",
+            "response.reasoning_summary_text.done",
+        ),
+        F(("sequence_number",), "nonnegative_integer", "stream_sequence_invalid"),
+        F(("item_id",), "nonempty_string", "stream_item_id_invalid"),
+        F(("output_index",), "nonnegative_integer", "stream_output_index_invalid"),
+        F(("summary_index",), "nonnegative_integer", "stream_summary_index_invalid"),
+        F(("text",), "string", "stream_reasoning_done_invalid"),
+    ),
+}
+
+
+@dataclass(frozen=True)
 class CaseSpec:
     name: str
     client_protocol: str
@@ -444,11 +695,109 @@ def _chat_delta_has_payload(delta: dict[str, Any]) -> bool:
     )
 
 
-def _anthropic_stream_usage_valid(value: Any) -> bool:
-    return isinstance(value, dict) and all(
-        type(value.get(field)) is int and value[field] >= 0
-        for field in ("input_tokens", "output_tokens")
-    )
+_MISSING = object()
+
+
+def _required_field_value(payload: Any, path: tuple[str | int, ...]) -> Any:
+    value = payload
+    for part in path:
+        if isinstance(part, int):
+            if not isinstance(value, list) or part >= len(value):
+                return _MISSING
+            value = value[part]
+        else:
+            if not isinstance(value, dict) or part not in value:
+                return _MISSING
+            value = value[part]
+    return value
+
+
+def _required_field_valid(field: RequiredEnvelopeField, value: Any) -> bool:
+    if value is _MISSING:
+        return False
+    if field.rule == "literal":
+        return value == field.expected
+    if field.rule == "one_of":
+        return isinstance(value, str) and value in field.expected
+    if field.rule == "object":
+        return isinstance(value, dict)
+    if field.rule == "list":
+        return isinstance(value, list)
+    if field.rule == "empty_list":
+        return isinstance(value, list) and not value
+    if field.rule == "single_object_list":
+        return isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict)
+    if field.rule == "nonempty_string":
+        return isinstance(value, str) and bool(value)
+    if field.rule == "string":
+        return isinstance(value, str)
+    if field.rule == "nullable_string":
+        return value is None or isinstance(value, str)
+    if field.rule == "nonnegative_integer":
+        return type(value) is int and value >= 0
+    if field.rule == "zero_index":
+        return type(value) is int and value == 0
+    raise ValueError(f"unknown required-envelope rule: {field.rule}")
+
+
+def _required_envelope_errors(kind: str, payload: Any) -> list[str]:
+    errors: list[str] = []
+    for field in REQUIRED_ENVELOPE_FIELDS[kind]:
+        value = _required_field_value(payload, field.path)
+        error = field.error if value is _MISSING else field.invalid_error or field.error
+        if not _required_field_valid(field, value) and error not in errors:
+            errors.append(error)
+    return errors
+
+
+def _extend_unique(errors: list[str], additions: list[str]) -> None:
+    errors.extend(error for error in additions if error not in errors)
+
+
+_ANTHROPIC_STREAM_ENVELOPES = {
+    "message_start": "anthropic.stream.message_start",
+    "content_block_start": "anthropic.stream.content_block_start",
+    "content_block_delta": "anthropic.stream.content_block_delta",
+    "content_block_stop": "anthropic.stream.content_block_stop",
+    "message_delta": "anthropic.stream.message_delta",
+    "message_stop": "anthropic.stream.message_stop",
+    "ping": "anthropic.stream.ping",
+}
+_RESPONSES_STREAM_ENVELOPES = {
+    "response.created": "responses.stream.created",
+    "response.in_progress": "responses.stream.in_progress",
+    "response.completed": "responses.stream.terminal",
+    "response.done": "responses.stream.terminal",
+    "response.output_item.added": "responses.stream.output_item_added",
+    "response.output_item.done": "responses.stream.output_item_done",
+    "response.content_part.added": "responses.stream.content_part_added",
+    "response.content_part.done": "responses.stream.content_part_done",
+    "response.function_call_arguments.delta": "responses.stream.function_arguments_delta",
+    "response.function_call_arguments.done": "responses.stream.function_arguments_done",
+    "response.output_text.delta": "responses.stream.output_text_delta",
+    "response.output_text.done": "responses.stream.output_text_done",
+    "response.reasoning_summary_text.delta": "responses.stream.reasoning_summary_delta",
+    "response.reasoning_summary_text.done": "responses.stream.reasoning_summary_done",
+}
+
+
+def _stream_envelope_kind(protocol: str, event: dict[str, Any]) -> str | None:
+    event_type = event.get("type")
+    if protocol == "anthropic":
+        return _ANTHROPIC_STREAM_ENVELOPES.get(event_type)
+    if protocol == "responses":
+        return _RESPONSES_STREAM_ENVELOPES.get(event_type)
+    if protocol == "chat" and event_type != "error":
+        choices = event.get("choices", _MISSING)
+        if event.get("usage") is not None and choices in (_MISSING, []):
+            return "chat.stream.usage"
+        return "chat.stream.choice"
+    return None
+
+
+def _stream_envelope_errors(protocol: str, event: dict[str, Any]) -> list[str]:
+    kind = _stream_envelope_kind(protocol, event)
+    return _required_envelope_errors(kind, event) if kind is not None else []
 
 
 def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
@@ -476,23 +825,12 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
             if item.get("type") != event_type:
                 return False
+            if _stream_envelope_errors("anthropic", event):
+                return False
             if message_stop is not None:
                 return False
             if event_type == "message_start":
                 if message_started:
-                    return False
-                message = event.get("message")
-                if (
-                    not isinstance(message, dict)
-                    or message.get("type") != "message"
-                    or message.get("role") != "assistant"
-                    or message.get("content") != []
-                    or not _anthropic_stream_usage_valid(message.get("usage"))
-                    or "stop_reason" not in message
-                    or "stop_sequence" not in message
-                    or message.get("stop_reason") is not None
-                    or message.get("stop_sequence") is not None
-                ):
                     return False
                 message_started = True
             elif event_type == "error":
@@ -564,16 +902,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             elif event_type == "message_delta":
                 if not message_started or open_blocks or message_delta_seen:
                     return False
-                delta = event.get("delta")
-                if not isinstance(delta, dict):
-                    return False
+                delta = event["delta"]
                 stop_reason = delta.get("stop_reason")
                 stop_sequence = delta.get("stop_sequence")
                 if (
-                    not isinstance(stop_reason, str)
-                    or "stop_sequence" not in delta
-                    or (stop_sequence is not None and not isinstance(stop_sequence, str))
-                    or (stop_reason == "stop_sequence" and not stop_sequence)
+                    (stop_reason == "stop_sequence" and not stop_sequence)
                     or (stop_reason != "stop_sequence" and stop_sequence is not None)
                 ):
                     return False
@@ -624,6 +957,8 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 return False
             if event_type not in RESPONSES_STREAM_EVENT_TYPES:
                 return False
+            if _stream_envelope_errors("responses", event):
+                return False
             wire_sequence = item.get("wire_sequence")
             if type(wire_sequence) is not int or wire_sequence < 0 or (
                 previous_wire_sequence is not None and wire_sequence <= previous_wire_sequence
@@ -636,34 +971,15 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 if response_created or output_started:
                     return False
                 response_created = True
-                response = event.get("response")
-                if (
-                    not isinstance(response, dict)
-                    or response.get("object") != "response"
-                    or response.get("status") != "in_progress"
-                    or response.get("output") != []
-                ):
-                    return False
-                if not isinstance(response.get("id"), str) or not response["id"]:
-                    return False
+                response = event["response"]
                 response_id = response["id"]
                 response_started = True
             elif event_type == "response.in_progress":
                 if not response_created or response_in_progress_seen or output_started:
                     return False
                 response_in_progress_seen = True
-                response = event.get("response")
-                if (
-                    not isinstance(response, dict)
-                    or response.get("object") != "response"
-                    or response.get("status") != "in_progress"
-                    or response.get("output") != []
-                ):
-                    return False
-                in_progress_id = response.get("id")
-                if not isinstance(in_progress_id, str) or in_progress_id != response_id:
-                    return False
-                if output_started:
+                response = event["response"]
+                if response["id"] != response_id:
                     return False
                 response_started = True
             elif event_type == "response.output_item.added":
@@ -949,15 +1265,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 completed_items[item_id] = copy.deepcopy(raw)
                 closed.add(item_id)
             elif event_type in {"response.completed", "response.done"}:
-                terminal_response = event.get("response")
+                terminal_response = event["response"]
                 if (
                     not response_started
                     or added != closed
                     or content_parts != content_parts_closed
-                    or not isinstance(terminal_response, dict)
-                    or terminal_response.get("object") != "response"
-                    or not isinstance(terminal_response.get("output"), list)
-                    or terminal_response.get("status") != "completed"
                 ):
                     return False
                 terminal_items = {
@@ -1004,8 +1316,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or _responses_output_projection(completed_output) != _responses_output_projection(terminal_response["output"])
                 ):
                     return False
-                terminal_id = terminal_response.get("id")
-                if not isinstance(terminal_id, str) or terminal_id != response_id:
+                if terminal_response["id"] != response_id:
                     return False
                 terminal = index
             elif event_type in {"error", "response.failed", "response.incomplete"}:
@@ -1033,24 +1344,11 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             continue
         event = item.get("event", {})
         event_type = event.get("type")
-        if "choices" not in event:
-            return False
-        choices = event["choices"]
-        usage = event.get("usage")
-        if event.get("object") != "chat.completion.chunk":
-            return False
-        event_id = event.get("id")
-        if not isinstance(event_id, str) or not event_id:
-            return False
-        elif completion_id is None:
-            completion_id = event_id
-        elif event_id != completion_id:
-            return False
         if event_type is not None and not isinstance(event_type, str):
             return False
         if event_type not in CHAT_STREAM_EVENT_TYPES:
             return False
-        if not isinstance(choices, list):
+        if _stream_envelope_errors("chat", event):
             return False
         if item.get("type") is not None and item.get("type") != event_type:
             return False
@@ -1058,19 +1356,20 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             return False
         if "error" in event:
             return False
+        choices = event["choices"]
+        usage = event.get("usage")
+        event_id = event["id"]
+        if completion_id is None:
+            completion_id = event_id
+        elif event_id != completion_id:
+            return False
         if terminal is not None:
             if choices or not isinstance(usage, dict) or usage_seen:
                 return False
             usage_seen = True
             continue
         if choices:
-            if len(choices) != 1 or not isinstance(choices[0], dict):
-                return False
             choice = choices[0]
-            if "index" not in choice or _stream_index(choice.get("index")) != 0:
-                return False
-            if "delta" not in choice or not isinstance(choice["delta"], dict):
-                return False
             delta = choice["delta"]
             if "role" in delta:
                 if delta["role"] != "assistant" or assistant_role_seen or payload_seen:
@@ -1302,13 +1601,9 @@ def _parse_anthropic_document(document: dict[str, Any] | None, *, event_count: i
     if not isinstance(document, dict):
         errors.append("message_envelope_invalid")
         document = {}
-    if document.get("type") != "message":
-        errors.append("message_type_invalid")
-    if document.get("role") != "assistant":
-        errors.append("message_role_invalid")
-    content = document.get("content") if isinstance(document, dict) else None
+    _extend_unique(errors, _required_envelope_errors("anthropic.message", document))
+    content = document.get("content")
     if not isinstance(content, list):
-        errors.append("content_missing")
         content = []
     calls: list[ToolCall] = []
     text_parts: list[str] = []
@@ -1386,6 +1681,7 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
         if event_type not in ANTHROPIC_STREAM_EVENT_TYPES:
             errors.append("stream_event_unknown")
             continue
+        _extend_unique(errors, _stream_envelope_errors("anthropic", event))
         if event_type == "error":
             errors.append("stream_error_event")
         elif event_type == "content_block_start":
@@ -1477,25 +1773,14 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
         elif event_type == "message_start":
             message = event.get("message")
             if not isinstance(message, dict):
-                errors.append("message_envelope_invalid")
+                continue
             else:
                 envelope = {"type": message.get("type"), "role": message.get("role")}
-                if not _anthropic_stream_usage_valid(message.get("usage")):
-                    errors.append("message_start_usage_invalid")
-                if message.get("content") != []:
-                    errors.append("message_start_content_invalid")
-                if (
-                    "stop_reason" not in message
-                    or "stop_sequence" not in message
-                    or message.get("stop_reason") is not None
-                    or message.get("stop_sequence") is not None
-                ):
-                    errors.append("message_start_terminal_invalid")
         elif event_type == "message_delta":
             message_delta_seen = True
             delta = event.get("delta")
             if not isinstance(delta, dict):
-                errors.append("message_delta_invalid")
+                continue
             else:
                 candidate_reason = delta.get("stop_reason")
                 candidate_sequence = delta.get("stop_sequence")
@@ -1549,13 +1834,10 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
 
 def _parse_responses_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
-    if not isinstance(document, dict) or document.get("object") != "response":
-        errors.append("response_object_invalid")
-    if not isinstance(document, dict) or not isinstance(document.get("id"), str) or not document["id"]:
-        errors.append("response_id_invalid")
-    output = document.get("output") if isinstance(document, dict) else None
+    payload = document if isinstance(document, dict) else {}
+    _extend_unique(errors, _required_envelope_errors("responses.response", payload))
+    output = payload.get("output")
     if not isinstance(output, list):
-        errors.append("output_missing")
         output = []
     calls: list[ToolCall] = []
     text_parts: list[str] = []
@@ -1628,7 +1910,7 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
                         errors.append("message_text_invalid")
                     else:
                         text_parts.append(text)
-    status = document.get("status") if isinstance(document, dict) else None
+    status = payload.get("status")
     if status is not None and not isinstance(status, str):
         errors.append("status_invalid")
         status = None
@@ -1733,6 +2015,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
         if event_type not in RESPONSES_STREAM_EVENT_TYPES:
             errors.append("stream_event_unknown")
             continue
+        _extend_unique(errors, _stream_envelope_errors("responses", event))
         if event_type in {"error", "response.failed", "response.incomplete"}:
             errors.append("stream_failure_event")
         elif event_type == "response.created":
@@ -2112,24 +2395,16 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
 
 def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 0, invalid_event_count: int = 0, terminal: bool | None = None) -> Turn:
     errors: list[str] = []
-    if not isinstance(document, dict) or document.get("object") != "chat.completion":
-        errors.append("chat_object_invalid")
-    if not isinstance(document, dict) or not isinstance(document.get("id"), str) or not document["id"]:
-        errors.append("chat_id_invalid")
-    choices = document.get("choices") if isinstance(document, dict) else None
+    payload = document if isinstance(document, dict) else {}
+    _extend_unique(errors, _required_envelope_errors("chat.completion", payload))
+    choices = payload.get("choices")
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
-        errors.append("choice_invalid")
         choice: dict[str, Any] = {}
     else:
         choice = choices[0]
-        if _stream_index(choice.get("index")) != 0:
-            errors.append("choice_index_invalid")
     message = choice.get("message", {})
     if not isinstance(message, dict):
-        errors.append("message_invalid")
         message = {}
-    if message.get("role") != "assistant":
-        errors.append("assistant_role_invalid")
     calls: list[ToolCall] = []
     tool_calls = message.get("tool_calls", [])
     if not isinstance(tool_calls, list):
@@ -2151,7 +2426,6 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
             errors.append(error)
         calls.append(ToolCall(_required_identifier(raw.get("id"), errors), str(function.get("name", "")), arguments))
     if "content" not in message:
-        errors.append("message_content_missing")
         content = ""
     else:
         content = message["content"]
@@ -2221,15 +2495,11 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if event_type == "error":
             errors.append("stream_failure_event")
             continue
-        if event.get("object") != "chat.completion.chunk":
-            errors.append("stream_object_invalid")
-            continue
+        _extend_unique(errors, _stream_envelope_errors("chat", event))
         event_id = event.get("id")
-        if not isinstance(event_id, str) or not event_id:
-            errors.append("stream_completion_id_invalid")
-        elif completion_id is None:
+        if isinstance(event_id, str) and event_id and completion_id is None:
             completion_id = event_id
-        elif event_id != completion_id:
+        elif isinstance(event_id, str) and event_id and event_id != completion_id:
             errors.append("stream_completion_id_changed")
         if "error" in event:
             errors.append("stream_failure_event")
@@ -2243,30 +2513,20 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             else:
                 usage = event_usage
                 usage_seen = True
-        if "choices" not in event:
-            errors.append("choices_missing")
-            choices = []
-        else:
-            choices = event["choices"]
+        choices = event.get("choices", [])
         if not isinstance(choices, list):
-            errors.append("choice_invalid")
             continue
         if not choices:
             if event_usage is None:
                 errors.append("stream_envelope_invalid")
             continue
         if len(choices) != 1 or not isinstance(choices[0], dict):
-            errors.append("choice_invalid")
             continue
         choice = choices[0]
-        if "index" not in choice or _stream_index(choice.get("index")) != 0:
-            errors.append("choice_index_invalid")
         if "delta" not in choice:
-            errors.append("delta_missing")
             continue
         delta = choice["delta"]
         if not isinstance(delta, dict):
-            errors.append("delta_invalid")
             continue
         if "role" in delta:
             if delta.get("role") != "assistant":
@@ -2365,6 +2625,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
     document: dict[str, Any] = {
+        "id": completion_id,
         "object": "chat.completion",
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }

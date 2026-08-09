@@ -11,8 +11,9 @@ def _anthropic_usage():
 
 def _responses_wire(*events):
     normalized = []
-    for event in events:
+    for index, event in enumerate(events):
         event = copy.deepcopy(event)
+        event.setdefault("sequence_number", index)
         if event["type"] in {"response.created", "response.in_progress", "response.completed", "response.done"} and isinstance(event.get("response"), dict):
             event["response"].setdefault("id", "resp_1")
             event["response"].setdefault("object", "response")
@@ -179,7 +180,198 @@ def _response_function_stream():
     )
 
 
+def _required_envelope_samples():
+    response_start = {
+        "id": "resp_1",
+        "object": "response",
+        "status": "in_progress",
+        "output": [],
+    }
+    response_terminal = {
+        "id": "resp_1",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+    }
+    return {
+        "anthropic.message": {
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+        },
+        "anthropic.stream.message_start": {
+            "type": "message_start",
+            "message": {
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "usage": _anthropic_usage(),
+                "stop_reason": None,
+                "stop_sequence": None,
+            },
+        },
+        "anthropic.stream.content_block_start": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {},
+        },
+        "anthropic.stream.content_block_delta": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {},
+        },
+        "anthropic.stream.content_block_stop": {
+            "type": "content_block_stop",
+            "index": 0,
+        },
+        "anthropic.stream.message_delta": {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 1},
+        },
+        "anthropic.stream.message_stop": {"type": "message_stop"},
+        "anthropic.stream.ping": {"type": "ping"},
+        "chat.completion": {
+            "id": "chatcmpl_1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": None},
+                }
+            ],
+        },
+        "chat.stream.choice": {
+            "id": "chatcmpl_1",
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {}}],
+        },
+        "chat.stream.usage": {
+            "id": "chatcmpl_1",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {},
+        },
+        "responses.response": {
+            "id": "resp_1",
+            "object": "response",
+            "output": [],
+        },
+        "responses.stream.created": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": copy.deepcopy(response_start),
+        },
+        "responses.stream.in_progress": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": copy.deepcopy(response_start),
+        },
+        "responses.stream.terminal": {
+            "type": "response.completed",
+            "sequence_number": 2,
+            "response": response_terminal,
+        },
+        "responses.stream.output_item_added": {
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {},
+        },
+        "responses.stream.output_item_done": {
+            "type": "response.output_item.done",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {},
+        },
+        "responses.stream.content_part_added": {
+            "type": "response.content_part.added",
+            "sequence_number": 2,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {},
+        },
+        "responses.stream.content_part_done": {
+            "type": "response.content_part.done",
+            "sequence_number": 4,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {},
+        },
+        "responses.stream.function_arguments_delta": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 2,
+            "item_id": "fc_1",
+            "output_index": 0,
+            "delta": "{}",
+        },
+        "responses.stream.function_arguments_done": {
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 3,
+            "item_id": "fc_1",
+            "output_index": 0,
+            "arguments": "{}",
+        },
+        "responses.stream.output_text_delta": {
+            "type": "response.output_text.delta",
+            "sequence_number": 2,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "a",
+        },
+        "responses.stream.output_text_done": {
+            "type": "response.output_text.done",
+            "sequence_number": 3,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "a",
+        },
+        "responses.stream.reasoning_summary_delta": {
+            "type": "response.reasoning_summary_text.delta",
+            "sequence_number": 2,
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "a",
+        },
+        "responses.stream.reasoning_summary_done": {
+            "type": "response.reasoning_summary_text.done",
+            "sequence_number": 3,
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "text": "a",
+        },
+    }
+
+
+def _drop_required_path(payload, path):
+    parent = payload
+    for part in path[:-1]:
+        parent = parent[part]
+    del parent[path[-1]]
+
+
 class ProbeParserTests(unittest.TestCase):
+    def test_required_envelope_matrix_rejects_every_missing_field(self) -> None:
+        samples = _required_envelope_samples()
+        self.assertEqual(set(samples), set(probe.REQUIRED_ENVELOPE_FIELDS))
+        for kind, fields in probe.REQUIRED_ENVELOPE_FIELDS.items():
+            sample = samples[kind]
+            self.assertEqual([], probe._required_envelope_errors(kind, sample), kind)
+            for field in fields:
+                with self.subTest(kind=kind, path=field.path):
+                    mutated = copy.deepcopy(sample)
+                    _drop_required_path(mutated, field.path)
+                    self.assertIn(
+                        field.error,
+                        probe._required_envelope_errors(kind, mutated),
+                    )
+
     def test_anthropic_followup_preserves_observed_id_and_thinking(self) -> None:
         turn = probe._parse_anthropic_document(
             {
@@ -1265,7 +1457,7 @@ class ProbeParserTests(unittest.TestCase):
             b'\xef\xbb\xbfevent: message_start\rdata: {"type":"message_start","message":'
             b'{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0},"stop_reason":null,"stop_sequence":null}}\r\r'
             b'event: message_delta\rdata: {"type":"message_delta","delta":'
-            b'{"stop_reason":"end_turn","stop_sequence":null}}\r\r'
+            b'{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\r\r'
             b'event: message_stop\rdata: {"type":"message_stop"}\r\r'
         )
 
@@ -1482,8 +1674,26 @@ class ProbeParserTests(unittest.TestCase):
                     },
                 },
             },
-            {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0}},
-            {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0}},
+            {
+                "kind": "event",
+                "sequence": 1,
+                "type": "content_block_start",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            },
+            {
+                "kind": "event",
+                "sequence": 2,
+                "type": "content_block_delta",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "ok"},
+                },
+            },
             {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
             {
                 "kind": "event",
@@ -1492,6 +1702,7 @@ class ProbeParserTests(unittest.TestCase):
                 "event": {
                     "type": "message_delta",
                     "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 1},
                 },
             },
             {"kind": "event", "sequence": 5, "type": "message_stop", "event": {"type": "message_stop"}},
@@ -1701,6 +1912,7 @@ class ProbeParserTests(unittest.TestCase):
             for index, event in enumerate(events):
                 event["sequence"] = index
                 event["wire_sequence"] = index
+                event["event"]["sequence_number"] = index
             self.assertFalse(probe._stream_order_ok("responses", events))
             turn = probe._parse_responses_stream(probe.TransportResult(200, None, events, False, 0, False))
             self.assertIn("response_in_progress_snapshot_invalid", turn.parse_errors)
@@ -1723,6 +1935,7 @@ class ProbeParserTests(unittest.TestCase):
         for index, event in enumerate(valid):
             event["sequence"] = index
             event["wire_sequence"] = index
+            event["event"]["sequence_number"] = index
         self.assertTrue(probe._stream_order_ok("responses", valid))
         valid_turn = probe._parse_responses_stream(probe.TransportResult(200, None, valid, False, 0, False))
         self.assertNotIn("response_in_progress_id_invalid", valid_turn.parse_errors)
@@ -2523,7 +2736,7 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}},
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}},
             {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
-            {"kind": "event", "sequence": 4, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
+            {"kind": "event", "sequence": 4, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}}},
             {"kind": "event", "sequence": 5, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
         missing = copy.deepcopy(valid)
@@ -2734,7 +2947,7 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "thought"}}},
             {"kind": "event", "sequence": 3, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
             {"kind": "event", "sequence": 4, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
-            {"kind": "event", "sequence": 5, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
+            {"kind": "event", "sequence": 5, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}}},
             {"kind": "event", "sequence": 6, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
         invalid = copy.deepcopy(valid)
@@ -2823,6 +3036,7 @@ class ProbeParserTests(unittest.TestCase):
                 "event": {
                     "type": "message_delta",
                     "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                    "usage": {"output_tokens": 1},
                 },
             },
             {
@@ -2889,7 +3103,7 @@ class ProbeParserTests(unittest.TestCase):
                 "kind": "event",
                 "sequence": 1,
                 "type": "message_delta",
-                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}},
+                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}},
             },
             {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
@@ -2919,7 +3133,7 @@ class ProbeParserTests(unittest.TestCase):
     def test_anthropic_message_start_requires_usage_snapshot(self) -> None:
         valid = [
             {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "usage": _anthropic_usage(), "stop_reason": None, "stop_sequence": None}}},
-            {"kind": "event", "sequence": 1, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
+            {"kind": "event", "sequence": 1, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}}},
             {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
         self.assertTrue(probe._stream_order_ok("anthropic", valid))
@@ -3243,16 +3457,31 @@ class ProbeParserTests(unittest.TestCase):
                 "kind": "event",
                 "sequence": 1,
                 "type": "message_delta",
-                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}},
+                "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 1}},
             },
             {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
         ]
         malformed = copy.deepcopy(valid)
         malformed[1]["event"]["delta"]["stop_sequence"] = []
         self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        valid_turn = probe._parse_anthropic_stream(
+            probe.TransportResult(200, None, valid, False, 0, False)
+        )
+        self.assertNotIn("message_delta_usage_invalid", valid_turn.parse_errors)
         self.assertFalse(probe._stream_order_ok("anthropic", malformed))
         turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, malformed, False, 0, False))
         self.assertIn("message_delta_stop_sequence_invalid", turn.parse_errors)
+        for invalid_usage in (None, {}, {"output_tokens": -1}, {"output_tokens": True}):
+            invalid = copy.deepcopy(valid)
+            if invalid_usage is None:
+                invalid[1]["event"].pop("usage")
+            else:
+                invalid[1]["event"]["usage"] = invalid_usage
+            self.assertFalse(probe._stream_order_ok("anthropic", invalid))
+            invalid_turn = probe._parse_anthropic_stream(
+                probe.TransportResult(200, None, invalid, False, 0, False)
+            )
+            self.assertIn("message_delta_usage_invalid", invalid_turn.parse_errors)
 
     def test_chat_stream_completion_id_must_remain_stable(self) -> None:
         events = [
@@ -3279,6 +3508,10 @@ class ProbeParserTests(unittest.TestCase):
             {"kind": "done", "sequence": 2, "type": None},
         ]
         self.assertTrue(probe._stream_order_ok("chat", events))
+        valid_turn = probe._parse_chat_stream(
+            probe.TransportResult(200, None, events, True, 0, False)
+        )
+        self.assertNotIn("chat_id_invalid", valid_turn.parse_errors)
         mismatched = copy.deepcopy(events)
         mismatched[1]["event"]["id"] = "chatcmpl_2"
         self.assertFalse(probe._stream_order_ok("chat", mismatched))

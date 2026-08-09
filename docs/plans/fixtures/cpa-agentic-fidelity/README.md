@@ -80,7 +80,7 @@ in the first turn, failed the first parse/order gates, and failed the final
 exact tuple. Chat-to-Messages single passed both parse gates but lacked
 reasoning in both turns and failed final system scope. Its parallel also lacked
 reasoning, failed both parse gates and first-turn stream ordering, and failed
-final system scope. The focused suite contains 204 tests.
+final system scope. The focused suite contains 205 tests.
 
 Per the owner decision recorded on 2026-08-08, r45 is sealed M0 evidence.
 Subsequent validator hardening applies to future collections only and does not
@@ -103,6 +103,52 @@ success claim.
 | System prompt | `_system_prompt`, `_token_present`, `_validate_first`: negative `user_scope`, and `_validate_second`: exact-token `system_marker` and `system_scope` |
 | Thinking/reasoning | `_anthropic_payload`, `_responses_payload`, `_chat_payload`, `_parse_anthropic_document` payload/signature/redacted-data validation and protected-part collection, `_parse_anthropic_stream` explicitly present, string, empty `thinking`/`signature` opening snapshots plus terminal signature ordering, `_parse_responses_document` `RESPONSES_REASONING_PART_TYPES`/encrypted reasoning type validation and protected-part collection, `_parse_responses_stream` reasoning text, exact summary-index lifecycle, and encrypted snapshot comparison, `_reasoning_item_has_signal`, `_chat_reasoning_usage_present` terminal integer-token gate, and `_validate_first`/`_validate_second`: `reasoning_present` plus `_protected_reasoning_visible` normalized full-value/meaningful-excerpt rejection against all readable and opaque protected parts while `reasoning_text` remains readable-only |
 | Context length/truncation | `probe.CONTEXT_LENGTH_NOT_VERIFIED` residual; no low-cost context-limit run was included in M0 |
+
+## Required envelope field matrix
+
+Future collections use `REQUIRED_ENVELOPE_FIELDS` as the single authority for
+the required fields inside the protocol envelopes claimed by the closed S4
+matrix. The table covers 25 envelope kinds and 123 required-field cells. The
+`test_required_envelope_matrix_rejects_every_missing_field` mutation test owns
+one valid sample per envelope kind, removes every required field one at a time,
+and requires the declared validation error for all 123 mutations. Lifecycle,
+cross-event identity, snapshot equality, and nested tool/content semantics stay
+in their named S4 assertions; fields explicitly listed as residuals below are
+not silently promoted into this required set. The required sets are shaped
+against the upstream [Anthropic streaming event
+contract](https://platform.claude.com/docs/en/build-with-claude/streaming),
+[OpenAI Chat Completions schema](https://developers.openai.com/api/reference/resources/chat),
+and [OpenAI Responses streaming event
+schema](https://developers.openai.com/api/reference/resources/responses/streaming-events),
+then limited to the protocol envelopes the S4 probe claims to validate.
+
+| Protocol envelope kind | Required field paths |
+| --- | --- |
+| `anthropic.message` | `type`, `role`, `content` |
+| `anthropic.stream.message_start` | `type`, `message`, `message.type`, `message.role`, `message.content`, `message.usage`, `message.usage.input_tokens`, `message.usage.output_tokens`, `message.stop_reason`, `message.stop_sequence` |
+| `anthropic.stream.content_block_start` | `type`, `index`, `content_block` |
+| `anthropic.stream.content_block_delta` | `type`, `index`, `delta` |
+| `anthropic.stream.content_block_stop` | `type`, `index` |
+| `anthropic.stream.message_delta` | `type`, `delta`, `delta.stop_reason`, `delta.stop_sequence`, `usage`, `usage.output_tokens` |
+| `anthropic.stream.message_stop` | `type` |
+| `anthropic.stream.ping` | `type` |
+| `chat.completion` | `id`, `object`, `choices`, `choices[0].index`, `choices[0].message`, `choices[0].message.role`, `choices[0].message.content` |
+| `chat.stream.choice` | `id`, `object`, `choices`, `choices[0].index`, `choices[0].delta` |
+| `chat.stream.usage` | `id`, `object`, `choices`, `usage` |
+| `responses.response` | `id`, `object`, `output` |
+| `responses.stream.created` | `type`, `sequence_number`, `response`, `response.id`, `response.object`, `response.status`, `response.output` |
+| `responses.stream.in_progress` | `type`, `sequence_number`, `response`, `response.id`, `response.object`, `response.status`, `response.output` |
+| `responses.stream.terminal` | `type`, `sequence_number`, `response`, `response.id`, `response.object`, `response.status`, `response.output` |
+| `responses.stream.output_item_added` | `type`, `sequence_number`, `output_index`, `item` |
+| `responses.stream.output_item_done` | `type`, `sequence_number`, `output_index`, `item` |
+| `responses.stream.content_part_added` | `type`, `sequence_number`, `item_id`, `output_index`, `content_index`, `part` |
+| `responses.stream.content_part_done` | `type`, `sequence_number`, `item_id`, `output_index`, `content_index`, `part` |
+| `responses.stream.function_arguments_delta` | `type`, `sequence_number`, `item_id`, `output_index`, `delta` |
+| `responses.stream.function_arguments_done` | `type`, `sequence_number`, `item_id`, `output_index`, `arguments` |
+| `responses.stream.output_text_delta` | `type`, `sequence_number`, `item_id`, `output_index`, `content_index`, `delta` |
+| `responses.stream.output_text_done` | `type`, `sequence_number`, `item_id`, `output_index`, `content_index`, `text` |
+| `responses.stream.reasoning_summary_delta` | `type`, `sequence_number`, `item_id`, `output_index`, `summary_index`, `delta` |
+| `responses.stream.reasoning_summary_done` | `type`, `sequence_number`, `item_id`, `output_index`, `summary_index`, `text` |
 
 The live evidence in the survey used the owner-provided compatible relay. Direct
 official vendor APIs were not measured. A transient `no available accounts`
