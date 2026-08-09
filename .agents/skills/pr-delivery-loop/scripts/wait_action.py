@@ -19,7 +19,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from _github_wait_common import (  # noqa: E402
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
-    RETRY_EXIT_CODE,
     get_token,
     github_get,
     is_retryable_http_error,
@@ -258,9 +257,6 @@ def main() -> int:
                 max_pages=args.max_pages,
             )
         except urllib.error.HTTPError as err:
-            if first_poll:
-                print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
-                return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
             if token is None and err.code in {403, 429}:
                 print(
                     (
@@ -270,13 +266,19 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
-            print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
+            if not is_retryable_http_error(err):
+                print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
+                return 1
+            print(
+                f"Retryable GitHub API error during polling: {err.code} {err.reason}; continuing in this watch",
+                file=sys.stderr,
+            )
+            runs = []
+            request_count = 0
         except urllib.error.URLError as err:
             print(f"GitHub network error: {err.reason}", file=sys.stderr)
-            if first_poll:
-                return RETRY_EXIT_CODE
             runs = []
+            request_count = 0
         except Exception as err:  # noqa: BLE001
             print(f"Polling failed: {err}", file=sys.stderr)
             if first_poll:

@@ -178,8 +178,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
 - Watches: use the bundled
   `.agents/skills/pr-delivery-loop/scripts/wait_pr.py` with `python3`; it is
   self-contained with `_github_wait_common.py`. Use one-shot watches per phase,
-  re-arm after each round, and never `--forever`. A CI-only wait may use the
-  bundled `wait_action.py`.
+  re-arm after each round by updating/resuming the same watch ID, and never
+  `--forever`. A CI-only wait may use the bundled `wait_action.py`. Both waiters
+  keep retryable GitHub/network errors inside the bounded one-shot timeout; only
+  terminal errors stop the watch.
 - The PR waiter filters your own reviews and comments by the authenticated
   GitHub viewer login. It must resolve that identity before polling; if `/user`
   is unavailable for `--pr`, fail closed or explicitly pass
@@ -225,11 +227,12 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `enabled=0` with no waiter behind it. Both errors are silent and look
   identical on a dashboard, so a brief must never ask a lane to "self-certify
   enabled" — that phrase prescribes exactly the unsound check.
-- A watch you delete on purpose is not a liveness break while you are mid-run:
-  the running turn *is* the liveness. Deleting a stale watch before you start
-  editing is correct — a watch whose stored message describes the previous
-  round's world hands your future self a brief that contradicts the current
-  one. Re-arm after the push, then verify both ways.
+- Preserve the watch ID when re-arming: use `vibe watch update` or `vibe watch
+  resume` on the existing definition so its owner stamp remains compatible with
+  the persisted state file. If an ownership handoff is unavoidable, rotate to a
+  fresh state path and seed it before starting the replacement. A watch you delete
+  on purpose is not a liveness break while you are mid-run: the running turn *is*
+  the liveness. Re-arm after the push, then verify both ways.
 - For whoever gates the PR: a lane run that ended `succeeded` proves nothing
   about the loop. A watch-triggered run can finish clean having pushed nothing
   and armed nothing, leaving the PR with new findings and no watcher on either

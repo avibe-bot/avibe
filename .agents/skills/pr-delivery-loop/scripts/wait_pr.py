@@ -39,7 +39,6 @@ from _github_wait_common import (  # noqa: E402
     max_id,
     min_interval_for_unauthenticated,
     REQUEST_TIMEOUT_SECONDS,
-    RETRY_EXIT_CODE,
     requests_per_poll,
     resolve_authenticated_login,
     ResponseCache,
@@ -77,6 +76,7 @@ STATE_CURSOR_KEYS = (
     "issue_comment_cursor",
     "reaction_cursor",
 )
+REVIEW_FINGERPRINTS_KEY = "review_fingerprints"
 # A bot review lands as a burst of inline comments plus an envelope. Re-polling a
 # few times while the burst is still arriving turns it into one Agent turn instead
 # of one turn per fragment that happened to cross a poll boundary.
@@ -354,11 +354,12 @@ def _render_activity(
     actionable_only: bool = False,
     ignored_authors: set[str] | None = None,
     ignore_patterns: list[re.Pattern[str]] | None = None,
+    review_fingerprints: dict[str, str] | None = None,
 ) -> tuple[str | None, int, int, int, int, str]:
     ignored_authors = ignored_authors or set()
     ignore_patterns = ignore_patterns or []
     current_pr_status = _current_pr_status(state.get("pull_request"))
-    new_reviews = filter_new(state["reviews"], review_cursor)
+    new_reviews = _filter_review_changes(state["reviews"], review_cursor, review_fingerprints or {})
     new_review_comments = filter_new(state["review_comments"], review_comment_cursor)
     new_issue_comments = filter_new(state["issue_comments"], issue_comment_cursor)
 
@@ -484,6 +485,41 @@ def _write_cursor_output(
     }
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
+
+
+def _review_fingerprint(review: dict[str, Any]) -> str:
+    """Capture fields GitHub can update without allocating a new review id."""
+
+    return "|".join(
+        str(review.get(field) or "")
+        for field in ("state", "updated_at", "submitted_at", "body")
+    )
+
+
+def _review_fingerprint_map(reviews: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        str(review["id"]): _review_fingerprint(review)
+        for review in reviews
+        if isinstance(review.get("id"), int) and not isinstance(review.get("id"), bool)
+    }
+
+
+def _filter_review_changes(
+    reviews: list[dict[str, Any]],
+    cursor: int,
+    fingerprints: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Return new reviews and updates to reviews already covered by the id cursor."""
+
+    changed: list[dict[str, Any]] = []
+    for review in reviews:
+        review_id = review.get("id")
+        if not isinstance(review_id, int) or isinstance(review_id, bool):
+            continue
+        saved_fingerprint = fingerprints.get(str(review_id))
+        if review_id > cursor or (saved_fingerprint is not None and saved_fingerprint != _review_fingerprint(review)):
+            changed.append(review)
+    return changed
 
 
 def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
@@ -1004,6 +1040,13 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _saved_review_fingerprints(saved: dict[str, Any]) -> dict[str, str]:
+    value = saved.get(REVIEW_FINGERPRINTS_KEY)
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(item, str)}
+
+
 def _last_delivery() -> str | None:
     """When the supervisor last queued a report from this watch, as it sees it.
 
@@ -1222,6 +1265,8 @@ def main() -> int:
         watch_id=watch_id,
     )
     token_fingerprint = _token_fingerprint(token)
+    base_interval = max(args.interval, 1.0)
+    start = time.monotonic()
     viewer_login = None
     if args.pr is not None and not args.include_self_comments:
         # The stored login spares a /user request on every cycle of a forever watch,
@@ -1230,17 +1275,32 @@ def main() -> int:
         # account's comments and let the new account's own comments wake the Agent.
         if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
             viewer_login = _saved_str(saved, "viewer_login")
-        try:
-            viewer_login = viewer_login or resolve_authenticated_login(token)
-        except urllib.error.HTTPError as err:
-            print(f"GitHub viewer lookup failed: {err.code} {err.reason}", file=sys.stderr)
-            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
-        except urllib.error.URLError as err:
-            print(f"GitHub viewer lookup failed: {err.reason}", file=sys.stderr)
-            return RETRY_EXIT_CODE
-        except Exception as err:  # noqa: BLE001
-            print(f"GitHub viewer lookup failed: {err}", file=sys.stderr)
-            return 1
+        while viewer_login is None:
+            try:
+                viewer_login = resolve_authenticated_login(token)
+            except urllib.error.HTTPError as err:
+                if not is_retryable_http_error(err):
+                    print(f"GitHub viewer lookup failed: {err.code} {err.reason}", file=sys.stderr)
+                    return 1
+                print(
+                    f"Retryable GitHub viewer lookup error: {err.code} {err.reason}; continuing in this watch",
+                    file=sys.stderr,
+                )
+            except urllib.error.URLError as err:
+                print(f"GitHub viewer lookup failed: {err.reason}; continuing in this watch", file=sys.stderr)
+            except Exception as err:  # noqa: BLE001
+                print(f"GitHub viewer lookup failed: {err}", file=sys.stderr)
+                return 1
+            if viewer_login is not None:
+                break
+            if args.timeout > 0:
+                remaining_timeout = args.timeout - (time.monotonic() - start)
+                if remaining_timeout <= 0:
+                    print("Timed out while resolving GitHub viewer identity", file=sys.stderr)
+                    return 124
+                time.sleep(min(base_interval, remaining_timeout))
+            else:
+                time.sleep(base_interval)
         if not viewer_login:
             print(
                 "GitHub viewer identity could not be resolved; pass --include-self-comments explicitly to continue.",
@@ -1248,11 +1308,8 @@ def main() -> int:
             )
             return 1
 
-    base_interval = max(args.interval, 1.0)
     effective_interval = base_interval
     settle_seconds = max(args.settle, 0.0)
-
-    start = time.monotonic()
 
     # Resume only from a complete cursor set. A partial one would leave some
     # baseline to be derived from a `since`-narrowed fetch, which no longer
@@ -1289,39 +1346,53 @@ def main() -> int:
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
 
-    try:
-        if args.pr is not None:
-            state, requests_per_poll_count = _fetch_state(
-                args.repo,
-                args.pr,
-                token,
-                cache=cache,
-                review_comment_since=review_comment_since,
-                issue_comment_since=issue_comment_since,
+    while True:
+        try:
+            if args.pr is not None:
+                state, requests_per_poll_count = _fetch_state(
+                    args.repo,
+                    args.pr,
+                    token,
+                    cache=cache,
+                    review_comment_since=review_comment_since,
+                    issue_comment_since=issue_comment_since,
+                )
+            else:
+                initial_pr_stop_after_id = None
+                initial_pr_max_pages = None
+                if since_pr_id is not None and not args.catch_up:
+                    initial_pr_stop_after_id = since_pr_id
+                elif not args.catch_up:
+                    initial_pr_max_pages = 1
+                state, requests_per_poll_count = _fetch_new_pr_state(
+                    args.repo,
+                    token,
+                    stop_after_id=initial_pr_stop_after_id,
+                    max_pages=initial_pr_max_pages,
+                    cache=cache,
+                )
+            break
+        except urllib.error.HTTPError as err:
+            if not is_retryable_http_error(err):
+                print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
+                return 1
+            print(
+                f"Retryable GitHub API error: {err.code} {err.reason}; continuing in this watch",
+                file=sys.stderr,
             )
+        except urllib.error.URLError as err:
+            print(f"GitHub network error: {err.reason}; continuing in this watch", file=sys.stderr)
+        except Exception as err:  # noqa: BLE001
+            print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
+            return 1
+        if args.timeout > 0:
+            remaining_timeout = args.timeout - (time.monotonic() - start)
+            if remaining_timeout <= 0:
+                print("Timed out while fetching initial GitHub PR state", file=sys.stderr)
+                return 124
+            time.sleep(min(base_interval, remaining_timeout))
         else:
-            initial_pr_stop_after_id = None
-            initial_pr_max_pages = None
-            if since_pr_id is not None and not args.catch_up:
-                initial_pr_stop_after_id = since_pr_id
-            elif not args.catch_up:
-                initial_pr_max_pages = 1
-            state, requests_per_poll_count = _fetch_new_pr_state(
-                args.repo,
-                token,
-                stop_after_id=initial_pr_stop_after_id,
-                max_pages=initial_pr_max_pages,
-                cache=cache,
-            )
-    except urllib.error.HTTPError as err:
-        print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
-        return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
-    except urllib.error.URLError as err:
-        print(f"GitHub network error: {err.reason}", file=sys.stderr)
-        return RETRY_EXIT_CODE
-    except Exception as err:  # noqa: BLE001
-        print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
-        return 1
+            time.sleep(base_interval)
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -1361,6 +1432,7 @@ def main() -> int:
             args.since_issue_comment_id, "issue_comment_cursor", "issue_comments"
         )
         reaction_cursor = _initial_cursor(args.since_reaction_id, "reaction_cursor", "reactions")
+        review_fingerprints = _saved_review_fingerprints(saved)
         pr_status = (
             args.since_pr_status
             or (_saved_str(saved, "pr_status") if resumed else None)
@@ -1386,7 +1458,8 @@ def main() -> int:
         )
 
         def _render(cursors: tuple[int, int, int, int, str]) -> tuple[str | None, int, int, int, int, str]:
-            return _render_activity(
+            nonlocal review_fingerprints
+            result = _render_activity(
                 repo=args.repo,
                 pr_number=args.pr,
                 state=state,
@@ -1401,7 +1474,10 @@ def main() -> int:
                 actionable_only=args.actionable_only,
                 ignored_authors=ignored_authors,
                 ignore_patterns=ignore_patterns,
+                review_fingerprints=review_fingerprints,
             )
+            review_fingerprints = _review_fingerprint_map(state["reviews"])
+            return result
 
         def _advance_since() -> None:
             nonlocal review_comment_since, issue_comment_since
@@ -1415,6 +1491,7 @@ def main() -> int:
                 "issue_comment_cursor": issue_comment_cursor,
                 "reaction_cursor": reaction_cursor,
                 "pr_status": pr_status,
+                REVIEW_FINGERPRINTS_KEY: review_fingerprints,
                 "review_comment_since": review_comment_since,
                 "issue_comment_since": issue_comment_since,
                 "viewer_login": viewer_login,
@@ -1634,7 +1711,13 @@ def main() -> int:
                 )
                 return 1
             print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
+            if is_retryable_http_error(err):
+                print(
+                    f"Retryable GitHub API error during polling: {err.code} {err.reason}; continuing in this watch",
+                    file=sys.stderr,
+                )
+                continue
+            return 1
         except Exception as err:  # noqa: BLE001
             print(f"Polling failed: {err}", file=sys.stderr)
             continue
