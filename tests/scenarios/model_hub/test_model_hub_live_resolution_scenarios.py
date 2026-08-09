@@ -17,6 +17,8 @@ from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
@@ -134,10 +136,25 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
             for backend in ("claude", "codex", "opencode")
         },
     )
-    for agent in config.agents.values():
+    route_models = {
+        "claude": "model-live",
+        "codex": "model-live",
+        "opencode": "anthropic/model-live",
+    }
+    for backend, agent in config.agents.items():
+        eligible_sources = tuple(
+            source
+            for source in sources
+            if ModelHubConfig.source_eligible_for_backend(source, backend)
+        )
         agent.sources = ModelHubAgentSourcesConfig(
-            policy="custom",
-            order=[source.id for source in sources],
+            order=[source.id for source in eligible_sources],
+        )
+        agent.routes[route_models[backend]] = ModelHubRouteConfig(
+            hops=tuple(
+                ModelHubRouteHopConfig(source.id, "model-live")
+                for source in eligible_sources
+            )
         )
     return config
 
@@ -172,25 +189,6 @@ async def _post_turn(
             json={"model": launch.runtime_model, "messages": [], "stream": stream},
         ) as response:
             return response.status, await response.read()
-
-
-def test_mh_pri_001_source_order_projection_has_no_policy_state(tmp_path: Path) -> None:
-    """MH-PRI-001: the persisted Source order is projected without policy state."""
-
-    alpha = _source("src_alpha001")
-    zulu = _source("src_zulu0001")
-    store = MemoryStore(_config(alpha, zulu))
-    store.config.agents["claude"].sources.order = [zulu.id, alpha.id]
-    service = _service(
-        tmp_path,
-        store,
-        AdapterBoundaryFake([]),
-        now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
-    )
-
-    projected = service.get_agent_sources("claude")["sources"]
-    assert projected["order"] == [zulu.id, alpha.id]
-    assert "policy" not in projected
 
 
 def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
@@ -264,7 +262,7 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"recovered":true}'),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
         assert store.config.agents["opencode"].menu is not None
         store.config.agents["opencode"].menu.checked = ["anthropic/model-live"]
         service = _service(tmp_path, store, adapter, now=lambda: clock[0])
@@ -280,7 +278,7 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             status, body = await _post_turn(launch, endpoint=endpoint)
             assert status == 200
             assert body == b'{"ok":true}'
-            assert [call[0] for call in adapter.invocations] == ["src_primary", "src_backup"]
+            assert [call[0] for call in adapter.invocations] == ["src_primary1", "src_backup01"]
             assert store.load().sources[0].state.status == "cooldown"
             assert [event["kind"] for event in service.list_events(limit=5)[:2]] == ["switch", "cooldown"]
             assert service.list_events(limit=5)[1]["reason"] == reason
@@ -301,7 +299,7 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             )
             assert recovered_status == 200
             assert recovered_body == b'{"recovered":true}'
-            assert adapter.invocations[-1][0] == "src_primary"
+            assert adapter.invocations[-1][0] == "src_primary1"
         finally:
             await gateway.close()
 
@@ -318,7 +316,7 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
         service = _service(
             tmp_path,
             store,
@@ -331,7 +329,7 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
             status, body = await _post_turn(await router.resolve("claude", "model-live"))
             assert status == 200
             assert body == b'{"ok":true}'
-            assert [call[0] for call in adapter.invocations] == ["src_primary", "src_primary"]
+            assert [call[0] for call in adapter.invocations] == ["src_primary1", "src_primary1"]
             assert store.load().sources[0].state.status == "standby"
         finally:
             await gateway.close()
@@ -352,7 +350,7 @@ def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"backup":true}'),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
         service = _service(
             tmp_path,
             store,
@@ -365,9 +363,9 @@ def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
             status, _body = await _post_turn(await router.resolve("claude", "model-live"))
             assert status == 200
             assert [call[0] for call in adapter.invocations] == [
-                "src_primary",
-                "src_primary",
-                "src_backup",
+                "src_primary1",
+                "src_primary1",
+                "src_backup01",
             ]
             primary = store.load().sources[0]
             assert primary.state.status == "needs_action"
@@ -400,7 +398,7 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b"data: backup\n\n"),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
         service = _service(
             tmp_path,
             store,
@@ -413,7 +411,7 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
             status, body = await _post_turn(await router.resolve("claude", "model-live"), stream=True)
             assert status == 200
             assert body == b"data: partial\n\n"
-            assert [call[0] for call in adapter.invocations] == ["src_primary"]
+            assert [call[0] for call in adapter.invocations] == ["src_primary1"]
             assert store.load().sources[0].state.status == "standby"
         finally:
             await gateway.close()
@@ -436,7 +434,7 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
                 ),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary")))
+        store = MemoryStore(_config(_source("src_primary1")))
         service = _service(
             tmp_path,
             store,
@@ -460,7 +458,7 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
 def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None:
     async def exercise() -> None:
         adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
-        store = MemoryStore(_config(_source("src_primary")))
+        store = MemoryStore(_config(_source("src_primary1")))
         service = _service(
             tmp_path,
             store,
@@ -488,7 +486,7 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
 def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path) -> None:
     async def exercise() -> None:
         adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
-        store = MemoryStore(_config(_source("src_primary")))
+        store = MemoryStore(_config(_source("src_primary1")))
         service = _service(
             tmp_path,
             store,
@@ -524,8 +522,8 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
 
     async def exercise() -> None:
         clock = datetime(2026, 7, 25, tzinfo=timezone.utc)
-        native = _source("src_native", channel="native_cli", kind="subscription")
-        backup = _source("src_backup")
+        native = _source("src_native01", channel="native_cli", kind="subscription")
+        backup = _source("src_backup01")
         store = MemoryStore(_config(native, backup))
         first_adapter = AdapterBoundaryFake([])
         first_service = _service(tmp_path, store, first_adapter, now=lambda: clock)
@@ -558,8 +556,8 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
                 "switch",
                 "cooldown",
             ]
-            assert persisted[0]["from_source"] == "src_native"
-            assert persisted[0]["to_source"] == "src_backup"
+            assert persisted[0]["from_source"] == "src_native01"
+            assert persisted[0]["to_source"] == "src_backup01"
         finally:
             await second_gateway.close()
 

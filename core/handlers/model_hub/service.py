@@ -375,47 +375,78 @@ def _matching_v1_model_id(
 ) -> str | None:
     """Return one concrete observed model for the frozen add-time matching-v1."""
 
+    observed_models = tuple(
+        model for model in source.models if model.provenance == "discovered"
+    )
+
     if backend == "opencode":
         requested_model = normalize_opencode_requested_model(requested_model, checked_models) or ""
         if not requested_model:
             return None
         exact = [
             model.id
-            for model in source.models
+            for model in observed_models
             if opencode_model_id(source.vendor, model.id) == requested_model
         ]
         return exact[0] if len(exact) == 1 else None
 
-    literal = [model.id for model in source.models if model.id == requested_model]
+    if backend == "claude" and source.vendor == "anthropic" and source.supply_channel == "native_cli":
+        family = _CLAUDE_FAMILY_ALIASES.get(requested_model)
+        requested_version: tuple[int, ...] | None = None
+        parsed_request = _parsed_claude_model_id(requested_model)
+        if family is None and parsed_request is not None:
+            family, requested_version, requested_date = parsed_request
+            if requested_date is not None:
+                return next(
+                    (model.id for model in observed_models if model.id == requested_model),
+                    None,
+                )
+        if family is not None:
+            matches: list[tuple[tuple[int, ...], int, str]] = []
+            for model in observed_models:
+                parsed = _parsed_claude_model_id(model.id)
+                if parsed is None:
+                    continue
+                candidate_family, candidate_version, candidate_date = parsed
+                if candidate_family != family:
+                    continue
+                if requested_version is not None and candidate_version != requested_version:
+                    continue
+                matches.append((candidate_version, candidate_date or 0, model.id))
+            return max(matches)[2] if matches else None
+
+    literal = [model.id for model in observed_models if model.id == requested_model]
     if literal:
         return literal[0]
-    if backend != "claude" or source.vendor != "anthropic" or source.supply_channel != "native_cli":
-        return None
+    return None
 
-    family = _CLAUDE_FAMILY_ALIASES.get(requested_model)
-    requested_version: tuple[int, ...] | None = None
-    if family is None:
-        parsed_request = _parsed_claude_model_id(requested_model)
-        if parsed_request is None:
-            return None
-        family, requested_version, requested_date = parsed_request
-        if requested_date is not None:
-            return None
 
-    matches: list[tuple[tuple[int, ...], int, str]] = []
-    for model in source.models:
-        if model.provenance != "discovered":
-            continue
-        parsed = _parsed_claude_model_id(model.id)
-        if parsed is None:
-            continue
-        candidate_family, candidate_version, candidate_date = parsed
-        if candidate_family != family:
-            continue
-        if requested_version is not None and candidate_version != requested_version:
-            continue
-        matches.append((candidate_version, candidate_date or 0, model.id))
-    return max(matches)[2] if matches else None
+async def _provision_transient_credential_with_cancellation_ownership(
+    service: "ModelHubService",
+    vendor: str,
+    key: str,
+    base_url: str | None,
+) -> str:
+    """Keep ownership of an engine ref when the caller is cancelled mid-provision."""
+
+    provision_task = asyncio.create_task(
+        service._engine_call(
+            service.adapter.provision_transient_credential(vendor, key, base_url)
+        )
+    )
+    try:
+        return await asyncio.shield(provision_task)
+    except asyncio.CancelledError:
+        # The shield leaves provisioning alive; wait for its ref before settling
+        # cancellation so the transient material can be journaled and revoked.
+        transient_ref = await asyncio.shield(provision_task)
+        try:
+            await asyncio.shield(
+                service._rollback_credential("observation", transient_ref)
+            )
+        except BaseException:
+            logger.warning("Transient Model Hub observation cleanup did not settle")
+        raise
 
 
 def _binding(source: ModelHubSourceConfig) -> SourceBinding:
@@ -877,8 +908,11 @@ class ModelHubService:
         if not isinstance(key, str) or not key.strip():
             raise ModelHubError("discovery_failed")
         protocol_order = self._observation_protocol_order(payload)
-        transient_ref = await self._engine_call(
-            self.adapter.provision_transient_credential(vendor, key.strip(), base_url)
+        transient_ref = await _provision_transient_credential_with_cancellation_ownership(
+            self,
+            vendor,
+            key.strip(),
+            base_url,
         )
         try:
             try:
@@ -1892,7 +1926,10 @@ class ModelHubService:
                 "protocol_order": payload.get("protocol_order"),
             }
         )
-        if observation.protocol is None:
+        if (
+            observation.outcome is not ObservationOutcome.OBSERVED
+            or observation.protocol is None
+        ):
             raise ModelHubError(
                 "discovery_failed",
                 status=422,

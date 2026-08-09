@@ -467,7 +467,6 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     before = _tree_digest(native_home)
 
     service, store, adapter = _service(tmp_path)
-    store.config.agents["codex"].sources.policy = "custom"
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -502,9 +501,6 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert store.config.agents["claude"].sources.order == []
     assert store.config.agents["codex"].sources.order == []
     assert store.config.agents["opencode"].sources.order == []
-    assert set(store.config.effective_source_order("claude")) == imported_ids
-    assert store.config.effective_source_order("codex") == []
-    assert set(store.config.effective_source_order("opencode")) == imported_ids
     codex_payload = next(
         agent for agent in service.list_agents() if agent["backend"] == "codex"
     )
@@ -515,8 +511,9 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
         if item["eligible"]
     } == imported_ids
     assert all(
-        by_id[source_id].billing == "metered"
-        for source_id in store.config.effective_source_order("opencode")
+        source.billing == "metered"
+        for source in store.config.sources
+        if source.kind == "api_key"
     )
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
@@ -571,28 +568,6 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
         ("openai", "subscription", "native_cli", None),
     }
     assert adapter.provisioned == []
-
-
-def test_mh_mig_003_experimental_flag_keeps_oauth_native(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Scenario: MH-MIG-003."""
-
-    native_home = tmp_path / "native-home"
-    _write_codex_oauth(native_home)
-    _isolate_native_home(monkeypatch, native_home)
-    service, store, adapter = _service(tmp_path)
-    store.config.subscription_hub_experimental = True
-    oauth_item = next(item for item in service.migration_scan()["items"] if item["kind"] == "oauth_native")
-    assert oauth_item["proposed_action"] == "keep_native"
-    assert oauth_item["notes_key"] == "settings.models.source.nativeSupply"
-
-    result = asyncio.run(service.migration_apply([oauth_item["id"]]))
-    assert result["applied"] == 1
-    assert adapter.provisioned == []
-    assert len(store.config.sources) == 1
-    assert store.config.sources[0].supply_channel == "native_cli"
 
 
 @pytest.mark.parametrize(

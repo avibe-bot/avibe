@@ -6,7 +6,6 @@ import pytest
 
 from core.handlers.model_hub.adapter import RetainedMaterialDisposition
 from tests.scenario_harness.model_hub_native_oauth import (
-    HubOAuthScenarioHarness,
     NativeOAuthScenarioHarness,
 )
 from tests.ui_server_test_helpers import csrf_headers
@@ -129,8 +128,6 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
             "organizations": [{"title": "Example Org", "is_default": True}],
         },
     }
-    harness.store.config.agents["codex"].sources.policy = "custom"
-    harness.store.config.agents["codex"].sources.order = []
     client, headers = _client(monkeypatch, harness.service)
 
     started = client.post(
@@ -171,8 +168,6 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
     assert source["state"]["status"] == "standby"
     assert source["account_label"] == "chatgpt-owner@example.com \u00b7 plus \u00b7 Example Org"
     assert source["credential_ref"] is None
-    assert "policy" not in codex["sources"]
-    assert codex["sources"]["order"] == []
     assert codex["sources"]["eligibility"] == [
         {
             "source_id": source["id"],
@@ -251,55 +246,3 @@ def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, t
         f"/api/models/oauth/status/{cancelled['flow_id']}",
         base_url=BASE_URL,
     ).status_code == 404
-
-
-def test_mh_oauth_consent_001_public_source_omits_retired_consent_stamp(monkeypatch, tmp_path):
-    """Scenario: MH-OAUTH-CONSENT-001."""
-
-    harness = HubOAuthScenarioHarness(tmp_path)
-    client, headers = _client(monkeypatch, harness.service)
-
-    rejected = client.post(
-        "/api/models/oauth/start",
-        json={"vendor": "anthropic", "channel": "hub"},
-        headers=headers,
-        base_url=BASE_URL,
-    )
-    assert rejected.status_code == 409
-    assert rejected.get_json()["error"] == "consent_required"
-    assert harness.adapter.flows == {}
-
-    started = client.post(
-        "/api/models/oauth/start",
-        json={
-            "vendor": "anthropic",
-            "channel": "hub",
-            "experimental_consent": True,
-        },
-        headers=headers,
-        base_url=BASE_URL,
-    ).get_json()["flow"]
-    binding = harness.service.oauth_flows.binding(started["flow_id"])
-    assert binding is not None
-    assert binding.experimental_consent is True
-
-    harness.adapter.complete(started["flow_id"])
-    completed = client.get(
-        f"/api/models/oauth/status/{started['flow_id']}",
-        base_url=BASE_URL,
-    ).get_json()["flow"]
-    source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
-
-    assert completed["state"] == "success"
-    assert source["id"] == started["source_id"]
-    assert source["supply_channel"] == "hub"
-    assert "experimental_consent_at" not in source
-
-    harness.adapter.flows.clear()
-    repeated = client.get(
-        f"/api/models/oauth/status/{started['flow_id']}",
-        base_url=BASE_URL,
-    )
-    assert repeated.status_code == 200
-    assert repeated.get_json()["flow"]["state"] == "success"
-    assert len(client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"]) == 1

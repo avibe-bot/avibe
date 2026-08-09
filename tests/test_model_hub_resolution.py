@@ -73,6 +73,8 @@ class FakeAdapter:
         self.synced: list[tuple] = []
         self.discovery_started: asyncio.Event | None = None
         self.discovery_block: asyncio.Event | None = None
+        self.provision_started: asyncio.Event | None = None
+        self.provision_block: asyncio.Event | None = None
         self.sync_started: asyncio.Event | None = None
         self.sync_block: asyncio.Event | None = None
         self.outcomes = deque()
@@ -98,6 +100,10 @@ class FakeAdapter:
 
     async def provision_transient_credential(self, vendor, secret, base_url):
         self.provisioned.append(secret)
+        if self.provision_started is not None:
+            self.provision_started.set()
+        if self.provision_block is not None:
+            await self.provision_block.wait()
         return f"cred_{len(self.provisioned):08d}"
 
     async def revoke_credential(self, credential_ref):
@@ -196,7 +202,13 @@ def _service(tmp_path: Path, config: ModelHubConfig, adapter: FakeAdapter | None
 def test_matching_v1_claude_aliases_persist_concrete_observed_id():
     source = _source(
         "src_claudev1",
-        ("claude-opus-4-5-20251101", "claude-opus-4-6-20260101", "claude-opus-4-6-20260115"),
+        (
+            "opus",
+            "claude-opus-4-6",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-6-20260101",
+            "claude-opus-4-6-20260115",
+        ),
         kind="subscription",
         channel="native_cli",
         credential_ref=None,
@@ -218,6 +230,29 @@ def test_matching_v1_opencode_bare_name_requires_unique_checked_suffix():
     source = _source("src_openv001", ("x",), vendor="custom")
     assert _matching_v1_model_id(backend="opencode", requested_model="x", source=source, checked_models=("custom/x",)) == "x"
     assert _matching_v1_model_id(backend="opencode", requested_model="x", source=source, checked_models=("a/x", "custom/x")) is None
+
+
+def test_matching_v1_never_routes_to_manual_inventory():
+    source = _source("src_manual001", ("observed",), vendor="custom")
+    source.models.append(ModelHubModelConfig(id="manual-target", provenance="manual"))
+
+    assert (
+        _matching_v1_model_id(
+            backend="codex",
+            requested_model="manual-target",
+            source=source,
+        )
+        is None
+    )
+    assert (
+        _matching_v1_model_id(
+            backend="opencode",
+            requested_model="custom/manual-target",
+            source=source,
+            checked_models=("custom/manual-target",),
+        )
+        is None
+    )
 
 
 def test_runtime_opencode_resolution_never_repeats_bare_name_matching():
@@ -358,6 +393,35 @@ def test_source_creation_cancellation_revokes_unsaved_credential(tmp_path):
     assert adapter.revoked == ["cred_00000001"]
 
 
+def test_source_creation_cancellation_during_provision_revokes_owned_credential(tmp_path):
+    adapter = FakeAdapter()
+    adapter.provision_started = asyncio.Event()
+    adapter.provision_block = asyncio.Event()
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    async def scenario():
+        task = asyncio.create_task(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Key",
+                    "key": "sk-test-provision-cancel",
+                }
+            )
+        )
+        await adapter.provision_started.wait()
+        task.cancel()
+        adapter.provision_block.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert store.load().sources == []
+    assert adapter.revoked == ["cred_00000001"]
+    assert service.revocations.list() == []
+
+
 def test_source_creation_cancellation_after_persist_keeps_source_and_credential(tmp_path):
     adapter = FakeAdapter()
     adapter.sync_started = asyncio.Event()
@@ -439,6 +503,35 @@ def test_ambiguous_observation_never_creates_a_source(tmp_path):
         )
 
     assert exc.value.data["observation"]["outcome"] == "ambiguous"
+    assert store.load().sources == []
+    assert adapter.revoked == ["cred_00000001"]
+
+
+def test_authentication_failure_observation_never_creates_a_source(tmp_path):
+    adapter = FakeAdapter()
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+        reachable=True,
+        authenticated=False,
+        protocol="anthropic",
+        discovery=ObservationDiscovery.NOT_ATTEMPTED,
+        model_ids=(),
+    )
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Rejected key",
+                    "key": "sk-test-auth-rejected",
+                }
+            )
+        )
+
+    assert exc.value.data["observation"]["outcome"] == "authentication_failed"
     assert store.load().sources == []
     assert adapter.revoked == ["cred_00000001"]
 
