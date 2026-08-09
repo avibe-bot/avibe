@@ -10,9 +10,15 @@ export const dependencyHasInstallAction = (
 export const dependencyIsStartupManaged = (dependency: Pick<DependencyItem, 'id'>): boolean =>
   STARTUP_MANAGED_DEPENDENCIES.has(dependency.id);
 
+export const dependencyIsStartupRepairing = (
+  dependency: Pick<DependencyItem, 'id' | 'installed' | 'status'>,
+): boolean =>
+  dependencyIsStartupManaged(dependency) &&
+  (!dependency.installed || dependency.status === 'upgrade_required' || dependency.status === 'error');
+
 export const dependenciesNeedAutomaticRefresh = (
   result: DependenciesResult,
   allowInitialRetry = false,
 ): boolean =>
   Boolean(result.reconciling) ||
-  (allowInitialRetry && result.deps.some((dependency) => dependencyIsStartupManaged(dependency) && !dependency.installed));
+  (allowInitialRetry && result.deps.some((dependency) => dependencyIsStartupRepairing(dependency)));

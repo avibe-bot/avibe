@@ -7529,6 +7529,9 @@ def dependencies_status(*, offline: bool = False) -> dict:
     Returns stable ids + machine-readable status only — display copy (label /
     detail) is localized in the React page, not sent from here.
     """
+    # Probes below can outlive a short reconciliation, so preserve either edge of
+    # the lock window instead of reporting a stale idle snapshot.
+    reconciling_before = _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked()
     deps: list[dict] = []
 
     a = askill_update_status(include_latest=False)
@@ -7649,7 +7652,7 @@ def dependencies_status(*, offline: bool = False) -> dict:
     return {
         "ok": True,
         "deps": deps,
-        "reconciling": _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked(),
+        "reconciling": reconciling_before or _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked(),
     }
 
 

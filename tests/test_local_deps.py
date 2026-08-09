@@ -891,6 +891,34 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
 
 
+def test_dependencies_status_preserves_reconciliation_seen_before_probes(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
+    import core.show_runtime as srt_mod
+
+    class _ShowRuntime:
+        def status(self):
+            return {"installed": True, "node_available": True, "node_version": "22.0"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _ShowRuntime())
+
+    class _LockSnapshot:
+        def __init__(self):
+            self._calls = 0
+
+        def locked(self):
+            self._calls += 1
+            return self._calls == 1
+
+    monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _LockSnapshot())
+
+    assert api.dependencies_status(offline=True)["reconciling"] is True
+
+
 @pytest.mark.parametrize(
     ("runtime", "expected"),
     [

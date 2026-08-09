@@ -4,6 +4,7 @@ import {
   dependenciesNeedAutomaticRefresh,
   dependencyHasInstallAction,
   dependencyIsStartupManaged,
+  dependencyIsStartupRepairing,
 } from './SettingsDependenciesPage.logic';
 
 describe('dependencyHasInstallAction', () => {
@@ -68,5 +69,18 @@ describe('startup dependency refresh', () => {
         deps: [dependency('show-runtime', true), dependency('memory-runtime', false)],
       }),
     ).toBe(false);
+  });
+
+  it('treats installed dependencies requiring an upgrade as startup repairs', () => {
+    expect(
+      dependencyIsStartupRepairing({ id: 'avault', installed: true, status: 'upgrade_required' }),
+    ).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [{ ...dependency('avault', true), status: 'upgrade_required' }],
+      }, true),
+    ).toBe(true);
   });
 });

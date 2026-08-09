@@ -27,7 +27,7 @@ import { useToast } from '@/context/ToastContext';
 import {
   dependenciesNeedAutomaticRefresh,
   dependencyHasInstallAction,
-  dependencyIsStartupManaged,
+  dependencyIsStartupRepairing,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 
@@ -138,7 +138,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusText = (d: DependencyItem) => {
-    if (reconciling && dependencyIsStartupManaged(d) && !d.installed) {
+    if (reconciling && dependencyIsStartupRepairing(d)) {
       return t('settings.dependencies.installing');
     }
     // Closed non-installed failure states render distinctly, ahead
@@ -152,7 +152,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusVariant = (d: DependencyItem): 'success' | 'warning' | 'destructive' => {
-    if (reconciling && dependencyIsStartupManaged(d) && !d.installed) return 'warning';
+    if (reconciling && dependencyIsStartupRepairing(d)) return 'warning';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
     return d.installed ? 'success' : 'destructive';
@@ -182,7 +182,7 @@ export const SettingsDependenciesPage: React.FC = () => {
           {deps.map((d) => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
-            const startupInstalling = reconciling && dependencyIsStartupManaged(d) && !d.installed;
+            const startupInstalling = reconciling && dependencyIsStartupRepairing(d);
             const showAction = dependencyHasInstallAction(d);
             return (
               <SettingsResourceRow

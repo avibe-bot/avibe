@@ -4944,8 +4944,9 @@ def test_show_runtime_manager_installs_without_blocking_event_loop(monkeypatch, 
     monkeypatch.setattr("core.show_runtime.asyncio.to_thread", fake_to_thread)
 
     assert asyncio.run(manager._resolve_managed_command()) == [str(manager._managed_bin_path())]
-    assert len(calls) == 1
-    assert calls[0].__name__ == "_install_managed_runtime_serialized"
+    assert len(calls) == 2
+    assert calls[0].__name__ == "acquire"
+    assert calls[1].__name__ == "fake_install"
 
 
 def test_show_runtime_manager_fails_closed_when_manifest_is_absent(tmp_path):
