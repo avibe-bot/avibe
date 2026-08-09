@@ -234,7 +234,23 @@ def _build_controller_double(handler=None):
 
     controller = MagicMock()
     controller.message_handler = MagicMock()
-    controller.message_handler.handle_user_message = AsyncMock(side_effect=handler or (lambda ctx, text: None))
+
+    async def _handle_user_message(context, text):
+        payload = context.platform_specific or {}
+        lifecycle_admission = payload.pop(
+            session_turns.TURN_LIFECYCLE_ADMISSION_KEY,
+            None,
+        )
+        release = getattr(lifecycle_admission, "release", None)
+        if callable(release):
+            release()
+        if handler is not None:
+            return await handler(context, text)
+        return None
+
+    controller.message_handler.handle_user_message = AsyncMock(
+        side_effect=_handle_user_message,
+    )
 
     sinks: dict = {}
     controller.active_turn_sinks = sinks
@@ -295,6 +311,30 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     return controller
+
+
+def test_controller_double_releases_turn_lifecycle_admission_before_handler() -> None:
+    async def _exercise() -> None:
+        lock = asyncio.Lock()
+        await lock.acquire()
+        admission = session_turns.TurnLifecycleAdmission(lock)
+        context = MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={
+                session_turns.TURN_LIFECYCLE_ADMISSION_KEY: admission,
+            },
+        )
+
+        async def handler(received_context, _text):
+            assert session_turns.TURN_LIFECYCLE_ADMISSION_KEY not in received_context.platform_specific
+            assert lock.locked() is False
+
+        controller = _build_controller_double(handler=handler)
+        await controller.message_handler.handle_user_message(context, "hello")
+
+    asyncio.run(_exercise())
 
 
 def test_memory_final_flush_delegates_identity_to_controller() -> None:
