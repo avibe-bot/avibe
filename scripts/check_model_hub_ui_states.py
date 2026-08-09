@@ -6,9 +6,16 @@ question only a reviewer could answer. §0.8 turns the states into a table; this
 script turns the table into a set of assertions a machine can check.
 
 It regenerates its input from the live document in the same run it reports —
-pass a path, or a git rev that is read through `git show`. It never consumes a
-snapshot committed beside it, because a snapshot can agree with a checker while
-both disagree with the file everyone else reads.
+pass a checkout, a path, or a git rev that is read through `git show`. It never
+consumes a snapshot committed beside it, because a snapshot can agree with a
+checker while both disagree with the file everyone else reads.
+
+Every input this run reads — the document, `api.md`, the schemas, the cited
+Python — comes from one `Origin` resolved once from that target, and every arm
+reads a declared slice of the document rather than all of it. No arm opens a path
+or scans the whole text on its own: an arm that chooses where to read is an arm
+that can be pointed at the wrong revision, or fooled by a line elsewhere that
+looks like the one it wanted, and both have now happened.
 
 Five gap classes, each a set computed from the text:
 
@@ -48,10 +55,174 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = Path("docs/plans/model-hub-ui-spec.md")
+CONTRACTS = Path("docs/plans/model-hub-contracts")
+API_CONTRACT = CONTRACTS / "api.md"
+
+MODE_FILES = "same_run_live_files"
+MODE_REV = "same_run_git_rev"
+
+
+# --- the gate's one input origin --------------------------------------------
+#
+# Every byte this run reads comes from here, and no arm reads a path of its own.
+#
+# The two halves of that arrived a review round apart, as one defect found
+# twice. Round 9: the gate decided path-or-revision by *spelling*, so `HEAD`, a
+# branch and a tag were read as paths and died on a missing file — the gate
+# could not be pointed at the head under review. Round 13: the spec could be
+# read from a revision but the authorities never were, so a check of a revision
+# compared that revision's document against whatever the contracts say right
+# now, and an alternate root holding only the spec silently borrowed all of its
+# authorities from this checkout and reported green. Neither is an accident of
+# one arm. Both are the same generator the shared comparison closed for *names*,
+# still running on *reads*: each arm inventing how it gets at a file.
+#
+# So reading is one object with one resolution, the origin is decided once per
+# run from the target, and what it resolved to is printed with the verdict. An
+# authority borrowed from somewhere else is precisely the thing a green result
+# may not hide.
+
+
+class Origin:
+    """A checkout or a git revision, and the only place this file reads a file."""
+
+    def __init__(self, kind: str, *, tree: Path | None = None, rev: str | None = None) -> None:
+        if kind not in ("tree", "rev"):
+            raise ValueError(f"{kind!r} is not an origin kind")
+        self.kind = kind
+        self.tree = tree
+        self.rev = rev
+        self._cache: dict[str, str | None] = {}
+
+    # --- how a spelling becomes an origin ---------------------------------
+    @classmethod
+    def tree_at(cls, path: Path) -> "Origin":
+        return cls("tree", tree=path.resolve())
+
+    @classmethod
+    def revision(cls, rev: str) -> "Origin":
+        return cls("rev", rev=rev)
+
+    @classmethod
+    def resolve(cls, spelling: str) -> "Origin":
+        """A directory is a checkout; anything else has to name a revision.
+
+        Decided by the filesystem, never by spelling — that is what round 9
+        cost. A revision has to prove itself by producing the one file every
+        authority hangs off, so a typo fails here, saying which two things the
+        target is not, instead of surfacing later as an empty inventory.
+        """
+        for candidate in (Path(spelling), ROOT / spelling):
+            if candidate.is_dir():
+                return cls.tree_at(candidate)
+        origin = cls.revision(spelling.split(":", 1)[0])
+        if origin.read(API_CONTRACT) is None:
+            raise SystemExit(
+                f"{spelling!r} is neither a directory nor a git revision holding {API_CONTRACT}"
+            )
+        return origin
+
+    @classmethod
+    def containing(cls, path: Path) -> "Origin | None":
+        """The checkout `path` lives in, found by the file the authorities start at."""
+        for parent in path.resolve().parents:
+            if (parent / API_CONTRACT).is_file():
+                return cls.tree_at(parent)
+        return None
+
+    @property
+    def mode(self) -> str:
+        return MODE_FILES if self.kind == "tree" else MODE_REV
+
+    @property
+    def label(self) -> str:
+        if self.kind == "rev":
+            return f"git rev {self.rev}"
+        return "this checkout" if self.tree == ROOT else str(self.tree)
+
+    # --- reading ----------------------------------------------------------
+    def read(self, rel: str | Path) -> str | None:
+        """Repo-relative path -> text, or None when this origin does not carry it."""
+        key = str(rel)
+        if key not in self._cache:
+            self._cache[key] = self._read(key)
+        return self._cache[key]
+
+    def _read(self, rel: str) -> str | None:
+        if self.kind == "tree":
+            assert self.tree is not None
+            path = self.tree / rel
+            return path.read_text(encoding="utf-8") if path.is_file() else None
+        # `cwd=ROOT` is the object store the revision is named in, not an input:
+        # a rev is only meaningful inside a repository, and this is the one whose
+        # history the caller spelled a rev of.
+        proc = subprocess.run(
+            ["git", "show", f"{self.rev}:{rel}"], cwd=ROOT, capture_output=True, text=True
+        )
+        return proc.stdout if proc.returncode == 0 else None
+
+    def names_in(self, directory: Path, suffix: str) -> list[str]:
+        """File names directly under `directory` ending in `suffix`, sorted."""
+        if self.kind == "tree":
+            assert self.tree is not None
+            return sorted(p.name for p in (self.tree / directory).glob(f"*{suffix}"))
+        proc = subprocess.run(
+            ["git", "ls-tree", "--name-only", f"{self.rev}:{directory}"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return []
+        return sorted(n for n in proc.stdout.split() if n.endswith(suffix))
+
+    @staticmethod
+    def read_detached(path: Path) -> str:
+        """A document that is in no checkout — the mutation harness writes one."""
+        return path.read_text(encoding="utf-8")
+
+
+def resolve_inputs(
+    target: str | Path, authorities: str | Path | None = None
+) -> tuple[str, str, Origin]:
+    """The document to check, how it was read, and the origin of every authority.
+
+    `target` is a checkout, a file, or a git revision. The authority origin
+    *follows* the target — a revision's spec is checked against that revision's
+    contracts — with one case that must be stated out loud rather than assumed:
+    a document living outside any checkout has no authorities of its own, so the
+    caller names whose it borrows and the borrowing is reported with the verdict.
+    Left to a default, that case is a false pass wearing a green badge.
+    """
+    stated = Origin.resolve(str(authorities)) if authorities is not None else None
+    for candidate in (Path(target), ROOT / str(target)):
+        if candidate.is_dir():
+            here = Origin.tree_at(candidate)
+            text = here.read(SPEC)
+            if text is None:
+                raise SystemExit(f"{here.label} holds no {SPEC}")
+            return text, here.mode, stated or here
+        if candidate.is_file():
+            origin = stated or Origin.containing(candidate)
+            if origin is None:
+                raise SystemExit(
+                    f"{candidate} is in no checkout that holds {API_CONTRACT}, so this run has "
+                    f"no authority to check it against. Point the gate at the checkout or the "
+                    f"revision, or state whose authorities it borrows: "
+                    f"check(<document>, authorities=<checkout or revision>)"
+                )
+            return Origin.read_detached(candidate), MODE_FILES, origin
+    rev, _, rel = str(target).partition(":")
+    here = Origin.resolve(rev)
+    text = here.read(rel or SPEC)
+    if text is None:
+        raise SystemExit(f"{here.label} holds no {rel or SPEC}")
+    return text, here.mode, stated or here
+
 
 ROUTE_RE = re.compile(r"`(POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
 ANY_ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
@@ -329,8 +500,9 @@ SECTION_RE = re.compile(r"^### (\d+\.\d+)\b")
 # binding, so an unbound literal is itself the finding: the document has to name
 # the route a body belongs to before anyone, machine or reviewer, can say the
 # body is right.
-CONTRACTS = Path("docs/plans/model-hub-contracts")
-API_CONTRACT = CONTRACTS / "api.md"
+#
+# `CONTRACTS` / `API_CONTRACT` are declared with the other input constants, next
+# to the origin that reads them.
 
 API_ROW_RE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`$")
 BODY_RE = re.compile(r"`(\{[^`{}]*\})`")
@@ -426,15 +598,19 @@ def enum_fields(node: Any) -> dict[str, set[str]]:
     return {name: set().union(*paths.values()) for name, paths in enum_paths(node).items()}
 
 
-def load_authorities(root: Path) -> dict[str, Any]:
-    """Read the authority files live, in this run, from `root`.
+def load_authorities(origin: Origin) -> dict[str, Any]:
+    """Read the authority files live, in this run, from `origin`.
 
-    The spec may be read from a git revision; the authorities never are. They
-    are the files everyone else edits, and the question this class answers is
-    whether the spec agrees with *them*, not with a copy of them taken at the
-    same moment the spec was written.
+    The authorities come from wherever the document came from, and never from
+    "wherever this script happens to be installed". A revision's spec is checked
+    against that revision's contracts; a spec read out of another checkout is
+    checked against that checkout's. Reading them from here while the document
+    came from elsewhere answers a question nobody asked — whether a past document
+    agrees with today's contracts — and the answer is noise either way.
     """
-    api_text = (root / API_CONTRACT).read_text(encoding="utf-8")
+    api_text = origin.read(API_CONTRACT)
+    if api_text is None:
+        raise SystemExit(f"{origin.label} holds no {API_CONTRACT}")
     routes = Universe("routes", "authority", "E")
     table_spans: list[str] = []
     for line in api_text.split("\n"):
@@ -483,8 +659,12 @@ def load_authorities(root: Path) -> dict[str, Any]:
     # used to be a bespoke `len(owners) > 1` branch inside one class; it is now
     # what the shared comparison does with any name two things answer to.
     fields = Universe("schema fields", "authority", "E")
-    for path in sorted((root / CONTRACTS).glob("*.schema.json")):
-        doc = json.loads(path.read_text(encoding="utf-8"))
+    for name_json in origin.names_in(CONTRACTS, ".schema.json"):
+        raw = origin.read(CONTRACTS / name_json)
+        if raw is None:  # pragma: no cover - the origin just listed it
+            continue
+        path = Path(name_json)
+        doc = json.loads(raw)
         schemas[path.name] = schema_vocabulary(doc)
         properties[path.name] = set(doc.get("properties", {}))
         enums[path.name] = enum_fields(doc)
@@ -517,10 +697,10 @@ def load_authorities(root: Path) -> dict[str, Any]:
     }
 
 
-def defined_symbols(path: Path) -> set[str]:
+def defined_symbols(source: str) -> set[str]:
     """Top-level and class-level names a Python file defines."""
     names: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
@@ -528,100 +708,165 @@ def defined_symbols(path: Path) -> set[str]:
     return names
 
 
-def claim_scopes(lines: list[str]) -> list[tuple[int, str]]:
-    """Split the document into the units a claim is read in.
+def claim_scopes(numbered: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Split a slice of the document into the units a claim is read in.
 
     A table row is its own scope. Everything else is its paragraph. Without the
     first half the §0.8 register — several hundred contiguous rows — reads as
     one scope, and every route in it would vouch for every body literal in it.
+
+    Takes numbered lines rather than a blob, so a scope carries the line number
+    it has in the document even when the slice it came from starts elsewhere. A
+    gap in the numbering ends the paragraph: two sections that are not adjacent
+    are not one paragraph, however they were concatenated.
     """
     scopes: list[tuple[int, str]] = []
     buffer: list[str] = []
     start = 0
-    for i, line in enumerate(lines):
+    previous = 0
+
+    def flush() -> None:
+        nonlocal buffer
+        if buffer:
+            scopes.append((start, "\n".join(buffer)))
+            buffer = []
+
+    for n, line in numbered:
+        if n != previous + 1:
+            flush()
+        previous = n
         if line.startswith("|"):
-            if buffer:
-                scopes.append((start + 1, "\n".join(buffer)))
-                buffer = []
-            scopes.append((i + 1, line))
+            flush()
+            scopes.append((n, line))
             continue
         if not line.strip():
-            if buffer:
-                scopes.append((start + 1, "\n".join(buffer)))
-                buffer = []
+            flush()
             continue
         if not buffer:
-            start = i
+            start = n
         buffer.append(line)
-    if buffer:
-        scopes.append((start + 1, "\n".join(buffer)))
+    flush()
     return scopes
 
 
-def read_source(target: str) -> tuple[str, str, str]:
-    """Return (text, mode, fingerprint). Always read in this run, never cached.
+# --- what each arm is allowed to read ---------------------------------------
+#
+# Reading the whole document is a licence to be fooled by a line that looks like
+# the one you want. `| G-99 |` written in a §1 example table registered a gap
+# and silenced a real claim; a §0.4 route row moved into §0.7 kept accounting
+# for a mutation §0.4 no longer excuses. Both are the same shape as the origin
+# defect: an arm deciding for itself where its input comes from.
+#
+# So every arm declares its range and gets exactly that. A scope nobody reads is
+# reported (`unread_scopes`), because a declaration that binds nothing is a
+# comment pretending to be a constraint. `claims` is whole-document *by
+# declaration* — an authority restated wrongly is a defect wherever it is
+# written — and that is the point of writing the range down: the one arm that
+# needs everything says so, next to the reason, instead of every arm helping
+# itself.
 
-    `target` is a file on disk or a git revision, and which one it is comes from
-    the filesystem rather than from the target's spelling. An earlier version
-    decided by spelling — `:` in it, or a bare 7–40 hex run — which meant `HEAD`,
-    a branch name and a tag were all treated as paths and died on `[Errno 2]`,
-    a message that reads as *the file moved* when what happened is *the revision
-    was never resolved*. A gate that cannot be pointed at a named revision is a
-    gate nobody runs against the head under review.
 
-    A name that is both a readable file and a valid ref reads as the file: that
-    is the copy being edited, and it is the one whose result the author needs.
-    A target that is neither fails loudly and says which two things it is not.
+class Scope(NamedTuple):
+    where: str  # a section number, a `1.`-style prefix, or `*` for the document
+    why: str
+
+
+SCOPES: dict[str, Scope] = {
+    "register": Scope("0.8", "the state register is one table, and §0.8 is where it lives"),
+    "treatments": Scope("0.8", "the closed failure-treatment set is declared with the register"),
+    "gap registry": Scope("0.5", "a `| G-n |` row registers a gap only inside the §0.5 registry"),
+    "scope note": Scope("0.4", "§0.4 is the only place a contracted route is declared out of scope"),
+    "slots": Scope("0.9", "the interpolation slots are §0.9's table"),
+    "copy": Scope("1.", "a copy table belongs to the frame that renders it"),
+    "frame prose": Scope("1.", "element inventories, key citations and route mentions are per frame"),
+    "mapping tables": Scope("1.", "a total rendering of a field is drawn inside the frame showing it"),
+    "claims": Scope("*", "a restated authority is wrong wherever it is written"),
+}
+
+# The loader carries two rules, and each one is tiled over the things it governs
+# the way `CLASS_UNIVERSES` is tiled over the five classes: one input per origin
+# cell, one declared range per scope cell. A rule stated once and tested on one
+# arm is a rule that holds on one arm.
+LOADER_RULES = ("origin", "scope")
+LOADER_ARMS: dict[str, tuple[str, ...]] = {
+    # every kind of input, because the defect was one input reading from a
+    # different place than the rest
+    "origin": ("spec", "api.md", "schema", "python"),
+    # every declared range, because the defect was one arm reading past its own
+    "scope": tuple(SCOPES),
+}
+
+
+class Document:
+    """The document, its section geometry, and the declared slice each arm reads.
+
+    No arm gets the text. Asking for an undeclared scope is a `KeyError` rather
+    than a full-document default, so a new arm has to say what it reads before
+    it can read anything.
     """
-    for candidate in (Path(target), ROOT / target):
-        if candidate.is_file():
-            text = candidate.read_text(encoding="utf-8")
-            return text, "same_run_live_files", hashlib.sha256(text.encode()).hexdigest()[:16]
-    rev = target if ":" in target else f"{target}:{SPEC}"
-    proc = subprocess.run(["git", "show", rev], cwd=ROOT, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise SystemExit(
-            f"{target!r} is neither a readable file nor a git revision holding {SPEC}\n"
-            f"  git show {rev}: {proc.stderr.strip()}"
-        )
-    return proc.stdout, "same_run_git_rev", hashlib.sha256(proc.stdout.encode()).hexdigest()[:16]
 
+    def __init__(self, text: str) -> None:
+        self._lines = text.split("\n")
+        self.fingerprint = hashlib.sha256(text.encode()).hexdigest()[:16]
+        self.requested: set[str] = set()
+        self._spans: list[tuple[str, int, int]] = []
+        for i, line in enumerate(self._lines):
+            m = SECTION_RE.match(line)
+            if m:
+                if self._spans:
+                    self._spans[-1] = (self._spans[-1][0], self._spans[-1][1], i)
+                self._spans.append((m.group(1), i, len(self._lines)))
 
-def parse(text: str) -> dict[str, Any]:
-    lines = text.split("\n")
-
-    # --- section spans -------------------------------------------------------
-    spans: list[tuple[str, int, int]] = []
-    for i, line in enumerate(lines):
-        m = SECTION_RE.match(line)
-        if m:
-            if spans:
-                spans[-1] = (spans[-1][0], spans[-1][1], i)
-            spans.append((m.group(1), i, len(lines)))
-
-    def section_of(idx: int) -> str:
-        for name, a, b in spans:
-            if a <= idx < b:
+    def section_of(self, line_no: int) -> str:
+        """The §n.m a 1-based line number falls in."""
+        for name, a, b in self._spans:
+            if a <= line_no - 1 < b:
                 return name
         return "0"
 
+    def sections(self, prefix: str) -> list[tuple[str, int, str]]:
+        """(name, 1-based heading line, heading text) for sections named `prefix...`.
+
+        Section geometry is a property of the whole document rather than a slice
+        of it — a heading is what *creates* the slices — so this needs no
+        declaration, and asking for it grants no access to the lines inside.
+        """
+        return [
+            (name, a + 1, self._lines[a]) for name, a, _b in self._spans if name.startswith(prefix)
+        ]
+
+    def scope(self, name: str) -> list[tuple[int, str]]:
+        """The declared slice for `name`, as 1-based numbered lines."""
+        declared = SCOPES[name]
+        self.requested.add(name)
+        if declared.where == "*":
+            return list(enumerate(self._lines, start=1))
+        picked: list[tuple[int, str]] = []
+        for section, a, b in self._spans:
+            if (
+                section.startswith(declared.where)
+                if declared.where.endswith(".")
+                else section == declared.where
+            ):
+                picked.extend((i + 1, self._lines[i]) for i in range(a, b))
+        return picked
+
+    def claims(self) -> list[tuple[int, str]]:
+        return claim_scopes(self.scope("claims"))
+
+
+def parse(doc: Document) -> dict[str, Any]:
     # --- §0.8 register -------------------------------------------------------
     register: list[dict[str, Any]] = []
-    in_reg = False
-    for i, line in enumerate(lines):
-        if line.startswith("### 0.8"):
-            in_reg = True
-            continue
-        if in_reg and line.startswith("### "):
-            in_reg = False
-        if not in_reg or not line.startswith("| "):
+    for n, line in doc.scope("register"):
+        if not line.startswith("| "):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
         if len(cells) != 6 or cells[0] in ("Frame", "---") or cells[1] == "---":
             continue
         register.append(
             {
-                "line": i + 1,
+                "line": n,
                 "frame": cells[0],
                 "state": cells[1],
                 "entry": cells[2],
@@ -656,36 +901,29 @@ def parse(text: str) -> dict[str, Any]:
 
     treatments = Universe("treatments", "spec", "A")
     in_treat = False
-    for i, line in enumerate(lines):
+    for n, line in doc.scope("treatments"):
         if line.startswith("| # | Treatment |"):
             in_treat = True
             continue
         if in_treat and not line.startswith("|"):
-            break
+            in_treat = False
         if not in_treat:
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) == 3 and re.fullmatch(r"F\d+", cells[0]):
-            treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=i + 1)
+            treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=n)
 
     frames = Universe("frames", "spec", "C")
-    for name, a, _b in spans:
-        if name.startswith("1."):
-            frames.define(name, a + 1, content=lines[a].strip(), where=a + 1)
+    for name, line_no, heading in doc.sections("1."):
+        frames.define(name, line_no, content=heading.strip(), where=line_no)
 
     # --- §0.9 slots ----------------------------------------------------------
     slots = Universe("slots", "spec", "B")
-    in_slots = False
-    for i, line in enumerate(lines):
-        if line.startswith("### 0.9"):
-            in_slots = True
-            continue
-        if in_slots and line.startswith("### "):
-            in_slots = False
-        if in_slots and line.startswith("| `{{"):
+    for n, line in doc.scope("slots"):
+        if line.startswith("| `{{"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             for slot in SLOT_RE.findall(cells[0]):
-                slots.define(slot, i + 1, content=tuple(cells[1:]), where=i + 1)
+                slots.define(slot, n, content=tuple(cells[1:]), where=n)
 
     # --- copy tables ---------------------------------------------------------
     # A copy row counts only inside a copy table, which starts at its own
@@ -700,7 +938,7 @@ def parse(text: str) -> dict[str, Any]:
     ns = ""
     pending_ns = ""
     in_table = False
-    for i, line in enumerate(lines):
+    for n, line in doc.scope("copy"):
         if line.startswith("**Copy**"):
             m = re.search(r"`models\.hub\.([a-zA-Z]+)\.\*`", line)
             pending_ns = m.group(1) if m else ""
@@ -727,7 +965,7 @@ def parse(text: str) -> dict[str, Any]:
         if not ns:
             namespaces.add(key.split(".")[0])
         collected.append(
-            {"key": key, "zh": zh, "en": en, "line": i + 1, "ns": ns,
+            {"key": key, "zh": zh, "en": en, "line": n, "ns": ns,
              "qualified": f"{ns}.{key}" if ns else key}
         )
 
@@ -783,28 +1021,22 @@ def parse(text: str) -> dict[str, Any]:
     refs: list[tuple[str, int, str]] = []
     routes: list[tuple[str, int, str]] = []
     inventories: set[str] = set()
-    reg_start = next((i for i, l in enumerate(lines) if l.startswith("### 0.8")), 0)
-    reg_end = next((i for i, l in enumerate(lines) if l.startswith("### 0.9")), 0)
-    for i, line in enumerate(lines):
-        if reg_start <= i < reg_end:
-            continue
-        sec = section_of(i)
-        if not sec.startswith("1."):
-            continue
+    for n, line in doc.scope("frame prose"):
+        sec = doc.section_of(n)
         if line.startswith("**Element inventory**"):
             inventories.add(sec)
         for k in KEY_REF_RE.findall(line):
             head = k.split(".")[0]
             if head == "models" and k.startswith("models.hub."):
-                refs.append((sec, i + 1, k))
+                refs.append((sec, n, k))
             elif head in namespaces:
-                refs.append((sec, i + 1, k))
+                refs.append((sec, n, k))
         for meth, path in ROUTE_RE.findall(line):
             # Normalized on the way in, because class A compares this against a
             # register side that is normalized too, and two sides normalized by
             # different rules is not a comparison — it reports every route as
             # uncovered the moment one side spells a parameter the other way.
-            routes.append((sec, i + 1, normalize_route(meth, path)))
+            routes.append((sec, n, normalize_route(meth, path)))
 
     return {
         "register": register,
@@ -815,7 +1047,7 @@ def parse(text: str) -> dict[str, Any]:
         "routes": routes,
         "inventories": inventories,
         "namespaces": namespaces,
-        "sections": [s for s, _, _ in spans if s.startswith("1.")],
+        "sections": [name for name, _line, _heading in doc.sections("1.")],
     }
 
 
@@ -835,7 +1067,7 @@ MAPPING_HEADER_RE = re.compile(r"^\|\s*`([A-Za-z][A-Za-z0-9_.\[\]]*)`((?:\s*`\[[
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 
 
-def mapping_tables(lines: list[str]) -> list[tuple[int, str, set[str]]]:
+def mapping_tables(doc: Document) -> list[tuple[int, str, set[str], set[str], bool]]:
     """Tables that render one named field totally, one row per value.
 
     The document's own convention, used wherever a field's whole vocabulary has
@@ -855,12 +1087,17 @@ def mapping_tables(lines: list[str]) -> list[tuple[int, str, set[str]]]:
     call that a drift.
     """
     found: list[tuple[int, str, set[str], set[str], bool]] = []
-    for i, line in enumerate(lines):
+    numbered = doc.scope("mapping tables")
+    for pos, (line_no, line) in enumerate(numbered):
         m = MAPPING_HEADER_RE.match(line)
-        if not m or i + 1 >= len(lines) or not SEPARATOR_RE.match(lines[i + 1].strip()):
+        if (
+            not m
+            or pos + 1 >= len(numbered)
+            or not SEPARATOR_RE.match(numbered[pos + 1][1].strip())
+        ):
             continue
         values: set[str] = set()
-        for row in lines[i + 2 :]:
+        for _n, row in numbered[pos + 2 :]:
             if not row.startswith("|"):
                 break
             first = row.strip().strip("|").split("|")[0]
@@ -873,22 +1110,22 @@ def mapping_tables(lines: list[str]) -> list[tuple[int, str, set[str]]]:
         # and leaves the ambiguity finding for the case that earns it: a file
         # that declares the same name twice.
         lead: list[str] = []
-        for above in reversed(lines[:i]):
+        for _n, above in reversed(numbered[:pos]):
             if not above.strip():
                 if lead:
                     break
                 continue  # the blank line every table is separated from its lead-in by
             lead.append(above)
-        found.append((i + 1, m.group(1), values, set(SCHEMA_CITE_RE.findall("\n".join(lead))), "[contract]" in m.group(2)))
+        found.append((line_no, m.group(1), values, set(SCHEMA_CITE_RE.findall("\n".join(lead))), "[contract]" in m.group(2)))
     return found
 
 
 GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)")
-GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|", re.M)
+GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 
 
-def registered_gaps(text: str) -> set[str]:
-    """The gap numbers §0.5 actually carries a row for.
+def registered_gaps(doc: Document) -> dict[str, int]:
+    """Gap number -> the §0.5 line registering it.
 
     `[contract-gap]` is the document's one way to say "this surface has no
     backend behind it", and it is also the one way to tell a checker not to ask
@@ -899,8 +1136,15 @@ def registered_gaps(text: str) -> set[str]:
     stated missing behaviour, and evidence verified against a named commit. A
     bare `[contract-gap]`, or one citing a number no row defines, exempts
     nothing — the claim is checked as if the marker were not there.
+
+    Read from §0.5 alone. Scanning the document for the row *shape* let anything
+    shaped like `| G-99 |` — a §1 example, a quoted table, a row moved out of the
+    registry in an edit and never removed — mint a silencer, which is the one
+    thing this marker must never be cheap enough to do by accident. The row's
+    line is kept so the arms that ask "is this scope itself a registration?" can
+    ask about *this* row rather than re-testing the shape.
     """
-    return set(GAP_ROW_RE.findall(text))
+    return {m.group(1): n for n, line in doc.scope("gap registry") if (m := GAP_ROW_RE.match(line))}
 
 
 # A class whose correct value is zero cannot use "empty means the extractor
@@ -921,11 +1165,11 @@ SELF_TEST = [
 ]
 
 
-def self_test(auth: dict[str, Any], root: Path) -> list[str]:
+def self_test(auth: dict[str, Any], origin: Origin) -> list[str]:
     """Prove the target-zero arms still fire before believing their zeros."""
     broken: list[str] = []
     for fixture, want_counted, want_finding in SELF_TEST:
-        found, scale = authority_claims(fixture, auth, root, [])
+        found, scale = authority_claims(Document(fixture), auth, origin, [])
         counted = scale["vocabulary claims"] > 0
         reported = any(f["class"] == "E" and "not" in f["message"] for f in found)
         if counted is not want_counted or reported is not want_finding:
@@ -936,7 +1180,7 @@ def self_test(auth: dict[str, Any], root: Path) -> list[str]:
     return broken
 
 
-def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, int]]:
+def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, register: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Class E — every factual claim the spec makes, against the file that owns it.
 
     Returns the findings and the input scale. The scale is not decoration: this
@@ -962,16 +1206,26 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
     auth["repo symbols"] = symbols
     read_files: set[str] = set()
 
+    gaps = registered_gaps(doc)
+    registrations = set(gaps.values())
+
     guarded_named: dict[str, int] = {}
-    for line_no, scope in claim_scopes(text.split("\n")):
+    for line_no, scope in doc.claims():
         # A §0.5 row is the registration itself, so it needs no reference to
         # one: its whole job is to describe a behaviour the contract does not
         # have, and describing that behaviour means naming the branch that is
-        # missing. Every other scope has to point at a row that exists.
-        exempt = bool(GAP_ROW_RE.match(scope)) or bool(
-            registered_gaps(text) & set(GAP_REF_RE.findall(scope))
-        )
-        named = {normalize_route(m, p) for m, p in ANY_ROUTE_RE.findall(scope)}
+        # missing. Every other scope has to point at a row that exists. "Is
+        # this scope a registration?" is answered by the registry's own line
+        # numbers, not by re-testing the row shape here — that shape matches
+        # anywhere, including the places §0.5 is quoted.
+        exempt = line_no in registrations or bool(gaps.keys() & set(GAP_REF_RE.findall(scope)))
+        # Where each route is written, not just which routes appear: a body
+        # literal is bound to one route, and binding needs positions.
+        mentions = [
+            (m.start(), m.end(), normalize_route(m.group(1), m.group(2)))
+            for m in ANY_ROUTE_RE.finditer(scope)
+        ]
+        named = {route for _s, _e, route in mentions}
         for route in sorted(named):
             scale["routes"] += 1
             hit = auth["routes"].resolve(route)
@@ -993,6 +1247,31 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
                 if not exempt:
                     add(f"L{line_no}", f"`{literal}` names no route — an unbound body claim cannot be checked")
                 continue
+            # One body belongs to one route, and a scope that names several does
+            # not make all of them plausible: the §0.8 row that saves a source
+            # order also mentions the chain route two cells away, and the union
+            # of their vocabularies accepted `{hops}` posted to the order save —
+            # the exact defect this arm was added to catch, hidden by its own
+            # allowance. So the body binds to the route mention nearest it,
+            # either side, which is how the sentence reads to a human.
+            #
+            # Measured before it was written, because the alternative — accept a
+            # key only if *every* named route contracts it — is simpler and
+            # wrong here: it reports three of this document's own rows, where a
+            # shared refusal envelope, a shared query parameter and a two-step
+            # OAuth exchange are each written once against several routes on
+            # purpose. Nearest-mention reports none of them and still catches
+            # both the original and a decoy with the routes reordered.
+            bound = min(
+                mentions,
+                key=lambda mention: (
+                    0
+                    if mention[0] < m_body.end() and m_body.start() < mention[1]
+                    else m_body.start() - mention[1]
+                    if mention[1] <= m_body.start()
+                    else mention[0] - m_body.end()
+                ),
+            )[2]
             # Which side of the cell a claim belongs to is not a guess. A `GET`
             # has no request body, so a body written against one is quoting the
             # answer; so is a body the document itself introduces as one, with
@@ -1000,17 +1279,14 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
             # and letting a request borrow the response vocabulary is how
             # `{agent: [...]}` posted to the order route would pass a check the
             # server rejects.
-            answer = bool(ANSWER_CUE_RE.search(scope[: m_body.start()])) or all(
-                r.startswith("GET ") for r in named
-            )
+            answer = bool(ANSWER_CUE_RE.search(scope[: m_body.start()])) or bound.startswith("GET ")
             allowed: set[str] = set()
-            for route in named:
-                hit = auth["routes"].resolve(route)
-                if not hit.empty:
-                    row = hit.one
-                    allowed |= row["response_keys"] if answer else row["keys"]
-                    if row["guarded"]:
-                        allowed |= auth["envelope"]
+            hit = auth["routes"].resolve(bound)
+            if not hit.empty:
+                row = hit.one
+                allowed |= row["response_keys"] if answer else row["keys"]
+                if row["guarded"]:
+                    allowed |= auth["envelope"]
             # A registered gap forgives a field the contract does not have
             # anywhere — that is what the gap *is*, a behaviour the document
             # states and no route carries yet. It does not forgive a field some
@@ -1021,8 +1297,7 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
             if stray:
                 add(
                     f"L{line_no}",
-                    f"`{literal}` names {', '.join(stray)} — not contracted for "
-                    f"{' / '.join(sorted(named))}",
+                    f"`{literal}` names {', '.join(stray)} — not contracted for {bound}",
                 )
 
         if named and not exempt:
@@ -1076,13 +1351,13 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
 
         for rel, symbol in PY_CITE_RE.findall(scope):
             scale["repo symbols"] += 1
-            path = root / rel
-            if not path.is_file():
-                add(f"L{line_no}", f"`{rel}` is not a file in this repository")
+            source = origin.read(rel)
+            if source is None:
+                add(f"L{line_no}", f"`{rel}` is not a file in {origin.label}")
                 continue
             if rel not in read_files:
                 read_files.add(rel)
-                for name in defined_symbols(path):
+                for name in defined_symbols(source):
                     symbols.define(f"{rel}:{name}", rel, content=rel, where=rel)
             if symbol and symbols.resolve(f"{rel}:{symbol}").empty:
                 add(f"L{line_no}", f"`{rel}` defines no `{symbol}`")
@@ -1119,7 +1394,7 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
     # reads as a per-backend one); only after both does the row set mean
     # anything. Values are compared as sets — not counted — because one value
     # may legitimately occupy two rows.
-    for line_no, field, drawn, cited, contracted in mapping_tables(text.split("\n")):
+    for line_no, field, drawn, cited, contracted in mapping_tables(doc):
         scale["contract mapping tables"] += 1
         hit = auth["schema fields"].resolve(field)
         if cited:
@@ -1157,24 +1432,29 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
                 f"so a reading of either satisfies the sentence",
             )
             continue
-        origin, values = next(iter(owners.items()))
+        declared_at, values = next(iter(owners.items()))
         if drawn != values:
             add(
                 f"L{line_no}",
-                f"`{field}` renders {sorted(drawn)} against `{origin}`'s {sorted(values)} — "
+                f"`{field}` renders {sorted(drawn)} against `{declared_at}`'s {sorted(values)} — "
                 f"missing {sorted(values - drawn)}, extra {sorted(drawn - values)}",
             )
 
     return findings, scale
 
 
-def check(target: str | Path = SPEC) -> dict[str, Any]:
-    """`target` is the spec path, a git rev, or a repo root holding the spec."""
-    candidate = Path(target)
-    if candidate.is_dir():
-        target = candidate / SPEC
-    text, mode, fingerprint = read_source(str(target))
-    p = parse(text)
+def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -> dict[str, Any]:
+    """`target` is the spec path, a git rev, or a checkout holding the spec.
+
+    `authorities` names where `api.md`, the schemas and the cited Python are read
+    from. It defaults to the target's own origin and is reported either way; pass
+    it only for a document that lives outside any checkout, which is the one case
+    that has no authorities to default to.
+    """
+    text, mode, origin = resolve_inputs(target, authorities)
+    doc = Document(text)
+    fingerprint = doc.fingerprint
+    p = parse(doc)
     reg = p["register"]
     findings: list[dict[str, str]] = []
 
@@ -1194,7 +1474,7 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         findings.append({"class": cls, "where": where, "message": msg})
 
     # ---- A ------------------------------------------------------------------
-    auth = load_authorities(ROOT)
+    auth = load_authorities(origin)
     covered_routes: set[str] = set()
     for r in reg:
         cells = f"{r['entry']} {r['exit']} {r['failure']}"
@@ -1206,12 +1486,12 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
     # something the product does not do. That exception is exactly a registered
     # gap, so it is spelled as one: the scope has to name a G-number §0.5
     # defines. Anything less specific silences the check for free.
-    gaps = registered_gaps(text)
+    gaps = registered_gaps(doc)
     # Keyed by every line a scope spans, not by the line it starts on: a route
     # sits three lines into a paragraph as often as on its first line, and a map
     # keyed by starts silently misses those.
     scope_at: dict[int, str] = {}
-    for ln, s in claim_scopes(text.split("\n")):
+    for ln, s in doc.claims():
         for offset in range(s.count("\n") + 1):
             scope_at[ln + offset] = s
     seen: set[str] = set()
@@ -1221,7 +1501,7 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         seen.add(call)
         if call in covered_routes:
             continue
-        if gaps & set(GAP_REF_RE.findall(scope_at.get(line, ""))):
+        if gaps.keys() & set(GAP_REF_RE.findall(scope_at.get(line, ""))):
             continue
         add("A", f"§{sec} L{line}", f"{call} is named by no §0.8 row")
     for r in reg:
@@ -1269,15 +1549,18 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
     # cost a written sentence: §0.5 says the affordance is missing here, §0.4
     # says the affordance belongs to another surface. Silence is the only
     # answer this refuses.
+    #
+    # Both registers are read as sections, not as shapes found anywhere. A §0.4
+    # row moved out of §0.4 in an edit went on excusing its route, and a row
+    # merely shaped like a gap registration went on excusing its own: an excuse
+    # has to be written where the document says excuses are written, or it is
+    # not an excuse.
     accounted: set[str] = set(covered_routes)
-    in_scope_note = False
-    for line in text.split("\n"):
-        if line.startswith("### 0.4"):
-            in_scope_note = True
-        elif line.startswith("### ") and not line.startswith("### 0.4"):
-            in_scope_note = False
-        if in_scope_note or GAP_ROW_RE.match(line):
-            accounted.update(normalize_route(m, path) for m, path in ANY_ROUTE_RE.findall(line))
+    excusing = doc.scope("scope note") + [
+        (n, line) for n, line in doc.scope("gap registry") if GAP_ROW_RE.match(line)
+    ]
+    for _n, line in excusing:
+        accounted.update(normalize_route(m, path) for m, path in ANY_ROUTE_RE.findall(line))
     contracted_mutations = sorted(
         r for r in auth["routes"].tokens() if r.startswith(("POST ", "PUT ", "PATCH ", "DELETE "))
     )
@@ -1369,7 +1652,7 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         add("D", f"L{row['line']}", f"condition key `{row['key']}` is cited by no §0.8 row")
 
     # ---- E ------------------------------------------------------------------
-    e_findings, e_scale = authority_claims(text, auth, ROOT, reg)
+    e_findings, e_scale = authority_claims(doc, auth, origin, reg)
     findings.extend(e_findings)
 
     # ---- the duplicate rule, for every universe at once ---------------------
@@ -1417,27 +1700,41 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         "authority: repo symbol citations": e_scale["repo symbols"],
     }
     empty = [k for k, v in scale.items() if v == 0 and k not in TARGET_ZERO]
-    broken = self_test(auth, ROOT)
+    broken = self_test(auth, origin)
+    # A declared range nobody asks for is a constraint that binds nothing — the
+    # arm was deleted, or renamed, or quietly went back to reading everything.
+    # Cheap to check here, and the only place that can see all of it at once.
+    unread = sorted(set(SCOPES) - doc.requested)
     return {
-        "ok": not findings and not empty and not broken,
+        "ok": not findings and not empty and not broken and not unread,
         "input_mode": mode,
         "input_fingerprint": fingerprint,
+        "authority_origin": origin.label,
         "input_scale": scale,
         "empty_inventories": empty,
         "broken_arms": broken,
+        "unread_scopes": unread,
         "findings": findings,
     }
 
 
 def main() -> int:
     target = sys.argv[1] if len(sys.argv) > 1 else str(SPEC)
-    r = check(target)
+    authorities = sys.argv[2] if len(sys.argv) > 2 else None
+    r = check(target, authorities=authorities)
     print(f"input mode        : {r['input_mode']}")
     print(f"input fingerprint : {r['input_fingerprint']}")
+    print(f"authorities read  : {r['authority_origin']}")
     print("input scale (self-generated in this run):")
     for k, v in r["input_scale"].items():
         zero_ok = " (target zero, arms self-tested)" if k in TARGET_ZERO else ""
         print(f"  {k:<42}: {v}{zero_ok}")
+    if r["unread_scopes"]:
+        print()
+        print("FAIL: a declared parse scope was read by no arm")
+        for k in r["unread_scopes"]:
+            print(f"  {k} — {SCOPES[k].where} ({SCOPES[k].why})")
+        return 2
     if r["broken_arms"]:
         print()
         print("FAIL: a target-zero arm no longer fires, so its zero proves nothing")

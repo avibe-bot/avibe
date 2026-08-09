@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import fields
 from pathlib import Path
 from typing import NamedTuple
@@ -26,6 +27,7 @@ from config.v2_config import (
 )
 from core.services.settings import default_config
 from scripts.check_model_hub_authorities import check as check_model_hub_authorities
+from scripts.check_model_hub_ui_states import ROOT, SPEC
 from scripts.check_model_hub_ui_states import check as check_model_hub_ui_states
 from vibe import api
 
@@ -303,6 +305,12 @@ def test_model_hub_ui_state_completeness_is_generated_from_live_files():
     # document before trusting the verdict they produce.
     assert not result["empty_inventories"], result["empty_inventories"]
     assert result["input_scale"]["register rows"] > 50
+    # The document and every authority came from one place, and the run says
+    # which. A verdict that does not name its authority origin cannot be told
+    # apart from one that read the wrong revision's contracts.
+    assert result["authority_origin"] == "this checkout"
+    # A declared range nobody reads is a comment wearing a constraint's clothes.
+    assert not result["unread_scopes"], result["unread_scopes"]
     assert result["ok"], result["findings"]
 
 
@@ -674,7 +682,12 @@ def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: 
 
     mutated = tmp_path / "mutated.md"
     mutated.write_text(spec.replace(case.before, case.after, 1), encoding="utf-8")
-    result = check_model_hub_ui_states(mutated)
+    # A document written to a temporary directory is in no checkout, so it has no
+    # authorities of its own. Every case here mutates the spec side, and the
+    # authorities it is checked against are this repository's — said out loud
+    # because a borrowed authority is the one thing a green result may not hide.
+    result = check_model_hub_ui_states(mutated, authorities=ROOT)
+    assert result["authority_origin"] == "this checkout"
 
     assert not result["ok"], f"{case.label}: the gate did not notice"
     said = [f["message"] for f in result["findings"] if f["class"] == case.cls]
@@ -740,7 +753,7 @@ def test_authority_side_universes_report_a_duplicate_definition():
     prove it passes on the real files, which is the half a fixture alone leaves
     out.
     """
-    from scripts.check_model_hub_ui_states import ROOT, Universe, load_authorities
+    from scripts.check_model_hub_ui_states import Origin, Universe, load_authorities
 
     for side in ("routes", "schema files", "schema fields", "repo symbols"):
         u = Universe(side, "authority", "E")
@@ -752,7 +765,7 @@ def test_authority_side_universes_report_a_duplicate_definition():
         u.define("t", {"a": 1}, content="first", where="three.md")
         assert len(u.duplicates) == 1, side
 
-    auth = load_authorities(ROOT)
+    auth = load_authorities(Origin.tree_at(ROOT))
     for side in ("routes", "schema files", "schema fields"):
         assert not auth[side].duplicates, (side, auth[side].duplicates)
 
@@ -766,10 +779,16 @@ def test_model_hub_ui_gate_target_zero_classes_prove_their_own_zero():
     still be caught and one that must still pass. This asserts the gate refuses
     to report a self-tested zero when the arm behind it has stopped working.
     """
-    from scripts.check_model_hub_ui_states import ROOT, TARGET_ZERO, load_authorities, self_test
+    from scripts.check_model_hub_ui_states import (
+        TARGET_ZERO,
+        Origin,
+        load_authorities,
+        self_test,
+    )
 
     assert TARGET_ZERO, "a target-zero class list nobody populates tests nothing"
-    assert not self_test(load_authorities(ROOT), ROOT)
+    here = Origin.tree_at(ROOT)
+    assert not self_test(load_authorities(here), here)
 
     result = check_model_hub_ui_states(Path.cwd())
     assert not result["broken_arms"], result["broken_arms"]
@@ -787,6 +806,407 @@ def test_model_hub_ui_gate_reads_a_symbolic_revision():
     result = check_model_hub_ui_states("HEAD")
     assert result["input_mode"] == "same_run_git_rev"
     assert result["input_scale"]["register rows"] > 50
+    # And the authorities came from that revision too. Reading the spec at `HEAD`
+    # while resolving its citations against the working tree compares two
+    # different revisions and reports the answer as one — a diff on either side
+    # alone would move the verdict.
+    assert result["authority_origin"] == "git rev HEAD"
+
+
+# --- the loader: one origin for every input, one declared range per arm --------
+#
+# Two review rounds found the same defect on two different heads: an arm that
+# decided for itself where to read. Once it was the spec, read from a revision
+# while the contracts came from the working tree; once it was a row shaped like a
+# gap registration, credited from anywhere in three thousand lines. The gate now
+# resolves one `Origin` per run and hands every arm a declared slice, and the two
+# rules that closed it are tested the way the five classes are — tiled over
+# everything they govern, because a rule proved on one arm holds on one arm.
+
+
+class ScopeTrap(NamedTuple):
+    """One decoy, placed inside a declared range and then outside it.
+
+    The pair is the whole test. A decoy the gate catches proves the arm reads its
+    range; the *same* decoy elsewhere proves it reads no further — and only the
+    second half can fail when an arm quietly goes back to scanning the document.
+
+    `polarity` says which way the range cuts. A `collect` range is where a defect
+    counts, so inside must report and outside must not. An `excuse` range is
+    where a written exemption counts, so `setup` breaks the document first and
+    inside must silence it while outside must leave it standing.
+    """
+
+    scope: str  # the key in SCOPES whose declared range is under test
+    polarity: str  # collect | excuse
+    label: str
+    setup: tuple[str, str]  # (before, after), applied before the decoy is placed
+    decoy: str  # lines placed at the declared range, then at OUTSIDE_SECTION
+    says: str
+
+
+# A section no scope declares, so "outside every range" has somewhere to be. The
+# tiling test asserts that, rather than trusting this comment.
+OUTSIDE_SECTION = "0.7"
+
+# §0.4's row excusing a route no frame draws. The `scope note` trap deletes it and
+# puts it back in two places.
+_SCOPE_NOTE_ROW = (
+    "| `POST /api/models/migration/scan` | The migration surface. Neither of these ten "
+    "frames offers an import, and a scan with nothing to show it is not a screen |"
+)
+
+SCOPE_TRAPS: tuple[ScopeTrap, ...] = (
+    ScopeTrap(
+        "register", "collect", "a state row",
+        ("", ""),
+        "| §1.0 | Decoy state | 无 | F1 | `shell.title` | — |",
+        "「Decoy state」 has no exit",
+    ),
+    ScopeTrap(
+        "treatments", "collect", "a second definition of F1",
+        ("", ""),
+        "| # | Treatment |\n| --- | --- |\n| F1 | A decoy redefinition | with other content |",
+        "is defined twice in treatments",
+    ),
+    ScopeTrap(
+        "slots", "collect", "a second definition of {{count}}",
+        ("", ""),
+        "| `{{count}}` | A decoy redefinition. | Decoy |",
+        "is defined twice in slots",
+    ),
+    ScopeTrap(
+        "copy", "collect", "a second definition of shell.title",
+        ("", ""),
+        "| Key | 中文 | English |\n| --- | --- | --- |\n| `shell.title` | 诱饵 | Decoy |",
+        "is defined twice in copy",
+    ),
+    ScopeTrap(
+        "frame prose", "collect", "a citation of a key nothing defines",
+        ("", ""),
+        "A decoy sentence citing `shell.decoyMissing`.",
+        "key `shell.decoyMissing` is cited and never defined",
+    ),
+    ScopeTrap(
+        "mapping tables", "collect", "a [contract] rendering of a field no schema declares",
+        ("", ""),
+        "| `decoy_status` `[contract]` | Rendering |\n| --- | --- |\n| `alpha` | one |",
+        "the table maps no contracted field",
+    ),
+    ScopeTrap(
+        "gap registry", "excuse", "the registration that silences a drawn-by-nothing route",
+        (
+            "### 1.0 Shared shell",
+            "### 1.0 Shared shell\n\nA decoy: `POST /api/models/decoy` is contracted and "
+            "drawn by nothing `[contract-gap]` `G-99`.\n",
+        ),
+        "| G-99 | A decoy registration | `POST /api/models/decoy` | none |",
+        "POST /api/models/decoy is named by no §0.8 row",
+    ),
+    ScopeTrap(
+        "scope note", "excuse", "the row putting a contracted route on another surface",
+        (_SCOPE_NOTE_ROW + "\n", ""),
+        _SCOPE_NOTE_ROW,
+        "POST /api/models/migration/scan is contracted and reached by no §0.8 row",
+    ),
+)
+
+# A scope with no trap, and why it cannot have one.
+UNTRAPPED_SCOPES: dict[str, str] = {
+    "claims": (
+        "declared `*` on purpose — a restated authority is wrong wherever it is written — "
+        "so there is no outside to place a decoy in. What binds this one is the declaration "
+        "itself, asserted by test_every_arm_declares_a_range_the_module_declares."
+    ),
+}
+
+
+def _spec_heading(text: str, where: str) -> str:
+    """The heading line opening the section a scope declares.
+
+    Derived from `SCOPES`, never written down here: a scope that moves takes its
+    trap with it, instead of leaving one aimed at the section it used to name.
+    """
+    stem = re.escape(where.rstrip("."))
+    pattern = rf"^### {stem}(?:\.\d+)? .*$" if where.endswith(".") else rf"^### {stem} .*$"
+    found = re.search(pattern, text, re.M)
+    assert found, f"no §{where} heading to place a decoy in"
+    return found.group(0)
+
+
+def _place(text: str, section: str, decoy: str) -> str:
+    heading = _spec_heading(text, section)
+    assert text.count(heading) == 1, f"§{section}'s heading is not unique"
+    return text.replace(heading, f"{heading}\n{decoy}", 1)
+
+
+def _checked(tmp_path: Path, text: str, name: str) -> dict:
+    document = tmp_path / f"{name}.md"
+    document.write_text(text, encoding="utf-8")
+    return check_model_hub_ui_states(document, authorities=ROOT)
+
+
+@pytest.mark.parametrize("trap", SCOPE_TRAPS, ids=lambda t: f"{t.scope}/{t.label}")
+def test_gate_arm_reads_only_its_declared_range(tmp_path, trap: ScopeTrap):
+    from scripts.check_model_hub_ui_states import SCOPES
+
+    spec = (ROOT / SPEC).read_text(encoding="utf-8")
+    before, after = trap.setup
+    if before:
+        assert spec.count(before) == 1, f"{trap.label}: setup anchor is not unique"
+        spec = spec.replace(before, after, 1)
+    where = SCOPES[trap.scope].where
+
+    inside = _checked(tmp_path, _place(spec, where, trap.decoy), "inside")
+    outside = _checked(tmp_path, _place(spec, OUTSIDE_SECTION, trap.decoy), "outside")
+    said = lambda result: [f["message"] for f in result["findings"]]  # noqa: E731
+
+    if trap.polarity == "collect":
+        assert any(trap.says in m for m in said(inside)), (
+            f"{trap.scope}: a decoy inside §{where} was not read", said(inside)
+        )
+        assert not any(trap.says in m for m in said(outside)), (
+            f"{trap.scope}: the arm reached past §{where} into §{OUTSIDE_SECTION}",
+            said(outside),
+        )
+    else:
+        assert any(trap.says in m for m in said(_checked(tmp_path, spec, "setup"))), (
+            f"{trap.scope}: the setup did not break the document, so the excuse "
+            f"has nothing to excuse"
+        )
+        assert not any(trap.says in m for m in said(inside)), (
+            f"{trap.scope}: an excuse written in §{where} did not count", said(inside)
+        )
+        assert any(trap.says in m for m in said(outside)), (
+            f"{trap.scope}: an excuse written in §{OUTSIDE_SECTION} counted anyway",
+            said(outside),
+        )
+
+
+class OriginCase(NamedTuple):
+    """One input, edited in a copied checkout the gate is then pointed at.
+
+    The spec-side mutations above cannot ask this question: they borrow this
+    repository's authorities, so nothing proves the authorities *could* have come
+    from anywhere else. These cases edit an authority — which the harness above
+    may never do in place — and the gate has to read the edit.
+    """
+
+    arm: str  # the input kind in LOADER_ARMS["origin"]
+    rel: str  # repo-relative path inside the copied checkout
+    before: str
+    after: str
+    says: str
+
+
+ORIGIN_CASES: tuple[OriginCase, ...] = (
+    OriginCase(
+        "spec", str(SPEC),
+        "F4 — `POST /api/models/oauth/cancel` is issued as the dialog",
+        "F4 — `POST /api/models/oauth/cancellation` is issued as the dialog",
+        "POST /api/models/oauth/cancel is named by no §0.8 row",
+    ),
+    OriginCase(
+        "api.md", "docs/plans/model-hub-contracts/api.md",
+        "| POST `/api/models/agents/<backend>/probe` |",
+        "| POST `/api/models/agents/<backend>/probed` |",
+        "is contracted by no `api.md` route row",
+    ),
+    OriginCase(
+        "schema", "docs/plans/model-hub-contracts/runtime-dependency.schema.json",
+        '["ok", "degraded", "down", "not_started", "not_installed"]',
+        '["ok", "down", "not_started", "not_installed"]',
+        "`RuntimeDependency.status.health` renders",
+    ),
+    OriginCase(
+        "python", "core/handlers/model_hub/service.py",
+        "def list_agents", "def list_agents_renamed",
+        "defines no `list_agents`",
+    ),
+)
+
+
+def _fixture_checkout(tmp_path: Path) -> Path:
+    """A copy of everything the gate reads, editable without touching the repo."""
+    import shutil
+
+    from scripts.check_model_hub_ui_states import CONTRACTS
+
+    checkout = tmp_path / "checkout"
+    (checkout / SPEC).parent.mkdir(parents=True)
+    shutil.copy(ROOT / SPEC, checkout / SPEC)
+    shutil.copytree(ROOT / CONTRACTS, checkout / CONTRACTS)
+    for case in ORIGIN_CASES:
+        source = ROOT / case.rel
+        if source.suffix == ".py":
+            (checkout / case.rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, checkout / case.rel)
+    # The spec cites this file too, and a checkout missing it would fail for the
+    # wrong reason — an absent input reads exactly like a mutated one.
+    gate = "scripts/check_model_hub_ui_states.py"
+    (checkout / gate).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / gate, checkout / gate)
+    return checkout
+
+
+def test_fixture_checkout_passes_before_anything_is_mutated(tmp_path):
+    """The control the origin cases are read against.
+
+    Without it, a case that reports the wrong finding — or fails because the
+    fixture is short an input — is indistinguishable from a case that works.
+    """
+    checkout = _fixture_checkout(tmp_path)
+    result = check_model_hub_ui_states(checkout)
+    assert result["authority_origin"] == str(checkout)
+    assert result["ok"], result["findings"]
+
+
+@pytest.mark.parametrize("case", ORIGIN_CASES, ids=lambda c: c.arm)
+def test_gate_reads_every_input_from_the_target_origin(tmp_path, case: OriginCase):
+    """Point the gate at a checkout and all four inputs come from that checkout.
+
+    One input reading from somewhere else is not a smaller version of this bug —
+    it is a gate comparing two revisions and reporting the answer as one, which
+    is green whenever the two happen to agree.
+    """
+    checkout = _fixture_checkout(tmp_path)
+    edited = checkout / case.rel
+    text = edited.read_text(encoding="utf-8")
+    assert text.count(case.before) == 1, f"{case.arm}: anchor is not unique in {case.rel}"
+    edited.write_text(text.replace(case.before, case.after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(checkout)
+    assert not result["ok"], f"{case.arm}: the gate read the repository, not the target"
+    assert any(case.says in f["message"] for f in result["findings"]), (
+        case.arm, case.says, result["findings"]
+    )
+
+    if case.arm != "spec":
+        # And the borrowing works the other way: told to use this repository's
+        # authorities, the same broken checkout passes. Without this half, an arm
+        # hard-wired to the repository would still satisfy the assertion above
+        # whenever the fixture and the repository disagree for any reason.
+        borrowed = check_model_hub_ui_states(checkout, authorities=ROOT)
+        assert borrowed["authority_origin"] == "this checkout"
+        assert borrowed["ok"], borrowed["findings"]
+
+
+def test_loader_suite_is_tiled_over_every_rule_and_every_arm():
+    """Both loader rules, over everything each one governs.
+
+    The same tiling `CLASS_UNIVERSES` gets, and for the same reason: the defect
+    is not any one arm reading from the wrong place, it is a new arm arriving
+    with a reading of its own and nobody noticing which rule it skipped.
+    """
+    from scripts.check_model_hub_ui_states import LOADER_ARMS, LOADER_RULES, SCOPES
+
+    assert set(LOADER_ARMS) == set(LOADER_RULES)
+    assert LOADER_ARMS["scope"] == tuple(SCOPES), "the scope arms are the declared ranges"
+
+    covered = {"origin": {c.arm for c in ORIGIN_CASES}, "scope": {t.scope for t in SCOPE_TRAPS}}
+    exempt = {"origin": {}, "scope": UNTRAPPED_SCOPES}
+    for rule in LOADER_RULES:
+        missing = [
+            arm
+            for arm in LOADER_ARMS[rule]
+            if arm not in covered[rule] and arm not in exempt[rule]
+        ]
+        assert not missing, f"{rule}: arms with no case and no declared reason: {missing}"
+        for arm, why in exempt[rule].items():
+            assert arm in LOADER_ARMS[rule], f"{arm} is exempted and is not an arm"
+            assert why.strip(), f"{arm} is exempted with no reason"
+            assert arm not in covered[rule], f"{arm} is exempted and also covered"
+
+    # A trap in every polarity, and an outside that really is outside — otherwise
+    # every "the arm read no further" half is asserting nothing.
+    assert {t.polarity for t in SCOPE_TRAPS} == {"collect", "excuse"}
+    assert OUTSIDE_SECTION not in {s.where for s in SCOPES.values()}
+
+
+def test_only_the_origin_class_reads_a_file():
+    """One place opens a file, so there is one place a revision can be honoured.
+
+    Read as structure rather than as a promise in a docstring: an arm that reads
+    on its own is the defect, and it is invisible in a passing run — the numbers
+    look right until the two revisions differ.
+    """
+    import ast
+
+    source = (ROOT / "scripts/check_model_hub_ui_states.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    reading = {"open", "read_text", "read_bytes", "glob", "rglob", "iterdir", "run"}
+
+    def verbs(node) -> list[str]:
+        return [
+            (c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id)
+            for c in ast.walk(node)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, (ast.Attribute, ast.Name))
+            and (c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id) in reading
+        ]
+
+    outside = [
+        f"{node.name}: {sorted(set(found))}"
+        for node in tree.body
+        if not (isinstance(node, ast.ClassDef) and node.name == "Origin")
+        and (found := verbs(node))
+    ]
+    assert not outside, f"these read a file without going through Origin: {outside}"
+    assert verbs(next(n for n in tree.body if getattr(n, "name", "") == "Origin")), (
+        "Origin reads nothing, so this test would pass on a module that reads nowhere"
+    )
+
+
+def test_every_arm_declares_a_range_the_module_declares():
+    """A range is asked for by name, and the name is written down.
+
+    Both halves matter. A computed scope name cannot be checked against `SCOPES`
+    at all, and a literal that is not in `SCOPES` is an arm that would read
+    everything the moment the `KeyError` were softened into a default.
+    """
+    import ast
+
+    from scripts.check_model_hub_ui_states import Document, SCOPES
+
+    source = (ROOT / "scripts/check_model_hub_ui_states.py").read_text(encoding="utf-8")
+    asked = [
+        node.args[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "scope"
+        and node.args
+    ]
+    assert asked, "no arm asks for a range, so this test is watching nothing"
+    for arg in asked:
+        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+            f"a scope is asked for by a computed name at line {arg.lineno}"
+        )
+        assert arg.value in SCOPES, f"line {arg.lineno} reads undeclared scope {arg.value!r}"
+
+    with pytest.raises(KeyError):
+        Document("").scope("a range nobody declared")
+
+
+def test_a_document_outside_every_checkout_names_no_authority_by_default(tmp_path):
+    """The one case with nothing to default to says so, instead of guessing.
+
+    A document in a temporary directory has no `api.md` above it. Falling back to
+    this repository's contracts would make every such run green against
+    authorities the caller never chose — the failure mode this whole loader
+    exists to prevent, wearing the friendliest possible face.
+    """
+    stray = tmp_path / "stray.md"
+    stray.write_text((ROOT / SPEC).read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as refused:
+        check_model_hub_ui_states(stray)
+    # Both remedies, because a caller who is told only that it failed will reach
+    # for whichever one they guess.
+    assert "authorities=" in str(refused.value)
+    assert "revision" in str(refused.value)
+
+    assert check_model_hub_ui_states(stray, authorities=ROOT)["ok"]
 
 
 def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
