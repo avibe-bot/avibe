@@ -86,9 +86,20 @@ describe('internalPwaLinkTarget', () => {
     });
   });
 
-  it('leaves external and non-app resources to their existing handlers', () => {
+  it('keeps every other same-origin destination in the current document', () => {
+    expect(internalPwaLinkTarget('/api/files/report.pdf?download=0#page=2', current)).toEqual({
+      path: '/api/files/report.pdf?download=0#page=2',
+      navigation: 'document',
+    });
+    expect(internalPwaLinkTarget('/custom/help?topic=pwa#recovery', current)).toEqual({
+      path: '/custom/help?topic=pwa#recovery',
+      navigation: 'document',
+    });
+  });
+
+  it('leaves external and non-http destinations to their existing handlers', () => {
     expect(internalPwaLinkTarget('https://github.com/avibe-bot/avibe', current)).toBeNull();
-    expect(internalPwaLinkTarget('/api/files/download/report.pdf', current)).toBeNull();
+    expect(internalPwaLinkTarget('https://alex-app.avibe.bot:8443/help', current)).toBeNull();
     expect(internalPwaLinkTarget('mailto:hello@example.com', current)).toBeNull();
   });
 });

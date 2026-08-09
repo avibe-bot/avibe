@@ -33,15 +33,15 @@ export function shouldBlockPwaLoopbackLink(href: string, currentHref: string): b
 }
 
 /**
- * Resolve a `_blank` link that is really an internal Avibe destination to the
- * target the installed iOS PWA should open in its current browsing context.
+ * Resolve a same-origin `_blank` navigation to the target the installed iOS
+ * PWA should open in its current browsing context.
  *
  * A private Show Page root uses the in-shell app route so the user keeps Avibe
- * chrome and back navigation; deep private locations retain their complete URL
- * in a same-context document navigation. Canonical AppShell routes stay on the
- * SPA path, avoiding a reload and another auth pass. Public Show Pages load
- * their server-owned `/p/` document. Unrelated same-origin resources (downloads,
- * API endpoints, media) are not intercepted.
+ * chrome and back navigation. Canonical AppShell routes stay on the SPA path,
+ * avoiding a reload and another auth pass. Every other same-origin destination
+ * uses a current-context document navigation so WebKit never creates the
+ * secondary context that iOS may incorrectly restore after process eviction.
+ * Callers exclude download anchors before using this resolver.
  */
 export interface InternalPwaLinkTarget {
   path: string;
@@ -57,29 +57,14 @@ export function internalPwaLinkTarget(
     const target = new URL(href, current);
     if (target.origin !== current.origin || !['http:', 'https:'].includes(target.protocol)) return null;
 
-    const privateShow = /^\/show\/([^/]+)(?:\/(.*))?$/.exec(target.pathname);
-    if (privateShow) {
-      const rootPath = privateShow[2] === undefined || privateShow[2] === '';
-      if (rootPath && !target.search && !target.hash) {
-        return { path: `/apps/show/${privateShow[1]}`, navigation: 'spa' };
-      }
-      return {
-        path: `${target.pathname}${target.search}${target.hash}`,
-        navigation: 'document',
-      };
+    const privateShowRoot = /^\/show\/([^/]+)\/?$/.exec(target.pathname);
+    if (privateShowRoot && !target.search && !target.hash) {
+      return { path: `/apps/show/${privateShowRoot[1]}`, navigation: 'spa' };
     }
 
-    if (/^\/p\/[^/]+(?:\/.*)?$/.test(target.pathname)) {
-      return {
-        path: `${target.pathname}${target.search}${target.hash}`,
-        navigation: 'document',
-      };
-    }
-
-    if (!isApplicationRouteHref(target.pathname)) return null;
     return {
       path: `${target.pathname}${target.search}${target.hash}`,
-      navigation: 'spa',
+      navigation: isApplicationRouteHref(target.pathname) ? 'spa' : 'document',
     };
   } catch {
     return null;
