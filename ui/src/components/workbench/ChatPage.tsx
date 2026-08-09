@@ -91,6 +91,7 @@ import {
   transcriptSelectionActions,
   type SessionReadOnlyReason,
 } from './sessionArchived';
+import { createSessionRowRefreshGate } from './sessionRowRefresh';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -211,6 +212,7 @@ export const ChatPage: React.FC = () => {
   // Loaded session (null while bootstrapping — ChatPage renders a loader until
   // it's set). Lifted above the composer bridge + show-page logic that gate on it.
   const [session, setSession] = useState<WorkbenchSession | null>(null);
+  const sessionRowRefreshGateRef = useRef(createSessionRowRefreshGate());
   // Archive is terminal: an archived transcript stays fully readable (search's
   // "include archived" opt-in links straight here) but every mutation is refused
   // server-side, so the chat renders read-only — no composer, no rename, no
@@ -972,10 +974,9 @@ export const ChatPage: React.FC = () => {
 
   // The header's route and backend lock both come from the durable Session row.
   // Every settled turn refreshes it because turn start may materialize inherited
-  // model / effort even on an already-bound legacy session. Reconnect recovery
-  // can stay native-only: route materialization itself always belongs to a Turn.
+  // model / effort even on an already-bound legacy session. A missed turn.end is
+  // recovered by syncTurnState, which refreshes the row when it clears stale work.
   const hasNativeRef = useRef(false);
-  const sessionMutationGenerationRef = useRef(0);
   useEffect(() => {
     hasNativeRef.current = Boolean(session?.native_session_id);
   }, [session]);
@@ -1001,14 +1002,14 @@ export const ChatPage: React.FC = () => {
   const refreshSessionRow = useCallback(async () => {
     const id = sessionIdRef.current;
     if (!id) return;
-    const mutationGeneration = sessionMutationGenerationRef.current;
+    const isCurrent = sessionRowRefreshGateRef.current.begin();
     try {
       // cache:false — an earlier refresh (page open / reconnect) may have
       // cached a stale row; reusing it inside the read cache's TTL is exactly
       // what the callers are trying to escape.
       const row = await api.getSession(id, { cache: false });
       setSession((prev) =>
-        mutationGeneration === sessionMutationGenerationRef.current &&
+        isCurrent() &&
         prev &&
         prev.id === row.id &&
         row.id === sessionIdRef.current
@@ -1049,6 +1050,7 @@ export const ChatPage: React.FC = () => {
       showPageRequestRef.current += 1;
       setShowPageBusy(false);
       writeChatViewMode(archivedSessionId, 'chat');
+      sessionRowRefreshGateRef.current.invalidate();
       setSession((prev) => markSessionArchived(prev, archivedSessionId));
       void refreshSessionRow();
     },
@@ -1300,6 +1302,7 @@ export const ChatPage: React.FC = () => {
       if (turnEpochRef.current !== epochAtRequest) return;
       const sinceSet = Date.now() - workingSetAtRef.current;
       if (sinceSet > WORKING_SETTLE_GRACE_MS) {
+        const recoveredDroppedTurnEnd = workingRef.current;
         workingRef.current = false;
         setWorking(false);
         // Agent Activity: the idle poll recovering a dropped terminal/turn.end is a
@@ -1311,6 +1314,7 @@ export const ChatPage: React.FC = () => {
           dispatchLive({ type: 'settle' });
           scheduleActivityRefresh(false);
         }
+        if (recoveredDroppedTurnEnd) void refreshSessionRow();
       } else if (graceResyncRef.current === null) {
         // Idle INSIDE the grace: either the registration gap (don't clear) or a
         // quick turn that already finished and whose turn.end we missed (a
@@ -1324,7 +1328,7 @@ export const ChatPage: React.FC = () => {
     } catch {
       /* controller unreachable — leave the indicator as-is */
     }
-  }, [api, sessionId, markWorking, dispatchLive, scheduleActivityRefresh]);
+  }, [api, sessionId, markWorking, dispatchLive, scheduleActivityRefresh, refreshSessionRow]);
 
   // Keep a ref to the latest syncTurnState so the grace-resync timer can call the
   // current closure without baking it into a dependency cycle.
@@ -1343,6 +1347,7 @@ export const ChatPage: React.FC = () => {
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Dropped if the user switched chats while this load was in flight.
       if (sessionId !== sessionIdRef.current) return;
+      sessionRowRefreshGateRef.current.invalidate();
       setSession(bootstrap.session);
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
@@ -1400,6 +1405,7 @@ export const ChatPage: React.FC = () => {
     // finishes, and a rename / agent change would patch() the STALE session.id
     // while the URL is already on the new chat (Codex P2). Nulling it shows the
     // loading state until refresh() resolves the new session.
+    sessionRowRefreshGateRef.current.invalidate();
     setSession(null);
     setMessages([]);
     setVaultResolvedSourceIds(new Map());
@@ -1566,6 +1572,7 @@ export const ChatPage: React.FC = () => {
         if (data.session_id !== sessionIdRef.current || data.event !== 'updated') return;
         if (!Object.prototype.hasOwnProperty.call(data, 'title')) return;
         const nextTitle = data.title ?? null;
+        sessionRowRefreshGateRef.current.invalidate();
         setSession((prev) => {
           if (!prev || prev.id !== data.session_id || prev.title === nextTitle) return prev;
           return { ...prev, title: nextTitle };
@@ -2208,7 +2215,7 @@ export const ChatPage: React.FC = () => {
     async (changes: Partial<WorkbenchSession>) => {
       if (!session) return;
       const patchedId = session.id;
-      sessionMutationGenerationRef.current += 1;
+      sessionRowRefreshGateRef.current.invalidate();
       try {
         const updated = await api.updateSession(session.id, changes as any);
         // Drop a stale response after a chat switch: if the user navigated to a
@@ -2217,6 +2224,7 @@ export const ChatPage: React.FC = () => {
         // B and make later edits patch the wrong session.id (Codex P2). Mirrors
         // the sessionIdRef guards on send/cancel.
         if (patchedId !== sessionIdRef.current) return;
+        sessionRowRefreshGateRef.current.invalidate();
         setSession(updated);
       } catch (err) {
         if (patchedId !== sessionIdRef.current) return;
@@ -2227,11 +2235,6 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
-      } finally {
-        // Invalidate a row refresh that started while this mutation was in
-        // flight. If it returned first, the PATCH response above still wins;
-        // if it returns later, it cannot restore the pre-PATCH route.
-        sessionMutationGenerationRef.current += 1;
       }
     },
     [api, session, t],
@@ -2254,8 +2257,10 @@ export const ChatPage: React.FC = () => {
     onArchived: () => navigate('/inbox'),
     // The provider cache feeds the sidebar, not this page's own session copy. The
     // write resolves after an await, so only patch if we're still on that session.
-    onSessionPatched: (changes, sessionId) =>
-      setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev)),
+    onSessionPatched: (changes, sessionId) => {
+      sessionRowRefreshGateRef.current.invalidate();
+      setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev));
+    },
     archiveHint: ARCHIVE_SHORTCUT_LABEL,
   });
 
