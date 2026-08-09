@@ -15,8 +15,9 @@ import re
 import sqlite3
 import stat
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Literal, Mapping, Protocol, Sequence
 
@@ -32,6 +33,9 @@ _MANIFEST_BATCH_SIZE = 1_000
 # bound applies to one malformed record, never to total manifest bytes or rows.
 _MAX_MANIFEST_LINE_BYTES = 256 * 1024
 _COPY_CHUNK_BYTES = 1024 * 1024
+# Eviction only causes a path segment to be reopened; it never limits accepted
+# tree depth. Two simultaneous caches therefore stay well below common fd limits.
+_DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
 _SNAPSHOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TERMINAL_PERMIT_AUTHORITY = object()
@@ -246,6 +250,174 @@ class _RestorePlan:
     staged: Path | None
     backups: list[_RestoreBackup]
     installed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RelativeNode:
+    parent: _RelativeNode | None
+    name: str
+
+
+@dataclass(slots=True)
+class _TreeCopyFrame:
+    node: _RelativeNode | None
+    entry_type: Literal["tree", "directory"]
+    mode: int
+    before: tuple[int, int, int, int]
+    child_names: list[str]
+    child_index: int
+    digest: _DigestWriter
+
+
+@dataclass(slots=True)
+class _DirectoryWalkFrame:
+    node: _RelativeNode | None
+    before: tuple[int, int, int, int]
+    child_names: list[str]
+    child_index: int = 0
+
+
+@dataclass(slots=True)
+class _RemovalFrame:
+    node: _RelativeNode
+    before: tuple[int, int]
+    child_names: list[str]
+    child_index: int = 0
+
+
+class _DirectoryDescriptorCache:
+    """Reopen deep paths safely while keeping descriptor use constant."""
+
+    def __init__(
+        self,
+        root_fd: int,
+        *,
+        verification: bool = False,
+        require_private: bool = True,
+    ) -> None:
+        self._root_fd = root_fd
+        self._verification = verification
+        self._require_private = require_private
+        self._descriptors: OrderedDict[object, tuple[object, int]] = OrderedDict()
+        self._maximum = _DIRECTORY_DESCRIPTOR_CACHE_SIZE
+
+    def __enter__(self) -> "_DirectoryDescriptorCache":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        for _identity, descriptor in self._descriptors.values():
+            os.close(descriptor)
+        self._descriptors.clear()
+
+    def open(self, node: _RelativeNode | None, label: str) -> int:
+        if node is None:
+            return os.dup(self._root_fd)
+        trail: list[_RelativeNode] = []
+        ancestor = node
+        cached: tuple[_RelativeNode, int] | None = None
+        while ancestor is not None:
+            cached = self._descriptors.get(id(ancestor))
+            if cached is not None and cached[0] is ancestor:
+                self._descriptors.move_to_end(id(ancestor))
+                break
+            trail.append(ancestor)
+            ancestor = ancestor.parent
+        current = os.dup(self._root_fd if cached is None else cached[1])
+        try:
+            for component_node in reversed(trail):
+                try:
+                    next_descriptor = os.open(
+                        component_node.name,
+                        _directory_open_flags(),
+                        dir_fd=current,
+                    )
+                except OSError as error:
+                    if self._verification:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot payload path is unsafe"
+                        ) from error
+                    raise MemorySnapshotUnsafePathError(
+                        f"{label} cannot be opened safely"
+                    ) from error
+                os.close(current)
+                current = next_descriptor
+                self._validate(os.fstat(current), label)
+                self._remember(id(component_node), component_node, current)
+            return current
+        except BaseException:
+            os.close(current)
+            raise
+
+    def open_components(self, components: Sequence[str], label: str) -> int:
+        target = tuple(components)
+        prefix = target
+        cached: tuple[object, int] | None = None
+        while prefix:
+            cached = self._descriptors.get(prefix)
+            if cached is not None and cached[0] == prefix:
+                self._descriptors.move_to_end(prefix)
+                break
+            prefix = prefix[:-1]
+        current = os.dup(self._root_fd if cached is None else cached[1])
+        try:
+            for index in range(len(prefix), len(target)):
+                try:
+                    next_descriptor = os.open(
+                        target[index],
+                        _directory_open_flags(),
+                        dir_fd=current,
+                    )
+                except OSError as error:
+                    if self._verification:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot payload path is unsafe"
+                        ) from error
+                    raise MemorySnapshotUnsafePathError(
+                        f"{label} cannot be opened safely"
+                    ) from error
+                os.close(current)
+                current = next_descriptor
+                self._validate(os.fstat(current), label)
+                component_prefix = target[: index + 1]
+                self._remember(component_prefix, component_prefix, current)
+            return current
+        except BaseException:
+            os.close(current)
+            raise
+
+    def _validate(self, info: os.stat_result, label: str) -> None:
+        if self._verification:
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload path is unsafe"
+                )
+            try:
+                _require_owned(info, label)
+            except MemorySnapshotUnsafePathError as error:
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload path is unsafe"
+                ) from error
+            return
+        if self._require_private:
+            _require_directory_private(info, label)
+        elif not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise MemorySnapshotUnsafePathError(f"{label} is not a safe directory")
+
+    def _remember(self, key: object, identity: object, descriptor: int) -> None:
+        previous = self._descriptors.pop(key, None)
+        if previous is not None:
+            os.close(previous[1])
+        self._descriptors[key] = (identity, os.dup(descriptor))
+        while len(self._descriptors) > self._maximum:
+            _key, (_old_identity, old_descriptor) = self._descriptors.popitem(last=False)
+            os.close(old_descriptor)
 
 
 class _DigestWriter(Protocol):
@@ -863,105 +1035,131 @@ class MemorySnapshotManager:
         _require_directory_private(info, "Memory tree surface")
         _ensure_private_directory(self._effective_home, destination.parent)
         _mkdir_private(destination)
-        entry = self._copy_tree_children(
-            source,
-            destination,
-            PurePosixPath(surface.path),
-            SnapshotEntry(
-                path=surface.path,
-                type="tree",
-                mode=stat.S_IMODE(info.st_mode),
-                size=0,
-                sha256=None,
-                tree_digest=None,
-            ),
-            manifest,
-        )
-        os.chmod(destination, stat.S_IMODE(info.st_mode))
-        _fsync_directory(destination)
-        manifest.add(entry)
-        return entry
-
-    def _copy_tree_children(
-        self,
-        source: Path,
-        destination: Path,
-        relative: PurePosixPath,
-        directory_entry: SnapshotEntry,
-        manifest: _ManifestWriter,
-    ) -> SnapshotEntry:
-        before = os.lstat(source)
-        _require_directory_private(before, "Memory tree directory")
+        source_root_fd = _open_directory(source, "Memory tree surface")
+        destination_root_fd = _open_directory(destination, "Memory snapshot destination")
+        source_cache = _DirectoryDescriptorCache(source_root_fd)
+        destination_cache = _DirectoryDescriptorCache(destination_root_fd)
         try:
-            iterator = os.scandir(source)
-        except OSError as error:
-            raise MemorySnapshotError("Memory tree surface could not be read") from error
-        with iterator:
-            children = sorted(iterator, key=lambda item: item.name)
-        digest = _tree_digest(directory_entry)
-        for child in children:
-            source_child = Path(child.path)
-            destination_child = destination / child.name
-            info = child.stat(follow_symlinks=False)
-            child_relative = relative / child.name
-            path_text = _validated_relative_path(child_relative.as_posix())
-            if stat.S_ISLNK(info.st_mode):
-                raise MemorySnapshotUnsafePathError("Memory snapshot refuses symlinks")
-            if stat.S_ISDIR(info.st_mode):
-                _require_directory_private(info, "Memory tree directory")
-                _mkdir_private(destination_child)
-                entry = self._copy_tree_children(
-                    source_child,
-                    destination_child,
-                    child_relative,
-                    SnapshotEntry(
-                        path=path_text,
-                        type="directory",
-                        mode=stat.S_IMODE(info.st_mode),
-                        size=0,
-                        sha256=None,
-                        tree_digest=None,
-                    ),
-                    manifest,
+            root_mode = stat.S_IMODE(info.st_mode)
+            stack = [
+                _tree_copy_frame(
+                    source_cache,
+                    None,
+                    base_path=surface.path,
+                    entry_type="tree",
+                    mode=root_mode,
+                    expected=info,
                 )
-                os.chmod(destination_child, stat.S_IMODE(info.st_mode))
-                _fsync_directory(destination_child)
+            ]
+            root_entry: SnapshotEntry | None = None
+            while stack:
+                frame = stack[-1]
+                if frame.child_index < len(frame.child_names):
+                    child_name = frame.child_names[frame.child_index]
+                    frame.child_index += 1
+                    child_node = _RelativeNode(frame.node, child_name)
+                    source_parent_fd = source_cache.open(
+                        frame.node,
+                        "Memory tree directory",
+                    )
+                    destination_parent_fd = destination_cache.open(
+                        frame.node,
+                        "Memory snapshot destination",
+                    )
+                    try:
+                        child_info = os.stat(
+                            child_name,
+                            dir_fd=source_parent_fd,
+                            follow_symlinks=False,
+                        )
+                        path_text = _node_manifest_path(surface.path, child_node)
+                        if stat.S_ISLNK(child_info.st_mode):
+                            raise MemorySnapshotUnsafePathError(
+                                "Memory snapshot refuses symlinks"
+                            )
+                        if stat.S_ISDIR(child_info.st_mode):
+                            _require_directory_private(
+                                child_info,
+                                "Memory tree directory",
+                            )
+                            _mkdir_private_at(destination_parent_fd, child_name)
+                            stack.append(
+                                _tree_copy_frame(
+                                    source_cache,
+                                    child_node,
+                                    base_path=surface.path,
+                                    entry_type="directory",
+                                    mode=stat.S_IMODE(child_info.st_mode),
+                                    expected=child_info,
+                                )
+                            )
+                            continue
+                        if not stat.S_ISREG(child_info.st_mode):
+                            raise MemorySnapshotUnsafePathError(
+                                "Memory snapshot refuses special files"
+                            )
+                        _require_regular_private(child_info, "Memory tree file")
+                        size, file_digest = _copy_regular_file_at(
+                            source_parent_fd,
+                            destination_parent_fd,
+                            child_name,
+                            mode=stat.S_IMODE(child_info.st_mode),
+                        )
+                    finally:
+                        os.close(destination_parent_fd)
+                        os.close(source_parent_fd)
+                    entry = SnapshotEntry(
+                        path=path_text,
+                        type="file",
+                        mode=stat.S_IMODE(child_info.st_mode),
+                        size=size,
+                        sha256=file_digest,
+                        tree_digest=None,
+                    )
+                    manifest.add(entry)
+                    _update_tree_digest(frame.digest, entry)
+                    continue
+
+                stack.pop()
+                source_fd = source_cache.open(
+                    frame.node,
+                    "Memory tree directory",
+                )
+                destination_fd = destination_cache.open(
+                    frame.node,
+                    "Memory snapshot destination",
+                )
+                try:
+                    after = os.fstat(source_fd)
+                    if _directory_identity(after) != frame.before:
+                        raise MemorySnapshotError(
+                            "Memory tree directory changed during snapshot"
+                        )
+                    os.fchmod(destination_fd, frame.mode)
+                    os.fsync(destination_fd)
+                finally:
+                    os.close(destination_fd)
+                    os.close(source_fd)
+                entry = SnapshotEntry(
+                    path=_node_manifest_path(surface.path, frame.node),
+                    type=frame.entry_type,
+                    mode=frame.mode,
+                    size=0,
+                    sha256=None,
+                    tree_digest=frame.digest.hexdigest(),
+                )
                 manifest.add(entry)
-                _update_tree_digest(digest, entry)
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                raise MemorySnapshotUnsafePathError("Memory snapshot refuses special files")
-            _require_regular_private(info, "Memory tree file")
-            size, file_digest = _copy_regular_file(
-                source_child,
-                destination_child,
-                mode=stat.S_IMODE(info.st_mode),
-            )
-            entry = SnapshotEntry(
-                path=path_text,
-                type="file",
-                mode=stat.S_IMODE(info.st_mode),
-                size=size,
-                sha256=file_digest,
-                tree_digest=None,
-            )
-            manifest.add(entry)
-            _update_tree_digest(digest, entry)
-        after = os.lstat(source)
-        stable = (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_mtime_ns,
-        ) == (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_mtime_ns,
-        )
-        if not stable:
-            raise MemorySnapshotError("Memory tree directory changed during snapshot")
-        return replace(directory_entry, tree_digest=digest.hexdigest())
+                if stack:
+                    _update_tree_digest(stack[-1].digest, entry)
+                else:
+                    root_entry = entry
+            assert root_entry is not None
+            return root_entry
+        finally:
+            destination_cache.close()
+            source_cache.close()
+            os.close(destination_root_fd)
+            os.close(source_root_fd)
 
     def _verify_directory(self, snapshot_id: str, directory: Path) -> MemorySnapshot:
         with self._verified_directory(snapshot_id, directory) as (snapshot, _index):
@@ -1073,29 +1271,61 @@ class MemorySnapshotManager:
         return tuple(roots)
 
     def _verify_payload(self, payload_root: Path, entries: _ManifestIndex) -> None:
-        for entry in entries:
-            if entry.type == "missing":
-                continue
-            target = payload_root / entry.path
-            try:
-                info = os.lstat(target)
-            except FileNotFoundError as error:
-                raise MemorySnapshotVerificationError("Memory snapshot payload entry is missing") from error
-            mode = stat.S_IMODE(info.st_mode)
-            if mode != entry.mode:
-                raise MemorySnapshotVerificationError("Memory snapshot payload mode changed")
-            if entry.type in {"sqlite", "file"}:
-                if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                    raise MemorySnapshotVerificationError("Memory snapshot file type changed")
-                if info.st_size != entry.size or _file_sha256(target) != entry.sha256:
-                    raise MemorySnapshotVerificationError("Memory snapshot file digest changed")
-            else:
-                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                    raise MemorySnapshotVerificationError("Memory snapshot directory type changed")
-                if entry.size != 0:
-                    raise MemorySnapshotVerificationError("Memory snapshot directory size is invalid")
+        payload_fd = _open_verification_directory(payload_root, "Memory snapshot payload")
+        payload_cache = _DirectoryDescriptorCache(payload_fd, verification=True)
+        try:
+            for entry in entries:
+                if entry.type == "missing":
+                    continue
+                parts = entry.path.split("/")
+                parent_fd = payload_cache.open_components(
+                    parts[:-1],
+                    "Memory snapshot payload directory",
+                )
+                try:
+                    try:
+                        info = os.stat(
+                            parts[-1],
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError as error:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot payload entry is missing"
+                        ) from error
+                    mode = stat.S_IMODE(info.st_mode)
+                    if mode != entry.mode:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot payload mode changed"
+                        )
+                    if entry.type in {"sqlite", "file"}:
+                        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                            raise MemorySnapshotVerificationError(
+                                "Memory snapshot file type changed"
+                            )
+                        if (
+                            info.st_size != entry.size
+                            or _file_sha256_at(parent_fd, parts[-1]) != entry.sha256
+                        ):
+                            raise MemorySnapshotVerificationError(
+                                "Memory snapshot file digest changed"
+                            )
+                    else:
+                        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                            raise MemorySnapshotVerificationError(
+                                "Memory snapshot directory type changed"
+                            )
+                        if entry.size != 0:
+                            raise MemorySnapshotVerificationError(
+                                "Memory snapshot directory size is invalid"
+                            )
+                finally:
+                    os.close(parent_fd)
 
-        _verify_payload_paths(payload_root, entries)
+            _verify_payload_paths(payload_fd, payload_cache, entries)
+        finally:
+            payload_cache.close()
+            os.close(payload_fd)
         for entry in entries:
             if entry.type not in {"tree", "directory"}:
                 continue
@@ -1114,35 +1344,72 @@ class MemorySnapshotManager:
         staged: Path,
     ) -> None:
         _mkdir_private(staged)
-        for entry in entries.descendants(
-            surface.path,
-            entry_type="directory",
-            depth_order="ASC",
-        ):
-            relative = PurePosixPath(entry.path).relative_to(PurePosixPath(surface.path))
-            target = staged.joinpath(*relative.parts)
-            _mkdir_private(target)
-        for entry in entries.descendants(surface.path, entry_type="file"):
-            relative = PurePosixPath(entry.path).relative_to(PurePosixPath(surface.path))
-            _copy_verified_file(
-                payload_root / entry.path,
-                staged.joinpath(*relative.parts),
-                confinement_home=self._effective_home,
-                expected_sha256=entry.sha256,
-                expected_size=entry.size,
-                mode=entry.mode,
-            )
-        for entry in entries.descendants(
-            surface.path,
-            entry_type="directory",
-            depth_order="DESC",
-        ):
-            relative = PurePosixPath(entry.path).relative_to(PurePosixPath(surface.path))
-            directory = staged.joinpath(*relative.parts)
-            os.chmod(directory, entry.mode)
-            _fsync_directory(directory)
-        os.chmod(staged, root.mode)
-        _fsync_directory(staged)
+        payload_fd = _open_verification_directory(payload_root, "Memory snapshot payload")
+        staged_fd = _open_directory(staged, "Memory restore staging directory")
+        payload_cache = _DirectoryDescriptorCache(payload_fd, verification=True)
+        staged_cache = _DirectoryDescriptorCache(staged_fd)
+        surface_parts = surface.path.split("/")
+        try:
+            for entry in entries.descendants(
+                surface.path,
+                entry_type="directory",
+                depth_order="ASC",
+            ):
+                relative_parts = entry.path.split("/")[len(surface_parts) :]
+                parent_fd = staged_cache.open_components(
+                    relative_parts[:-1],
+                    "Memory restore staging directory",
+                )
+                try:
+                    _mkdir_private_at(parent_fd, relative_parts[-1])
+                finally:
+                    os.close(parent_fd)
+            for entry in entries.descendants(surface.path, entry_type="file"):
+                source_parts = entry.path.split("/")
+                relative_parts = source_parts[len(surface_parts) :]
+                source_parent_fd = payload_cache.open_components(
+                    source_parts[:-1],
+                    "Memory snapshot payload directory",
+                )
+                destination_parent_fd = staged_cache.open_components(
+                    relative_parts[:-1],
+                    "Memory restore staging directory",
+                )
+                try:
+                    _copy_verified_file_at(
+                        source_parent_fd,
+                        destination_parent_fd,
+                        source_parts[-1],
+                        relative_parts[-1],
+                        expected_sha256=entry.sha256,
+                        expected_size=entry.size,
+                        mode=entry.mode,
+                    )
+                finally:
+                    os.close(destination_parent_fd)
+                    os.close(source_parent_fd)
+            for entry in entries.descendants(
+                surface.path,
+                entry_type="directory",
+                depth_order="DESC",
+            ):
+                relative_parts = entry.path.split("/")[len(surface_parts) :]
+                directory_fd = staged_cache.open_components(
+                    relative_parts,
+                    "Memory restore staging directory",
+                )
+                try:
+                    os.fchmod(directory_fd, entry.mode)
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            os.fchmod(staged_fd, root.mode)
+            os.fsync(staged_fd)
+        finally:
+            staged_cache.close()
+            payload_cache.close()
+            os.close(staged_fd)
+            os.close(payload_fd)
 
     def _rollback_restore(self, plans: list[_RestorePlan]) -> None:
         for plan in reversed(plans):
@@ -1229,6 +1496,121 @@ def _mkdir_private(path: Path) -> None:
     _require_directory_private(os.lstat(path), "Memory private directory")
 
 
+def _directory_open_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_directory(path: Path, label: str) -> int:
+    try:
+        descriptor = os.open(path, _directory_open_flags())
+    except OSError as error:
+        raise MemorySnapshotUnsafePathError(f"{label} cannot be opened safely") from error
+    try:
+        _require_directory_private(os.fstat(descriptor), label)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_verification_directory(path: Path, label: str) -> int:
+    try:
+        descriptor = os.open(path, _directory_open_flags())
+    except OSError as error:
+        raise MemorySnapshotVerificationError(f"{label} cannot be opened safely") from error
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
+            raise MemorySnapshotVerificationError(f"{label} is not a private directory")
+        _require_owned(info, label)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _mkdir_private_at(parent_fd: int, name: str) -> None:
+    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+    descriptor = os.open(name, _directory_open_flags(), dir_fd=parent_fd)
+    try:
+        os.fchmod(descriptor, 0o700)
+        _require_directory_private(os.fstat(descriptor), "Memory private directory")
+    finally:
+        os.close(descriptor)
+
+
+def _node_components(node: _RelativeNode | None) -> list[str]:
+    components: list[str] = []
+    while node is not None:
+        components.append(node.name)
+        node = node.parent
+    components.reverse()
+    return components
+
+
+def _node_manifest_path(base_path: str, node: _RelativeNode | None) -> str:
+    components = _node_components(node)
+    value = base_path if not components else f"{base_path}/{'/'.join(components)}"
+    return _validated_relative_path(value)
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns)
+
+
+def _directory_child_names(descriptor: int, message: str) -> list[str]:
+    try:
+        with os.scandir(descriptor) as iterator:
+            return sorted(entry.name for entry in iterator)
+    except OSError as error:
+        raise MemorySnapshotError(message) from error
+
+
+def _tree_copy_frame(
+    source_cache: _DirectoryDescriptorCache,
+    node: _RelativeNode | None,
+    *,
+    base_path: str,
+    entry_type: Literal["tree", "directory"],
+    mode: int,
+    expected: os.stat_result,
+) -> _TreeCopyFrame:
+    descriptor = source_cache.open(
+        node,
+        "Memory tree directory",
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise MemorySnapshotError("Memory tree directory changed during snapshot")
+        entry = SnapshotEntry(
+            path=_node_manifest_path(base_path, node),
+            type=entry_type,
+            mode=mode,
+            size=0,
+            sha256=None,
+            tree_digest=None,
+        )
+        return _TreeCopyFrame(
+            node=node,
+            entry_type=entry_type,
+            mode=mode,
+            before=_directory_identity(opened),
+            child_names=_directory_child_names(
+                descriptor,
+                "Memory tree surface could not be read",
+            ),
+            child_index=0,
+            digest=_tree_digest(entry),
+        )
+    finally:
+        os.close(descriptor)
+
+
 def _require_absent(path: Path, message: str) -> None:
     try:
         os.lstat(path)
@@ -1311,6 +1693,69 @@ def _copy_regular_file(source: Path, destination: Path, *, mode: int) -> tuple[i
             _fsync_directory(destination.parent)
 
 
+def _copy_regular_file_at(
+    source_parent_fd: int,
+    destination_parent_fd: int,
+    source_name: str,
+    *,
+    mode: int,
+    destination_name: str | None = None,
+) -> tuple[int, str]:
+    target_name = source_name if destination_name is None else destination_name
+    source_fd = os.open(
+        source_name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=source_parent_fd,
+    )
+    destination_fd: int | None = None
+    created = False
+    try:
+        before = os.fstat(source_fd)
+        _require_regular_private(before, "Memory snapshot source file")
+        destination_fd = os.open(
+            target_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=destination_parent_fd,
+        )
+        created = True
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            chunk = os.read(source_fd, _COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            _write_all(destination_fd, chunk)
+        after = os.fstat(source_fd)
+        stable = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if not stable or size != before.st_size:
+            raise MemorySnapshotError("Memory snapshot source changed during copy")
+        os.fchmod(destination_fd, mode)
+        os.fsync(destination_fd)
+        return size, digest.hexdigest()
+    finally:
+        os.close(source_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+        if created:
+            os.fsync(destination_parent_fd)
+
+
 def _copy_verified_file(
     source: Path,
     destination: Path,
@@ -1326,6 +1771,35 @@ def _copy_verified_file(
     if size != expected_size or digest != expected_sha256:
         _remove_safe_path(confinement_home, destination)
         raise MemorySnapshotVerificationError("Memory snapshot changed during restore staging")
+
+
+def _copy_verified_file_at(
+    source_parent_fd: int,
+    destination_parent_fd: int,
+    source_name: str,
+    destination_name: str,
+    *,
+    expected_sha256: str | None,
+    expected_size: int,
+    mode: int,
+) -> None:
+    if expected_sha256 is None:
+        raise MemorySnapshotVerificationError("Memory snapshot file has no digest")
+    size, digest = _copy_regular_file_at(
+        source_parent_fd,
+        destination_parent_fd,
+        source_name,
+        destination_name=destination_name,
+        mode=mode,
+    )
+    if size != expected_size or digest != expected_sha256:
+        try:
+            os.unlink(destination_name, dir_fd=destination_parent_fd)
+        except FileNotFoundError:
+            pass
+        raise MemorySnapshotVerificationError(
+            "Memory snapshot changed during restore staging"
+        )
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -1517,33 +1991,107 @@ def _update_tree_digest(digest: _DigestWriter, child: SnapshotEntry) -> None:
     )
 
 
-def _verify_payload_paths(payload_root: Path, entries: _ManifestIndex) -> None:
-    def walk(directory: Path, relative: PurePosixPath | None = None) -> None:
-        try:
-            children = os.scandir(directory)
-        except OSError as error:
-            raise MemorySnapshotVerificationError("Memory snapshot payload cannot be read") from error
-        with children:
-            for child in children:
-                path = PurePosixPath(child.name) if relative is None else relative / child.name
-                path_text = _validated_relative_path(path.as_posix())
-                info = child.stat(follow_symlinks=False)
-                if stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
-                    raise MemorySnapshotVerificationError("Memory snapshot payload has an unsafe entry")
-                if stat.S_ISREG(info.st_mode):
-                    _require_regular_private(info, "Memory snapshot payload file")
-                else:
-                    _require_directory_private(info, "Memory snapshot payload directory")
-                if entries.entry(path_text) is None and not (
-                    stat.S_ISDIR(info.st_mode) and entries.has_descendant(path_text)
-                ):
+def _verify_payload_paths(
+    payload_root_fd: int,
+    cache: _DirectoryDescriptorCache,
+    entries: _ManifestIndex,
+) -> None:
+    root_info = os.fstat(payload_root_fd)
+    stack = [
+        _DirectoryWalkFrame(
+            node=None,
+            before=_directory_identity(root_info),
+            child_names=_verification_child_names(payload_root_fd),
+        )
+    ]
+    while stack:
+        frame = stack[-1]
+        if frame.child_index >= len(frame.child_names):
+            stack.pop()
+            descriptor = cache.open(
+                frame.node,
+                "Memory snapshot payload directory",
+            )
+            try:
+                if _directory_identity(os.fstat(descriptor)) != frame.before:
                     raise MemorySnapshotVerificationError(
-                        "Memory snapshot payload has unmanifested entries"
+                        "Memory snapshot payload changed during verification"
                     )
-                if stat.S_ISDIR(info.st_mode):
-                    walk(Path(child.path), path)
+            finally:
+                os.close(descriptor)
+            continue
 
-    walk(payload_root)
+        child_name = frame.child_names[frame.child_index]
+        frame.child_index += 1
+        child_node = _RelativeNode(frame.node, child_name)
+        parent_fd = cache.open(
+            frame.node,
+            "Memory snapshot payload directory",
+        )
+        try:
+            info = os.stat(
+                child_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot payload cannot be read"
+            ) from error
+        finally:
+            os.close(parent_fd)
+        if stat.S_ISLNK(info.st_mode) or not (
+            stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+        ):
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot payload has an unsafe entry"
+            )
+        try:
+            if stat.S_ISREG(info.st_mode):
+                _require_regular_private(info, "Memory snapshot payload file")
+            else:
+                _require_directory_private(info, "Memory snapshot payload directory")
+        except MemorySnapshotUnsafePathError as error:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot payload has an unsafe entry"
+            ) from error
+        path_text = _validated_relative_path("/".join(_node_components(child_node)))
+        if entries.entry(path_text) is None and not (
+            stat.S_ISDIR(info.st_mode) and entries.has_descendant(path_text)
+        ):
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot payload has unmanifested entries"
+            )
+        if stat.S_ISDIR(info.st_mode):
+            descriptor = cache.open(
+                child_node,
+                "Memory snapshot payload directory",
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise MemorySnapshotVerificationError(
+                        "Memory snapshot payload changed during verification"
+                    )
+                stack.append(
+                    _DirectoryWalkFrame(
+                        node=child_node,
+                        before=_directory_identity(opened),
+                        child_names=_verification_child_names(descriptor),
+                    )
+                )
+            finally:
+                os.close(descriptor)
+
+
+def _verification_child_names(descriptor: int) -> list[str]:
+    try:
+        with os.scandir(descriptor) as iterator:
+            return sorted(entry.name for entry in iterator)
+    except OSError as error:
+        raise MemorySnapshotVerificationError(
+            "Memory snapshot payload cannot be read"
+        ) from error
 
 
 def _descendant_bounds(path: str) -> tuple[str, str]:
@@ -1597,6 +2145,53 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _file_sha256_at(parent_fd: int, name: str) -> str:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_fd,
+    )
+    digest = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        try:
+            _require_regular_private(before, "Memory snapshot digest target")
+        except MemorySnapshotUnsafePathError as error:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot file type changed"
+            ) from error
+        size = 0
+        while True:
+            chunk = os.read(descriptor, _COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(descriptor)
+        stable = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if not stable or size != before.st_size:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot changed during digest"
+            )
+    except OSError as error:
+        raise MemorySnapshotVerificationError(
+            "Memory snapshot file cannot be read safely"
+        ) from error
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
 def _sqlite_sidecars(path: Path) -> tuple[Path, Path, Path]:
     return (
         path.with_name(f"{path.name}-wal"),
@@ -1620,53 +2215,107 @@ def _remove_safe_path(home: Path, path: Path) -> None:
     relative = _relative_to_home(path, home)
     if not relative.parts:
         raise MemorySnapshotUnsafePathError("refusing to remove the effective Memory home")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptors: list[int] = []
+    flags = _directory_open_flags()
+    current: int | None = None
     try:
         current = os.open(home, flags)
-        descriptors.append(current)
         for component in relative.parts[:-1]:
             try:
-                current = os.open(component, flags, dir_fd=current)
+                next_descriptor = os.open(component, flags, dir_fd=current)
             except FileNotFoundError:
                 return
-            descriptors.append(current)
+            os.close(current)
+            current = next_descriptor
         _remove_entry_at(current, relative.parts[-1])
     finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
+        if current is not None:
+            os.close(current)
 
 
 def _remove_entry_at(parent_fd: int, name: str) -> None:
-    try:
-        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode):
-        os.unlink(name, dir_fd=parent_fd)
-        return
-    if not stat.S_ISDIR(before.st_mode):
-        raise MemorySnapshotUnsafePathError("Memory snapshot removal refuses special files")
+    root_node = _RelativeNode(None, name)
+    stack: list[_RemovalFrame | _RelativeNode] = [root_node]
+    with _DirectoryDescriptorCache(parent_fd, require_private=False) as cache:
+        while stack:
+            item = stack[-1]
+            if isinstance(item, _RelativeNode):
+                stack.pop()
+                node_parent_fd = cache.open(
+                    item.parent,
+                    "Memory snapshot removal parent",
+                )
+                try:
+                    try:
+                        before = os.stat(
+                            item.name,
+                            dir_fd=node_parent_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode):
+                        os.unlink(item.name, dir_fd=node_parent_fd)
+                        continue
+                    if not stat.S_ISDIR(before.st_mode):
+                        raise MemorySnapshotUnsafePathError(
+                            "Memory snapshot removal refuses special files"
+                        )
+                    child_fd = os.open(
+                        item.name,
+                        _directory_open_flags(),
+                        dir_fd=node_parent_fd,
+                    )
+                    try:
+                        opened = os.fstat(child_fd)
+                        if (opened.st_dev, opened.st_ino) != (
+                            before.st_dev,
+                            before.st_ino,
+                        ):
+                            raise MemorySnapshotUnsafePathError(
+                                "Memory snapshot directory changed during removal"
+                            )
+                        with os.scandir(child_fd) as entries:
+                            child_names = sorted(entry.name for entry in entries)
+                    finally:
+                        os.close(child_fd)
+                finally:
+                    os.close(node_parent_fd)
+                stack.append(
+                    _RemovalFrame(
+                        node=item,
+                        before=(before.st_dev, before.st_ino),
+                        child_names=child_names,
+                    )
+                )
+                continue
 
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    child_fd = os.open(name, flags, dir_fd=parent_fd)
-    try:
-        opened = os.fstat(child_fd)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise MemorySnapshotUnsafePathError("Memory snapshot directory changed during removal")
-        with os.scandir(child_fd) as entries:
-            child_names = [entry.name for entry in entries]
-        for child_name in child_names:
-            _remove_entry_at(child_fd, child_name)
-        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
-        ):
-            raise MemorySnapshotUnsafePathError("Memory snapshot directory changed during removal")
-    finally:
-        os.close(child_fd)
-    os.rmdir(name, dir_fd=parent_fd)
+            if item.child_index < len(item.child_names):
+                child_name = item.child_names[item.child_index]
+                item.child_index += 1
+                stack.append(_RelativeNode(item.node, child_name))
+                continue
+
+            stack.pop()
+            node_parent_fd = cache.open(
+                item.node.parent,
+                "Memory snapshot removal parent",
+            )
+            try:
+                current = os.stat(
+                    item.node.name,
+                    dir_fd=node_parent_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(current.st_mode)
+                    or (current.st_dev, current.st_ino) != item.before
+                ):
+                    raise MemorySnapshotUnsafePathError(
+                        "Memory snapshot directory changed during removal"
+                    )
+                os.rmdir(item.node.name, dir_fd=node_parent_fd)
+            finally:
+                os.close(node_parent_fd)
 
 
 def _fsync_file(path: Path) -> None:

@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import sys
 import tracemalloc
 from pathlib import Path
 
@@ -352,6 +353,169 @@ def test_streaming_manifest_crosses_batches_and_restores_exact_tree(
         assert (home / relative).read_bytes() == payload
     assert (home / "memory/everos-root/episodes/empty").is_dir()
     assert not (home / "memory/everos-root/unexpected.txt").exists()
+
+
+def test_deep_tree_create_verify_restore_and_terminal_clear_gc_converge(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    home.chmod(0o700)
+    manager = MemorySnapshotManager(home)
+    source_root = _private_directory(home / "memory/everos-root", home)
+
+    path_max = os.pathconf(home, "PC_PATH_MAX")
+    longest_prefix = max(
+        len(os.fsencode(source_root)),
+        len(
+            os.fsencode(
+                manager.snapshot_root
+                / ".deep-tree.tmp/payload/memory/everos-root"
+            )
+        ),
+        len(os.fsencode(home / "memory/.everos-root.restore-deep-tree-1")),
+    )
+    depth = min(1_100, (path_max - longest_prefix - len("/leaf.txt") - 16) // 2)
+    recursion_limit = min(sys.getrecursionlimit(), depth - 32)
+    assert recursion_limit > 200
+    assert depth > recursion_limit
+
+    leaf_parent = source_root
+    for _ in range(depth):
+        leaf_parent /= "d"
+        leaf_parent.mkdir(mode=0o700)
+    leaf = leaf_parent / "leaf.txt"
+    leaf.write_bytes(b"sealed deep bytes")
+    leaf.chmod(0o600)
+    assert len(os.fsencode(leaf)) < path_max
+
+    journal = MemoryClearJournal(home)
+    operation = journal.start(
+        operation_id="deep-tree",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    previous_recursion_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(recursion_limit)
+        snapshot = manager.create("deep-tree")
+        assert manager.verify(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+        ) == snapshot
+
+        manifest_records = [
+            json.loads(line)
+            for line in (
+                manager.snapshot_path(snapshot.snapshot_id) / "manifest.jsonl"
+            ).read_bytes().splitlines()
+        ]
+        provider_paths = [
+            record["entry"]["path"]
+            for record in manifest_records
+            if record.get("record") == "entry"
+            and record["entry"]["path"].startswith("memory/everos-root")
+        ]
+        expected_directories = [
+            "memory/everos-root" + "/d" * level
+            for level in range(depth, 0, -1)
+        ]
+        assert provider_paths == [
+            f"memory/everos-root{'/d' * depth}/leaf.txt",
+            *expected_directories,
+            "memory/everos-root",
+        ]
+
+        snapshot_leaf = (
+            manager.snapshot_path(snapshot.snapshot_id)
+            / "payload"
+            / leaf.relative_to(home)
+        )
+        snapshot_leaf.write_bytes(b"corrupt deep bytes")
+        snapshot_leaf.chmod(0o600)
+        with pytest.raises(MemorySnapshotVerificationError):
+            manager.verify(
+                snapshot.snapshot_id,
+                expected_manifest_sha256=snapshot.manifest_sha256,
+                expected_surface_digests=snapshot.surface_digests(),
+            )
+        snapshot_leaf.write_bytes(b"sealed deep bytes")
+        snapshot_leaf.chmod(0o600)
+
+        outside = _private_file(home / "outside.txt", b"outside survives", home)
+        snapshot_leaf.unlink()
+        snapshot_leaf.symlink_to(outside)
+        with pytest.raises(MemorySnapshotVerificationError):
+            manager.verify(
+                snapshot.snapshot_id,
+                expected_manifest_sha256=snapshot.manifest_sha256,
+                expected_surface_digests=snapshot.surface_digests(),
+            )
+        assert outside.read_bytes() == b"outside survives"
+        snapshot_leaf.unlink()
+        snapshot_leaf.write_bytes(b"sealed deep bytes")
+        snapshot_leaf.chmod(0o600)
+
+        leaf.write_bytes(b"new live bytes")
+        manager.restore(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+        )
+        assert leaf.read_bytes() == b"sealed deep bytes"
+
+        leaf.unlink()
+        leaf.symlink_to(outside)
+        with pytest.raises(MemorySnapshotUnsafePathError):
+            manager.create("deep-symlink")
+        assert not manager.snapshot_path("deep-symlink").exists()
+        assert outside.read_bytes() == b"outside survives"
+        manager.restore(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+        )
+
+        assert operation.execution_token is not None
+        operation = journal.record_snapshot(
+            operation.operation_id,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+            snapshot=snapshot,
+        )
+        assert operation.execution_token is not None
+        operation = journal.mark_prepared(
+            operation.operation_id,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+        )
+        assert operation.execution_token is not None
+        operation = journal.begin_deleting(
+            operation.operation_id,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+        )
+        for surface in journal.surfaces:
+            assert operation.execution_token is not None
+            operation = journal.record_surface_deleted(
+                operation.operation_id,
+                surface.name,
+                expected_revision=operation.revision,
+                execution_token=operation.execution_token,
+            )
+        assert operation.execution_token is not None
+        operation = journal.mark_completed(
+            operation.operation_id,
+            expected_revision=operation.revision,
+            execution_token=operation.execution_token,
+        )
+        manager.remove(journal.terminal_snapshot_permit(operation.operation_id))
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
+
+    assert not manager.snapshot_path(snapshot.snapshot_id).exists()
 
 
 def test_streaming_manifest_index_stays_memory_bounded_beyond_old_limits(
@@ -846,7 +1010,7 @@ def test_remove_uses_anchored_no_follow_walk_during_directory_swap(
 
     def swap_directory_for_symlink(path):
         nonlocal swapped
-        if isinstance(path, int) and not swapped:
+        if isinstance(path, int) and not swapped and tombstone.exists():
             swapped = True
             tombstone.rename(moved)
             tombstone.symlink_to(outside, target_is_directory=True)

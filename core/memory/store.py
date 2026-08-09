@@ -35,10 +35,66 @@ from core.memory.types import (
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
+MEMORY_STORE_SCHEMA_VERSION = 1
 MAX_NONTERMINAL_QUEUE_ROWS = 500
 MAX_MESSAGE_ATTEMPTS = 3
 TERMINAL_TOMBSTONE_LIMIT = 100_000
 TERMINAL_TOMBSTONE_RETENTION = timedelta(days=90)
+
+_MEMORY_STORE_TABLES = frozenset(
+    {
+        "memory_meta",
+        "memory_attachment_bundle",
+        "memory_session_flush_state",
+        "memory_capture_queue",
+        "memory_flush_settlements",
+    }
+)
+_MEMORY_STORE_REQUIRED_COLUMNS = {
+    "memory_meta": frozenset(
+        {
+            "singleton",
+            "processing_fault_kind",
+            "processing_fault_since",
+            "processing_alert_active",
+        }
+    ),
+    "memory_attachment_bundle": frozenset({"bundle_id", "relative_path", "state"}),
+    "memory_session_flush_state": frozenset(
+        {
+            "provider_session_ref",
+            "open_generation",
+            "target_generation",
+            "operation_epoch",
+        }
+    ),
+    "memory_capture_queue": frozenset(
+        {
+            "provider_session_ref",
+            "generation",
+            "attachment_bundle_id",
+            "lease_token",
+            "add_status",
+        }
+    ),
+    "memory_flush_settlements": frozenset(
+        {"provider_session_ref", "generation", "operation_token", "recovery_origin"}
+    ),
+}
+_MEMORY_STORE_INDEXES = frozenset(
+    {
+        "ix_memory_capture_due",
+        "ix_memory_capture_session_generation",
+        "ix_memory_session_flush_due",
+        "ix_memory_flush_settlements_recent",
+    }
+)
+_MEMORY_STORE_TRIGGERS = frozenset(
+    {
+        "trg_memory_flush_settlements_immutable",
+        "trg_memory_flush_settlements_no_delete",
+    }
+)
 
 
 def memory_store_path() -> Path:
@@ -51,6 +107,77 @@ def utc_now_iso() -> str:
     """Return a lexically sortable UTC instant with millisecond precision."""
 
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _application_tables(conn: sqlite3.Connection) -> frozenset[str]:
+    return frozenset(
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        if not str(row[0]).startswith("sqlite_")
+    )
+
+
+def _quote_sqlite_identifier(value: str) -> str:
+    escaped = value.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _install_clean_schema(
+    conn: sqlite3.Connection,
+    schema_sql: str,
+    application_tables: frozenset[str],
+) -> None:
+    drops = "\n".join(
+        f"DROP TABLE {_quote_sqlite_identifier(table)};"
+        for table in sorted(application_tables)
+    )
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript(
+            "BEGIN IMMEDIATE;\n"
+            f"{drops}\n"
+            f"{schema_sql}\n"
+            f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION};\n"
+            "COMMIT;"
+        )
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _verify_current_schema(conn: sqlite3.Connection) -> None:
+    application_tables = _application_tables(conn)
+    if application_tables != _MEMORY_STORE_TABLES:
+        raise RuntimeError("Memory store schema is incomplete")
+
+    for table, required_columns in _MEMORY_STORE_REQUIRED_COLUMNS.items():
+        columns = frozenset(
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table)})")
+        )
+        if not required_columns.issubset(columns):
+            raise RuntimeError("Memory store schema is incomplete")
+
+    indexes = frozenset(
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        if row[0] is not None
+    )
+    triggers = frozenset(
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+    )
+    if not _MEMORY_STORE_INDEXES.issubset(indexes) or not _MEMORY_STORE_TRIGGERS.issubset(
+        triggers
+    ):
+        raise RuntimeError("Memory store schema is incomplete")
+
+    quick_check = conn.execute("PRAGMA quick_check").fetchone()
+    if quick_check is None or quick_check[0] != "ok":
+        raise RuntimeError("Memory store failed integrity check")
 
 
 def _absolute_path_without_resolve(value: Path | str) -> Path:
@@ -2548,9 +2675,15 @@ class MemoryStore:
             return self._compact_terminal_tombstones_in_connection(conn, reference)
 
     def _initialize(self) -> None:
-        schema = Path(__file__).with_name("schema.sql")
+        schema_sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self._connection() as conn:
-            conn.executescript(schema.read_text(encoding="utf-8"))
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            application_tables = _application_tables(conn)
+            if version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
+                raise RuntimeError(f"Unsupported Memory store schema version: {version}")
+            if version == 0:
+                _install_clean_schema(conn, schema_sql, application_tables)
+            _verify_current_schema(conn)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2715,6 +2848,19 @@ class MemoryStore:
         reference: datetime,
     ) -> int:
         cutoff = _iso_from_datetime(reference - TERMINAL_TOMBSTONE_RETENTION)
+        prunable_session_refs = {
+            str(row[0])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT provider_session_ref
+                FROM memory_capture_queue
+                WHERE state IN ('delivered', 'dead')
+                  AND completed_at IS NOT NULL
+                  AND completed_at < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+        }
         removed = conn.execute(
             """
             DELETE FROM memory_capture_queue
@@ -2731,6 +2877,16 @@ class MemoryStore:
         )
         overflow = max(terminal_count - TERMINAL_TOMBSTONE_LIMIT, 0)
         if overflow:
+            overflow_rows = conn.execute(
+                """
+                SELECT provider_session_ref FROM memory_capture_queue
+                WHERE state IN ('delivered', 'dead')
+                ORDER BY completed_at, source_message_digest
+                LIMIT ?
+                """,
+                (overflow,),
+            ).fetchall()
+            prunable_session_refs.update(str(row[0]) for row in overflow_rows)
             removed += conn.execute(
                 """
                 DELETE FROM memory_capture_queue
@@ -2743,6 +2899,26 @@ class MemoryStore:
                 """,
                 (overflow,),
             ).rowcount
+        if prunable_session_refs:
+            conn.executemany(
+                """
+                DELETE FROM memory_session_flush_state AS session
+                WHERE provider_session_ref = ?
+                  AND state = 'idle'
+                  AND unflushed_count = 0
+                  AND first_unflushed_at IS NULL
+                  AND due_at IS NULL
+                  AND next_attempt_at IS NULL
+                  AND target_generation IS NULL
+                  AND fence_token IS NULL
+                  AND submission_started_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM memory_capture_queue AS capture
+                      WHERE capture.provider_session_ref = session.provider_session_ref
+                  )
+                """,
+                ((session_ref,) for session_ref in prunable_session_refs),
+            )
         return int(removed)
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 import threading
@@ -33,6 +35,56 @@ def _enqueue(runtime: MemoryRuntime, source: str) -> None:
         max_provider_timestamp_ms=100,
     )
     assert result.outcome == "accepted"
+
+
+async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    manager = runtime._snapshot_manager
+    assert manager is not None
+    provider_root = tmp_path / "memory/everos-root"
+    runtime.module._ensure_owned_provider_root(runtime._store.ensure_meta())
+    path_max = os.pathconf(tmp_path, "PC_PATH_MAX")
+    snapshot_prefix = manager.snapshot_root / (
+        f".{('x' * 32)}.tmp/payload/memory/everos-root"
+    )
+    longest_prefix = max(
+        len(os.fsencode(provider_root)),
+        len(os.fsencode(snapshot_prefix)),
+    )
+    depth = min(500, (path_max - longest_prefix - len("/leaf") - 16) // 2)
+    recursion_limit = min(sys.getrecursionlimit(), depth - 32)
+    assert recursion_limit > 200
+    assert depth > recursion_limit
+
+    leaf_parent = provider_root
+    for _ in range(depth):
+        leaf_parent /= "d"
+        leaf_parent.mkdir(mode=0o700)
+    leaf = leaf_parent / "leaf"
+    leaf.write_bytes(b"provider bytes")
+    leaf.chmod(0o600)
+    assert len(os.fsencode(leaf)) < path_max
+
+    previous_recursion_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(recursion_limit)
+        result = await runtime.clear(operator_ref="user:owner")
+        gc_task = runtime._terminal_snapshot_gc_task
+        if gc_task is not None:
+            await gc_task
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
+
+    assert result["status"] == "completed"
+    assert runtime._clear_journal is not None
+    assert runtime._clear_journal.get_open_operation() is None
+    assert not leaf.exists()
+    assert not manager.snapshot_path(result["operation_id"]).exists()
+    await runtime.close()
 
 
 async def test_clear_refuses_manual_required_fence_without_mutating_evidence(

@@ -24,6 +24,7 @@ from core.memory.attachments import (
 )
 from core.memory.artifact import PROVIDER_ROOT_CONTROL_FILES
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
+from core.memory.snapshot import MemorySnapshotError, _remove_safe_path
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
     MemoryMeta,
@@ -795,7 +796,7 @@ class MemoryModule:
         except OSError as error:
             raise _ClearStepFailure("provider root cannot be read") from error
         for child in children:
-            _remove_root_child_no_follow(child)
+            _remove_root_child_no_follow(child, self._effective_home)
         self._write_root_sentinel(meta)
         self._verify_owned_provider_root(meta, require_empty=True)
 
@@ -1073,18 +1074,10 @@ def _read_root_sentinel(path: Path) -> object:
         raise _ClearStepFailure("provider root sentinel is invalid") from error
 
 
-def _remove_root_child_no_follow(path: Path) -> None:
+def _remove_root_child_no_follow(path: Path, effective_home: Path) -> None:
     try:
-        info = os.lstat(path)
-        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-            with os.scandir(path) as entries:
-                children = [Path(entry.path) for entry in entries]
-            for child in children:
-                _remove_root_child_no_follow(child)
-            os.rmdir(path)
-        else:
-            os.unlink(path)
-    except OSError as error:
+        _remove_safe_path(effective_home, path)
+    except (MemorySnapshotError, OSError, ValueError) as error:
         raise _ClearStepFailure("provider root child could not be removed") from error
 
 

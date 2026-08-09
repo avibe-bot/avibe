@@ -16,6 +16,7 @@ from core.memory.store import (
     AmbiguousAdd,
     MAX_MESSAGE_ATTEMPTS,
     MAX_NONTERMINAL_QUEUE_ROWS,
+    MEMORY_STORE_SCHEMA_VERSION,
     Delivered,
     MemoryStore,
     MessageFailure,
@@ -30,6 +31,10 @@ from core.memory.types import ProviderSessionRef
 
 
 PROJECT = "p-22222222222222222222222222222222"
+FOUNDATION_SCHEMAS = (
+    Path(__file__).with_name("fixtures") / "memory_initial_foundation_v0.sql",
+    Path(__file__).with_name("fixtures") / "memory_foundation_v0.sql",
+)
 
 
 def _dt(value: str) -> datetime:
@@ -168,6 +173,102 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
                 ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
                 """
             )
+
+
+@pytest.mark.parametrize("foundation_schema", FOUNDATION_SCHEMAS, ids=("initial", "parent"))
+def test_store_clean_rebuilds_nonempty_foundation_v0_before_current_indexes(
+    tmp_path: Path,
+    foundation_schema: Path,
+) -> None:
+    database = _store_path(tmp_path / foundation_schema.stem)
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        conn.executescript(foundation_schema.read_text(encoding="utf-8"))
+        conn.execute(
+            """
+            INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, updated_at
+            ) VALUES (1, 0, 0, X'00', 'legacy-root', 0, 0, 'now')
+            """
+        )
+        queue_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")
+        }
+        provider_column = (
+            ", provider_session_ref" if "provider_session_ref" in queue_columns else ""
+        )
+        provider_value = ", 'legacy-provider-session'" if provider_column else ""
+        conn.execute(
+            f"""
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id{provider_column},
+                principal_id, project_ref, provenance, payload_text,
+                occurred_at_ms, provider_timestamp_ms, state, created_at
+            ) VALUES (?, 0, 'legacy-session'{provider_value}, ?, ?,
+                      'user_input', 'legacy payload', 1, 1, 'pending', 'now')
+            """,
+            (
+                "legacy-digest",
+                "u-11111111111111111111111111111111",
+                PROJECT,
+            ),
+        )
+
+    store = MemoryStore(database)
+
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
+        assert conn.execute("SELECT COUNT(*) FROM memory_meta").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM memory_capture_queue").fetchone()[0] == 0
+        queue_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")
+        }
+        assert {
+            "provider_session_ref",
+            "generation",
+            "attachment_bundle_id",
+            "lease_token",
+        }.issubset(queue_columns)
+        assert {
+            row[1] for row in conn.execute("PRAGMA index_list('memory_capture_queue')")
+        } >= {"ix_memory_capture_due", "ix_memory_capture_session_generation"}
+        assert {
+            row[1] for row in conn.execute("PRAGMA table_info('memory_session_flush_state')")
+        } >= {"provider_session_ref", "open_generation", "target_generation"}
+
+
+def test_store_initializes_an_empty_v0_database(tmp_path: Path) -> None:
+    database = _store_path(tmp_path / "empty-v0")
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+    store = MemoryStore(database)
+
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
+        assert conn.execute("SELECT COUNT(*) FROM memory_capture_queue").fetchone()[0] == 0
+
+
+def test_store_rejects_unknown_nonzero_schema_without_rebuilding(tmp_path: Path) -> None:
+    database = _store_path(tmp_path / "future-schema")
+    future_version = MEMORY_STORE_SCHEMA_VERSION + 1
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE future_memory_state (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO future_memory_state VALUES ('preserve')")
+        conn.execute(f"PRAGMA user_version = {future_version}")
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"Unsupported Memory store schema version: {future_version}",
+    ):
+        MemoryStore(database)
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == future_version
+        assert conn.execute("SELECT value FROM future_memory_state").fetchone()[0] == "preserve"
 
 
 def test_session_scope_recovery_survives_store_reopen_and_separates_sessions(tmp_path: Path) -> None:
@@ -904,6 +1005,225 @@ def test_terminal_tombstones_compact_after_90_days_but_retain_settlement_evidenc
         "flush-terminal",
         "2026-01-01T00:00:03.000Z",
     )
+
+
+def test_terminal_tombstone_compaction_prunes_idle_session_state_after_high_churn(
+    tmp_path: Path,
+) -> None:
+    store_path = _store_path(tmp_path)
+    store = MemoryStore(store_path)
+    session_refs: list[ProviderSessionRef] = []
+
+    for index in range(32):
+        result = store.enqueue_request(
+            source_message_id=f"churn-source-{index}",
+            session_id=f"churn-session-{index}",
+            principal_id="u-11111111111111111111111111111111",
+            project_ref=PROJECT,
+            provenance="user_input",
+            payload_text="queued payload",
+            occurred_at_ms=1_000 + index,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+        assert result.row is not None
+        claimed = store.claim_due(
+            lease_owner="boot",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+        assert store.settle(
+            claimed,
+            Delivered(
+                add_request_id=f"churn-add-{index}",
+                add_status="extracted",
+            ),
+            lease_owner="boot",
+            now=_dt("2026-01-01T00:00:01.000Z"),
+        ).settled
+        session_refs.append(result.row.provider_session_ref)
+
+    assert store.resolve_current_session_scope("churn-session-0") == (
+        "u-11111111111111111111111111111111",
+        PROJECT,
+    )
+    reference = (
+        datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
+        + TERMINAL_TOMBSTONE_RETENTION
+        + timedelta(seconds=1)
+    )
+
+    assert store.compact_terminal_tombstones(now=reference) == len(session_refs)
+    assert all(store.get_session_flush_state(ref) is None for ref in session_refs)
+
+    reopened = MemoryStore(store_path)
+    recovery = reopened.recover_after_boot(lease_owner="next-boot", clock=lambda: reference)
+    assert (recovery.reclaimed, recovery.interrupted_flushes, recovery.due_flushes) == (0, 0, 0)
+    assert reopened.resolve_current_session_scope("churn-session-0") is None
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_flush_settlements").fetchone()[0] == len(
+            session_refs
+        )
+
+
+def test_terminal_tombstone_count_compaction_prunes_only_the_evicted_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    session_refs = [
+        _deliver(store, f"bounded-{index}", session_ref=f"bounded-session-{index}")
+        for index in range(2)
+    ]
+    for index, session_ref in enumerate(session_refs):
+        lease = store.acquire_flush(
+            now="2026-01-01T00:00:02.000Z",
+            provider_session_ref=session_ref,
+            force=True,
+        )
+        assert lease is not None
+        assert store.mark_flush_submission_started(
+            lease,
+            now="2026-01-01T00:00:02.500Z",
+        )
+        assert store.settle_flush(
+            lease,
+            FlushSucceeded(request_id=f"bounded-flush-{index}", status="extracted"),
+            now="2026-01-01T00:00:03.000Z",
+        ).settled
+
+    monkeypatch.setattr("core.memory.store.TERMINAL_TOMBSTONE_LIMIT", 1)
+    assert store.compact_terminal_tombstones(
+        now=datetime(2026, 1, 2, tzinfo=UTC)
+    ) == 1
+    retained_states = [store.get_session_flush_state(ref) for ref in session_refs]
+    assert sum(state is None for state in retained_states) == 1
+    assert len(store.list_queue_rows()) == 1
+
+
+def test_session_state_pruning_preserves_active_and_retained_evidence(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+
+    due_ref = _deliver(store, "retained-due", session_ref="retained-due")
+    due_lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=due_ref,
+        force=True,
+    )
+    assert due_lease is not None
+
+    in_flight_ref = _deliver(store, "retained-in-flight", session_ref="retained-in-flight")
+    in_flight_lease = store.acquire_flush(
+        now="2026-01-01T00:00:02.000Z",
+        provider_session_ref=in_flight_ref,
+        force=True,
+    )
+    assert in_flight_lease is not None
+    assert store.mark_flush_submission_started(
+        in_flight_lease,
+        now="2026-01-01T00:00:02.500Z",
+    )
+
+    manual = store.enqueue_request(
+        source_message_id="retained-manual",
+        session_id="retained-manual",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=2_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert manual.row is not None
+    manual_claim = store.claim_due(
+        lease_owner="manual-boot",
+        now="2026-01-01T00:00:03.000Z",
+    )
+    assert manual_claim is not None
+    assert store.settle(
+        manual_claim,
+        AmbiguousAdd(),
+        lease_owner="manual-boot",
+        now=_dt("2026-01-01T00:00:04.000Z"),
+    ).settled
+
+    current = store.enqueue_request(
+        source_message_id="retained-current",
+        session_id="retained-current",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=3_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert current.row is not None
+    current_claim = store.claim_due(
+        lease_owner="current-boot",
+        now="2026-03-31T23:59:58.000Z",
+    )
+    assert current_claim is not None
+    assert store.settle(
+        current_claim,
+        Delivered(add_status="extracted"),
+        lease_owner="current-boot",
+        now=_dt("2026-03-31T23:59:59.000Z"),
+    ).settled
+
+    dead = store.enqueue_request(
+        source_message_id="retained-dead",
+        session_id="retained-dead",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=4_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert dead.row is not None
+    dead_claim = store.claim_due(
+        lease_owner="dead-boot",
+        now="2026-03-31T23:59:58.000Z",
+    )
+    assert dead_claim is not None
+    assert store.settle(
+        dead_claim,
+        MessageFailure(error="memory_processing_failed", retryable=False),
+        lease_owner="dead-boot",
+        now=_dt("2026-03-31T23:59:59.000Z"),
+    ).settled
+
+    pending = store.enqueue_request(
+        source_message_id="retained-pending",
+        session_id="retained-pending",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=5_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert pending.row is not None
+
+    reference = datetime(2026, 4, 2, tzinfo=UTC)
+    store.compact_terminal_tombstones(now=reference)
+
+    expected_states = {
+        pending.row.provider_session_ref: "idle",
+        due_ref: "due",
+        in_flight_ref: "in_flight",
+        manual.row.provider_session_ref: "manual_required",
+        current.row.provider_session_ref: "idle",
+        dead.row.provider_session_ref: "idle",
+    }
+    for session_ref, expected_state in expected_states.items():
+        state = store.get_session_flush_state(session_ref)
+        assert state is not None and state.state == expected_state
+    assert _row_for_source(store, "retained-pending") is not None
+    assert _row_for_source(store, "retained-due") is None
+    assert _row_for_source(store, "retained-in-flight") is None
+    assert _row_for_source(store, "retained-manual") is not None
+    assert _row_for_source(store, "retained-current") is not None
+    assert _row_for_source(store, "retained-dead") is not None
 
 
 def test_rejected_add_evidence_survives_terminal_tombstone_compaction(tmp_path: Path) -> None:
