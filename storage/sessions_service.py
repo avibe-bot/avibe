@@ -995,6 +995,7 @@ class SQLiteSessionsService:
                 ).where(agent_sessions.c.id == str(session_id))
             ).mappings().first()
             current_backend = str((route_row or {}).get("agent_backend") or "")
+            route_metadata = _json_loads((route_row or {}).get("metadata_json"), {})
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
             backend_changes = bool(requested_backend) and requested_backend != current_backend
             if backend_changes and not already_bound:
@@ -1013,18 +1014,22 @@ class SQLiteSessionsService:
                 adopt_values = dict(values)
                 adopt_values["agent_backend"] = requested_backend
                 adopt_values["agent_variant"] = requested_backend or "default"
-                # A backend-less Workbench row has just inherited the global
-                # Agent route. Turn-start materialization may already have
-                # persisted that route, so initial adoption must keep it. A
-                # concrete backend-to-backend adoption is different: those
-                # settings belong to the old backend and must be cleared as one
-                # atomic route replacement (HFR-250).
-                if _is_owned_backend(current_backend):
+                # Only Workbench performs turn-start materialization. Its
+                # backend-less row therefore owns the resolved route already and
+                # initial adoption must keep it. Placeholder IM rows never pass
+                # through that lifecycle, so their old route is incompatible with
+                # the newly adopted backend and must be cleared like a concrete
+                # backend-to-backend replacement (HFR-250).
+                preserves_materialized_workbench_route = (
+                    not _is_owned_backend(current_backend)
+                    and route_metadata.get("created_via") == "workbench"
+                )
+                if not preserves_materialized_workbench_route:
                     adopt_values["model"] = None
                     adopt_values["reasoning_effort"] = None
                     adopt_values["metadata_json"] = json.dumps(
                         reconcile_explicit_overrides(
-                            _json_loads((route_row or {}).get("metadata_json"), {}),
+                            route_metadata,
                             cleared=OVERRIDABLE_SETTING_COLUMNS,
                         ),
                         separators=(",", ":"),

@@ -2221,7 +2221,7 @@ export const ChatPage: React.FC = () => {
     async (changes: Partial<WorkbenchSession>) => {
       if (!session) return;
       const patchedId = session.id;
-      sessionRowRefreshGateRef.current.invalidate();
+      const patchIsCurrent = sessionRowRefreshGateRef.current.begin();
       try {
         const updated = await api.updateSession(session.id, changes as any);
         // Drop a stale response after a chat switch: if the user navigated to a
@@ -2230,7 +2230,7 @@ export const ChatPage: React.FC = () => {
         // B and make later edits patch the wrong session.id (Codex P2). Mirrors
         // the sessionIdRef guards on send/cancel.
         if (patchedId !== sessionIdRef.current) return;
-        sessionRowRefreshGateRef.current.invalidate();
+        if (!patchIsCurrent()) return;
         setSession(updated);
       } catch (err) {
         if (patchedId !== sessionIdRef.current) return;
@@ -2241,7 +2241,7 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
-        void refreshSessionRow();
+        if (patchIsCurrent()) void refreshSessionRow();
       }
     },
     [api, session, t, refreshSessionRow],
