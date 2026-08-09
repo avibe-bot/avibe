@@ -2363,8 +2363,10 @@ def test_materialize_agent_session_route_rejects_changed_explicit_pin_snapshot(
         service.close()
 
 
+@pytest.mark.parametrize("placeholder_backend", ["", "default", "unknown"])
 def test_first_backend_adoption_preserves_materialized_global_agent_route(
     tmp_path: Path,
+    placeholder_backend: str,
 ) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -2378,7 +2380,7 @@ def test_first_backend_adoption_preserves_materialized_global_agent_route(
                 conn,
                 scope_id=scope_id,
                 session_anchor="avibe_ses3",
-                agent_backend="",
+                agent_backend=placeholder_backend,
                 agent_variant="default",
                 agent_name=None,
                 model=None,
@@ -2395,7 +2397,7 @@ def test_first_backend_adoption_preserves_materialized_global_agent_route(
             expected_route={
                 "agent_id": None,
                 "agent_name": None,
-                "agent_backend": None,
+                "agent_backend": placeholder_backend or None,
                 "agent_variant": "default",
                 "model": None,
                 "reasoning_effort": None,

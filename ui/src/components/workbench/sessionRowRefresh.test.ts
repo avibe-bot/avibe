@@ -17,7 +17,9 @@ describe('Session-row refresh ordering', () => {
     const readIsCurrent = gate.begin();
 
     gate.invalidate();
+    const retryIsCurrent = gate.begin();
 
     expect(readIsCurrent()).toBe(false);
+    expect(retryIsCurrent()).toBe(true);
   });
 });

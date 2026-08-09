@@ -1013,7 +1013,7 @@ class SQLiteSessionsService:
                 # concrete backend-to-backend adoption is different: those
                 # settings belong to the old backend and must be cleared as one
                 # atomic route replacement (HFR-250).
-                if current_backend:
+                if _is_owned_backend(current_backend):
                     adopt_values["model"] = None
                     adopt_values["reasoning_effort"] = None
                     adopt_values["metadata_json"] = json.dumps(

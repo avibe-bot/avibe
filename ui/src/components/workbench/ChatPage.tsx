@@ -1577,6 +1577,11 @@ export const ChatPage: React.FC = () => {
           if (!prev || prev.id !== data.session_id || prev.title === nextTitle) return prev;
           return { ...prev, title: nextTitle };
         });
+        // The activity event carries only a partial Session projection. Its
+        // title is newer than an in-flight full-row read, but it cannot replace
+        // that read's native bind or materialized route, so retry after the
+        // invalidation and converge on the complete committed row.
+        void refreshSessionRow();
       },
       onConnected: () => {
         // Every (re)connect recovers any state missed while the socket was down:

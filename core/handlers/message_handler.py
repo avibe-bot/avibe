@@ -460,13 +460,9 @@ class MessageHandler(BaseHandler):
             # silently re-route every session that is merely inheriting.
             explicit_overrides: set[str] = set()
             if isinstance(session_target, dict):
-                session_meta = session_target.get("metadata")
-                if isinstance(session_meta, dict):
-                    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+                from storage.session_reclaim import explicit_override_names
 
-                    marked = session_meta.get(SESSION_SETTINGS_OVERRIDE_KEY)
-                    if isinstance(marked, (list, tuple, set)):
-                        explicit_overrides = {str(name) for name in marked}
+                explicit_overrides = explicit_override_names(session_target.get("metadata"))
             if "model" in explicit_overrides:
                 effective_model = session_target.get("model")
             if "reasoning_effort" in explicit_overrides:

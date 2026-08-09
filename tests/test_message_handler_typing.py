@@ -1156,6 +1156,54 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
 
+    async def test_workbench_scalar_explicit_route_marker_uses_shared_parser(self):
+        """A tolerated legacy scalar marker must mean the same thing to the
+        dispatch snapshot and the storage CAS: model stays explicitly null while
+        the unpinned effort can still materialize."""
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        sessions_store = Mock()
+        sessions_store.is_message_in_processed_set.return_value = False
+        sessions_store.try_add_to_processed_set.return_value = True
+        sessions_store.materialize_agent_session_route = Mock(return_value=True)
+        controller.settings_manager.sessions = SessionsFacade(sessions_store)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses_wb",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_wb",
+                    "agent_id": None,
+                    "agent_name": None,
+                    "agent_backend": None,
+                    "agent_variant": None,
+                    "model": None,
+                    "reasoning_effort": None,
+                    "metadata": {"explicit_setting_overrides": "model"},
+                }
+            },
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        sessions_store.materialize_agent_session_route.assert_called_once_with(
+            "ses_wb",
+            model=None,
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": None,
+                "agent_variant": None,
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": ["model"],
+            },
+        )
+
     async def test_im_turn_never_materializes_session_route(self):
         """Scheduled IM turns can carry ``agent_session_target``; their model
         semantics still belong to channel routing and must not be pinned."""
