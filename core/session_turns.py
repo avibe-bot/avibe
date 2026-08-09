@@ -15,6 +15,7 @@ owners for live tasks and streaming only.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -984,7 +985,7 @@ class SessionTurnManager:
             return text
         handler = getattr(self.controller, "message_handler", None)
         decorator = getattr(handler, "_prepend_message_metadata", None)
-        if not callable(decorator):
+        if not callable(decorator) or not inspect.iscoroutinefunction(decorator):
             return text
         decorated = await decorator(context, text, include_user_info=False)
         spec[SCHEDULED_DISPATCH_METADATA_APPLIED_KEY] = True
