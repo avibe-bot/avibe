@@ -600,7 +600,7 @@ as everywhere else in this document.
 | §1.3 | Saving | 保存顺序 pressed — the whole order in one `PUT /api/models/agents/<backend>/sources` `[contract-gap]` G-9 | F3 when the response is a guard refusal, F1 otherwise | `order.save` | Success → close |
 | §1.3 | Guard refused | The `PUT` came back refused, naming the hops it would remove | F3 — the shared confirm (§1.6 `Qp6FI`) renders it; this drawer starts no second one | `guard.title.saveOrder`, `guard.subtitle.saveOrder`, `guard.confirm.saveOrder`, `guard.label`, `guard.count`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要保存 re-sends the same `PUT` with `force` → Saving; 取消 → back to Dirty, nothing persisted |
 | §1.4 | Default | Opened | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 → Awaiting sign-in |
-| §1.4 | Second pass `[derived]` | Re-opened for an account that already has one of the two channels | F5 | `addSub.opt.added` | The taken option is inert; the remaining one is selected on open, whatever the recommendation says |
+| §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start`, then `GET /api/models/oauth/status/<flow_id>` polled every 2s until `OAuthFlow.state` is terminal `[contract]` | → OAuth failed | `addSub.signIn` | `state` reads `success` → source created, dialog closes; `failed` → OAuth failed; `OAuthFlow.expires_at` passes with no terminal reading → OAuth failed, the same state and the same sentence `[contract]`; dismissed any of the three ways → Dismissing |
 | §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
 | §1.4 | OAuth failed | Provider or engine failure; classified `needs_action` `[spec §4.5]` | F1 | `addSub.error.oauthFailed`, `addSub.retry` | 重试 → Awaiting sign-in; 取消 → Dismissing |
@@ -1609,15 +1609,25 @@ are reachable, sequentially, not in one pass. So:
 - there is no zero-selected state to design for, because the dialog never opens without
   a selection and a radio group cannot be emptied by clicking. 去登录 is therefore
   enabled from the moment the dialog opens;
-- on a second pass for the same account, the already-added channel stays in place and
-  reads as already added rather than disappearing `[derived]` — a dialog that silently
-  drops an option looks like a different dialog, and the user was told to come back here;
-- and the taken option is **present but not choosable** `[derived]`: it renders with
-  `aria-disabled="true"`, no radio mark of either kind, and the arrow keys skip it, so
-  the roving tab-stop has exactly one stop. On a second pass the initial selection is
-  therefore **the remaining option, whatever the recommendation says** — pre-selecting a
-  disabled row is the one way to open this dialog with 去登录 disabled, and the bullet
-  above depends on that never happening.
+- on a second pass the already-added channel stays in place and reads as already added
+  rather than disappearing `[derived]` — a dialog that silently drops an option looks
+  like a different dialog, and the user was told to come back here;
+- **and the row that is not choosable is the native one, decided by the slot and not by
+  the account** `[contract]`. Before a sign-in this dialog knows which sources exist; it
+  does not know who is about to sign in. The one exclusivity the contract states is the
+  slot — 「Each backend has at most one `native_cli` Source because its official CLI
+  exposes one current login」, said four times in `model-hub.md` — so the native row is
+  **present but not choosable** exactly when that backend already holds its one native
+  source, whichever account that source holds. The hub row is never disabled: a second
+  hub-held account of the same vendor is something §4.1 permits, and disabling it on the
+  strength of an existing vendor source would refuse an addition the contract allows. A
+  genuinely duplicate hub account is a real condition and it keeps its own state, reached
+  where it becomes knowable — after the sign-in returns, at *Already bound*;
+- the not-choosable row renders with `aria-disabled="true"`, no radio mark of either
+  kind, and the arrow keys skip it, so the roving tab-stop has exactly one stop. Whenever
+  it is disabled the initial selection is therefore **the remaining option, whatever the
+  recommendation says** — pre-selecting a disabled row is the one way to open this dialog
+  with 去登录 disabled, and the bullet above depends on that never happening.
 
 This is the item most likely to be implemented from the pixels alone, and getting it
 backwards in either direction costs something real: checkboxes would promise a
