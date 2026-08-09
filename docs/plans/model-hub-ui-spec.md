@@ -232,6 +232,7 @@ than in a moving one.
 | G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves | the route that carries a non-persisting observation of a source that does not exist yet | **The behaviour is contracted and the route is not**, so this row registers a gap *inside* the contract rather than an undecided question. AC-26 states the operation outright — 「Add Source exposes one non-persisting submission that combines connectivity classification with response-backed protocol observation」, returning classified reachability, authentication and a protocol 「without persisting a Source」 — and `model-hub.md`'s protocol-observation ruling of 2026-08-09 requires every stored `protocol` to trace back to a real response taken *before* Save, so an observation that saves nothing is not optional to the design. None of `api.md`'s 28 route rows accepts one: `POST /api/models/agents/<backend>/probe` is backend-scoped (`{model?}`) and reports on the configured chain, `POST /api/models/sources/<id>/refresh` needs an `id` only Save produces, and `POST /api/models/sources` persists on success. §1.5 keeps every Pull-origin state, because the operation is contracted and 05 draws it; what is missing is the way to invoke it |
 | G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight | what the server is left holding when the cancel lands after the transient phase | **Cancellation is contracted everywhere except the persisting half.** AC-26 requires an API-key test's success, authentication failure, adapter error, timeout **and cancellation** each to 「revoke the transient provisioned ref before the operation settles」, with a durable pending-revocation record and reconciliation behind a fault-injected revoke failure, and repeats that guarantee for unsaved model discovery; `api.md` contracts `POST /api/models/oauth/cancel` for the subscription branch. No artefact states the outcome once `POST /api/models/sources` has crossed out of that transient phase into persistence — whether a cancel there yields a Source or nothing. §1.5 states the guarantee for the phase that has one and stops at that seam rather than extending AC-26 over a boundary AC-26 does not cross |
 | G-20 | 01 source card, 被哪些链收编, **and 06's status bar, which splits `active` on the same field** — on any load that is not the creation response | a *read* that carries `adopted_by` | **The contract names this exact consumer and then gives it nothing to call.** `api.md:212` defines `AdoptedBy` as 「the stable Source-card projection of persisted references」 and FC-05 requires `agent-supply` to expose it, which is what makes the field authority rather than an invention (§0.3). Every place it is actually contracted is a creation terminal: `POST /api/models/sources` → `{source, added_to, adopted_by}`, and the OAuth completion reading — `api.md`'s *OAuth completion* section, which makes the terminal shape a function of `OAuthFlow.intent` and puts the same three arrays behind `intent: "create"` and explicitly not behind `intent: "reauth"`. The reads a loaded page can call carry no trace of it: `GET /api/models/sources` → `{sources: Source[]}` and `source.schema.json` has no backend-attribution property at all; `GET /api/models/agents` → `{agents: AgentSupply[]}` and `agent-supply.schema.json`'s 13 properties do not include `adopted_by`, nor does `api.md:628`'s CI-guarded AgentSupply serializer-completeness row. So the projection survives exactly one response and a reload has nowhere to read it from, while D-28 forbids the one derivation that would rebuild it from `hops`. This is the §0.3 shape where an FC item requires another file to carry something that file does not, rather than FC-05's `hops` shape where an FC item states a shape the frozen schema omits |
+| G-21 | 01 upstream card, 添加订阅 → 04 | the step that picks **which vendor** the subscription is for | **04 is drawn per vendor and the press that opens it carries no vendor.** Every part of the dialog that means anything is a function of it: the head reads `添加 {vendor} 订阅`, the two option cards, which of them is 推荐, the ToS note and the hint are all static per vendor (§1.4's inventory), and the one route the dialog can send — `POST /api/models/oauth/start` — takes a vendor and a channel, where only the channel has a drawn producer in the radio group. `XvCC4` holds one display per vendor and each opens with the choice already made; the page behind it draws exactly one 添加订阅 and one 添加 API Key, neither per vendor and neither a menu. The absence is in the drawing, not the contract — `api.md` states the parameter and 04 consumes it, and no frame supplies it. §1.1 and §1.4 state the missing step; §0.1 forbids specifying the control that would fill it, so this row is the whole of what this document says about it |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -585,9 +586,9 @@ as everywhere else in this document.
 
 | Frame | State | Entry condition | Failure / pending | Copy keys | Exit |
 | --- | --- | --- | --- | --- | --- |
-| §1.0 | Loading | Route entered, first payload outstanding | → Unreachable / Sources unread / Partial | — | Payload arrives → Ready |
-| §1.0 | Ready | Payload arrives | F5 | `shell.running` | Any mutation re-renders in place `[derived]` |
-| §1.0 | Empty (no sources) | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05; first source → Ready |
+| §1.0 | Loading | Route entered, first payload outstanding | → Unreachable / Sources unread / Partial | — | What the payload says decides where it lands, not the fact that it arrived. In the order the page reads it: `health` first — `down` → Unreachable (engine down), `not_installed` → Not installed or Unsupported host by the manifest, `not_started` → Not started, `degraded` → Impaired; then the two page reads, where one of them failing → Sources unread or Partial; then `sources == []` → Empty (no sources); and a payload that trips none of them → Ready |
+| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `shell.running` | Any mutation re-renders in place `[derived]` |
+| §1.0 | Empty (no sources) | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05, where the 04 leg needs a vendor no frame produces `[contract-gap]` G-21; first source → Ready |
 | §1.0 | Not installed | `health` reads `not_installed` `[contract]` | F5 | `shell.notInstalled`, `install.title` … `install.cancel` | Confirm → Installing |
 | §1.0 | Unsupported host | `not_installed`, and `manifest.assets` carries no entry for this platform `[contract]` | F5 | `shell.unsupported` | Not from this page — 直连 (§1.8) is the documented escape hatch |
 | §1.0 | Installing | An install confirm was accepted `[contract-gap]` G-10 | F1 → Install failed | `install.progress` | Component present → Not started, and the confirm's promise carries it on to Starting |
@@ -599,15 +600,17 @@ as everywhere else in this document.
 | §1.0 | Partial | Sources load, per-backend supply does not | F2 | `gateway.supply.none` | Retry succeeds → Ready |
 | §1.0 | Sources unread | The mirror: `GET /api/models/sources` fails while `health` and per-backend supply both answer `[derived]` | F1, in the region the list would have filled | `upstream.unread`, `upstream.retry` | 重试 succeeds → Ready; a later payload carries the list → Ready |
 | §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The per-model 当前 line is a third read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
-| §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05 |
+| §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05, where the 04 leg needs a vendor no frame produces `[contract-gap]` G-21 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this row is that same first paint seen from the module | — | Payload arrives → Ready |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock |
 | §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. The card is one tap to 06; **replacing the credential is drawn on no frame** `[contract-gap]` G-12 |
 | §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`; the card is one tap to 06 |
 | §1.1 | Group waiting | Every member of that backend's chain is cooling and none is retry-ready `[contract]` | F5 — time alone resolves it | `gateway.group.status.waiting` | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the reported state and never the elapsed time |
 | §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it is a different word from 等待重试 |
-| §1.1 | Group interrupted — a source needs action | `supply_status` reads `interrupted`, no member is runnable, and at least one blocker is a source in `needs_action` or `error` `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The user clears that source's cause on frame 06 → Ready, or whichever rollup the chain then reads |
+| §1.1 | Group interrupted — a source needs action | `supply_status` reads `interrupted`, no member is runnable, and at least one blocker is a source in `needs_action` or `error` `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → Ready, or whichever rollup the chain then reads. 重新拉取 on 06 is the drawn repair and recovers a source whose stored credential still works `[contract]`; a credential that has to be **replaced** is drawn on no frame `[contract-gap]` G-12, so this row names the reading it waits for instead of sending the user to a control 06 does not carry |
 | §1.1 | Group interrupted — empty chain | `supply_status` reads `interrupted` because the capability chain for the pinned model has no members at all `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | A source is placed into that model's chain → Ready. Distinct from *Nothing pinned*, where there is no chain to be empty |
+| §1.1 | Group interrupted — a hop's source is gone | `supply_status` reads `interrupted`, no member is runnable, and at least one hop names a source that no longer exists `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → Ready, or whichever rollup the chain then reads. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is a chain edit — which is 02's, and this document specifies nothing about 02 (§0.2, §1.2) |
+| §1.1 | Group interrupted — a hop's model is no longer callable | `supply_status` reads `interrupted`, no member is runnable, and at least one hop pins a model its source no longer advertises `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | 重新拉取 on 06 puts the model back into that source's inventory → Ready, or whichever rollup the chain then reads. The contract keeps the hop visible and non-runnable until an explicit refresh or edit and never re-points it `[contract]`; the edit half is 02's, which this document does not specify (§0.2, §1.2) |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | Nothing pinned | `mode` reads `hub` and `selected_model_id` is `null`, which is exactly when `supply_status` is `null` on the gateway `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.noSelection` | A pinned model gives the rollup something to answer with → Ready, or whichever rollup state that reading names |
@@ -620,8 +623,8 @@ as everywhere else in this document.
 | §1.3 | Zero eligible sources | No source is eligible for this backend | F5 | `order.empty.noEligible` | 关闭. A source becomes eligible → Ready. 保存顺序 is disabled |
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
 | §1.3 | Dirty (uncommitted moves) | 排进来, 移出, a drag, or a keyboard move | F5 — nothing has been sent, so nothing can fail | `order.action.include`, `order.action.exclude` | 保存顺序 → Saving; 取消 → discard, close |
-| §1.3 | Saving | 保存顺序 pressed — the whole order in one `PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`, which stores and re-echoes it and touches no chain | F1 | `order.save` | Success → close |
-| §1.4 | Default | Opened | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 → Awaiting sign-in |
+| §1.3 | Saving | 保存顺序 pressed — the whole order in one `PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`, which stores and re-echoes it and touches no chain | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; 重试 → Saving again, with every move still held |
+| §1.4 | Default | Opened **for a vendor already chosen** — no frame draws the step that chooses it `[contract-gap]` G-21 | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 → Awaiting sign-in |
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start`, then `GET /api/models/oauth/status/<flow_id>` polled every 2s until `OAuthFlow.state` is terminal `[contract]` | → OAuth failed | `addSub.signIn` | `state` reads `success` → source created, dialog closes; `failed` → OAuth failed; `cancelled` → OAuth failed as well `[contract]` — it is one of the six readings the flow's own enum admits, so it arrives here while this dialog is still open and polling, which is the sign-in being abandoned on the provider's surface rather than this dialog's dismissal; the unsuccessful terminals share one destination because 重试 is the affordance either of them wants; the polling bound passes with no terminal reading → OAuth failed, the same state and the same sentence — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from the start call when it does not `[derived]`, because `oauth-flow.schema.json` admits `expires_at: null` and a deadline only the provider can supply is absent exactly when it is needed; dismissed any of the three ways → Dismissing |
 | §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
@@ -661,7 +664,7 @@ as everywhere else in this document.
 | §1.7 | Multiple takeovers | More than one backend was rerouted | F5 | `takeover.pill` | Each backend recovers independently |
 | §1.7 | Loading / Empty / Unreachable | As §1.0 | As §1.0 | — | As §1.0 |
 | §1.8 | Ready (first run) | Every backend is in 直连, no source exists, and at least one backend row renders | F5 | `direct.card.current`, `direct.card.current.sub`, `direct.pill.direct`, `direct.backend.claude.detail`, `direct.backend.codex.detail`, `direct.backend.opencode.detail`, `direct.benefits.title`, `direct.benefits.1` … `direct.note.perBackend`, `shell.allDirect` | 切换到网关 on a row → 10's confirm for that backend; a source added or a backend switched → 01 |
-| §1.8 | Loading | First paint | → §1.0 Unreachable | — | Payload arrives → Ready (first run) or No backend found |
+| §1.8 | Loading | First paint | → §1.0 Unreachable | — | Payload arrives → No backend found when the rows resolve to zero, Retained sources, all direct when a source already exists and no backend is on the gateway — which is 01, not this page — and Ready (first run) otherwise. The three are exactly this frame's own branch table below |
 | §1.8 | No backend found | The rows resolve to zero `[derived]` `[contract-gap]` G-11 | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; the page leaves this state only when a backend appears in the payload. This is the one state on the page with no in-product action, and the copy says so rather than leaving the user to guess |
 | §1.8 | Retained sources, all direct | Every backend is in 直连 and at least one source exists — reachable through `adopt.undo.3` | F5 | — | The page is 01 with every gateway group in its 直连 form, not this frame |
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
@@ -920,8 +923,9 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   reading health off a stale value: both state a fact the payload did not carry.
 
 **The run pill is a total rendering of `health`, and the states above are how it gets
-there** `[contract]`. Every value `runtime-dependency.schema.json` admits for it has
-exactly one pill, and no pill is drawn for anything else:
+there** `[contract]`. Every value `runtime-dependency.schema.json` admits for it is
+rendered, and no pill is drawn for anything else. One value splits, on a second field —
+the same shape frame 06's bar has when it splits `active` on adoption:
 
 | `RuntimeDependency.status.health` `[contract]` | State | Pill | Treatment | Activation |
 | --- | --- | --- | --- | --- |
@@ -929,7 +933,8 @@ exactly one pill, and no pill is drawn for anything else:
 | `degraded` | Impaired | `shell.degraded` | error | none |
 | `down` | Unreachable | `shell.stopped` | error | start (`POST /api/models/runtime/start` `[contract]`) |
 | `not_started` | Not started | `shell.notStarted` | idle | start |
-| `not_installed` | Not installed | `shell.notInstalled` | idle | the non-switching install confirm — **never** the start route |
+| `not_installed`, with a manifest asset for this platform `[contract]` | Not installed | `shell.notInstalled` | idle | the non-switching install confirm — **never** the start route |
+| `not_installed`, with none `[contract]` | Unsupported host | `shell.unsupported` | idle | none — 直连 (§1.8) is the escape hatch |
 
 Starting is the one pill with no `health` behind it: it is the client's own optimistic
 state between accepting the press and the next payload. A transport failure — the status
@@ -1131,14 +1136,16 @@ nothing being served for a reason waiting cannot resolve.
 A UI that renders only 正常/降级 tells a user in `waiting` to go fix something and a user
 in `interrupted` to wait.
 
-`interrupted` covers three of those reasons, not one. The schema states them: no runnable
-member with at least one blocker that needs action — **including** a native CLI
-unavailable in this process at any source health — or a capability chain with no members
-at all. The word is the same for all three because what it tells the user is the same,
-that time alone will not fix this; the *repair* is not, which is why §0.8 files them as
-three rows with three exits. Reading the value as CLI-only is the specific error this
-list exists to prevent: it sends a user whose credential expired, or who never placed a
-source, to check a CLI that is running fine.
+`interrupted` covers six readings, not one, and the contract names every one of them: a
+capability chain with no members at all, or nothing runnable with at least one hop held
+by a non-self-healing blocker — `needs_action`, `error`, `source_missing`,
+`model_unsupported`, or a native CLI unavailable in this process at any source health
+`[contract]`. The word is the same for all of them because what it tells the user is the
+same, that time alone will not fix this; the *repair* is not. §0.8 files them as **five**
+rows rather than six because `needs_action` and `error` share one repair and one exit,
+and every other reading has its own. Reading the value as CLI-only is the specific error
+this list exists to prevent: it sends a user whose credential expired, whose source is
+gone, or who never placed one, to check a CLI that is running fine.
 
 **接管中 is not one of these values, and must not be rendered from this field.**
 Takeover is a projection of the chain — the current hop is not the first hop, and the
@@ -1317,7 +1324,7 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | `heujA` upstream card | tile icon by kind, name, kind pill, mono detail line, one status line | one source | yes (whole card) | Open 06 for that source |
 | `uf3re` detail | account label, or `host/path · masked key` — **and every field it can draw is nullable, so the line is specified by omission, exactly as §0.9 and §1.6 rule the same hole** `[contract]`. `account_label`, `base_url` and `masked_credential` are each `["string","null"]` in `source.schema.json`, so a segment with no value is dropped, never rendered empty and never left behind a dangling `·`; `base_url: null` is the vendor's official endpoint (§0.9's `{{host}}`) and is not synthesized into a hostname (§1.6). When nothing is left the whole line is omitted rather than filled — a subscription that reports no account label is the common case, and the card still identifies itself from four required fields (icon and pill by `kind`, name by `display_name`, state by `state`). Repeating the kind pill or the card's own name here would be the only alternative, and it would say nothing the card has not already said | source | no | — |
 | `YcOFo` status | which backends have this source configured into a route — `adopted_by`, absent under `[contract-gap]` G-20 (§1.0) | that projection when a response carries it, never a computation over chains (D-28) | no | — |
-| `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | Open 04 / 05 |
+| `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | Open 04 / 05. 04 is drawn per vendor and this press carries none, and no frame draws the step that picks one `[contract-gap]` G-21 |
 | `f8w6Xp` + `pnYa0` rail | dispatch happens between the columns | decorative | no | — |
 | `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line | per-backend mode + supply health | head: buttons only | — |
 | `ehGRK` / `bGsC7` 「来源顺序」 | — | — | yes | Open 03 **for that backend** |
@@ -1748,6 +1755,17 @@ the table above commits through that one path, and so does every button on a row
 | `empty.ordered` `[derived]` | 这条顺序现在是空的。把下面的来源排进来。 | This order is empty. Add a source from below. |
 | `cancel` | 取消 | Cancel |
 | `save` | 保存顺序 | Save order |
+| `fail.save` `[derived]` | 顺序没保存上 | The order was not saved |
+| `retry` `[derived]` | 重试 | Retry |
+
+**The last two keys are what F1 costs** `[derived]`. Saving is an F1 state, and F1 is
+「the message is replaced in the slot the result would have used, the primary becomes
+重试」 (§0.8) — so it owes exactly one line and one label, and a drawer that carried
+neither would be specifying a treatment it cannot render. The line says what did not
+happen and nothing about why: this save sends one array to one route, the drawer keeps
+every move the user made, and the frozen rule against enumerating request-level failure
+kinds means a 401, a 409 and a timeout are the same sentence here — the same shape
+§1.6 gives `fail.tier`.
 
 **The copy says placement, not execution** `[derived]`, and that is not a wording
 preference. 保存顺序 stores an order and touches no chain (§0.8), which four paragraphs
@@ -1797,11 +1815,20 @@ where 排在链里 named a chain this drawer does not write.
 directly, or hand it to the gateway?* Two dialogs, because the recommended answer
 is **different per vendor** and for a reason that is legal, not technical.
 
+**Nothing drawn picks the vendor** `[contract-gap]` G-21. Every line below is stated per
+vendor — the head, both option cards, which one carries 推荐, the ToS note, the hint — and
+`POST /api/models/oauth/start` sends `{vendor, channel}`, of which only the channel has a
+producer in the radio group this dialog draws. The one entrance to 04 these ten frames
+draw is 01's single 添加订阅 (§1.1): not per vendor, not a menu. So the parameter this
+whole section is a function of arrives from a step no frame contains. This section
+specifies the dialog as drawn and states the absence; it does not invent the picker,
+because §0.1 confines this document to frames that exist.
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| head | `添加 {vendor} 订阅` + `host / plan` | vendor | close | Dismiss |
+| head | `添加 {vendor} 订阅` + `host / plan` | vendor, chosen before the dialog opens and by nothing this document draws `[contract-gap]` G-21 | close | Dismiss |
 | `gI9r5` / `gBZ4W` (Claude), `mUvIf` / `Fs6bj` (ChatGPT) option | radio mark, name, recommendation badge, one-line consequence | static per vendor | yes | Select **this** option and deselect the other |
 | `uzelE` ToS note | why gateway-supplying a Claude subscription is out of scope | static, Claude only | no | — |
 | `iF4LZ` / `O0o5X` hint | how to get the other channel too (Claude) / what the non-recommended choice costs (ChatGPT) | static per vendor | no | — |
@@ -2321,7 +2348,7 @@ opposite sides — which is why it is worth stating as one.
 | `submit` | 添加 | Add |
 | `adding` | 连接中… | Connecting… |
 | `adding.detail` | 连上 + 认出接口 + 首次拉取型号列表 · 通常 1–3 秒 | Connect, identify the interface, fetch the model list · usually 1–3s |
-| `fail.subtitle` | 认出接口是「添加」的前置条件 · 先修好凭据再重试 | Identifying the interface is a precondition of Add · fix the credential, then retry |
+| `fail.subtitle` | 认出接口是「添加」的前置条件 · 先按下面这条修,再重试 | Identifying the interface is a precondition of Add · fix what the line below names, then retry |
 | `fail.auth` | 鉴权失败:401 Unauthorized | Authentication failed: 401 Unauthorized |
 | `fail.auth.detail` | 检查 API Key 是否有效 | Check whether the API key is valid |
 | `fail.address` `[derived]` | 地址不对:404 Not Found | Wrong address: 404 Not Found |
@@ -2343,6 +2370,15 @@ opposite sides — which is why it is worth stating as one.
 | `success.title` | 成功 → 弹窗关闭,直接进入「来源详情 · 型号管理」 | Done → the dialog closes and you land on Source details · Models |
 | `success.detail` | 型号列表、重新拉取、推理强度档位都在那里维护 | The model list, refetch and reasoning tiers are all maintained there |
 | `cancel` | 取消 | Cancel |
+
+**`fail.subtitle` is shared by every classified cause, which is why it names none of
+them** `[derived]`. State ③ renders exactly one of `fail.auth` / `fail.address` /
+`fail.network` underneath it, and those are a 401, a 404 and a timeout — only the first
+is about a credential. A subtitle that names the credential is right one time in three
+and actively misleading the other two: it sends a user with a typo in the base URL off to
+regenerate a key that was never the problem. It points at whichever line the
+classification produced instead, which is the same thing `fail.auth.detail` does one
+level down — the specific advice lives with the specific cause.
 
 The three protocol strings above are the **only** protocol names anywhere in the
 product surface. They are identifiers, identical in both locales, and they
@@ -3722,6 +3758,21 @@ frames already do this correctly; the rule is written down so a lane reading the
 files does not "fix" the page title to match them. Note that the design file's frame
 names do contain 模型网关: they are canvas labels for the author, and D-17 already says
 a frame's shell is not the shipped shell.
+
+**D-30 — 切换到直连 commits on the press; only 切换到网关 gets a confirm.** Adopting the
+gateway opens frame 10 (§1.9); leaving it sends `PATCH /api/models/agents/<backend>/mode`
+straight from the group head with no intermediate surface, and F1 in place is the whole
+of its failure handling.
+*Why:* a confirm is owed where an action is hard to take back, and these two directions
+are not symmetric. Adopting changes where a backend's traffic goes and is the step frame
+10 exists to explain, down to where the undo lives (`undo.1`, `undo.2`). Leaving
+destroys nothing: the same dialog's third line already promises
+that the sources stay and only stop supplying that backend `undo.3`, and §1.8's
+*Retained sources, all direct* is the state that promise lands in. Putting a confirm on
+the reversible half would make the product ask twice for the thing it just told the user
+was free, and a confirm the user learns to click through stops protecting the adoption
+that needed one. This is the same asymmetry D-15 applies to a cancel: the direction that
+gives something back does not owe a gate.
 
 **D-31 — A tier edit commits the whole `reasoning_efforts` list, so adding and removing
 are one state, not two.** `PATCH /api/models/sources/<source_id>/models/<model_id>`
