@@ -18,6 +18,7 @@ from core.memory.clear_journal import (
     MemoryClearJournal,
 )
 from core.memory.snapshot import (
+    MemorySnapshotError,
     MemorySnapshotManager,
     MemorySnapshotUnsafePathError,
     MemorySnapshotVerificationError,
@@ -1070,6 +1071,56 @@ def test_snapshot_rejects_sqlite_sidecar_symlink_and_overlapping_root(tmp_path: 
         MemorySnapshotManager(home).create("unsafe-sidecar")
     with pytest.raises(ValueError):
         MemorySnapshotManager(home, snapshot_root="memory")
+
+
+@pytest.mark.parametrize("unsafe_kind", ("symlink", "directory"))
+def test_corrupt_call_log_snapshot_refuses_unsafe_sidecars(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    home = tmp_path / "home"
+    call_log = _private_file(
+        home / "memory/call-log/call-log.db",
+        b"not-a-sqlite-database",
+        home,
+    )
+    sidecar = call_log.with_name(f"{call_log.name}-wal")
+    outside = _private_file(home / "outside-wal", b"outside", home)
+    if unsafe_kind == "symlink":
+        sidecar.symlink_to(outside)
+    else:
+        _private_directory(sidecar, home)
+    manager = MemorySnapshotManager(home)
+
+    with pytest.raises(MemorySnapshotUnsafePathError):
+        manager.create(f"unsafe-call-log-{unsafe_kind}")
+
+    assert not manager.snapshot_path(f"unsafe-call-log-{unsafe_kind}").exists()
+    assert outside.read_bytes() == b"outside"
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "backup"),
+    (
+        ("state/memory/memory.sqlite", False),
+        ("state/memory/clear-journal.sqlite", True),
+    ),
+)
+def test_authoritative_sqlite_surfaces_still_reject_corrupt_databases(
+    tmp_path: Path,
+    relative_path: str,
+    backup: bool,
+) -> None:
+    home = tmp_path / "home"
+    _private_file(home / relative_path, b"not-a-sqlite-database", home)
+    manager = (
+        MemorySnapshotManager._for_backup(home, operation_guard=lambda: None)
+        if backup
+        else MemorySnapshotManager(home)
+    )
+
+    with pytest.raises(MemorySnapshotError):
+        manager.create(f"corrupt-authority-{backup}")
 
 
 def test_restore_retry_converges_after_crash_between_backup_and_install(

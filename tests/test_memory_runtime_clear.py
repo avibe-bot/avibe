@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sqlite3
+import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -650,6 +652,90 @@ async def test_abort_restores_all_surfaces_after_destructive_work(
     assert operation is not None and operation.state == "aborted"
     assert runtime._snapshot_manager is not None
     assert not runtime._snapshot_manager.snapshot_path(recovery.operation_id).exists()
+    await runtime.close()
+
+
+async def test_clear_accepts_corrupt_diagnostic_call_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    call_log = tmp_path / "memory/call-log/call-log.db"
+    call_log.parent.mkdir(parents=True, mode=0o700)
+    call_log.parent.chmod(0o700)
+    files = {
+        call_log: b"corrupt-call-log-database",
+        call_log.with_name(f"{call_log.name}-wal"): b"corrupt-call-log-wal",
+        call_log.with_name(f"{call_log.name}-shm"): b"corrupt-call-log-shm",
+        call_log.with_name(f"{call_log.name}-journal"): b"corrupt-call-log-journal",
+    }
+    for path, payload in files.items():
+        path.write_bytes(payload)
+        path.chmod(0o600)
+
+    result = await runtime.clear(operator_ref="user:owner")
+
+    assert result["status"] == "completed"
+    assert all(not path.exists() for path in files)
+    assert runtime._clear_journal.get_open_operation() is None
+    await runtime.close()
+
+
+async def test_abort_restores_exact_corrupt_call_log_files_after_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    call_log = tmp_path / "memory/call-log/call-log.db"
+    call_log.parent.mkdir(parents=True, mode=0o700)
+    call_log.parent.chmod(0o700)
+    files = {
+        call_log: b"corrupt-call-log-database",
+        call_log.with_name(f"{call_log.name}-wal"): b"corrupt-call-log-wal",
+        call_log.with_name(f"{call_log.name}-shm"): b"corrupt-call-log-shm",
+        call_log.with_name(f"{call_log.name}-journal"): b"corrupt-call-log-journal",
+    }
+    for path, payload in files.items():
+        path.write_bytes(payload)
+        path.chmod(0o600)
+    before = {
+        path: (
+            path.read_bytes(),
+            stat.S_IMODE(path.stat().st_mode),
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in files
+    }
+    original_delete = runtime._delete_clear_surface
+
+    async def fail_after_call_log(surface, *, target_epoch):
+        if surface.surface == "attachments":
+            raise OSError("injected failure after call-log deletion")
+        await original_delete(surface, target_epoch=target_epoch)
+
+    monkeypatch.setattr(runtime, "_delete_clear_surface", fail_after_call_log)
+    failed = await runtime.clear(operator_ref="user:owner")
+    recovery = runtime._clear_journal.get_open_operation()
+
+    assert failed["status"] == "failed"
+    assert recovery is not None and recovery.destructive_started
+    assert all(not path.exists() for path in files)
+
+    monkeypatch.setattr(runtime, "_delete_clear_surface", original_delete)
+    aborted = await runtime.abort_clear(
+        recovery.operation_id,
+        operator_ref="user:owner",
+    )
+
+    assert aborted["status"] == "aborted"
+    for path, (expected_bytes, expected_mode, expected_digest) in before.items():
+        restored_bytes = path.read_bytes()
+        assert restored_bytes == expected_bytes
+        assert stat.S_IMODE(path.stat().st_mode) == expected_mode
+        assert hashlib.sha256(restored_bytes).hexdigest() == expected_digest
+    assert runtime._clear_journal.get_open_operation() is None
     await runtime.close()
 
 

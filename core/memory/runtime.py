@@ -10,7 +10,7 @@ import stat
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 
 
 _MaintenanceIOResult = TypeVar("_MaintenanceIOResult")
+_SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
 
 
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
@@ -81,6 +82,10 @@ _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
 
 class MemoryStoreUnavailableError(RuntimeError):
     """Raised when the controller cannot safely open the local Memory store."""
+
+
+class MemorySessionLifecycleBusyError(RuntimeError):
+    """Raised when a destructive session transition cannot acquire its fence."""
 
 
 class _UnavailableMemoryModule:
@@ -293,6 +298,26 @@ class MemoryRuntime:
         except Exception:
             return True
 
+    def _can_disable_without_maintenance_authority(self, config: MemoryConfig) -> bool:
+        """Allow only a pure disable when the journal authority is unreadable."""
+
+        if config.enabled or config != replace(self._config, enabled=False):
+            return False
+        restore_journal = self._backup_restore_journal
+        clear_journal = self._clear_journal
+        if (
+            restore_journal is None
+            or clear_journal is None
+            or self._clear_journal_error is not None
+        ):
+            return True
+        try:
+            restore_journal.get_open_operation()
+            clear_journal.get_open_operation()
+        except Exception:
+            return True
+        return False
+
     def _clear_capability_ready(self) -> bool:
         """Whether every local dependency required by Clear initialized."""
 
@@ -435,19 +460,43 @@ class MemoryRuntime:
             # through an active provider call.
             async with self.module._lifecycle_lock:
                 restore_operation = self._open_backup_restore_operation()
-                if restore_operation is not None and not recorded_sidecar_reaped:
-                    self.module._worker.pause_claims()
-                    return {"ok": False, "error": "memory_clear_failed"}
+                maintenance_open = self._maintenance_open()
                 if (
-                    self._maintenance_open()
-                    and restore_operation is None
+                    maintenance_open
+                    and self._can_disable_without_maintenance_authority(config)
                 ):
+                    result = await self._disable_locked(config)
+                elif restore_operation is not None and not recorded_sidecar_reaped:
                     self.module._worker.pause_claims()
                     return {"ok": False, "error": "memory_clear_failed"}
-                result = await self._reconcile_locked(config)
+                elif maintenance_open and restore_operation is None:
+                    self.module._worker.pause_claims()
+                    return {"ok": False, "error": "memory_clear_failed"}
+                else:
+                    result = await self._reconcile_locked(config)
                 if result.get("ok") is True:
                     self._restart_config = deepcopy(config)
                 return result
+
+    async def _disable_locked(self, config: MemoryConfig) -> dict[str, Any]:
+        """Stop every active Memory component without consulting maintenance state."""
+
+        self.module._worker.pause_claims()
+        self._config = config
+        self._configure_insight_reader(config)
+        self._provider = EverOSPort(self._socket_path)
+        self.module._replace_provider(self._provider)
+        await self._stop_worker()
+        stopped_process = self._process is not None
+        if stopped_process:
+            await self._process.stop()
+            self._process = None
+        self._process_records_calls = False
+        self._reset_recorder_health_unless_corrupt()
+        if stopped_process:
+            self._ensure_call_log_retention()
+        self._runtime_error = None
+        return {"ok": True, "state": "disabled"}
 
     async def _reconcile_locked(
         self,
@@ -468,6 +517,8 @@ class MemoryRuntime:
 
         if self._maintenance_open():
             self.module._worker.pause_claims()
+            if self._can_disable_without_maintenance_authority(config):
+                return await self._disable_locked(config)
             return {"ok": False, "error": "memory_clear_failed"}
 
         embedding_changed = not skip_embedding_guard and (
@@ -521,23 +572,7 @@ class MemoryRuntime:
             self._restart_config.embedding_change_pending = False
 
         if not config.enabled:
-            self._config = config
-            self._configure_insight_reader(config)
-            self._provider = EverOSPort(self._socket_path)
-            self.module._replace_provider(self._provider)
-            await self._stop_worker()
-            stopped_process = self._process is not None
-            if stopped_process:
-                await self._process.stop()
-                self._process = None
-            self._process_records_calls = False
-            self._reset_recorder_health_unless_corrupt()
-            if stopped_process:
-                self._ensure_call_log_retention()
-            self._runtime_error = None
-            if claims_paused:
-                self.module._worker.resume_claims()
-            return {"ok": True, "state": "disabled"}
+            return await self._disable_locked(config)
 
         # Preflight before touching a healthy child. This keeps an active
         # configuration alive when a replacement endpoint or runtime is
@@ -841,15 +876,77 @@ class MemoryRuntime:
         try:
             await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
             acquired = True
-            if not self.available or not self._config.enabled or self._maintenance_open():
-                return False
+            return await self._final_flush_under_admission(
+                principal_id=principal_id,
+                project_id=project_id,
+                raw_session_id=raw_session_id,
+                deadline=deadline,
+            )
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            if acquired:
+                admission_lock.release()
+
+    async def run_session_lifecycle(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
+        deadline_seconds: float = 5.0,
+    ) -> _SessionLifecycleResult:
+        """Flush and run one destructive session transition under one fence."""
+
+        if not self.available or not self._config.enabled or self._maintenance_open():
+            return await operation()
+        timeout = _final_flush_timeout(deadline_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        admission_lock = self.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
+        try:
+            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
+        except asyncio.TimeoutError as error:
+            raise MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ) from error
+
+        try:
+            await self._final_flush_under_admission(
+                principal_id=principal_id,
+                project_id=project_id,
+                raw_session_id=raw_session_id,
+                deadline=deadline,
+            )
+            return await operation()
+        finally:
+            admission_lock.release()
+
+    async def _final_flush_under_admission(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        raw_session_id: str,
+        deadline: float,
+    ) -> bool:
+        """Flush one session while its capture admission lock is already held."""
+
+        if not self.available or not self._config.enabled or self._maintenance_open():
+            return False
+        try:
             session_ref = await asyncio.to_thread(
                 self._store.provider_session_ref,
                 principal_id=principal_id,
                 project_ref=project_id,
                 session_id=raw_session_id,
             )
-            remaining = deadline - loop.time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return False
             return await self.module._worker.coordinator.final_flush(
@@ -863,9 +960,6 @@ class MemoryRuntime:
         except Exception:
             logger.warning("Memory final flush failed")
             return False
-        finally:
-            if acquired:
-                admission_lock.release()
 
     async def profile_payload(self, principal_id: str, project_id: str) -> dict[str, Any]:
         if not self.available:

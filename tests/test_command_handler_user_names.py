@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import sys
@@ -326,6 +327,92 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(controller.im_client.sent_messages), 1)
 
+    async def test_new_holds_memory_session_fence_through_reset(self):
+        controller = _StubController({"display_name": "Alex"})
+        admission_lock = asyncio.Lock()
+        reset_entered = asyncio.Event()
+        release_reset = asyncio.Event()
+        capture_enqueued = asyncio.Event()
+        calls = []
+
+        async def _run_lifecycle(
+            context,
+            raw_session_id,
+            operation,
+            *,
+            deadline_seconds,
+        ):
+            self.assertEqual(raw_session_id, "wechat_wx-chat")
+            self.assertEqual(deadline_seconds, 5.0)
+            async with admission_lock:
+                calls.append(("flush", context))
+                return await operation()
+
+        async def _clear_sessions(session_key):
+            calls.append(("clear", session_key))
+            reset_entered.set()
+            await release_reset.wait()
+            return {}
+
+        async def _capture_same_session():
+            async with admission_lock:
+                calls.append(("capture", "wechat_wx-chat"))
+                capture_enqueued.set()
+
+        controller.run_memory_session_lifecycle = _run_lifecycle
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        new_task = asyncio.create_task(handler.handle_new(context))
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        capture_task = asyncio.create_task(_capture_same_session())
+        await asyncio.sleep(0)
+
+        self.assertFalse(capture_enqueued.is_set())
+        release_reset.set()
+        await new_task
+        await capture_task
+        self.assertEqual(
+            calls,
+            [
+                ("flush", context),
+                ("clear", "wechat::wx-chat"),
+                ("capture", "wechat_wx-chat"),
+            ],
+        )
+
+    async def test_new_does_not_reset_when_memory_session_fence_is_busy(self):
+        controller = _StubController({"display_name": "Alex"})
+
+        async def _busy_lifecycle(
+            _context,
+            _raw_session_id,
+            _operation,
+            *,
+            deadline_seconds,
+        ):
+            self.assertEqual(deadline_seconds, 5.0)
+            raise RuntimeError("memory capture admission is busy")
+
+        controller.run_memory_session_lifecycle = _busy_lifecycle
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        await handler.handle_new(context)
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        self.assertIn("memory capture admission is busy", controller.im_client.sent_messages[0][1])
+
     async def test_new_does_not_flush_a_fallback_session_anchor(self):
         controller = _StubController({"display_name": "Alex"})
         flush_calls = []
@@ -548,11 +635,18 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         flush_calls = []
         call_order = []
 
-        async def _final_flush(context, raw_session_id, *, deadline_seconds):
+        async def _run_lifecycle(
+            context,
+            raw_session_id,
+            operation,
+            *,
+            deadline_seconds,
+        ):
             call_order.append("flush")
             flush_calls.append((context, raw_session_id, deadline_seconds))
+            return await operation()
 
-        controller.final_flush_memory_session = _final_flush
+        controller.run_memory_session_lifecycle = _run_lifecycle
         controller.session_handler = type(
             "SessionHandler",
             (),

@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Literal, Mapping, Protocol, Sequence
 
 
-SnapshotSurfaceKind = Literal["sqlite", "tree"]
+SnapshotSurfaceKind = Literal["sqlite", "tree", "call_log"]
 SnapshotEntryType = Literal["sqlite", "tree", "directory", "file", "missing"]
 
 _SCHEMA_VERSION = 2
@@ -45,6 +45,12 @@ _TERMINAL_PERMIT_AUTHORITY = object()
 _PREPARING_DISCARD_PERMIT_AUTHORITY = object()
 _ACTIVE_PREPARING_DISCARD_LEASES: set[object] = set()
 _SUCCEEDED_PREPARING_DISCARD_LEASES: set[object] = set()
+_CALL_LOG_FILESET: tuple[tuple[str, str], ...] = (
+    ("database", ""),
+    ("journal", "-journal"),
+    ("shm", "-shm"),
+    ("wal", "-wal"),
+)
 
 
 def _validated_relative_path(value: str) -> str:
@@ -71,6 +77,10 @@ class MemorySnapshotVerificationError(MemorySnapshotError):
     """A snapshot did not match its authenticated manifest."""
 
 
+class _MemorySQLiteCorruptionError(MemorySnapshotError):
+    """A SQLite source is readable as a file but not as a valid database."""
+
+
 @dataclass(frozen=True, slots=True)
 class SnapshotSurface:
     """One effective-home-relative surface owned by the snapshot manager."""
@@ -80,14 +90,14 @@ class SnapshotSurface:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", _validated_relative_path(self.path))
-        if self.kind not in {"sqlite", "tree"}:
+        if self.kind not in {"sqlite", "tree", "call_log"}:
             raise ValueError("unsupported Memory snapshot surface kind")
 
 
 DEFAULT_MEMORY_SNAPSHOT_SURFACES: tuple[SnapshotSurface, ...] = (
     SnapshotSurface("state/memory/memory.sqlite", "sqlite"),
     SnapshotSurface("memory/everos-root", "tree"),
-    SnapshotSurface("memory/call-log/call-log.db", "sqlite"),
+    SnapshotSurface("memory/call-log/call-log.db", "call_log"),
     SnapshotSurface("memory/attachments", "tree"),
 )
 
@@ -251,8 +261,9 @@ class _RestorePlan:
     surface: SnapshotSurface
     target: Path
     staged: Path | None
+    installs: list[tuple[Path, Path]]
     backups: list[_RestoreBackup]
-    installed: bool = False
+    installed_targets: list[Path]
 
 
 @dataclass(frozen=True, slots=True)
@@ -855,6 +866,8 @@ class MemorySnapshotManager:
                     destination = payload_root / surface.path
                     if surface.kind == "sqlite":
                         manifest.add(self._snapshot_sqlite(surface, source, destination))
+                    elif surface.kind == "call_log":
+                        self._snapshot_call_log(surface, source, destination, manifest)
                     else:
                         self._snapshot_tree(surface, source, destination, manifest)
                 manifest.finish()
@@ -989,10 +1002,17 @@ class MemorySnapshotManager:
                     if root_entry.type != "missing":
                         staged = target.parent / f".{target.name}.restore-{token}-{index}"
                         _remove_safe_path(self._effective_home, staged)
-                    plan = _RestorePlan(surface, target, staged, [])
+                    plan = _RestorePlan(
+                        surface=surface,
+                        target=target,
+                        staged=staged,
+                        installs=[],
+                        backups=[],
+                        installed_targets=[],
+                    )
                     plans.append(plan)
                     if staged is not None:
-                        if surface.kind == "sqlite":
+                        if root_entry.type == "sqlite":
                             _copy_verified_file(
                                 payload_root / surface.path,
                                 staged,
@@ -1001,6 +1021,7 @@ class MemorySnapshotManager:
                                 expected_size=root_entry.size,
                                 mode=root_entry.mode,
                             )
+                            plan.installs.append((staged, target))
                         else:
                             self._stage_tree_restore(
                                 surface,
@@ -1009,13 +1030,24 @@ class MemorySnapshotManager:
                                 payload_root,
                                 staged,
                             )
+                            if surface.kind == "call_log":
+                                for member, suffix in _CALL_LOG_FILESET:
+                                    if manifest_index.entry(f"{surface.path}/{member}") is not None:
+                                        plan.installs.append(
+                                            (
+                                                staged / member,
+                                                target.with_name(f"{target.name}{suffix}"),
+                                            )
+                                        )
+                            else:
+                                plan.installs.append((staged, target))
 
                 if before_replace is not None:
                     before_replace(snapshot)
 
                 for index, plan in enumerate(plans):
                     candidates = [plan.target]
-                    if plan.surface.kind == "sqlite":
+                    if plan.surface.kind in {"sqlite", "call_log"}:
                         candidates.extend(_sqlite_sidecars(plan.target))
                     for candidate_index, candidate in enumerate(candidates):
                         backup = candidate.parent / (
@@ -1046,9 +1078,9 @@ class MemorySnapshotManager:
                             plan.backups.append(_RestoreBackup(candidate, backup, True))
                         else:
                             _remove_safe_path(self._effective_home, candidate)
-                    if plan.staged is not None:
-                        os.replace(plan.staged, plan.target)
-                        plan.installed = True
+                    for staged_file, installed_target in plan.installs:
+                        os.replace(staged_file, installed_target)
+                        plan.installed_targets.append(installed_target)
                     _fsync_directory(plan.target.parent)
             except Exception:
                 self._rollback_restore(plans)
@@ -1169,7 +1201,9 @@ class MemorySnapshotManager:
             destination_conn.commit()
             check = destination_conn.execute("PRAGMA quick_check").fetchone()
             if check is None or check[0] != "ok":
-                raise MemorySnapshotError("Memory SQLite snapshot failed integrity check")
+                raise _MemorySQLiteCorruptionError(
+                    "Memory SQLite snapshot failed integrity check"
+                )
         except sqlite3.Error as error:
             raise MemorySnapshotError("Memory SQLite snapshot failed") from error
         finally:
@@ -1194,6 +1228,118 @@ class MemorySnapshotManager:
             sha256=_file_sha256(destination),
             tree_digest=None,
         )
+
+    def _snapshot_call_log(
+        self,
+        surface: SnapshotSurface,
+        source: Path,
+        destination: Path,
+        manifest: _ManifestWriter,
+    ) -> SnapshotEntry:
+        """Snapshot a diagnostic call log without weakening SQLite surfaces.
+
+        Healthy call logs retain the standalone SQLite-backup representation.
+        A positively identified corrupt database instead uses a fixed raw file
+        set so Clear can preserve the diagnostic bytes for an exact Abort.
+        """
+
+        source_state = _call_log_fileset_state(self._effective_home, source)
+        if not source_state:
+            entry = _missing_entry(surface.path)
+            manifest.add(entry)
+            return entry
+        if "database" in source_state:
+            if not _call_log_has_sqlite_header(self._effective_home, source):
+                return self._snapshot_call_log_fileset(
+                    surface,
+                    source,
+                    destination,
+                    manifest,
+                )
+            try:
+                entry = self._snapshot_sqlite(surface, source, destination)
+            except MemorySnapshotError as error:
+                if not _is_sqlite_corruption(error):
+                    raise
+                _remove_safe_path(self._effective_home, destination)
+                for sidecar in _sqlite_sidecars(destination):
+                    _remove_safe_path(self._effective_home, sidecar)
+            else:
+                manifest.add(entry)
+                return entry
+        return self._snapshot_call_log_fileset(
+            surface,
+            source,
+            destination,
+            manifest,
+        )
+
+    def _snapshot_call_log_fileset(
+        self,
+        surface: SnapshotSurface,
+        source: Path,
+        destination: Path,
+        manifest: _ManifestWriter,
+    ) -> SnapshotEntry:
+        _ensure_private_directory(self._effective_home, destination.parent)
+        _mkdir_private(destination)
+        source_fd = _open_directory(source.parent, "Memory call-log directory")
+        destination_fd = _open_directory(
+            destination,
+            "Memory call-log snapshot destination",
+        )
+        try:
+            before = _call_log_fileset_state_at(source_fd, source.name)
+            if not before:
+                raise MemorySnapshotError("Memory call-log changed during snapshot")
+            root_template = SnapshotEntry(
+                path=surface.path,
+                type="tree",
+                mode=0o700,
+                size=0,
+                sha256=None,
+                tree_digest=None,
+            )
+            digest = _tree_digest(root_template)
+            for member, suffix in _CALL_LOG_FILESET:
+                info = before.get(member)
+                if info is None:
+                    continue
+                size, file_digest = _copy_regular_file_at(
+                    source_fd,
+                    destination_fd,
+                    f"{source.name}{suffix}",
+                    destination_name=member,
+                    mode=stat.S_IMODE(info.st_mode),
+                )
+                entry = SnapshotEntry(
+                    path=f"{surface.path}/{member}",
+                    type="file",
+                    mode=stat.S_IMODE(info.st_mode),
+                    size=size,
+                    sha256=file_digest,
+                    tree_digest=None,
+                )
+                manifest.add(entry)
+                _update_tree_digest(digest, entry)
+            after = _call_log_fileset_state_at(source_fd, source.name)
+            if _call_log_fileset_identity(before) != _call_log_fileset_identity(after):
+                raise MemorySnapshotError("Memory call-log changed during snapshot")
+            os.fchmod(destination_fd, 0o700)
+            os.fsync(destination_fd)
+        finally:
+            os.close(destination_fd)
+            os.close(source_fd)
+        root = SnapshotEntry(
+            path=surface.path,
+            type="tree",
+            mode=0o700,
+            size=0,
+            sha256=None,
+            tree_digest=digest.hexdigest(),
+        )
+        manifest.add(root)
+        return root
 
     def _snapshot_tree(
         self,
@@ -1430,10 +1576,32 @@ class MemorySnapshotManager:
         roots: list[SnapshotEntry] = []
         for surface in self._surfaces:
             root = entries.entry(surface.path)
-            if root is None or root.type not in {surface.kind, "missing"}:
+            allowed_root_types = (
+                {"sqlite", "tree", "missing"}
+                if surface.kind == "call_log"
+                else {surface.kind, "missing"}
+            )
+            if root is None or root.type not in allowed_root_types:
                 raise MemorySnapshotVerificationError("Memory snapshot surface root is invalid")
             if root.type == "missing" and entries.has_descendant(surface.path):
                 raise MemorySnapshotVerificationError("Missing Memory surface has payload entries")
+            if surface.kind == "call_log":
+                descendants = tuple(entries.descendants(surface.path))
+                if root.type == "tree":
+                    expected_paths = {
+                        f"{surface.path}/{member}" for member, _suffix in _CALL_LOG_FILESET
+                    }
+                    if not descendants or any(
+                        entry.path not in expected_paths or entry.type != "file"
+                        for entry in descendants
+                    ):
+                        raise MemorySnapshotVerificationError(
+                            "Memory call-log snapshot file set is invalid"
+                        )
+                elif descendants:
+                    raise MemorySnapshotVerificationError(
+                        "Memory call-log SQLite surface has child entries"
+                    )
             roots.append(root)
         for entry in entries:
             owner: SnapshotSurface | None = None
@@ -1598,8 +1766,8 @@ class MemorySnapshotManager:
     def _rollback_restore(self, plans: list[_RestorePlan]) -> None:
         for plan in reversed(plans):
             try:
-                if plan.installed:
-                    _remove_safe_path(self._effective_home, plan.target)
+                for installed_target in reversed(plan.installed_targets):
+                    _remove_safe_path(self._effective_home, installed_target)
                 for backup in reversed(plan.backups):
                     if backup.created_this_run and backup.backup.exists():
                         os.replace(backup.backup, backup.target)
@@ -2381,6 +2549,108 @@ def _file_sha256_at(parent_fd: int, name: str) -> str:
     return digest.hexdigest()
 
 
+def _is_sqlite_corruption(error: MemorySnapshotError) -> bool:
+    if isinstance(error, _MemorySQLiteCorruptionError):
+        return True
+    cause = error.__cause__
+    if not isinstance(cause, sqlite3.DatabaseError):
+        return False
+    error_code = getattr(cause, "sqlite_errorcode", None)
+    return isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_CORRUPT,
+        sqlite3.SQLITE_NOTADB,
+    }
+
+
+def _call_log_fileset_state(
+    home: Path,
+    database: Path,
+) -> dict[str, os.stat_result]:
+    directory_info = _managed_source_info(home, database.parent)
+    if directory_info is None:
+        return {}
+    _require_directory_private(directory_info, "Memory call-log directory")
+    directory_fd = _open_directory(database.parent, "Memory call-log directory")
+    try:
+        return _call_log_fileset_state_at(directory_fd, database.name)
+    finally:
+        os.close(directory_fd)
+
+
+def _call_log_fileset_state_at(
+    directory_fd: int,
+    database_name: str,
+) -> dict[str, os.stat_result]:
+    files: dict[str, os.stat_result] = {}
+    for member, suffix in _CALL_LOG_FILESET:
+        try:
+            info = os.stat(
+                f"{database_name}{suffix}",
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        _require_regular_private(info, "Memory call-log file")
+        files[member] = info
+    return files
+
+
+def _call_log_fileset_identity(
+    files: Mapping[str, os.stat_result],
+) -> dict[str, tuple[int, int, int, int, int, int, int]]:
+    return {
+        member: (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+        for member, info in files.items()
+    }
+
+
+def _call_log_has_sqlite_header(home: Path, database: Path) -> bool:
+    directory_info = _managed_source_info(home, database.parent)
+    if directory_info is None:
+        raise MemorySnapshotError("Memory call-log changed during snapshot")
+    _require_directory_private(directory_info, "Memory call-log directory")
+    directory_fd = _open_directory(database.parent, "Memory call-log directory")
+    database_fd: int | None = None
+    try:
+        database_fd = os.open(
+            database.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(database_fd)
+        _require_regular_private(before, "Memory call-log file")
+        header = os.read(database_fd, 16)
+        after = os.fstat(database_fd)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise MemorySnapshotError("Memory call-log changed during snapshot")
+        return header == b"SQLite format 3\x00"
+    finally:
+        if database_fd is not None:
+            os.close(database_fd)
+        os.close(directory_fd)
+
+
 def _sqlite_sidecars(path: Path) -> tuple[Path, Path, Path]:
     return (
         path.with_name(f"{path.name}-wal"),
@@ -2392,7 +2662,7 @@ def _sqlite_sidecars(path: Path) -> tuple[Path, Path, Path]:
 def _require_expected_target(info: os.stat_result, kind: SnapshotSurfaceKind, *, sidecar: bool) -> None:
     if stat.S_ISLNK(info.st_mode):
         raise MemorySnapshotUnsafePathError("Memory restore refuses a symlink target")
-    if sidecar or kind == "sqlite":
+    if sidecar or kind in {"sqlite", "call_log"}:
         _require_regular_private(info, "Memory restore file target")
     else:
         _require_directory_private(info, "Memory restore tree target")

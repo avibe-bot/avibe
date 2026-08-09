@@ -6,7 +6,8 @@ import json
 import logging
 import threading
 import time
-from typing import Optional, Dict, Any
+from collections.abc import Awaitable, Callable
+from typing import Optional, Dict, Any, TypeVar
 from config import paths
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import (
@@ -52,6 +53,7 @@ from vibe.i18n import get_supported_languages, t as i18n_t
 logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
+_MemorySessionLifecycleResult = TypeVar("_MemorySessionLifecycleResult")
 
 
 class _SettingsUserBindings:
@@ -1569,29 +1571,76 @@ class Controller:
         current epoch-scoped identity.
         """
 
-        if not isinstance(raw_session_id, str) or not raw_session_id:
-            return False
-        facts = self._memory_turn_facts(context, session_id=raw_session_id)
-        if not facts.memory_enabled:
-            return False
-        admission = self._memory_admission()
-        try:
-            if not admission.admits(facts):
-                return False
-            principal_id = admission.principal_for(facts)
-            project_id = admission.project_for(facts)
-        except Exception:
-            logger.debug("Memory final flush admission failed", exc_info=True)
-            return False
-        if principal_id is None or project_id is None:
+        scope = self._memory_scope_for_im_session(context, raw_session_id)
+        if scope is None:
             return False
 
         return await self._final_flush_memory_scope(
             raw_session_id,
-            principal_id,
-            project_id,
+            scope[0],
+            scope[1],
             deadline_seconds=deadline_seconds,
         )
+
+    async def run_memory_session_lifecycle(
+        self,
+        context: MessageContext,
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[_MemorySessionLifecycleResult]],
+        *,
+        deadline_seconds: float = 5.0,
+    ) -> _MemorySessionLifecycleResult:
+        """Run an IM session reset behind Memory's exact capture fence."""
+
+        scope = self._memory_scope_for_im_session(context, raw_session_id)
+        if scope is None:
+            return await operation()
+
+        runtime = getattr(self, "memory_runtime", None)
+        run_lifecycle = getattr(runtime, "run_session_lifecycle", None)
+        if not callable(run_lifecycle):
+            await self._final_flush_memory_scope(
+                raw_session_id,
+                scope[0],
+                scope[1],
+                deadline_seconds=deadline_seconds,
+            )
+            return await operation()
+
+        return await run_lifecycle(
+            principal_id=scope[0],
+            project_id=scope[1],
+            raw_session_id=raw_session_id,
+            operation=operation,
+            deadline_seconds=deadline_seconds,
+        )
+
+    def _memory_scope_for_im_session(
+        self,
+        context: MessageContext,
+        raw_session_id: object,
+    ) -> Optional[tuple[str, str]]:
+        """Resolve the same complete, admitted scope used by IM capture."""
+
+        from core.memory.store import is_principal_id, is_project_id
+
+        if not isinstance(raw_session_id, str) or not raw_session_id:
+            return None
+        facts = self._memory_turn_facts(context, session_id=raw_session_id)
+        if not facts.memory_enabled:
+            return None
+        admission = self._memory_admission()
+        try:
+            if not admission.admits(facts):
+                return None
+            principal_id = admission.principal_for(facts)
+            project_id = admission.project_for(facts)
+        except Exception:
+            logger.debug("Memory session lifecycle admission failed", exc_info=True)
+            return None
+        if not is_principal_id(principal_id) or not is_project_id(project_id):
+            return None
+        return principal_id, project_id
 
     async def final_flush_memory_cli_session(
         self,

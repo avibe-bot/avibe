@@ -55,6 +55,8 @@ class _Runtime:
         self.final_flush_calls: list[dict[str, object]] = []
         self.final_flush_result = True
         self.final_flush_error: Exception | None = None
+        self.session_lifecycle_calls: list[dict[str, object]] = []
+        self.session_lifecycle_error: Exception | None = None
         self.recovered_scope: tuple[str, str] | None = None
         self.scope_recovery_calls: list[str] = []
 
@@ -75,6 +77,13 @@ class _Runtime:
         if self.final_flush_error is not None:
             raise self.final_flush_error
         return self.final_flush_result
+
+    async def run_session_lifecycle(self, **kwargs):
+        operation = kwargs.pop("operation")
+        self.session_lifecycle_calls.append(kwargs)
+        if self.session_lifecycle_error is not None:
+            raise self.session_lifecycle_error
+        return await operation()
 
 
 class _CaptureModule:
@@ -249,6 +258,97 @@ def test_final_flush_memory_session_swallows_runtime_failure() -> None:
 
     assert result is False
     assert len(controller.memory_runtime.final_flush_calls) == 1
+
+
+def test_memory_session_lifecycle_reuses_capture_scope_and_raw_anchor() -> None:
+    controller = _controller()
+    operation_calls = []
+
+    async def reset_session() -> str:
+        operation_calls.append("reset")
+        return "reset-complete"
+
+    result = asyncio.run(
+        controller.run_memory_session_lifecycle(
+            _context("wechat"),
+            "wechat_dm-1",
+            reset_session,
+            deadline_seconds=4.0,
+        )
+    )
+
+    assert result == "reset-complete"
+    assert operation_calls == ["reset"]
+    assert controller.memory_runtime.session_lifecycle_calls == [
+        {
+            "principal_id": "u-" + ("1" * 32),
+            "project_id": PROJECT,
+            "raw_session_id": "wechat_dm-1",
+            "deadline_seconds": 4.0,
+        }
+    ]
+
+
+def test_memory_session_lifecycle_does_not_reset_without_a_fence() -> None:
+    controller = _controller()
+    controller.memory_runtime.session_lifecycle_error = RuntimeError("fence unavailable")
+    operation_calls = []
+
+    async def reset_session() -> str:
+        operation_calls.append("reset")
+        return "reset-complete"
+
+    with pytest.raises(RuntimeError, match="fence unavailable"):
+        asyncio.run(
+            controller.run_memory_session_lifecycle(
+                _context("slack"),
+                "slack_dm-1",
+                reset_session,
+            )
+        )
+
+    assert operation_calls == []
+
+
+def test_memory_session_lifecycle_resets_without_guessing_an_ineligible_scope() -> None:
+    controller = _controller(user=SimpleNamespace(enabled=False, is_admin=False))
+    operation_calls = []
+
+    async def reset_session() -> str:
+        operation_calls.append("reset")
+        return "reset-complete"
+
+    result = asyncio.run(
+        controller.run_memory_session_lifecycle(
+            _context("slack"),
+            "slack_dm-1",
+            reset_session,
+        )
+    )
+
+    assert result == "reset-complete"
+    assert operation_calls == ["reset"]
+    assert controller.memory_runtime.session_lifecycle_calls == []
+
+
+def test_memory_session_lifecycle_does_not_repeat_failed_reset() -> None:
+    controller = _controller()
+    operation_calls = []
+
+    async def reset_session() -> None:
+        operation_calls.append("reset")
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        asyncio.run(
+            controller.run_memory_session_lifecycle(
+                _context("telegram"),
+                "telegram_dm-1",
+                reset_session,
+            )
+        )
+
+    assert operation_calls == ["reset"]
 
 
 def test_final_flush_memory_cli_session_uses_trusted_stored_scope() -> None:

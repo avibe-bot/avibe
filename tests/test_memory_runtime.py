@@ -59,7 +59,12 @@ from core.memory.process import (
     _signal_owned_processes,
     _snapshot_owned_processes,
 )
-from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
+from core.memory.runtime import (
+    MemoryRuntime,
+    MemorySessionLifecycleBusyError,
+    MemoryStoreUnavailableError,
+    create_memory_runtime,
+)
 from core.memory.sidecar import _request_rejection
 from core.memory.everos_insight.recorder import initialize_call_log
 from core.memory.snapshot import MemorySnapshotManager
@@ -1027,6 +1032,101 @@ def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: P
     assert runtime._provider._embedding_api_key is None
 
 
+@pytest.mark.parametrize(
+    "journal_attribute",
+    ["_clear_journal", "_backup_restore_journal"],
+)
+def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    journal_attribute: str,
+) -> None:
+    processing = MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+        embedding=MemoryEndpointConfig(
+            "https://embed.example.test/v1",
+            "embed",
+            "embed-key",
+        ),
+    )
+    enabled = MemoryConfig(enabled=True, processing=processing)
+    disabled = replace(enabled, enabled=False)
+    factory = FakeEverOSProcessFactory()
+
+    async def run() -> None:
+        runtime = MemoryRuntime(
+            enabled,
+            artifact_manager=_installed_artifact(),
+            process_factory=factory,
+            effective_home=tmp_path,
+        )
+        assert await runtime.reconcile(enabled) == {"ok": True, "state": "ready"}
+        sidecar = factory.supervised[0]
+        assert runtime._worker_task is not None
+        assert runtime._process_records_calls is True
+
+        terminal_gc = runtime._terminal_snapshot_gc_task
+        backup_reconcile = runtime._backup_stage_reconcile_task
+        if terminal_gc is not None:
+            await terminal_gc
+        if backup_reconcile is not None:
+            await backup_reconcile
+
+        journal = getattr(runtime, journal_attribute)
+        assert journal is not None
+
+        def unreadable_journal() -> None:
+            raise OSError("maintenance journal is unreadable")
+
+        async def recovery_must_not_run() -> bool:
+            raise AssertionError("disable must not mutate an unreadable journal")
+
+        monkeypatch.setattr(journal, "get_open_operation", unreadable_journal)
+        monkeypatch.setattr(runtime, "_recover_backup_restore_locked", recovery_must_not_run)
+
+        changed = replace(
+            enabled,
+            processing=replace(
+                processing,
+                llm=replace(processing.llm, model="changed-while-unreadable"),
+            ),
+        )
+        assert await runtime.reconcile(changed) == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        assert await runtime.restart() == {
+            "ok": False,
+            "error": "memory_clear_failed",
+        }
+        assert runtime._worker_task is not None
+        assert sidecar.stopped is False
+
+        from core.controller import Controller
+
+        controller = Controller.__new__(Controller)
+        controller.config = SimpleNamespace(memory=enabled)
+        controller.memory_runtime = runtime
+        controller.memory_module = runtime.module
+        assert await controller.reconcile_memory(disabled) == {
+            "ok": True,
+            "state": "disabled",
+        }
+        assert controller.config.memory is disabled
+        assert runtime._config is disabled
+        assert runtime._restart_config == disabled
+        assert runtime.module._worker._claims_paused is True
+        assert runtime._worker_task is None
+        assert runtime._process is None
+        assert runtime._process_records_calls is False
+        assert sidecar.stopped is True
+        assert sidecar.running is False
+        assert len(factory.supervised) == 1
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
     def _artifact() -> FakeMemoryArtifactManager:
         return FakeMemoryArtifactManager(
@@ -1680,6 +1780,201 @@ def test_final_flush_fences_capture_before_queue_visibility(
         ]
         assert len(later_rows) == 1
         assert later_rows[0].state == "pending"
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_session_lifecycle_fences_capture_through_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = MemoryStore()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=store,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    provider = FakeMemoryProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = "lifecycle-session"
+    admission_lock = runtime.module._capture_admission_lock(
+        principal_id=principal_id,
+        project_id=PROJECT,
+        session_id=session_id,
+    )
+
+    async def failed_flush(**_kwargs) -> bool:
+        assert admission_lock.locked()
+        return False
+
+    monkeypatch.setattr(runtime, "_final_flush_under_admission", failed_flush)
+    request = CaptureRequest(
+        source_message_id="after-reset-source",
+        session_id=session_id,
+        principal_id=principal_id,
+        project_id=PROJECT,
+        provenance="user_input",
+        text="message after reset",
+        occurred_at_ms=1_725_000_001_234,
+        attachments=(),
+    )
+
+    async def run() -> None:
+        reset_entered = asyncio.Event()
+        release_reset = asyncio.Event()
+        order: list[str] = []
+
+        async def reset_session() -> str:
+            order.append("reset-entered")
+            reset_entered.set()
+            await release_reset.wait()
+            order.append("reset-committed")
+            return "reset-complete"
+
+        lifecycle = asyncio.create_task(
+            runtime.run_session_lifecycle(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                operation=reset_session,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        capture = asyncio.create_task(runtime.module.capture(request))
+        await asyncio.sleep(0)
+
+        assert not capture.done()
+        assert all(
+            row.payload_text != request.text
+            for row in store.list_queue_rows()
+        )
+
+        release_reset.set()
+        assert await lifecycle == "reset-complete"
+        assert isinstance(await capture, CaptureAccepted)
+        order.append("capture-enqueued")
+        assert order == [
+            "reset-entered",
+            "reset-committed",
+            "capture-enqueued",
+        ]
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = "busy-lifecycle-session"
+
+    async def run() -> None:
+        admission_lock = runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            session_id=session_id,
+        )
+        await admission_lock.acquire()
+        operation_called = False
+
+        async def reset_session() -> None:
+            nonlocal operation_called
+            operation_called = True
+
+        try:
+            with pytest.raises(
+                MemorySessionLifecycleBusyError,
+                match="did not quiesce",
+            ):
+                await runtime.run_session_lifecycle(
+                    principal_id=principal_id,
+                    project_id=PROJECT,
+                    raw_session_id=session_id,
+                    operation=reset_session,
+                    deadline_seconds=0.01,
+                )
+            assert operation_called is False
+        finally:
+            admission_lock.release()
+            await runtime.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("outcome", ["exception", "cancellation"])
+def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    provider = FakeMemoryProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+    principal_id = "u-11111111111111111111111111111111"
+    session_id = f"aborted-{outcome}-session"
+    request = CaptureRequest(
+        source_message_id=f"after-{outcome}-source",
+        session_id=session_id,
+        principal_id=principal_id,
+        project_id=PROJECT,
+        provenance="user_input",
+        text=f"message after {outcome}",
+        occurred_at_ms=1_725_000_001_234,
+        attachments=(),
+    )
+
+    async def run() -> None:
+        reset_entered = asyncio.Event()
+        keep_reset_open = asyncio.Event()
+
+        async def abort_reset() -> None:
+            reset_entered.set()
+            if outcome == "exception":
+                raise RuntimeError("reset failed")
+            await keep_reset_open.wait()
+
+        lifecycle = asyncio.create_task(
+            runtime.run_session_lifecycle(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                operation=abort_reset,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        if outcome == "exception":
+            with pytest.raises(RuntimeError, match="reset failed"):
+                await lifecycle
+        else:
+            lifecycle.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await lifecycle
+
+        receipt = await asyncio.wait_for(runtime.module.capture(request), timeout=1.0)
+        assert isinstance(receipt, CaptureAccepted)
         await runtime.close()
 
     asyncio.run(run())
