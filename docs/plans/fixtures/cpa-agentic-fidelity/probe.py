@@ -444,6 +444,13 @@ def _chat_delta_has_payload(delta: dict[str, Any]) -> bool:
     )
 
 
+def _anthropic_stream_usage_valid(value: Any) -> bool:
+    return isinstance(value, dict) and all(
+        type(value.get(field)) is int and value[field] >= 0
+        for field in ("input_tokens", "output_tokens")
+    )
+
+
 def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
     """Check lifecycle ordering without depending on provider-specific chunk sizes."""
     if not events:
@@ -480,6 +487,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                     or message.get("type") != "message"
                     or message.get("role") != "assistant"
                     or message.get("content") != []
+                    or not _anthropic_stream_usage_valid(message.get("usage"))
                     or "stop_reason" not in message
                     or "stop_sequence" not in message
                     or message.get("stop_reason") is not None
@@ -1025,7 +1033,9 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
             continue
         event = item.get("event", {})
         event_type = event.get("type")
-        choices = event.get("choices", [])
+        if "choices" not in event:
+            return False
+        choices = event["choices"]
         usage = event.get("usage")
         if event.get("object") != "chat.completion.chunk":
             return False
@@ -1470,6 +1480,8 @@ def _parse_anthropic_stream(result: TransportResult) -> Turn:
                 errors.append("message_envelope_invalid")
             else:
                 envelope = {"type": message.get("type"), "role": message.get("role")}
+                if not _anthropic_stream_usage_valid(message.get("usage")):
+                    errors.append("message_start_usage_invalid")
                 if message.get("content") != []:
                     errors.append("message_start_content_invalid")
                 if (
@@ -1539,6 +1551,8 @@ def _parse_responses_document(document: dict[str, Any] | None, *, event_count: i
     errors: list[str] = []
     if not isinstance(document, dict) or document.get("object") != "response":
         errors.append("response_object_invalid")
+    if not isinstance(document, dict) or not isinstance(document.get("id"), str) or not document["id"]:
+        errors.append("response_id_invalid")
     output = document.get("output") if isinstance(document, dict) else None
     if not isinstance(output, list):
         errors.append("output_missing")
@@ -2083,7 +2097,7 @@ def _parse_responses_stream(result: TransportResult) -> Turn:
                     errors.append("stream_arguments_missing")
     response_object = terminal_response.get("object") if isinstance(terminal_response, dict) else None
     turn = _parse_responses_document(
-        {"object": response_object, "output": items, "status": status},
+        {"id": response_id, "object": response_object, "output": items, "status": status},
         event_count=len(result.events),
         invalid_event_count=result.invalid_event_count,
         terminal=status == "completed",
@@ -2134,7 +2148,11 @@ def _parse_chat_document(document: dict[str, Any] | None, *, event_count: int = 
         if error:
             errors.append(error)
         calls.append(ToolCall(_required_identifier(raw.get("id"), errors), str(function.get("name", "")), arguments))
-    content = message.get("content", "") if isinstance(message, dict) else ""
+    if "content" not in message:
+        errors.append("message_content_missing")
+        content = ""
+    else:
+        content = message["content"]
     if content is not None and not isinstance(content, str):
         errors.append("message_content_invalid")
         content = ""
@@ -2223,7 +2241,11 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             else:
                 usage = event_usage
                 usage_seen = True
-        choices = event.get("choices", [])
+        if "choices" not in event:
+            errors.append("choices_missing")
+            choices = []
+        else:
+            choices = event["choices"]
         if not isinstance(choices, list):
             errors.append("choice_invalid")
             continue

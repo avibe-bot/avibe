@@ -80,7 +80,12 @@ in the first turn, failed the first parse/order gates, and failed the final
 exact tuple. Chat-to-Messages single passed both parse gates but lacked
 reasoning in both turns and failed final system scope. Its parallel also lacked
 reasoning, failed both parse gates and first-turn stream ordering, and failed
-final system scope. The focused suite contains 199 tests.
+final system scope. The focused suite contains 203 tests.
+
+Per the owner decision recorded on 2026-08-08, r45 is sealed M0 evidence.
+Subsequent validator hardening applies to future collections only and does not
+retroactively rewrite r45 or its direction-level decisions without a new,
+explicitly adopted matrix run.
 
 ## S4 matrix mapping
 

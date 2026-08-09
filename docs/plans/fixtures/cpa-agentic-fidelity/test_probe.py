@@ -5,6 +5,10 @@ import unittest
 import probe
 
 
+def _anthropic_usage():
+    return {"input_tokens": 1, "output_tokens": 0}
+
+
 def _responses_wire(*events):
     normalized = []
     for event in events:
@@ -1259,7 +1263,7 @@ class ProbeParserTests(unittest.TestCase):
     def test_sse_accepts_cr_only_line_endings(self) -> None:
         payload = (
             b'\xef\xbb\xbfevent: message_start\rdata: {"type":"message_start","message":'
-            b'{"type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null}}\r\r'
+            b'{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0},"stop_reason":null,"stop_sequence":null}}\r\r'
             b'event: message_delta\rdata: {"type":"message_delta","delta":'
             b'{"stop_reason":"end_turn","stop_sequence":null}}\r\r'
             b'event: message_stop\rdata: {"type":"message_stop"}\r\r'
@@ -1472,6 +1476,7 @@ class ProbeParserTests(unittest.TestCase):
                         "type": "message",
                         "role": "assistant",
                         "content": [],
+                        "usage": _anthropic_usage(),
                         "stop_reason": None,
                         "stop_sequence": None,
                     },
@@ -2514,7 +2519,7 @@ class ProbeParserTests(unittest.TestCase):
         self.assertIn("stream_signature_snapshot_invalid", thinking_turn.parse_errors)
 
         valid = [
-            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "content": [], "usage": _anthropic_usage(), "stop_reason": None, "stop_sequence": None}}},
             {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}},
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "answer"}}},
             {"kind": "event", "sequence": 3, "type": "content_block_stop", "event": {"type": "content_block_stop", "index": 0}},
@@ -2724,7 +2729,7 @@ class ProbeParserTests(unittest.TestCase):
 
     def test_anthropic_thinking_opening_snapshot_must_be_empty(self) -> None:
         valid = [
-            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "usage": _anthropic_usage(), "stop_reason": None, "stop_sequence": None}}},
             {"kind": "event", "sequence": 1, "type": "content_block_start", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}},
             {"kind": "event", "sequence": 2, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "thought"}}},
             {"kind": "event", "sequence": 3, "type": "content_block_delta", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig"}}},
@@ -2761,6 +2766,7 @@ class ProbeParserTests(unittest.TestCase):
                         "type": "message",
                         "role": "assistant",
                         "content": [],
+                        "usage": _anthropic_usage(),
                         "stop_reason": None,
                         "stop_sequence": None,
                     },
@@ -2873,6 +2879,7 @@ class ProbeParserTests(unittest.TestCase):
                         "type": "message",
                         "role": "assistant",
                         "content": [],
+                        "usage": _anthropic_usage(),
                         "stop_reason": None,
                         "stop_sequence": None,
                     },
@@ -2909,6 +2916,25 @@ class ProbeParserTests(unittest.TestCase):
             )
             self.assertIn("message_start_terminal_invalid", missing_turn.parse_errors)
 
+    def test_anthropic_message_start_requires_usage_snapshot(self) -> None:
+        valid = [
+            {"kind": "event", "sequence": 0, "type": "message_start", "event": {"type": "message_start", "message": {"type": "message", "role": "assistant", "content": [], "usage": _anthropic_usage(), "stop_reason": None, "stop_sequence": None}}},
+            {"kind": "event", "sequence": 1, "type": "message_delta", "event": {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}}},
+            {"kind": "event", "sequence": 2, "type": "message_stop", "event": {"type": "message_stop"}},
+        ]
+        self.assertTrue(probe._stream_order_ok("anthropic", valid))
+        valid_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, valid, False, 0, True))
+        self.assertNotIn("message_start_usage_invalid", valid_turn.parse_errors)
+        for invalid_usage in (None, {}, {"input_tokens": -1, "output_tokens": 0}, {"input_tokens": 1, "output_tokens": True}):
+            invalid = copy.deepcopy(valid)
+            if invalid_usage is None:
+                invalid[0]["event"]["message"].pop("usage")
+            else:
+                invalid[0]["event"]["message"]["usage"] = invalid_usage
+            self.assertFalse(probe._stream_order_ok("anthropic", invalid))
+            invalid_turn = probe._parse_anthropic_stream(probe.TransportResult(200, None, invalid, False, 0, False))
+            self.assertIn("message_start_usage_invalid", invalid_turn.parse_errors)
+
     def test_non_string_stop_reasons_are_parse_failures(self) -> None:
         anthropic = probe._parse_anthropic_document(
             {"type": "message", "role": "assistant", "content": [], "stop_reason": []}
@@ -2933,7 +2959,7 @@ class ProbeParserTests(unittest.TestCase):
             self.assertIn("choice_invalid", turn.parse_errors)
 
     def test_responses_nonstream_requires_response_object(self) -> None:
-        valid = probe._parse_responses_document({"object": "response", "output": [], "status": "completed"})
+        valid = probe._parse_responses_document({"id": "resp_1", "object": "response", "output": [], "status": "completed"})
         self.assertNotIn("response_object_invalid", valid.parse_errors)
         for object_value in (None, "chat.completion", []):
             document = {"output": [], "status": "completed"}
@@ -2941,6 +2967,17 @@ class ProbeParserTests(unittest.TestCase):
                 document["object"] = object_value
             turn = probe._parse_responses_document(document)
             self.assertIn("response_object_invalid", turn.parse_errors)
+
+    def test_responses_nonstream_requires_response_id(self) -> None:
+        valid = {"id": "resp_1", "object": "response", "output": [], "status": "completed"}
+        self.assertNotIn("response_id_invalid", probe._parse_responses_document(valid).parse_errors)
+        for invalid_id in (None, "", []):
+            document = copy.deepcopy(valid)
+            if invalid_id is None:
+                document.pop("id")
+            else:
+                document["id"] = invalid_id
+            self.assertIn("response_id_invalid", probe._parse_responses_document(document).parse_errors)
 
     def test_responses_nonstream_rejects_invalid_output_item_types(self) -> None:
         for item_type in (None, [], {}, "unknown"):
@@ -3073,6 +3110,13 @@ class ProbeParserTests(unittest.TestCase):
                 document["object"] = object_value
             self.assertIn("chat_object_invalid", probe._parse_chat_document(document).parse_errors)
 
+    def test_chat_nonstream_requires_message_content(self) -> None:
+        valid = {"object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": None}, "finish_reason": "tool_calls"}]}
+        self.assertNotIn("message_content_missing", probe._parse_chat_document(valid).parse_errors)
+        missing = copy.deepcopy(valid)
+        missing["choices"][0]["message"].pop("content")
+        self.assertIn("message_content_missing", probe._parse_chat_document(missing).parse_errors)
+
     def test_chat_stream_event_discriminator_must_be_string(self) -> None:
         for event_type in ([], {}):
             events = [{"kind": "event", "type": event_type, "event": {"type": event_type, "choices": []}}]
@@ -3129,6 +3173,20 @@ class ProbeParserTests(unittest.TestCase):
         turn = probe._parse_chat_stream(probe.TransportResult(200, None, events, True, 0, False))
         self.assertIn("usage_duplicate", turn.parse_errors)
 
+    def test_chat_stream_usage_chunk_requires_choices(self) -> None:
+        valid = [
+            {"kind": "event", "sequence": 0, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": "stop"}]}},
+            {"kind": "event", "sequence": 1, "event": {"id": "chatcmpl_1", "object": "chat.completion.chunk", "choices": [], "usage": {"completion_tokens": 1}}},
+            {"kind": "done", "sequence": 2},
+        ]
+        self.assertTrue(probe._stream_order_ok("chat", valid))
+        self.assertNotIn("choices_missing", probe._parse_chat_stream(probe.TransportResult(200, None, valid, True, 0, True)).parse_errors)
+        missing = copy.deepcopy(valid)
+        missing[1]["event"].pop("choices")
+        self.assertFalse(probe._stream_order_ok("chat", missing))
+        missing_turn = probe._parse_chat_stream(probe.TransportResult(200, None, missing, True, 0, False))
+        self.assertIn("choices_missing", missing_turn.parse_errors)
+
     def test_responses_done_message_snapshots_are_checked_per_item(self) -> None:
         message_one = {"id": "msg_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
         message_two = {"id": "msg_2", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "AB"}]}
@@ -3164,6 +3222,7 @@ class ProbeParserTests(unittest.TestCase):
                         "type": "message",
                         "role": "assistant",
                         "content": [],
+                        "usage": _anthropic_usage(),
                         "stop_reason": None,
                         "stop_sequence": None,
                     },
