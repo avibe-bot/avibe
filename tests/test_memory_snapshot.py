@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -327,7 +328,11 @@ def test_streaming_manifest_crosses_batches_and_restores_exact_tree(
 
     manager = MemorySnapshotManager(home)
     snapshot = manager.create("many-entries")
-    assert len(snapshot.entries) > snapshot_module._MANIFEST_BATCH_SIZE * 4
+    with snapshot_module._indexed_manifest(
+        manager.snapshot_path(snapshot.snapshot_id) / "manifest.jsonl"
+    ) as (entries, _digest):
+        assert entries.count() > snapshot_module._MANIFEST_BATCH_SIZE * 4
+    assert len(snapshot.entries) == len(manager.surfaces)
     assert manager.verify(
         snapshot.snapshot_id,
         expected_manifest_sha256=snapshot.manifest_sha256,
@@ -349,10 +354,12 @@ def test_streaming_manifest_crosses_batches_and_restores_exact_tree(
     assert not (home / "memory/everos-root/unexpected.txt").exists()
 
 
-def test_streaming_manifest_round_trips_beyond_old_entry_and_size_limits(
+def test_streaming_manifest_index_stays_memory_bounded_beyond_old_limits(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_path = _private_directory(tmp_path / "snapshot", tmp_path) / "manifest.jsonl"
+    snapshot_dir = _private_directory(tmp_path / "snapshot", tmp_path)
+    manifest_path = snapshot_dir / "manifest.jsonl"
     writer = snapshot_module._ManifestWriter(manifest_path)
     try:
         for index in range(100_001):
@@ -371,11 +378,23 @@ def test_streaming_manifest_round_trips_beyond_old_entry_and_size_limits(
         writer.close()
 
     assert manifest_path.stat().st_size > 8 * 1024 * 1024
-    entries, digest = snapshot_module._read_manifest(manifest_path)
-    assert len(entries) == 100_001
-    assert entries[0].path == "memory/everos-root/items/000000.json"
-    assert entries[-1].path == "memory/everos-root/items/100000.json"
-    assert digest == snapshot_module._file_sha256(manifest_path)
+    sqlite_temp = _private_directory(tmp_path / "sqlite-temp", tmp_path)
+    monkeypatch.setenv("SQLITE_TMPDIR", str(sqlite_temp))
+    tracemalloc.start()
+    try:
+        with snapshot_module._indexed_manifest(manifest_path) as (entries, digest):
+            _current, peak = tracemalloc.get_traced_memory()
+            assert entries.count() == 100_001
+            assert entries.entry("memory/everos-root/items/000000.json") is not None
+            assert entries.entry("memory/everos-root/items/100000.json") is not None
+            assert digest == snapshot_module._file_sha256(manifest_path)
+    finally:
+        tracemalloc.stop()
+
+    # Retaining the old tuple plus dictionaries consumes tens of MiB here.
+    # The indexed reader holds one JSON record and a fixed SQLite page cache.
+    assert peak < 8 * 1024 * 1024
+    assert list(sqlite_temp.iterdir()) == []
 
 
 def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path) -> None:
@@ -400,8 +419,58 @@ def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path)
     lines = manifest_path.read_bytes().splitlines(keepends=True)
     assert len(lines[1]) > 64 * 1024
     assert len(lines[1]) <= snapshot_module._MAX_MANIFEST_LINE_BYTES
-    entries, _digest = snapshot_module._read_manifest(manifest_path)
-    assert entries[0].path == relative_path
+    with snapshot_module._indexed_manifest(manifest_path) as (entries, _digest):
+        assert entries.entry(relative_path) is not None
+
+
+def test_manifest_index_temp_database_closes_on_success_and_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_dir = _private_directory(tmp_path / "snapshot", tmp_path)
+    manifest_path = snapshot_dir / "manifest.jsonl"
+    writer = snapshot_module._ManifestWriter(manifest_path)
+    try:
+        writer.add(
+            snapshot_module.SnapshotEntry(
+                path="memory/everos-root/profile.json",
+                type="file",
+                mode=0o600,
+                size=1,
+                sha256="a" * 64,
+                tree_digest=None,
+            )
+        )
+        writer.finish()
+    finally:
+        writer.close()
+
+    connections: list[sqlite3.Connection] = []
+    real_init = snapshot_module._ManifestIndex.__init__
+
+    def capture_connection(index) -> None:
+        real_init(index)
+        connections.append(index._connection)
+
+    monkeypatch.setattr(snapshot_module._ManifestIndex, "__init__", capture_connection)
+    with snapshot_module._indexed_manifest(manifest_path):
+        pass
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[-1].execute("SELECT 1")
+
+    with pytest.raises(SystemExit, match="injected cancellation"):
+        with snapshot_module._indexed_manifest(manifest_path):
+            raise SystemExit("injected cancellation")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[-1].execute("SELECT 1")
+
+    manifest_path.write_bytes(manifest_path.read_bytes().splitlines(keepends=True)[0])
+    with pytest.raises(MemorySnapshotVerificationError):
+        with snapshot_module._indexed_manifest(manifest_path):
+            pass
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[-1].execute("SELECT 1")
+    assert set(snapshot_dir.iterdir()) == {manifest_path}
 
 
 @pytest.mark.parametrize("damage", ["corrupt", "truncated", "appended", "symlink"])
@@ -708,7 +777,10 @@ def test_create_retry_reclaims_stage_left_by_process_death(
     snapshot = manager.create("stage-crash")
 
     assert snapshot.snapshot_id == "stage-crash"
-    assert len(snapshot.entries) > snapshot_module._MANIFEST_BATCH_SIZE
+    with snapshot_module._indexed_manifest(
+        manager.snapshot_path(snapshot.snapshot_id) / "manifest.jsonl"
+    ) as (entries, _digest):
+        assert entries.count() > snapshot_module._MANIFEST_BATCH_SIZE
     assert not list(manager.snapshot_root.glob(".stage-crash*.tmp"))
 
 

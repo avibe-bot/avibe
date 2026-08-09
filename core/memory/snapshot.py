@@ -15,9 +15,10 @@ import re
 import sqlite3
 import stat
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Callable, Literal, Mapping, Protocol, Sequence
+from typing import Callable, Iterator, Literal, Mapping, Protocol, Sequence
 
 
 SnapshotSurfaceKind = Literal["sqlite", "tree"]
@@ -138,6 +139,8 @@ class MemorySnapshot:
     snapshot_id: str
     relative_path: str
     manifest_sha256: str
+    # Only the fixed surface roots are retained. Full manifest entries live in
+    # an operation-scoped on-disk index while verification or restore runs.
     entries: tuple[SnapshotEntry, ...]
     surface_receipts: tuple[SnapshotSurfaceReceipt, ...]
 
@@ -315,6 +318,158 @@ class _ManifestWriter:
         self._buffer.clear()
 
 
+class _ManifestIndex:
+    """Bounded-memory, automatically deleted index for manifest entries."""
+
+    def __init__(self) -> None:
+        # An empty SQLite filename creates an on-disk temporary database which
+        # SQLite deletes automatically when this connection closes. It leaves
+        # no named snapshot metadata behind after success, failure, or process
+        # termination.
+        self._connection = sqlite3.connect("")
+        try:
+            self._connection.execute("PRAGMA temp_store=FILE")
+            self._connection.execute("PRAGMA cache_size=-2048")
+            self._connection.execute("PRAGMA journal_mode=OFF")
+            self._connection.execute(
+                """
+                CREATE TABLE manifest_entry (
+                    path TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    mode INTEGER NOT NULL,
+                    size INTEGER NOT NULL,
+                    sha256 TEXT,
+                    tree_digest TEXT,
+                    parent TEXT NOT NULL,
+                    depth INTEGER NOT NULL
+                ) WITHOUT ROWID
+                """
+            )
+            self._connection.execute(
+                "CREATE INDEX manifest_entry_parent ON manifest_entry(parent, path)"
+            )
+            self._connection.execute(
+                "CREATE INDEX manifest_entry_depth ON manifest_entry(depth, path)"
+            )
+        except BaseException:
+            self._connection.close()
+            raise
+
+    def __enter__(self) -> "_ManifestIndex":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def __iter__(self) -> Iterator[SnapshotEntry]:
+        return self.entries()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def add(self, entry: SnapshotEntry) -> None:
+        path = PurePosixPath(entry.path)
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO manifest_entry (
+                    path, type, mode, size, sha256, tree_digest, parent, depth
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.path,
+                    entry.type,
+                    entry.mode,
+                    entry.size,
+                    entry.sha256,
+                    entry.tree_digest,
+                    path.parent.as_posix(),
+                    len(path.parts),
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot manifest contains duplicate paths"
+            ) from error
+
+    def finish(self) -> None:
+        self._connection.commit()
+
+    def count(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) FROM manifest_entry").fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def entry(self, path: str) -> SnapshotEntry | None:
+        row = self._connection.execute(
+            """
+            SELECT path, type, mode, size, sha256, tree_digest
+            FROM manifest_entry WHERE path = ?
+            """,
+            (path,),
+        ).fetchone()
+        return None if row is None else _entry_from_row(row)
+
+    def entries(self) -> Iterator[SnapshotEntry]:
+        rows = self._connection.execute(
+            """
+            SELECT path, type, mode, size, sha256, tree_digest
+            FROM manifest_entry
+            """
+        )
+        for row in rows:
+            yield _entry_from_row(row)
+
+    def descendants(
+        self,
+        path: str,
+        *,
+        entry_type: str | None = None,
+        depth_order: Literal["ASC", "DESC"] | None = None,
+    ) -> Iterator[SnapshotEntry]:
+        lower, upper = _descendant_bounds(path)
+        clauses = ["path >= ?", "path < ?"]
+        parameters: list[object] = [lower, upper]
+        if entry_type is not None:
+            clauses.append("type = ?")
+            parameters.append(entry_type)
+        order = "path"
+        if depth_order is not None:
+            order = f"depth {depth_order}, path"
+        rows = self._connection.execute(
+            f"""
+            SELECT path, type, mode, size, sha256, tree_digest
+            FROM manifest_entry
+            WHERE {' AND '.join(clauses)}
+            ORDER BY {order}
+            """,
+            parameters,
+        )
+        for row in rows:
+            yield _entry_from_row(row)
+
+    def children(self, path: str) -> Iterator[SnapshotEntry]:
+        rows = self._connection.execute(
+            """
+            SELECT path, type, mode, size, sha256, tree_digest
+            FROM manifest_entry WHERE parent = ? ORDER BY path
+            """,
+            (path,),
+        )
+        for row in rows:
+            yield _entry_from_row(row)
+
+    def has_descendant(self, path: str) -> bool:
+        lower, upper = _descendant_bounds(path)
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM manifest_entry WHERE path >= ? AND path < ? LIMIT 1",
+                (lower, upper),
+            ).fetchone()
+            is not None
+        )
+
+
 class MemorySnapshotManager:
     """Create, verify, relocate, restore, and remove Memory snapshots."""
 
@@ -440,12 +595,13 @@ class MemorySnapshotManager:
 
         identifier = _validated_snapshot_id(snapshot_id)
         directory = self.snapshot_path(identifier)
-        snapshot = self._verify_directory(identifier, directory)
-        expected_manifest = _validated_sha256(expected_manifest_sha256)
-        if snapshot.manifest_sha256 != expected_manifest:
-            raise MemorySnapshotVerificationError("Memory snapshot manifest digest changed")
-        self._verify_surface_digests(snapshot, expected_surface_digests)
-        return snapshot
+        with self._verified_directory(identifier, directory) as (snapshot, _index):
+            self._verify_expected_snapshot(
+                snapshot,
+                expected_manifest_sha256=expected_manifest_sha256,
+                expected_surface_digests=expected_surface_digests,
+            )
+            return snapshot
 
     def restore(
         self,
@@ -465,93 +621,99 @@ class MemorySnapshotManager:
         """
 
         self._assert_operation_allowed()
-        snapshot = self.verify(
-            snapshot_id,
-            expected_manifest_sha256=expected_manifest_sha256,
-            expected_surface_digests=expected_surface_digests,
-        )
-        entries_by_path = {entry.path: entry for entry in snapshot.entries}
-        snapshot_dir = self.snapshot_path(snapshot.snapshot_id)
-        payload_root = snapshot_dir / _PAYLOAD_DIRNAME
-        plans: list[_RestorePlan] = []
-        token = snapshot.snapshot_id
-        try:
-            for index, surface in enumerate(self._surfaces):
-                target = self._effective_home / surface.path
-                _ensure_private_directory(self._effective_home, target.parent)
-                root_entry = entries_by_path[surface.path]
-                staged: Path | None = None
-                if root_entry.type != "missing":
-                    staged = target.parent / f".{target.name}.restore-{token}-{index}"
-                    _remove_safe_path(self._effective_home, staged)
-                plan = _RestorePlan(surface, target, staged, [])
-                plans.append(plan)
-                if staged is not None:
-                    if surface.kind == "sqlite":
-                        _copy_verified_file(
-                            payload_root / surface.path,
-                            staged,
-                            confinement_home=self._effective_home,
-                            expected_sha256=root_entry.sha256,
-                            expected_size=root_entry.size,
-                            mode=root_entry.mode,
-                        )
-                    else:
-                        self._stage_tree_restore(
-                            surface,
-                            root_entry,
-                            snapshot.entries,
-                            payload_root,
-                            staged,
-                        )
+        identifier = _validated_snapshot_id(snapshot_id)
+        snapshot_dir = self.snapshot_path(identifier)
+        with self._verified_directory(identifier, snapshot_dir) as (snapshot, manifest_index):
+            self._verify_expected_snapshot(
+                snapshot,
+                expected_manifest_sha256=expected_manifest_sha256,
+                expected_surface_digests=expected_surface_digests,
+            )
+            payload_root = snapshot_dir / _PAYLOAD_DIRNAME
+            plans: list[_RestorePlan] = []
+            token = snapshot.snapshot_id
+            try:
+                for index, surface in enumerate(self._surfaces):
+                    target = self._effective_home / surface.path
+                    _ensure_private_directory(self._effective_home, target.parent)
+                    root_entry = manifest_index.entry(surface.path)
+                    assert root_entry is not None
+                    staged: Path | None = None
+                    if root_entry.type != "missing":
+                        staged = target.parent / f".{target.name}.restore-{token}-{index}"
+                        _remove_safe_path(self._effective_home, staged)
+                    plan = _RestorePlan(surface, target, staged, [])
+                    plans.append(plan)
+                    if staged is not None:
+                        if surface.kind == "sqlite":
+                            _copy_verified_file(
+                                payload_root / surface.path,
+                                staged,
+                                confinement_home=self._effective_home,
+                                expected_sha256=root_entry.sha256,
+                                expected_size=root_entry.size,
+                                mode=root_entry.mode,
+                            )
+                        else:
+                            self._stage_tree_restore(
+                                surface,
+                                root_entry,
+                                manifest_index,
+                                payload_root,
+                                staged,
+                            )
 
-            if before_replace is not None:
-                before_replace(snapshot)
+                if before_replace is not None:
+                    before_replace(snapshot)
 
-            for index, plan in enumerate(plans):
-                candidates = [plan.target]
-                if plan.surface.kind == "sqlite":
-                    candidates.extend(_sqlite_sidecars(plan.target))
-                for candidate_index, candidate in enumerate(candidates):
-                    backup = candidate.parent / (
-                        f".{candidate.name}.before-restore-{token}-{index}-{candidate_index}"
-                    )
-                    try:
-                        backup_info = os.lstat(backup)
-                    except FileNotFoundError:
-                        backup_info = None
-                    if backup_info is not None:
+                for index, plan in enumerate(plans):
+                    candidates = [plan.target]
+                    if plan.surface.kind == "sqlite":
+                        candidates.extend(_sqlite_sidecars(plan.target))
+                    for candidate_index, candidate in enumerate(candidates):
+                        backup = candidate.parent / (
+                            f".{candidate.name}.before-restore-{token}-{index}-{candidate_index}"
+                        )
+                        try:
+                            backup_info = os.lstat(backup)
+                        except FileNotFoundError:
+                            backup_info = None
+                        if backup_info is not None:
+                            _require_expected_target(
+                                backup_info,
+                                plan.surface.kind,
+                                sidecar=candidate_index > 0,
+                            )
+                            plan.backups.append(_RestoreBackup(candidate, backup, False))
+                        try:
+                            info = os.lstat(candidate)
+                        except FileNotFoundError:
+                            continue
                         _require_expected_target(
-                            backup_info,
+                            info,
                             plan.surface.kind,
                             sidecar=candidate_index > 0,
                         )
-                        plan.backups.append(_RestoreBackup(candidate, backup, False))
-                    try:
-                        info = os.lstat(candidate)
-                    except FileNotFoundError:
-                        continue
-                    _require_expected_target(info, plan.surface.kind, sidecar=candidate_index > 0)
-                    if backup_info is None:
-                        os.replace(candidate, backup)
-                        plan.backups.append(_RestoreBackup(candidate, backup, True))
-                    else:
-                        _remove_safe_path(self._effective_home, candidate)
-                if plan.staged is not None:
-                    os.replace(plan.staged, plan.target)
-                    plan.installed = True
-                _fsync_directory(plan.target.parent)
-        except Exception:
-            self._rollback_restore(plans)
-            raise
+                        if backup_info is None:
+                            os.replace(candidate, backup)
+                            plan.backups.append(_RestoreBackup(candidate, backup, True))
+                        else:
+                            _remove_safe_path(self._effective_home, candidate)
+                    if plan.staged is not None:
+                        os.replace(plan.staged, plan.target)
+                        plan.installed = True
+                    _fsync_directory(plan.target.parent)
+            except Exception:
+                self._rollback_restore(plans)
+                raise
 
-        for plan in plans:
-            for backup in plan.backups:
-                _remove_safe_path(self._effective_home, backup.backup)
-            if plan.staged is not None:
-                _remove_safe_path(self._effective_home, plan.staged)
-            _fsync_directory(plan.target.parent)
-        return snapshot
+            for plan in plans:
+                for backup in plan.backups:
+                    _remove_safe_path(self._effective_home, backup.backup)
+                if plan.staged is not None:
+                    _remove_safe_path(self._effective_home, plan.staged)
+                _fsync_directory(plan.target.parent)
+            return snapshot
 
     def _assert_operation_allowed(self) -> None:
         if self._operation_guard is not None:
@@ -802,6 +964,15 @@ class MemorySnapshotManager:
         return replace(directory_entry, tree_digest=digest.hexdigest())
 
     def _verify_directory(self, snapshot_id: str, directory: Path) -> MemorySnapshot:
+        with self._verified_directory(snapshot_id, directory) as (snapshot, _index):
+            return snapshot
+
+    @contextmanager
+    def _verified_directory(
+        self,
+        snapshot_id: str,
+        directory: Path,
+    ) -> Iterator[tuple[MemorySnapshot, _ManifestIndex]]:
         try:
             directory_info = _managed_source_info(self._effective_home, directory)
         except FileNotFoundError as error:
@@ -810,32 +981,48 @@ class MemorySnapshotManager:
             raise MemorySnapshotVerificationError("Memory snapshot is missing")
         _require_directory_private(directory_info, "Memory snapshot directory")
         manifest_path = directory / _MANIFEST_FILENAME
-        entries, manifest_sha256 = _read_manifest(manifest_path)
-        self._validate_manifest_surfaces(entries)
-        payload_root = directory / _PAYLOAD_DIRNAME
-        try:
-            payload_info = os.lstat(payload_root)
-        except FileNotFoundError as error:
-            raise MemorySnapshotVerificationError("Memory snapshot payload is missing") from error
-        _require_directory_private(payload_info, "Memory snapshot payload")
-        self._verify_payload(payload_root, entries)
-        roots = {entry.path: entry for entry in entries}
-        receipts = tuple(
-            SnapshotSurfaceReceipt(
-                path=surface.path,
-                present=roots[surface.path].type != "missing",
-                pre_clear_digest=roots[surface.path].sha256 or roots[surface.path].tree_digest,
-                snapshot_digest=roots[surface.path].sha256 or roots[surface.path].tree_digest,
+        with _indexed_manifest(manifest_path) as (manifest_index, manifest_sha256):
+            roots = self._validate_manifest_surfaces(manifest_index)
+            payload_root = directory / _PAYLOAD_DIRNAME
+            try:
+                payload_info = os.lstat(payload_root)
+            except FileNotFoundError as error:
+                raise MemorySnapshotVerificationError(
+                    "Memory snapshot payload is missing"
+                ) from error
+            _require_directory_private(payload_info, "Memory snapshot payload")
+            self._verify_payload(payload_root, manifest_index)
+            receipts = tuple(
+                SnapshotSurfaceReceipt(
+                    path=surface.path,
+                    present=root.type != "missing",
+                    pre_clear_digest=root.sha256 or root.tree_digest,
+                    snapshot_digest=root.sha256 or root.tree_digest,
+                )
+                for surface, root in zip(self._surfaces, roots, strict=True)
             )
-            for surface in self._surfaces
-        )
-        return MemorySnapshot(
-            snapshot_id=snapshot_id,
-            relative_path=(PurePosixPath(self._snapshot_root_relative) / snapshot_id).as_posix(),
-            manifest_sha256=manifest_sha256,
-            entries=entries,
-            surface_receipts=receipts,
-        )
+            snapshot = MemorySnapshot(
+                snapshot_id=snapshot_id,
+                relative_path=(
+                    PurePosixPath(self._snapshot_root_relative) / snapshot_id
+                ).as_posix(),
+                manifest_sha256=manifest_sha256,
+                entries=roots,
+                surface_receipts=receipts,
+            )
+            yield snapshot, manifest_index
+
+    def _verify_expected_snapshot(
+        self,
+        snapshot: MemorySnapshot,
+        *,
+        expected_manifest_sha256: str,
+        expected_surface_digests: Mapping[str, str | None],
+    ) -> None:
+        expected_manifest = _validated_sha256(expected_manifest_sha256)
+        if snapshot.manifest_sha256 != expected_manifest:
+            raise MemorySnapshotVerificationError("Memory snapshot manifest digest changed")
+        self._verify_surface_digests(snapshot, expected_surface_digests)
 
     def _verify_surface_digests(
         self,
@@ -845,51 +1032,50 @@ class MemorySnapshotManager:
         expected_paths = {surface.path for surface in self._surfaces}
         if set(expected) != expected_paths:
             raise ValueError("expected Memory snapshot digests must cover every surface")
-        roots = {entry.path: entry for entry in snapshot.entries if entry.path in expected_paths}
+        receipts = {receipt.path: receipt for receipt in snapshot.surface_receipts}
         for surface in self._surfaces:
             expected_digest = expected[surface.path]
             if expected_digest is not None:
                 expected_digest = _validated_sha256(expected_digest)
-            entry = roots[surface.path]
-            actual_digest = entry.sha256 or entry.tree_digest
+            actual_digest = receipts[surface.path].snapshot_digest
             if actual_digest != expected_digest:
                 raise MemorySnapshotVerificationError("Memory snapshot surface digest changed")
 
-    def _validate_manifest_surfaces(self, entries: tuple[SnapshotEntry, ...]) -> None:
-        by_path = {entry.path: entry for entry in entries}
-        if len(by_path) != len(entries):
-            raise MemorySnapshotVerificationError("Memory snapshot manifest contains duplicate paths")
+    def _validate_manifest_surfaces(
+        self,
+        entries: _ManifestIndex,
+    ) -> tuple[SnapshotEntry, ...]:
+        roots: list[SnapshotEntry] = []
         for surface in self._surfaces:
-            root = by_path.get(surface.path)
+            root = entries.entry(surface.path)
             if root is None or root.type not in {surface.kind, "missing"}:
                 raise MemorySnapshotVerificationError("Memory snapshot surface root is invalid")
+            if root.type == "missing" and entries.has_descendant(surface.path):
+                raise MemorySnapshotVerificationError("Missing Memory surface has payload entries")
+            roots.append(root)
         for entry in entries:
-            owners = [
-                surface
-                for surface in self._surfaces
-                if entry.path == surface.path
-                or PurePosixPath(surface.path) in PurePosixPath(entry.path).parents
-            ]
-            if len(owners) != 1:
+            owner: SnapshotSurface | None = None
+            entry_path = PurePosixPath(entry.path)
+            for surface in self._surfaces:
+                surface_path = PurePosixPath(surface.path)
+                if entry_path == surface_path or surface_path in entry_path.parents:
+                    if owner is not None:
+                        raise MemorySnapshotVerificationError(
+                            "Memory snapshot entry is outside its surfaces"
+                        )
+                    owner = surface
+            if owner is None:
                 raise MemorySnapshotVerificationError("Memory snapshot entry is outside its surfaces")
-            owner = owners[0]
             if owner.kind == "sqlite" and entry.path != owner.path:
                 raise MemorySnapshotVerificationError("Memory SQLite surface has child entries")
             if entry.path != owner.path and entry.type not in {"directory", "file"}:
                 raise MemorySnapshotVerificationError("Memory tree child has an invalid type")
-            if by_path[owner.path].type == "missing" and entry.path != owner.path:
-                raise MemorySnapshotVerificationError("Missing Memory surface has payload entries")
+        return tuple(roots)
 
-    def _verify_payload(self, payload_root: Path, entries: tuple[SnapshotEntry, ...]) -> None:
-        allowed: set[str] = set()
-        expected_payload: set[str] = set()
+    def _verify_payload(self, payload_root: Path, entries: _ManifestIndex) -> None:
         for entry in entries:
             if entry.type == "missing":
                 continue
-            expected_payload.add(entry.path)
-            path = PurePosixPath(entry.path)
-            allowed.add(path.as_posix())
-            allowed.update(parent.as_posix() for parent in path.parents if parent.as_posix() != ".")
             target = payload_root / entry.path
             try:
                 info = os.lstat(target)
@@ -909,53 +1095,47 @@ class MemorySnapshotManager:
                 if entry.size != 0:
                     raise MemorySnapshotVerificationError("Memory snapshot directory size is invalid")
 
-        actual = _payload_paths(payload_root)
-        extras = actual - allowed
-        if extras:
-            raise MemorySnapshotVerificationError("Memory snapshot payload has unmanifested entries")
-        if not expected_payload.issubset(actual):
-            raise MemorySnapshotVerificationError("Memory snapshot payload is incomplete")
-        calculated = {entry.path: entry.tree_digest for entry in _with_tree_digests(entries)}
+        _verify_payload_paths(payload_root, entries)
         for entry in entries:
-            if entry.type in {"tree", "directory"} and calculated[entry.path] != entry.tree_digest:
+            if entry.type not in {"tree", "directory"}:
+                continue
+            digest = _tree_digest(entry)
+            for child in entries.children(entry.path):
+                _update_tree_digest(digest, child)
+            if digest.hexdigest() != entry.tree_digest:
                 raise MemorySnapshotVerificationError("Memory snapshot tree digest changed")
 
     def _stage_tree_restore(
         self,
         surface: SnapshotSurface,
         root: SnapshotEntry,
-        entries: tuple[SnapshotEntry, ...],
+        entries: _ManifestIndex,
         payload_root: Path,
         staged: Path,
     ) -> None:
         _mkdir_private(staged)
-        descendants = [
-            entry
-            for entry in entries
-            if entry.path != surface.path
-            and PurePosixPath(surface.path) in PurePosixPath(entry.path).parents
-        ]
-        for entry in sorted(descendants, key=lambda value: (len(PurePosixPath(value.path).parts), value.path)):
+        for entry in entries.descendants(
+            surface.path,
+            entry_type="directory",
+            depth_order="ASC",
+        ):
             relative = PurePosixPath(entry.path).relative_to(PurePosixPath(surface.path))
             target = staged.joinpath(*relative.parts)
-            source = payload_root / entry.path
-            if entry.type == "directory":
-                _mkdir_private(target)
-            elif entry.type == "file":
-                _copy_verified_file(
-                    source,
-                    target,
-                    confinement_home=self._effective_home,
-                    expected_sha256=entry.sha256,
-                    expected_size=entry.size,
-                    mode=entry.mode,
-                )
-            else:
-                raise MemorySnapshotVerificationError("Memory tree restore entry is invalid")
-        for entry in sorted(
-            (value for value in descendants if value.type == "directory"),
-            key=lambda value: len(PurePosixPath(value.path).parts),
-            reverse=True,
+            _mkdir_private(target)
+        for entry in entries.descendants(surface.path, entry_type="file"):
+            relative = PurePosixPath(entry.path).relative_to(PurePosixPath(surface.path))
+            _copy_verified_file(
+                payload_root / entry.path,
+                staged.joinpath(*relative.parts),
+                confinement_home=self._effective_home,
+                expected_sha256=entry.sha256,
+                expected_size=entry.size,
+                mode=entry.mode,
+            )
+        for entry in entries.descendants(
+            surface.path,
+            entry_type="directory",
+            depth_order="DESC",
         ):
             relative = PurePosixPath(entry.path).relative_to(PurePosixPath(surface.path))
             directory = staged.joinpath(*relative.parts)
@@ -1157,7 +1337,14 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         view = view[written:]
 
 
-def _read_manifest(path: Path) -> tuple[tuple[SnapshotEntry, ...], str]:
+@contextmanager
+def _indexed_manifest(path: Path) -> Iterator[tuple[_ManifestIndex, str]]:
+    with _ManifestIndex() as entries:
+        manifest_sha256 = _read_manifest(path, entries)
+        yield entries, manifest_sha256
+
+
+def _read_manifest(path: Path, entries: _ManifestIndex) -> str:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -1170,7 +1357,7 @@ def _read_manifest(path: Path) -> tuple[tuple[SnapshotEntry, ...], str]:
         _require_regular_private(before, "Memory snapshot manifest")
         manifest_digest = hashlib.sha256()
         entries_digest = hashlib.sha256()
-        entries: list[SnapshotEntry] = []
+        entry_count = 0
         footer_seen = False
         line_number = 0
         with os.fdopen(os.dup(descriptor), "rb") as stream:
@@ -1209,7 +1396,8 @@ def _read_manifest(path: Path) -> tuple[tuple[SnapshotEntry, ...], str]:
                         raise MemorySnapshotVerificationError(
                             "Memory snapshot manifest entry is invalid"
                         )
-                    entries.append(_parse_manifest_entry(record["entry"]))
+                    entries.add(_parse_manifest_entry(record["entry"]))
+                    entry_count += 1
                     entries_digest.update(line)
                     continue
                 if record.get("record") == "footer":
@@ -1217,15 +1405,15 @@ def _read_manifest(path: Path) -> tuple[tuple[SnapshotEntry, ...], str]:
                         raise MemorySnapshotVerificationError(
                             "Memory snapshot manifest footer is invalid"
                         )
-                    entry_count = record["entry_count"]
+                    footer_entry_count = record["entry_count"]
                     expected_digest = record["entries_sha256"]
                     if (
-                        not isinstance(entry_count, int)
-                        or isinstance(entry_count, bool)
-                        or entry_count < 0
+                        not isinstance(footer_entry_count, int)
+                        or isinstance(footer_entry_count, bool)
+                        or footer_entry_count < 0
                         or not isinstance(expected_digest, str)
                         or _SHA256_RE.fullmatch(expected_digest) is None
-                        or entry_count != len(entries)
+                        or footer_entry_count != entry_count
                         or expected_digest != entries_digest.hexdigest()
                     ):
                         raise MemorySnapshotVerificationError(
@@ -1252,7 +1440,8 @@ def _read_manifest(path: Path) -> tuple[tuple[SnapshotEntry, ...], str]:
             raise MemorySnapshotVerificationError("Memory snapshot manifest changed during read")
         if line_number == 0 or not footer_seen:
             raise MemorySnapshotVerificationError("Memory snapshot manifest is incomplete")
-        return tuple(entries), manifest_digest.hexdigest()
+        entries.finish()
+        return manifest_digest.hexdigest()
     except OSError as error:
         raise MemorySnapshotVerificationError("Memory snapshot manifest cannot be read") from error
     finally:
@@ -1311,34 +1500,6 @@ def _parse_manifest_entry(raw: object) -> SnapshotEntry:
     return SnapshotEntry(path, entry_type, mode, size, digest, tree_digest)
 
 
-def _with_tree_digests(entries: Sequence[SnapshotEntry]) -> list[SnapshotEntry]:
-    by_path = {entry.path: entry for entry in entries}
-    children: dict[str, list[str]] = {}
-    for path in by_path:
-        parent = PurePosixPath(path).parent.as_posix()
-        children.setdefault(parent, []).append(path)
-    result = dict(by_path)
-    directories = sorted(
-        (entry for entry in entries if entry.type in {"tree", "directory"}),
-        key=lambda entry: len(PurePosixPath(entry.path).parts),
-        reverse=True,
-    )
-    for directory in directories:
-        direct_children = [result[path] for path in children.get(directory.path, [])]
-        result[directory.path] = _with_tree_digest(directory, direct_children)
-    return [result[entry.path] for entry in entries]
-
-
-def _with_tree_digest(
-    directory: SnapshotEntry,
-    children: Sequence[SnapshotEntry],
-) -> SnapshotEntry:
-    digest = _tree_digest(directory)
-    for child in sorted(children, key=lambda entry: entry.path):
-        _update_tree_digest(digest, child)
-    return replace(directory, tree_digest=digest.hexdigest())
-
-
 def _tree_digest(directory: SnapshotEntry) -> _DigestWriter:
     digest = hashlib.sha256()
     digest.update(f"path={directory.path}\ntype={directory.type}\n".encode("utf-8"))
@@ -1356,9 +1517,7 @@ def _update_tree_digest(digest: _DigestWriter, child: SnapshotEntry) -> None:
     )
 
 
-def _payload_paths(payload_root: Path) -> set[str]:
-    found: set[str] = set()
-
+def _verify_payload_paths(payload_root: Path, entries: _ManifestIndex) -> None:
     def walk(directory: Path, relative: PurePosixPath | None = None) -> None:
         try:
             children = os.scandir(directory)
@@ -1375,12 +1534,34 @@ def _payload_paths(payload_root: Path) -> set[str]:
                     _require_regular_private(info, "Memory snapshot payload file")
                 else:
                     _require_directory_private(info, "Memory snapshot payload directory")
-                found.add(path_text)
+                if entries.entry(path_text) is None and not (
+                    stat.S_ISDIR(info.st_mode) and entries.has_descendant(path_text)
+                ):
+                    raise MemorySnapshotVerificationError(
+                        "Memory snapshot payload has unmanifested entries"
+                    )
                 if stat.S_ISDIR(info.st_mode):
                     walk(Path(child.path), path)
 
     walk(payload_root)
-    return found
+
+
+def _descendant_bounds(path: str) -> tuple[str, str]:
+    # Canonical manifest paths use '/' as the separator. Replacing that final
+    # separator with its immediate successor creates an exact indexed range for
+    # every descendant without relying on LIKE escaping.
+    return f"{path}/", f"{path}0"
+
+
+def _entry_from_row(row: Sequence[object]) -> SnapshotEntry:
+    return SnapshotEntry(
+        path=str(row[0]),
+        type=row[1],  # type: ignore[arg-type]
+        mode=int(row[2]),
+        size=int(row[3]),
+        sha256=None if row[4] is None else str(row[4]),
+        tree_digest=None if row[5] is None else str(row[5]),
+    )
 
 
 def _file_sha256(path: Path) -> str:

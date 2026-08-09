@@ -260,7 +260,9 @@ def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> No
     )
     assert store.has_manual_required_fence() is True
     assert store.claim_due(lease_owner="worker-2", now="2026-01-01T00:00:02.000Z") is None
-    assert store.ensure_meta().last_error == "memory_provider_response_invalid"
+    meta = store.ensure_meta()
+    assert meta.last_error == "memory_processing_failed"
+    assert meta.processing_fault_since == "2026-01-01T00:00:01.000Z"
     failures = store.failure_log()
     assert len(failures) == 1
     assert (failures[0].kind, failures[0].operation) == ("result_unknown", "add")
@@ -296,6 +298,43 @@ def test_ambiguous_add_is_terminal_and_never_claimed_again(tmp_path: Path) -> No
     assert follow_up.row is not None
     assert follow_up.row.provider_session_ref == row.provider_session_ref
     assert store.claim_due(lease_owner="worker-3", now="2026-01-01T00:00:02.000Z") is None
+
+
+def test_ambiguous_add_and_processing_fault_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "atomic-ambiguous")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    def fail_fault_open(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault write failure")
+
+    monkeypatch.setattr(
+        store,
+        "_open_processing_fault_in_connection",
+        fail_fault_open,
+    )
+    with pytest.raises(OSError, match="injected processing fault write failure"):
+        store.settle(
+            claimed,
+            AmbiguousAdd(error="memory_provider_timeout"),
+            lease_owner="worker",
+            now=_dt("2026-01-01T00:00:01.000Z"),
+        )
+
+    row = _row_for_source(store, "atomic-ambiguous")
+    assert row is not None and row.state == "processing"
+    state = store.get_session_flush_state(claimed.provider_session_ref)
+    assert state is not None and state.state == "idle"
+    assert store.ensure_meta().processing_fault_since is None
+    assert store.failure_log() == ()
 
 
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:

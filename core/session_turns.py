@@ -1885,13 +1885,19 @@ class SessionTurnManager:
             context.user_id = str(payload["author_id"])
         if context.platform_specific is None:
             context.platform_specific = {}
+        metadata = payload.get("metadata") or {}
+        context.is_ordinary_text = metadata.get("_memory_ordinary_text") is True
+        if metadata.get("_memory_cli_admitted") is True:
+            context.platform_specific["memory_cli_admitted"] = True
+        else:
+            context.platform_specific.pop("memory_cli_admitted", None)
         context.platform_specific.update(
             {
                 "delivery_id": str(delivery["id"]),
                 "scope_id": payload.get("scope_id"),
                 "display_text": payload.get("text") or "",
                 "message_content": dict(payload.get("content") or {}),
-                "message_metadata": dict(payload.get("metadata") or {}),
+                "message_metadata": dict(metadata),
                 "author_id": payload.get("author_id"),
                 "author_name": payload.get("author_name"),
                 "native_message_id": payload.get("native_message_id"),

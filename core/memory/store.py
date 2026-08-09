@@ -1217,6 +1217,7 @@ class MemoryStore:
                 ),
             )
             self._set_last_error_in_connection(conn, safe_error, now)
+            self._open_processing_fault_in_connection(conn, now=now)
             return True
 
     def has_manual_required_fence(self) -> bool:

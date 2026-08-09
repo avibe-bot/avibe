@@ -1400,6 +1400,141 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     }
 
 
+@pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
+def test_durable_workbench_turn_restores_memory_admission_facts(
+    managers,
+    launch_path: str,
+) -> None:
+    from core.controller import Controller
+    from core.system_prompt_injection import memory_cli_prompt_admitted
+
+    manager, _other, engine, _engine_b, _starts = managers
+    classifications: list[bool | None] = []
+    memory_cli_observations: list[tuple[bool, bool, tuple[str, str] | None]] = []
+    principal_id = "u-" + ("1" * 32)
+    project_id = "p-" + ("2" * 32)
+    admission = SimpleNamespace(
+        principal_for=lambda _facts: principal_id,
+        project_for=lambda _facts: project_id,
+        admits=lambda _facts: True,
+    )
+    prompt_controller = SimpleNamespace(
+        config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
+        _memory_scopes_by_session={},
+        _memory_cli_facts_by_session={},
+        _memory_turn_facts=lambda _context: object(),
+        _memory_admission=lambda: admission,
+    )
+    prompt_controller.configure_memory_cli_session = (
+        Controller.configure_memory_cli_session.__get__(prompt_controller)
+    )
+    prompt_controller.memory_scope_for_cli_session = (
+        Controller.memory_scope_for_cli_session.__get__(prompt_controller)
+    )
+
+    async def capture_start(_session_id, context, _text, **_kwargs):
+        classifications.append(context.is_ordinary_text)
+        prompt_admitted = memory_cli_prompt_admitted(prompt_controller, context)
+        payload = context.platform_specific or {}
+        memory_cli_observations.append(
+            (
+                payload.get("memory_cli_admitted") is True,
+                prompt_admitted,
+                prompt_controller.memory_scope_for_cli_session("ses_fsm"),
+            )
+        )
+
+    manager._run = capture_start
+    if launch_path == "immediate":
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content="remember this",
+                    metadata={
+                        "_memory_cli_admitted": True,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                context=_context(),
+            )
+        )
+    else:
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p3",
+                state="queued",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    text="remember this",
+                    metadata={
+                        "_memory_cli_admitted": True,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                dispatch_text="remember this",
+            )
+        if launch_path == "fifo":
+            asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+        else:
+            asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+    assert classifications == [True]
+    assert memory_cli_observations == [
+        (True, True, (principal_id, project_id)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"_memory_cli_admitted": False},
+        {"_memory_cli_admitted": "true"},
+        {"_memory_cli_admitted": 1},
+    ],
+)
+def test_durable_memory_cli_admission_fails_closed(
+    managers,
+    metadata: dict[str, object],
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    admissions: list[object] = []
+
+    def stale_context(_session_id: str) -> MessageContext:
+        context = _context()
+        context.platform_specific["memory_cli_admitted"] = True
+        return context
+
+    async def capture_start(_session_id, context, _text, **_kwargs):
+        admissions.append((context.platform_specific or {}).get("memory_cli_admitted"))
+
+    manager.bind_context(stale_context)
+    manager._run = capture_start
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not admit",
+                metadata=metadata,
+            ),
+            context=_context(),
+        )
+    )
+
+    assert admissions == [None]
+
+
 def test_dispatch_uses_current_session_route_without_mutating_delivery_provenance(
     managers,
 ) -> None:

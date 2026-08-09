@@ -342,6 +342,181 @@ def test_processing_fault_emits_one_fault_and_recovery_edge(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("failure", ["timeout", "disconnect", "malformed_2xx"])
+def test_ambiguous_add_opens_one_durable_fault_without_replay(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        events: list[tuple[str, str | None, str, int]] = []
+
+        class Provider(FakeMemoryProvider):
+            async def add(self, capture):
+                self.captures.append(capture)
+                if failure == "timeout":
+                    await asyncio.Event().wait()
+                if failure == "disconnect":
+                    raise MemoryProviderSystemFailure(
+                        "memory_sidecar_unavailable",
+                        ambiguous=True,
+                    )
+                return AddAck(request_id=None, status="accumulated")
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued))
+            return True
+
+        provider = Provider(processing_healthy_flag=True)
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+            ingest_timeout_seconds=0.01,
+            processing_event=record_event,
+        )
+        _enqueue(store, f"ambiguous-{failure}")
+
+        assert await worker.drain_once() == 1
+        row = store.list_queue_rows()[0]
+        assert row.state == "manual_required"
+        assert len(provider.captures) == 1
+        meta = store.ensure_meta()
+        assert meta.processing_fault_since is not None
+        assert meta.processing_fault_kind == "engine"
+        assert meta.processing_alert_active is True
+        assert [(event, kind) for event, kind, _at, _queued in events] == [
+            ("fault", "engine")
+        ]
+
+        restarted = MemoryWorker(
+            store=MemoryStore(store.path),
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        assert await restarted.drain_once() == 0
+        assert await restarted.drain_once() == 0
+        assert len(provider.captures) == 1
+        assert [(event, kind) for event, kind, _at, _queued in events] == [
+            ("fault", "engine")
+        ]
+
+    asyncio.run(run())
+
+
+def test_restart_finishes_ambiguous_add_fault_after_classification_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider(processing_healthy_flag=False)
+        provider.add_results.append(AddAck(request_id=None, status="accumulated"))
+        coordinator = SessionFlushCoordinator(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        row = _enqueue(store, "ambiguous-classification-interrupt")
+        claimed = store.claim_due(
+            lease_owner="old-boot",
+            now="2026-01-01T00:00:00.000Z",
+        )
+        assert claimed is not None
+
+        async def interrupt_classification(_occurred_at: str) -> None:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            coordinator,
+            "_classify_processing_fault_locked",
+            interrupt_classification,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await coordinator.deliver(claimed, lease_owner="old-boot")
+
+        queued = store.list_queue_rows()[0]
+        assert queued.state == "manual_required"
+        pending_fault = store.ensure_meta()
+        assert pending_fault.processing_fault_since is not None
+        assert pending_fault.processing_fault_kind is None
+        assert pending_fault.processing_alert_active is False
+        assert len(provider.captures) == 1
+
+        events: list[tuple[str, str | None, str, int]] = []
+
+        async def record_event(
+            event: str,
+            kind: str | None,
+            occurred_at: str,
+            queued_count: int,
+        ) -> bool:
+            events.append((event, kind, occurred_at, queued_count))
+            return True
+
+        restarted = SessionFlushCoordinator(
+            store=MemoryStore(store.path),
+            provider=provider,
+            enabled=lambda: True,
+            processing_event=record_event,
+        )
+        await restarted.recover(lease_owner="new-boot")
+        await restarted.recover(lease_owner="same-boot")
+
+        recovered = store.ensure_meta()
+        assert recovered.processing_fault_kind == "credential"
+        assert recovered.processing_alert_active is True
+        assert [(event, kind) for event, kind, _at, _queued in events] == [
+            ("fault", "credential")
+        ]
+        assert len(provider.captures) == 1
+        assert store.claim_due(
+            lease_owner="new-boot",
+            now="2026-01-01T00:00:02.000Z",
+        ) is None
+        state = store.get_session_flush_state(row.provider_session_ref)
+        assert state is not None and state.state == "manual_required"
+
+    asyncio.run(run())
+
+
+def test_confirmed_client_rejection_does_not_open_processing_fault(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        store = _store(tmp_path)
+        provider = FakeMemoryProvider()
+        provider.add_results.append(
+            AddRejected(
+                request_id="client-rejection",
+                error_code="INVALID_ARGUMENT",
+                server_fault=False,
+            )
+        )
+        worker = MemoryWorker(
+            store=store,
+            provider=provider,
+            enabled=lambda: True,
+        )
+        _enqueue(store, "client-rejection")
+
+        assert await worker.drain_once() == 1
+        rejected = store.list_queue_rows()[0]
+        assert (rejected.state, rejected.add_request_id) == (
+            "dead",
+            "client-rejection",
+        )
+        assert store.ensure_meta().processing_fault_since is None
+
+    asyncio.run(run())
+
+
 def test_server_rejected_add_is_terminal_but_opens_processing_fault(tmp_path: Path) -> None:
     async def run() -> None:
         store = _store(tmp_path)
@@ -1909,6 +2084,7 @@ def test_attachment_preflight_classifies_local_failures_without_ambiguity(
         assert provider.captures == []
         state = store.get_session_flush_state(result.row.provider_session_ref)
         assert state is not None and state.state == "idle"
+        assert store.ensure_meta().processing_fault_since is None
 
     asyncio.run(run())
 

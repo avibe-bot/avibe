@@ -772,6 +772,31 @@ def test_dispatch_rejects_missing_session_id():
     assert "session_id" in resp.json()["error"]
 
 
+def test_dispatch_context_does_not_restore_memory_admission_from_transient_payload(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_memory_classification",
+    )
+
+    _text, context = asyncio.run(
+        internal_server._build_dispatch_payload(
+            {
+                "session_id": session["id"],
+                "text": "remember this",
+                "memory_cli_admitted": True,
+                "is_ordinary_text": True,
+            }
+        )
+    )
+
+    assert context.is_ordinary_text is None
+    assert "memory_cli_admitted" not in (context.platform_specific or {})
+
+
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():
     """Streaming turns are serialized per session (dispatch_turn rejects a
     concurrent one). As defense in depth, register_turn_sink must NOT clobber

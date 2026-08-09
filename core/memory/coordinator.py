@@ -697,6 +697,20 @@ class SessionFlushCoordinator:
         lease_owner: str,
         outcome: AddRejected | AmbiguousAdd | SystemOutage | MessageFailure,
     ) -> None:
+        if isinstance(outcome, AmbiguousAdd):
+            async with self._processing_fault_lock:
+                settled_at = self._current_time()
+                settled = await self._store_call(
+                    self._store.settle,
+                    row,
+                    outcome,
+                    lease_owner=lease_owner,
+                    now=settled_at,
+                )
+                if settled.settled:
+                    await self._classify_processing_fault_locked(_iso(settled_at))
+            return
+
         settled = await self._store_call(
             self._store.settle,
             row,

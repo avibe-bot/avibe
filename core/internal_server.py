@@ -1791,8 +1791,6 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         thread_id=payload.get("thread_id"),
         message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
-        memory_cli_admitted=payload.get("memory_cli_admitted") is True,
-        is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
     if context.platform_specific is None:
         context.platform_specific = {}
@@ -1819,8 +1817,6 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
-    memory_cli_admitted: bool = False,
-    is_ordinary_text: bool = False,
 ) -> MessageContext:
     """Rebuild a Session's routing context from its durable scope and target.
 
@@ -1852,8 +1848,6 @@ def _build_session_context(
     }
     if resolved_platform == "avibe":
         platform_specific["workbench_session_id"] = session_id
-    if memory_cli_admitted:
-        platform_specific["memory_cli_admitted"] = True
     session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {
@@ -1886,7 +1880,6 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
-        is_ordinary_text=is_ordinary_text,
     )
 
 
