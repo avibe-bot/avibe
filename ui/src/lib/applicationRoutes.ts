@@ -58,6 +58,8 @@ export const APPLICATION_ROUTE_PATHS = [
   '/remote-access',
   '/doctor',
   '/doctor/logs',
+  // PWA cold-launch fallback keeps stale extensionless paths inside AuthGuard.
+  '*',
 ] as const;
 
 export const APPLICATION_DYNAMIC_ROUTE_PATHS = [
