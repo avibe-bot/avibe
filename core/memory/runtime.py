@@ -992,7 +992,9 @@ class MemoryRuntime:
             )
         ):
             raise ValueError("invalid canonical Memory session scopes")
-        if not self.available or not self._config.enabled or self._maintenance_open():
+        if not self.available or not self._config.enabled:
+            return await operation()
+        if self._maintenance_open():
             raise MemorySessionLifecycleBusyError("memory session lifecycle is unavailable")
 
         timeout = _final_flush_timeout(deadline_seconds)
