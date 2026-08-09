@@ -97,6 +97,38 @@ class _RuntimeObservations:
         )
 
 
+class _ConcurrentRuntimeObservations(_RuntimeObservations):
+    def __init__(self) -> None:
+        super().__init__()
+        self._independent_reads = 0
+        self._independent_reads_started = asyncio.Event()
+
+    def _mark_independent_read(self) -> None:
+        self._independent_reads += 1
+        if self._independent_reads == 3:
+            self._independent_reads_started.set()
+
+    async def observe_health(self) -> RuntimeHealthObservation:
+        await self._independent_reads_started.wait()
+        self.recorder = {"state": "degraded", "reason": "writer_failures"}
+        return RuntimeHealthObservation(_health(self.recorder))
+
+    async def failure_log(self) -> tuple[MemoryFailureLogEntry, ...]:
+        self._mark_independent_read()
+        return await super().failure_log()
+
+    async def observe_sources(self) -> ProcessingSourceObservations:
+        self._mark_independent_read()
+        return await super().observe_sources()
+
+    async def maintenance_payload(
+        self,
+        operator_ref: str | None,
+    ) -> MaintenanceResult:
+        self._mark_independent_read()
+        return await super().maintenance_payload(operator_ref)
+
+
 @pytest.mark.asyncio
 async def test_health_snapshot_falls_back_only_to_its_own_stale_observation(
     monkeypatch: pytest.MonkeyPatch,
@@ -217,6 +249,23 @@ async def test_sources_anomalies_and_maintenance_degrade_independently() -> None
 
 
 @pytest.mark.asyncio
+async def test_composite_reads_sources_concurrently_then_merges_recorder_episode() -> None:
+    observations = _ConcurrentRuntimeObservations()
+    record = MemoryProcessingRecord(observations.port())
+
+    summary = await asyncio.wait_for(record.read(None), timeout=0.2)
+
+    assert summary.runtime.health is not None
+    assert summary.runtime.health.recorder == {
+        "state": "degraded",
+        "reason": "writer_failures",
+    }
+    assert [item.kind for item in summary.anomalies.items] == [
+        "recorder_degraded"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_serializes_one_composite_and_compatibility_projections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -302,6 +351,32 @@ async def test_runtime_propagates_recorder_transition_time_at_mutation(
     assert first["items"][0]["occurred_at"] == "transition-1"
     assert second["items"][0]["occurred_at"] == "transition-2"
     assert second["items"][0]["id"] != first["items"][0]["id"]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_runtime_status_is_authoritative_when_store_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    def unavailable_store():
+        raise OSError("test store unavailable")
+
+    monkeypatch.setattr("core.memory.runtime.MemoryStore", unavailable_store)
+    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+
+    assert runtime.available is False
+    assert await runtime.status_payload() == {
+        "status": "ok",
+        "source": {
+            "status": "unavailable",
+            "observed_at": None,
+            "reason": "memory_disabled",
+        },
+        "health": None,
+    }
     await runtime.close()
 
 

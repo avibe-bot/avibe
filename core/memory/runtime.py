@@ -786,6 +786,11 @@ class MemoryRuntime:
     async def _processing_record_health(self) -> RuntimeHealthObservation:
         snapshot: ProviderHealthSnapshot | None = None
         reason: str | None = None
+        if not self._config.enabled:
+            return RuntimeHealthObservation(
+                snapshot=None,
+                unavailable_reason="memory_disabled",
+            )
         if not self.available:
             return RuntimeHealthObservation(
                 snapshot=None,

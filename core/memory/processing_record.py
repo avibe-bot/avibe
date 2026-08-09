@@ -94,16 +94,16 @@ class MemoryProcessingRecord:
     async def read(self, operator_ref: str | None) -> ProcessingRecordSummary:
         """Read one independently degrading Processing Record summary."""
 
-        runtime = await self.read_runtime()
-        sources, anomalies, maintenance = await asyncio.gather(
+        runtime, sources, anomalies, maintenance = await asyncio.gather(
+            self.read_runtime(),
             self._read_sources(),
-            self._read_anomalies(),
+            self._read_durable_anomalies(),
             self._read_maintenance(operator_ref),
         )
         return ProcessingRecordSummary(
             runtime=runtime,
             sources=sources,
-            anomalies=anomalies,
+            anomalies=self._merge_recorder_anomaly(anomalies),
             maintenance=maintenance,
         )
 
@@ -129,10 +129,10 @@ class MemoryProcessingRecord:
 
         self.observe_recorder(self._runtime.recorder_health())
         anomalies, maintenance = await asyncio.gather(
-            self._read_anomalies(),
+            self._read_durable_anomalies(),
             self._read_maintenance(operator_ref),
         )
-        return anomalies, maintenance
+        return self._merge_recorder_anomaly(anomalies), maintenance
 
     async def read_maintenance(
         self,
@@ -189,7 +189,7 @@ class MemoryProcessingRecord:
                 calls=unavailable,
             )
 
-    async def _read_anomalies(self) -> AnomalyProjection:
+    async def _read_durable_anomalies(self) -> AnomalyProjection:
         try:
             durable = await self._runtime.failure_log()
             source = SourceObservation("available", observed_at=_utc_observed_at())
@@ -199,11 +199,17 @@ class MemoryProcessingRecord:
                 "unavailable",
                 reason="memory_store_unavailable",
             )
-        items = list(durable)
+        return AnomalyProjection(source=source, items=durable[:50])
+
+    def _merge_recorder_anomaly(
+        self,
+        durable: AnomalyProjection,
+    ) -> AnomalyProjection:
+        items = list(durable.items)
         recorder = self._recorder_anomaly()
         if recorder is not None:
             items.insert(0, recorder)
-        return AnomalyProjection(source=source, items=tuple(items[:50]))
+        return AnomalyProjection(source=durable.source, items=tuple(items[:50]))
 
     async def _read_maintenance(
         self,
