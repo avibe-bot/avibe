@@ -435,8 +435,9 @@ It does not derive another provider list, insert native supply, or choose a subs
 model. A user-configured cross-vendor or cross-model mapping is authoritative and needs
 no warning beyond the existing Claude Hub add warning.
 
-Vendor custody recommendations affect only Add Source's initial placement. A new
-automatic match appends visibly to the relevant configured chain and never silently
-changes existing priority. Takeover remains a derived execution fact: a later stored
-hop is current while the first stored hop is unavailable for a recoverable quota or
-cooldown reason. It is not a routing policy or persisted state.
+Vendor custody recommendations affect only Add Source placement. The sole policy in
+`model-hub.md` §4.2 chooses a deterministic position during Add Source, persists it in
+the visible configured chain, and never runs at runtime. Takeover remains a derived
+execution fact: a later stored hop is current while the first stored hop is unavailable
+for a recoverable quota or cooldown reason. It is not a routing policy or persisted
+state.

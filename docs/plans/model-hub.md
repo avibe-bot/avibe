@@ -308,9 +308,16 @@ restart, health change, catalog change, or turn never repeats matching. Users ma
 the persisted chains directly: add or remove a hop, move it, or edit its explicit
 upstream `model_id` mapping.
 
-**Add-time recommendation rule (deterministic; owner 2026-08-09 S-1).** When an empty
-route is seeded from Sources added in one setup/import transaction, its default order
-is:
+**Add-time Source placement policy (sole authority; owner 2026-08-09 S-1).** The Add
+Source service owns one write-time rule that chooses a deterministic insertion position
+for every accepted exact match. The same transaction writes the hop at that position
+and returns it through `added_to.position`; the Gateway renders that stored order and
+the user may adjust it immediately. No adapter, UI consumer, refresh path, or runtime
+resolver may implement or rerun placement. This named policy is one implementation rule,
+not a plugin point, registry, user setting, or persisted policy discriminator.
+
+**Current policy value (`placement-v1`).** Sources added in one setup/import transaction
+are processed in this recommendation order:
 
 1. own-vendor subscriptions in the recommended custody form — Claude `native_cli`,
    ChatGPT `hub` — by `created_at` ascending;
@@ -320,11 +327,12 @@ is:
 4. API-key Sources, by `created_at` ascending;
 5. ties by Source `id` ascending.
 
-This table supplies an **initial value**, not a continuing rule. Once a route contains
-any hop, an automatically matched hop from a newly added Source is appended to the
-tail, its position is shown immediately, and existing priority is never changed. This
-append-only default is **owner-vetoable (orchestrator ruling 2026-08-09)**. The user may
-then move or remove it. There is no “new Source not enabled” state or prompt.
+Each accepted match is then appended to its route's current tail. This is only the
+current `placement-v1` value, not an API, UI, or acceptance invariant. A later version
+may rank an incoming match by model fit or a fixed Source-reliability priority, but it
+must still run only during Add Source, persist the chosen position visibly, and leave
+runtime to execute that configuration verbatim. There is no “new Source not enabled”
+state or prompt.
 
 The table never decides runtime capability. `created_at` remains required and immutable
 so a multi-Source initial setup is reproducible, with Source `id` as its total-order
@@ -942,11 +950,14 @@ empty route; catalog expansion and inventory refresh do not retroactively match 
 Only Add Source's one-time match or an explicit user edit changes the array. Hop order,
 Source identity, and model mapping are user-visible configuration.
 
-A write validates each exact pair before commit. A later inventory or process change
-retains that pair at the same position with a live non-runnable reason until an explicit
-edit or guarded cascade changes it. Source deletion follows §4.5's transaction: a
-non-forced delete refuses while any route names the Source; a confirmed delete removes
-all such hops across all backends and preserves survivor order.
+A write validates every newly introduced or changed exact pair before commit. An exact
+pair already present in the persisted array may be retained or reordered even when a
+later inventory or process change currently annotates it non-runnable; retaining or
+moving that unchanged pair does not reclassify it as a new mapping. Its live reason
+remains visible until the Source recovers, the user removes or changes the pair, or a
+guarded cascade removes it. Source deletion follows §4.5's transaction: a non-forced
+delete refuses while any route names the Source; a confirmed delete removes all such
+hops across all backends and preserves survivor order.
 
 There is no separate `mappings` field, Source order, policy discriminator, matching
 resolver, or mapping diagnostic. `model_id == menu_model` is an identity mapping;
@@ -1022,8 +1033,11 @@ Required interaction rules:
   module.
 - Gateway is the primary editing surface. Each model row shows the exact stored order
   and mapping that runtime will execute; blocked hops remain in place and dim.
-- Add Source writes its one-time matches into those rows and appends to any existing
-  chain tail. The new positions are visible immediately and remain user-editable.
+- Add Source writes each one-time match at the deterministic position chosen by §4.2's
+  placement policy. That position is visible immediately and remains user-editable.
+  The UI never uses position to mean “new”: it has no bottom-only new section or other
+  ordering-dependent newness. If temporary differentiation is needed, it uses a
+  dismissible/transient marker derived from the add result, not a route field.
 - Each Gateway backend group renders §4.5's exact `supply_status` value in its subtitle.
   This is the sole backend-health line; explanatory prose cannot compete with it.
 - Adding Claude selects `native_cli` by default and presents Gateway custody as the
@@ -1102,8 +1116,8 @@ delivery lane. It must not appear as a placeholder third module in the v3 UI.
 
 | Action | Eligible detected item | Default / apply behavior |
 | --- | --- | --- |
-| `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store, create the backend's singleton `native_cli` Source, and run the same one-time route match/visible append as Add Source; reject a duplicate native Source before OAuth or partial commit |
-| `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source, run the same one-time route match/visible append as Add Source, and leave the original file byte-identical |
+| `keep_native` | Claude or Codex subscription OAuth held by the sanctioned local CLI | selected by default; retain the credential in the CLI store, create the backend's singleton `native_cli` Source, and run the same one-time route match plus §4.2 placement as Add Source; reject a duplicate native Source before OAuth or partial commit |
+| `import` | API key plus optional Base URL, including an OpenCode provider key | selected by default; copy into a validated Hub Source, run the same one-time route match plus §4.2 placement as Add Source, and leave the original file byte-identical |
 | `reauth` | detected material that cannot be safely copied or retained as a usable native login | not auto-applied as import; direct the user into the explicit authentication flow |
 | `controlled_import` | future engine-owned OAuth-import capability that can preserve refresh semantics | reserved and not selectable/applicable in v3; explicit OAuth add is the only hub-held subscription path |
 
@@ -1239,9 +1253,9 @@ directions into questions that later lanes must answer before writing mechanical
       with no persistent provenance marker or protocol-level unverified value.
 - [ ] §4.1 exposes exactly `anthropic | openai_responses | openai_chat`, retains Chat
       Completions, and shows protocol choices only after observation cannot decide.
-- [ ] §4.2 uses the vendor recommendation only to seed an empty route during Add Source,
-      appends later matches visibly at the tail, and never re-runs matching or reorders
-      an existing chain.
+- [ ] §4.2 alone owns Add Source placement: every accepted match is persisted at one
+      deterministic policy-chosen position that is visible and adjustable; no later
+      path reruns placement, and no UI test infers newness from position.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
       native CLI's sanctioned-backend binding.
 - [ ] §4.3 is the document's only configured-chain execution algorithm: it reads stored
