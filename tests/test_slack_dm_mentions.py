@@ -1858,5 +1858,119 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class SlackReactionDmRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """``reactions.add``/``remove`` reject a user id as ``channel``.
+
+    ``chat.postMessage`` silently accepts one (it opens the DM for you), so a DM
+    context that carried the user id kept *sending* fine while every reaction ack
+    failed with ``channel_not_found`` and silently downgraded to an ack message.
+    """
+
+    @staticmethod
+    def _slack_api_error(error: str):
+        return sys.modules["slack_sdk.errors"].SlackApiError(error, response={"error": error})
+
+    def _bot_with_store(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        record = SimpleNamespace(dm_chat_id="")
+        updates = []
+
+        class _Store:
+            def get_user(self, user_id, platform=None):
+                return record
+
+            def update_user(self, user_id, settings, platform=None):
+                updates.append((user_id, settings.dm_chat_id))
+
+        slack.settings_manager = SimpleNamespace(get_store=lambda: _Store(), reload_from_disk=lambda: None)
+        return slack, record, updates
+
+    async def test_add_reaction_recovers_dm_channel_when_context_carries_user_id(self):
+        slack, record, updates = self._bot_with_store()
+        calls = []
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                calls.append(kwargs["channel"])
+                if kwargs["channel"] != "D999":
+                    raise SlackReactionDmRecoveryTests._slack_api_error("channel_not_found")
+                return {"ok": True}
+
+            async def conversations_open(self, users):
+                return {"ok": True, "channel": {"id": "D999"}}
+
+        slack.web_client = _WebClient()
+        # The broken shape: a DM whose channel_id was left as the user id.
+        context = MessageContext(user_id="U123", channel_id="U123", platform_specific={"is_dm": True})
+
+        ok = await slack.add_reaction(context, "1710000000.000010", "👀")
+
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["U123", "D999"])
+        self.assertEqual(context.channel_id, "D999")
+        self.assertEqual(record.dm_chat_id, "D999")
+        self.assertEqual(updates, [("U123", "D999")])
+
+    async def test_add_reaction_treats_channel_equal_to_user_as_dm_without_is_dm_flag(self):
+        slack, _record, _updates = self._bot_with_store()
+        calls = []
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                calls.append(kwargs["channel"])
+                if kwargs["channel"] != "D999":
+                    raise SlackReactionDmRecoveryTests._slack_api_error("channel_not_found")
+                return {"ok": True}
+
+            async def conversations_open(self, users):
+                return {"ok": True, "channel": {"id": "D999"}}
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="U123")
+
+        self.assertTrue(await slack.add_reaction(context, "1710000000.000010", "👀"))
+        self.assertEqual(calls, ["U123", "D999"])
+
+    async def test_add_reaction_does_not_recover_for_real_channel(self):
+        slack, _record, _updates = self._bot_with_store()
+        opened = []
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                raise SlackReactionDmRecoveryTests._slack_api_error("channel_not_found")
+
+            async def conversations_open(self, users):
+                opened.append(users)
+                return {"ok": True, "channel": {"id": "D999"}}
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="C123")
+
+        self.assertFalse(await slack.add_reaction(context, "1710000000.000010", "👀"))
+        self.assertEqual(opened, [])
+        self.assertEqual(context.channel_id, "C123")
+
+    async def test_remove_reaction_recovers_dm_channel(self):
+        slack, _record, _updates = self._bot_with_store()
+        calls = []
+
+        class _WebClient:
+            async def reactions_remove(self, **kwargs):
+                calls.append(kwargs["channel"])
+                if kwargs["channel"] != "D999":
+                    raise SlackReactionDmRecoveryTests._slack_api_error("channel_not_found")
+                return {"ok": True}
+
+            async def conversations_open(self, users):
+                return {"ok": True, "channel": {"id": "D999"}}
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="U123", platform_specific={"is_dm": True})
+
+        self.assertTrue(await slack.remove_reaction(context, "1710000000.000010", "👌"))
+        self.assertEqual(calls, ["U123", "D999"])
+        self.assertEqual(context.channel_id, "D999")
+
+
 if __name__ == "__main__":
     unittest.main()
