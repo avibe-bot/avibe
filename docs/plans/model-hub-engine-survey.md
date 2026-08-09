@@ -696,7 +696,8 @@ NO-GO even if CPA returns HTTP 200. This probe was not run in M0.
 `run_relay.py` launcher. It has eight cases covering both
 directions of both pairs, single and parallel tools, tool-result round trips,
 streaming, system text, and thinking/reasoning parameters. Each case makes a
-second request only when the first response contains parsed tool calls; otherwise
+second request only when the first response contains parsed tool calls with
+nonempty unique observed IDs; otherwise
 the report records that the multi-turn path was not reached. When reached, the
 runner uses the first response's observed tool-call ids and complete assistant
 continuation; fabricated ids are never used. The runner parses
@@ -733,7 +734,7 @@ matrix and may underreport `fallback_used`; such a run remains blocked from
 semantic evidence.
 The future-collection validator now centralizes 25 protocol envelope kinds and
 123 required-field cells in one table-driven authority, with one delete-a-field
-mutation per cell. The focused probe suite contains 205 tests. Per the owner decision recorded on
+mutation per cell. The focused probe suite contains 206 tests. Per the owner decision recorded on
 2026-08-08, r45 is sealed M0 evidence: later fixture-only validator hardening
 applies to future collections and does not retroactively rewrite r45 or its
 direction-level decisions without a new, explicitly adopted matrix run.

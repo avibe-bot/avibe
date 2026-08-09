@@ -1389,7 +1389,7 @@ def _stream_order_ok(protocol: str, events: list[dict[str, Any]]) -> bool:
                 tool_index = _stream_index(call.get("index"))
                 if tool_index is None:
                     return False
-                if tool_index < chunk_last_tool_index:
+                if tool_index <= chunk_last_tool_index:
                     return False
                 if tool_index not in seen_tool_indexes:
                     if tool_index != len(seen_tool_indexes):
@@ -2563,6 +2563,7 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
         if not isinstance(tool_calls, list):
             errors.append("tool_calls_invalid")
             continue
+        chunk_tool_indexes: set[int] = set()
         for raw in tool_calls:
             if not isinstance(raw, dict):
                 errors.append("tool_call_invalid")
@@ -2571,6 +2572,10 @@ def _parse_chat_stream(result: TransportResult) -> Turn:
             if index is None:
                 errors.append("stream_index_invalid")
                 continue
+            if index in chunk_tool_indexes:
+                errors.append("stream_tool_index_duplicate")
+                continue
+            chunk_tool_indexes.add(index)
             opening_fragment = index not in calls
             call = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
             raw_type = raw.get("type")
@@ -2755,7 +2760,11 @@ def _run_case(spec: CaseSpec) -> dict[str, Any]:
     first = _validate_first(first_turn, spec.expected_tools, stream=spec.stream)
     first["checks"]["http_success"] = 200 <= first_result.status < 300
     second: dict[str, Any] = {"skipped": True, "checks": {"not_run": False}}
-    if first_turn.tool_calls:
+    call_ids = [call.call_id for call in first_turn.tool_calls]
+    followup_identity_valid = bool(call_ids) and all(call_ids) and len(set(call_ids)) == len(call_ids)
+    if first_turn.tool_calls and not followup_identity_valid:
+        second["skip_reason"] = "invalid first-turn tool-call identity"
+    if followup_identity_valid:
         second_result, second_model_used, second_blocked = _request_with_retries(spec, _build_payload(spec, model_used, followup=first_turn), model_used)
         if second_model_used != model_used:
             return {

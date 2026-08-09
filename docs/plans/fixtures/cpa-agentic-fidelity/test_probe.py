@@ -678,6 +678,34 @@ class ProbeParserTests(unittest.TestCase):
         )
         self.assertIn("stream_arguments_not_fragmented", single_turn.parse_errors)
 
+        duplicate_in_one_chunk = copy.deepcopy(events)
+        first_call = duplicate_in_one_chunk[0]["event"]["choices"][0]["delta"][
+            "tool_calls"
+        ][0]
+        first_call["function"]["arguments"] = '{"city":'
+        duplicate_in_one_chunk[0]["event"]["choices"][0]["delta"][
+            "tool_calls"
+        ].append(
+            {
+                "index": 0,
+                "function": {"arguments": '"Shanghai"}'},
+            }
+        )
+        duplicate_in_one_chunk[1]["event"]["choices"][0]["delta"] = {}
+        self.assertFalse(probe._stream_order_ok("chat", duplicate_in_one_chunk))
+        duplicate_turn = probe._parse_chat_stream(
+            probe.TransportResult(
+                200,
+                None,
+                duplicate_in_one_chunk,
+                True,
+                0,
+                False,
+            )
+        )
+        self.assertIn("stream_tool_index_duplicate", duplicate_turn.parse_errors)
+        self.assertIn("stream_arguments_not_fragmented", duplicate_turn.parse_errors)
+
     def test_chat_stream_rejects_falsey_malformed_tool_fields(self) -> None:
         events = [
             {"kind": "event", "type": None, "event": {"object": "chat.completion.chunk", "choices": [{"delta": {"role": "assistant", "tool_calls": [{"index": 0, "type": "function", "id": "call_1", "function": {"name": "lookup_weather", "arguments": "{"}}]}}]}},
@@ -1633,6 +1661,57 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(followup["messages"][2]["content"][0]["tool_use_id"], "toolu_from_first_response")
         self.assertTrue(result["checks"]["second_system_marker"])
         self.assertTrue(result["checks"]["second_tool_outputs"])
+
+    def test_case_skips_followup_for_invalid_tool_call_identity(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fake_request(
+            path: str,
+            payload: dict[str, object],
+            *,
+            client_protocol: str,
+            stream: bool,
+        ) -> probe.TransportResult:
+            requests.append(payload)
+            return probe.TransportResult(
+                200,
+                {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "lookup_weather",
+                            "input": {"city": "Shanghai"},
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                },
+                [],
+                False,
+                0,
+            )
+
+        original_request = probe._request
+        try:
+            probe._request = fake_request
+            result = probe._run_case(
+                probe.CaseSpec(
+                    "fake",
+                    "anthropic",
+                    "responses",
+                    "/v1/messages",
+                    False,
+                    False,
+                )
+            )
+        finally:
+            probe._request = original_request
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(result["second"]["skipped"])
+        self.assertEqual(
+            result["second"]["skip_reason"],
+            "invalid first-turn tool-call identity",
+        )
+        self.assertIsNone(result["second_status"])
 
     def test_redirect_handler_blocks_redirect(self) -> None:
         request = probe.urllib.request.Request("http://127.0.0.1:15220/v1/messages")
