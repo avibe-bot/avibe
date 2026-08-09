@@ -487,6 +487,33 @@ def test_unsaved_observation_terminal_paths_revoke_before_settling(
     assert adapter.revoked == ["cred_00000001"]
 
 
+def test_unsaved_observation_cancellation_revokes_before_settling(tmp_path):
+    adapter = FakeAdapter()
+    adapter.discovery_started = asyncio.Event()
+    adapter.discovery_block = asyncio.Event()
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    async def scenario():
+        task = asyncio.create_task(
+            service.observe_source(
+                {
+                    "vendor": "anthropic",
+                    "base_url": None,
+                    "key": "sk-test-observation-cancel",
+                }
+            )
+        )
+        await adapter.discovery_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert store.load().sources == []
+    assert adapter.revoked == ["cred_00000001"]
+    assert service.revocations.list() == []
+
+
 def test_unsaved_observation_revoke_failure_is_journaled_and_reconciled(tmp_path):
     adapter = FakeAdapter()
     adapter.revoke_error = True

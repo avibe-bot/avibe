@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, get_args
 
 from vibe.i18n import t as i18n_t
 
@@ -133,6 +133,16 @@ def build_resolution_event(
     severity: Optional[EventSeverity] = None,
     now: Optional[datetime] = None,
 ) -> ResolutionEvent:
+    if agent not in get_args(EventAgent):
+        raise ValueError("Invalid resolution event agent")
+    if kind not in get_args(EventKind):
+        raise ValueError("Invalid resolution event kind")
+    if reason not in get_args(EventReason):
+        raise ValueError("Invalid resolution event reason")
+    if billing_note is not None and billing_note not in get_args(BillingNote):
+        raise ValueError("Invalid resolution event billing note")
+    if severity is not None and severity not in get_args(EventSeverity):
+        raise ValueError("Invalid resolution event severity")
     action_required = kind in {"needs_action", "supply_interrupted"}
     expected_severity: EventSeverity = (
         "action_required" if action_required else "info"

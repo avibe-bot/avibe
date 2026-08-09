@@ -145,6 +145,7 @@ class GatewayTurnTerminalizer:
             source_id=source_id,
             resolved_model_id=resolved_model_id,
             channel=channel,
+            via_mapping=via_mapping,
         )
 
     def finish_attempt(

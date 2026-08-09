@@ -2167,12 +2167,23 @@ class ModelHubService:
                 add(model_id)
         return protected
 
-    def _would_interrupt(self, config: ModelHubConfig) -> list[dict]:
+    def _would_interrupt(
+        self,
+        config: ModelHubConfig,
+        *,
+        newly_empty_routes: frozenset[tuple[str, str]] = frozenset(),
+    ) -> list[dict]:
         gaps: list[dict] = []
         for backend_name in MODEL_HUB_BACKENDS:
             backend = cast(BackendName, backend_name)
             unavailable_source_ids = self._unavailable_native_sources(config, backend)
             for model_id, agents in self._protected_menu_models(config, backend).items():
+                route = config.agents[backend].routes.get(model_id)
+                if (
+                    (route is None or not route.hops)
+                    and (backend, model_id) not in newly_empty_routes
+                ):
+                    continue
                 resolution = resolve_model_hub_turn(
                     config,
                     backend,
@@ -2209,7 +2220,15 @@ class ModelHubService:
                 for model_id, route in list(agent.routes.items()):
                     route.hops = tuple(hop for hop in route.hops if hop.source_id != source_id)
                     agent.routes[model_id] = route
-            would_interrupt = self._would_interrupt(config)
+            newly_empty_routes = frozenset(
+                (item["backend"], item["menu_model"])
+                for item in removed_hops
+                if not config.agents[item["backend"]].routes[item["menu_model"]].hops
+            )
+            would_interrupt = self._would_interrupt(
+                config,
+                newly_empty_routes=newly_empty_routes,
+            )
             if removed_hops and not force:
                 raise ModelHubError(
                     "source_in_route_chain",
@@ -2447,7 +2466,14 @@ class ModelHubService:
                 not in {(item.source_id, item.model_id) for item in route.hops}
             ]
             agent.routes[model_id] = route
-            interrupted = self._would_interrupt(config)
+            interrupted = self._would_interrupt(
+                config,
+                newly_empty_routes=(
+                    frozenset({(backend, model_id)})
+                    if old_route.hops and not route.hops
+                    else frozenset()
+                ),
+            )
             if interrupted and payload.get("force") is not True:
                 raise ModelHubError(
                     "source_last_supplier",
