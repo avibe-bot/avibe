@@ -345,6 +345,9 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
     for method, pattern in (
         ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
         ("POST", r"^/api/sessions/[^/]+/fork$"),
+        ("GET", r"^/api/sessions/[^/]+/draft$"),
+        ("PUT", r"^/api/sessions/[^/]+/draft$"),
+        ("POST", r"^/api/sessions/[^/]+/mark-read$"),
         (
             "POST",
             r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)$",
@@ -504,6 +507,8 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
             else REMOTE_HTTP_LOCAL_ONLY
         )
         return HttpAuthorizationPolicy(minimum_role, remote_access)
+    if path == "/status":
+        return HttpAuthorizationPolicy(None, REMOTE_HTTP_LOCAL_ONLY)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
 

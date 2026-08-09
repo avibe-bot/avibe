@@ -120,6 +120,7 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("POST", "/api/sessions/ses-1/fork") == "editor"
     assert required_instance_role("POST", "/api/projects") == "owner"
     assert required_instance_role("GET", "/api/new-management-surface") == "owner"
+    assert required_instance_role("GET", "/status") is None
     assert required_instance_role("GET", "/show/ses-1/") == "viewer"
     assert required_instance_role("POST", "/show/ses-1/api/action") == "editor"
     assert required_instance_role("GET", "/assets/app.js") is None
@@ -205,6 +206,11 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("POST", "/api/vault/requests/sign", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/rotate-share", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/share-id", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/sessions/ses-1/draft", REMOTE_HTTP_LOCAL_ONLY),
+        ("PUT", "/api/sessions/ses-1/draft", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/sessions/ses-1/mark-read", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/status", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/status", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/ensure", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
         ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_ALLOWED),

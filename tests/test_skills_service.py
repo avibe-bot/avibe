@@ -382,6 +382,18 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
         )
         assert [item["name"] for item in allowed["skills"]] == ["project-skill"]
 
+        allowed_all_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", allowed_all_recorder)
+        allowed_all = _run(
+            skills.list_skills(
+                "askill",
+                scope="all",
+                project_dir=str(project_dir),
+                user_context=_organization_context("member-1"),
+            )
+        )
+        assert [item["name"] for item in allowed_all["skills"]] == ["project-skill"]
+
         denied_recorder = _Recorder(listing)
         monkeypatch.setattr(skills, "_run_askill", denied_recorder)
         with pytest.raises(skills.SkillAccessError):
@@ -397,8 +409,69 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
                 )
             )
         assert denied_recorder.calls == []
+
+        denied_all_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", denied_all_recorder)
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.list_skills(
+                    "askill",
+                    scope="all",
+                    project_dir=str(project_dir),
+                    user_context=_organization_context(
+                        "member-2",
+                        group_ids=frozenset({"group-sales"}),
+                    ),
+                )
+            )
+        assert denied_all_recorder.calls == []
     finally:
         engine.dispose()
+
+
+def test_remote_skill_listing_uses_explicit_safe_projection(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "public-skill", access_level="public")
+        recorder = _Recorder(
+            {
+                "ok": True,
+                "skills": [
+                    {
+                        **_skill_row("public-skill"),
+                        "description": "safe description",
+                        "sourceUrl": "file:///Users/alex/private-skill",
+                        "installSource": "/Users/alex/private-skill",
+                        "unknownLocalField": "secret",
+                        "agents": [
+                            {"id": "codex", "name": "Codex", "path": "/Users/alex/.codex"}
+                        ],
+                    }
+                ],
+            }
+        )
+        monkeypatch.setattr(skills, "_run_askill", recorder)
+
+        result = _run(
+            skills.list_skills(
+                "askill",
+                scope="global",
+                user_context=_organization_context("member-1"),
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert result["skills"] == [
+        {
+            "name": "public-skill",
+            "scope": "global",
+            "description": "safe description",
+            "path": "",
+            "agents": [{"id": "codex", "name": "Codex"}],
+        }
+    ]
 
 
 def test_remote_skill_mutations_require_instance_owner_and_resource_management(monkeypatch, tmp_path) -> None:

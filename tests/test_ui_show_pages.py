@@ -647,6 +647,61 @@ def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch
     assert manager.calls == []
 
 
+def test_remote_show_page_icon_is_not_persistently_cached(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"<svg/>"
+    assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def test_remote_show_page_ensure_redacts_local_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    monkeypatch.setattr(
+        "vibe.api.ensure_show_page",
+        lambda session_id: {
+            "ok": True,
+            "existed": False,
+            "session_id": session_id,
+            "path": "/Users/alex/.avibe/show-pages/ses123",
+        },
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        "/api/show-pages/ses123/ensure",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "existed": False, "session_id": "ses123"}
+
+
 def test_show_page_icon_endpoint_enforces_token_without_selecting_the_file(monkeypatch, tmp_path):
     # §7.1f (token-enforcement): resolution derives ONLY from the sid + workspace —
     # `?v=` NEVER selects the file. The CORRECT token serves the favicon; a

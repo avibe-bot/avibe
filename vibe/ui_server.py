@@ -4753,6 +4753,21 @@ def _show_page_error_response(exc):
     return _coded_error_response(code, str(exc), status)
 
 
+def _is_remote_show_page_request() -> bool:
+    context = getattr(g, "authorization_context", None)
+    return bool(
+        (context is not None and context.is_remote)
+        or getattr(g, "remote_session_payload", None) is not None
+        or _is_remote_access_request(_load_remote_access_config())
+    )
+
+
+def _show_page_payload_for_request(payload: dict) -> dict:
+    if not _is_remote_show_page_request():
+        return payload
+    return {key: value for key, value in payload.items() if key != "path"}
+
+
 @app.route("/api/show-pages", methods=["GET"])
 def show_pages_list_get():
     from storage import project_access_service
@@ -4760,15 +4775,11 @@ def show_pages_list_get():
 
     payload = api.list_show_pages()
     context = getattr(g, "authorization_context", None)
-    remote_request = bool(
-        getattr(g, "remote_session_payload", None) is not None
-        or _is_remote_access_request(_load_remote_access_config())
-    )
-    if remote_request or (context is not None and context.is_remote):
+    if _is_remote_show_page_request():
         payload = {
             **payload,
             "pages": [
-                {key: value for key, value in page.items() if key != "path"}
+                _show_page_payload_for_request(page)
                 for page in payload.get("pages", [])
             ],
         }
@@ -4809,7 +4820,7 @@ def show_page_ensure_post(session_id):
     from vibe import api
 
     try:
-        return jsonify(api.ensure_show_page(session_id))
+        return jsonify(_show_page_payload_for_request(api.ensure_show_page(session_id)))
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4891,11 +4902,15 @@ def show_page_icon_get(session_id):
         response.headers["X-Content-Type-Options"] = "nosniff"
         # A directly-navigated SVG must not execute scripts in the API origin.
         response.headers["Content-Security-Policy"] = "sandbox"
-        # `immutable` is honest now: `?v=` is enforced against the served bytes, so a
-        # given URL maps to exactly one byte-content — a changed icon gets a new token
-        # → a new URL → a fresh fetch, and the cache can never be poisoned across a
-        # content revert. A plain Response also never honors `Range` (no 206/416).
-        response.headers["Cache-Control"] = "private, max-age=604800, immutable"
+        # Local URLs may cache immutably because `?v=` is enforced against the served
+        # bytes. Remote responses must revalidate the ACL on every request so a revoked
+        # user or a different account in the same browser cannot reuse cached bytes.
+        # A plain Response also never honors `Range` (no 206/416).
+        response.headers["Cache-Control"] = (
+            "private, no-store"
+            if _is_remote_show_page_request()
+            else "private, max-age=604800, immutable"
+        )
         return response
     except ShowPageError as exc:
         if exc.code == "resource_access_forbidden":
@@ -8285,7 +8300,10 @@ async def sessions_bootstrap(session_id: str):
             if can_chat
             else []
         )
-        draft = message_deliveries.get_draft(conn, session_id) if can_chat else None
+        can_access_draft = can_chat and not bool(
+            authorization_context and authorization_context.is_remote
+        )
+        draft = message_deliveries.get_draft(conn, session_id) if can_access_draft else None
 
     agents_payload = {"agents": [], "default_agent_name": None}
     if can_chat:
@@ -8313,7 +8331,7 @@ async def sessions_bootstrap(session_id: str):
         }
 
     visible_queued = queued if can_chat else []
-    visible_draft = draft if can_chat else None
+    visible_draft = draft if can_access_draft else None
 
     try:
         turn_result = await internal_client.turn_state(session_id)

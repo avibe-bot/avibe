@@ -1510,10 +1510,10 @@ def set_workbench_prefs(*, background_work_banner_enabled: Optional[bool] = None
     }
 
 
-def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
+def _vibe_agent_payload(agent, *, brief: bool = False, remote_safe: bool = False) -> dict:
     payload = agent.to_dict()
-    if brief:
-        return {
+    if brief or remote_safe:
+        projected = {
             "id": payload["id"],
             "name": payload["name"],
             "display_name": payload["display_name"],
@@ -1527,6 +1527,15 @@ def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
+        if remote_safe:
+            projected.update(
+                {
+                    "system_prompt": payload["system_prompt"],
+                    "metadata": {},
+                    "created_at": payload["created_at"],
+                }
+            )
+        return projected
     return payload
 
 
@@ -1676,7 +1685,7 @@ def get_vibe_agent(name: str) -> dict:
                 default_agent = None
         return {
             "ok": True,
-            "agent": _vibe_agent_payload(agent),
+            "agent": _vibe_agent_payload(agent, remote_safe=user_context.is_remote),
             "default_agent_name": default_agent.name if default_agent else None,
         }
     finally:

@@ -258,6 +258,54 @@ def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatc
     )
 
 
+def test_remote_agent_detail_uses_safe_projection(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    store = VibeAgentStore()
+    try:
+        agent = store.create(
+            name="imported-agent",
+            backend="codex",
+            system_prompt="Safe remote prompt",
+            source="file",
+            source_ref="/Users/alex/private/AGENT.md",
+            metadata={"import_path": "/Users/alex/private", "secret": "local-only"},
+        )
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="agent",
+                resource_id=agent.id,
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="private",
+            )
+    finally:
+        store.close()
+
+    remote = app.test_client()
+    remote.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(config, subject="owner-1", groups=[], instance_role="owner"),
+        domain="alex.avibe.bot",
+    )
+    remote_response = remote.get(
+        "/api/agents/imported-agent",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    local_response = app.test_client().get("/api/agents/imported-agent")
+
+    assert remote_response.status_code == 200
+    remote_agent = remote_response.get_json()["agent"]
+    assert remote_agent["system_prompt"] == "Safe remote prompt"
+    assert remote_agent["metadata"] == {}
+    assert "source_ref" not in remote_agent
+    assert "normalized_name" not in remote_agent
+    assert local_response.get_json()["agent"]["source_ref"] == "/Users/alex/private/AGENT.md"
+    assert local_response.get_json()["agent"]["metadata"]["secret"] == "local-only"
+
+
 def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

@@ -587,6 +587,30 @@ def test_docker_loopback_status_probe_is_allowed_when_explicitly_trusted(monkeyp
     assert response.status_code == 200
 
 
+def test_authenticated_remote_status_probe_is_blocked_before_runtime_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    monkeypatch.setattr(
+        "vibe.runtime.render_status",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("runtime status must stay local")),
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "viewer@example.com", "viewer-1", role="viewer"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/status",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
+
+
 def test_docker_loopback_probe_accepts_ipv4_mapped_peer(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
