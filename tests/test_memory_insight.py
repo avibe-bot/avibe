@@ -1313,6 +1313,34 @@ def test_processing_record_source_observation_degrades_sources_independently(
     assert observation.calls.status == "available"
 
 
+def test_processing_record_source_observation_validates_run_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.ome_db_path) as connection:
+        connection.execute("ALTER TABLE run_record DROP COLUMN event_payload")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "partial"
+    assert observation.everos.reason == "runs_malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_call_indexes(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.call_log_db_path) as connection:
+        connection.execute("DROP INDEX provider_call_parent_idx")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "unavailable"
+    assert observation.calls.reason == "malformed"
+
+
 def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     root = tmp_path / "missing"
     reader = MemoryInsightReader(

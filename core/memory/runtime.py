@@ -777,7 +777,7 @@ class MemoryRuntime:
             return {"ok": False, "error": self._runtime_error}
         if self._ready_event is sidecar:
             self._ready_event = None
-        self._recorder_health = dict(_RECORDER_DEGRADED)
+        self._update_recorder_health(_RECORDER_DEGRADED)
         self._runtime_error = None
         self.module._worker.resume_claims()
         self._ensure_worker()
@@ -816,7 +816,7 @@ class MemoryRuntime:
                     else self._runtime_error or "memory_sidecar_unavailable"
                 )
             if snapshot is not None:
-                self._recorder_health = dict(snapshot.recorder)
+                self._update_recorder_health(snapshot.recorder)
         return RuntimeHealthObservation(snapshot=snapshot, unavailable_reason=reason)
 
     async def _processing_record_failure_log(
@@ -856,8 +856,11 @@ class MemoryRuntime:
         *,
         observed_at: str | None = None,
     ) -> None:
-        del observed_at
         self._recorder_health = dict(health)
+        self._processing_record.observe_recorder(
+            self._recorder_health,
+            observed_at=observed_at,
+        )
 
     async def processing_record_payload(
         self,
@@ -868,23 +871,23 @@ class MemoryRuntime:
         return _processing_record_payload(summary)
 
     async def status_payload(self) -> dict[str, Any]:
-        summary = await self._processing_record.read(None)
-        return _runtime_health_payload(summary.runtime)
+        runtime = await self._processing_record.read_runtime()
+        return _runtime_health_payload(runtime)
 
     async def failure_log_payload(
         self,
         *,
         operator_ref: str | None = None,
     ) -> dict[str, Any]:
-        summary = await self._processing_record.read(operator_ref)
-        if summary.anomalies.source.status == "unavailable":
+        anomalies, maintenance = await self._processing_record.read_failures(
+            operator_ref
+        )
+        if anomalies.source.status == "unavailable":
             raise self._unavailable()
         return {
             "status": "ok",
-            "items": [asdict(entry) for entry in summary.anomalies.items],
-            "recovery": _clear_recovery_payload(
-                summary.maintenance.clear_recovery
-            ),
+            "items": [asdict(entry) for entry in anomalies.items],
+            "recovery": _clear_recovery_payload(maintenance.clear_recovery),
         }
 
     async def maintenance_payload(
@@ -894,8 +897,7 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Return cheap local maintenance facts without probing or scanning EverOS."""
 
-        summary = await self._processing_record.read(operator_ref)
-        result = summary.maintenance
+        result = await self._processing_record.read_maintenance(operator_ref)
         return {
             "status": "ok",
             "data_exists": result.data_exists,
@@ -1623,7 +1625,7 @@ class MemoryRuntime:
             if self._ready_event is sidecar:
                 self._ready_event = None
 
-            self._recorder_health = dict(_RECORDER_DEGRADED)
+            self._update_recorder_health(_RECORDER_DEGRADED)
             self._runtime_error = None
             worker.resume_claims()
             self._ensure_worker()
@@ -2044,7 +2046,7 @@ class MemoryRuntime:
             self._set_recorder_health_disabled()
 
     def _set_recorder_health_disabled(self) -> None:
-        self._recorder_health = dict(_RECORDER_DISABLED)
+        self._update_recorder_health(_RECORDER_DISABLED)
 
     async def _drain_loop(self) -> None:
         while self._config.enabled:

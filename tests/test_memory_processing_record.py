@@ -253,6 +253,58 @@ async def test_runtime_serializes_one_composite_and_compatibility_projections(
     await runtime.close()
 
 
+@pytest.mark.asyncio
+async def test_failure_compatibility_projection_skips_health_and_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    async def unexpected_read() -> None:
+        raise AssertionError("compatibility failure reads must stay narrow")
+
+    monkeypatch.setattr(runtime._processing_record, "_read_health", unexpected_read)
+    monkeypatch.setattr(runtime._processing_record, "_read_sources", unexpected_read)
+
+    result = await asyncio.wait_for(
+        runtime.failure_log_payload(operator_ref="u-operator"),
+        timeout=1,
+    )
+
+    assert result == {"status": "ok", "items": [], "recovery": None}
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_propagates_recorder_transition_time_at_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+
+    runtime._update_recorder_health(
+        {"state": "degraded", "reason": "writer_failures"},
+        observed_at="transition-1",
+    )
+    first = await runtime.failure_log_payload()
+    runtime._update_recorder_health(
+        {"state": "active", "reason": None},
+        observed_at="recovered",
+    )
+    runtime._update_recorder_health(
+        {"state": "degraded", "reason": "writer_failures"},
+        observed_at="transition-2",
+    )
+    second = await runtime.failure_log_payload()
+
+    assert first["items"][0]["occurred_at"] == "transition-1"
+    assert second["items"][0]["occurred_at"] == "transition-2"
+    assert second["items"][0]["id"] != first["items"][0]["id"]
+    await runtime.close()
+
+
 def _enqueue(runtime: MemoryRuntime, source: str) -> None:
     result = runtime._store.enqueue_request(
         source_message_id=source,

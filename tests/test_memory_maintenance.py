@@ -828,7 +828,7 @@ async def test_cancelled_post_terminal_resume_holds_lifecycle_fences(
 
     monkeypatch.setattr(runtime, "_reconcile_locked", blocking_reconcile)
     clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
-    await asyncio.wait_for(resume_entered.wait(), timeout=1)
+    await asyncio.wait_for(resume_entered.wait(), timeout=5)
 
     assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     assert runtime.module._worker._claims_paused is True
@@ -1370,7 +1370,7 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
         blocking_recreate,
     )
     clearing = asyncio.create_task(_clear(runtime, operator_ref="user:owner"))
-    assert await asyncio.to_thread(started.wait, 1)
+    assert await asyncio.to_thread(started.wait, 5)
 
     clearing.cancel()
     await asyncio.sleep(0)

@@ -94,15 +94,7 @@ class MemoryProcessingRecord:
     async def read(self, operator_ref: str | None) -> ProcessingRecordSummary:
         """Read one independently degrading Processing Record summary."""
 
-        runtime = await self._read_health()
-        self._observe_recorder(
-            self._runtime.recorder_health(),
-            observed_at=(
-                runtime.source.observed_at
-                if runtime.source.status == "available"
-                else None
-            ),
-        )
+        runtime = await self.read_runtime()
         sources, anomalies, maintenance = await asyncio.gather(
             self._read_sources(),
             self._read_anomalies(),
@@ -114,6 +106,41 @@ class MemoryProcessingRecord:
             anomalies=anomalies,
             maintenance=maintenance,
         )
+
+    async def read_runtime(self) -> RuntimeHealthProjection:
+        """Project runtime health without reading the durable data sources."""
+
+        runtime = await self._read_health()
+        self.observe_recorder(
+            self._runtime.recorder_health(),
+            observed_at=(
+                runtime.source.observed_at
+                if runtime.source.status == "available"
+                else None
+            ),
+        )
+        return runtime
+
+    async def read_failures(
+        self,
+        operator_ref: str | None,
+    ) -> tuple[AnomalyProjection, MaintenanceProjection]:
+        """Project compatibility failure facts without probing runtime health."""
+
+        self.observe_recorder(self._runtime.recorder_health())
+        anomalies, maintenance = await asyncio.gather(
+            self._read_anomalies(),
+            self._read_maintenance(operator_ref),
+        )
+        return anomalies, maintenance
+
+    async def read_maintenance(
+        self,
+        operator_ref: str | None,
+    ) -> MaintenanceProjection:
+        """Project compatibility maintenance facts without unrelated reads."""
+
+        return await self._read_maintenance(operator_ref)
 
     async def _read_health(self) -> RuntimeHealthProjection:
         try:
@@ -206,7 +233,7 @@ class MemoryProcessingRecord:
             clear_recovery=result.clear_recovery,
         )
 
-    def _observe_recorder(
+    def observe_recorder(
         self,
         health: Mapping[str, str | None],
         *,

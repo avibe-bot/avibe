@@ -600,7 +600,7 @@ class MemoryInsightReader:
         try:
             with _read_only(self._paths.ome_db_path) as conn:
                 if not memcells:
-                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    _validate_run_record_source(conn)
                     return {}, {"status": "available"}
                 page = [
                     {
@@ -612,7 +612,7 @@ class MemoryInsightReader:
                     if (scope := _memcell_scope(row)) is not None
                 ]
                 if not page:
-                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    _validate_run_record_source(conn)
                     return {}, {"status": "available"}
                 page_json = json.dumps(page, separators=(",", ":"))
                 status_columns = ", ".join(
@@ -683,7 +683,7 @@ class MemoryInsightReader:
                 if runs_available:
                     _attach_read_only(conn, self._paths.ome_db_path, "ome")
                 if not memcells:
-                    conn.execute("SELECT 1 FROM provider_call LIMIT 1").fetchone()
+                    _validate_provider_call_source(conn)
                     return {}, {"status": "available"}
 
                 page_json = json.dumps(
@@ -1218,6 +1218,52 @@ class MemoryInsightReader:
                 return rows, int(rows[0]["total_count"]) if rows else 0, {"status": "available"}
         except _Unavailable as unavailable:
             return None, 0, {"status": "unavailable", "reason": unavailable.reason}
+
+def _validate_run_record_source(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        SELECT run_id, strategy_name, status, attempt, started_at, finished_at,
+               error, event_topic, event_payload
+        FROM run_record
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def _validate_provider_call_source(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        SELECT id, started_at_ms, duration_ms, kind, stage, model, status, error,
+               finish_reason, prompt_tokens, completion_tokens, request_json,
+               response_json, request_bytes, response_bytes, request_id, run_id,
+               memcell_id, app_id, project_id, owner_id, parent_type, parent_id,
+               dropped_before
+        FROM provider_call INDEXED BY provider_call_memcell_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, request_id
+        FROM provider_call INDEXED BY provider_call_request_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, run_id
+        FROM provider_call INDEXED BY provider_call_run_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, parent_type, parent_id
+        FROM provider_call INDEXED BY provider_call_parent_idx
+        LIMIT 1
+        """
+    ).fetchone()
+
 
 @contextmanager
 def _read_only(path: Path) -> Iterator[sqlite3.Connection]:
