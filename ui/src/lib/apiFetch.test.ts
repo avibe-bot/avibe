@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const deferRemoteAuthRedirect = vi.hoisted(() => vi.fn());
+const remoteAuth = vi.hoisted(() => ({
+  deferRemoteAuthRedirect: vi.fn(),
+  remoteLoginPath: vi.fn((target: string) => `/auth/login?next=${encodeURIComponent(target)}`),
+}));
 
-vi.mock('./remoteAuth', () => ({ deferRemoteAuthRedirect }));
+vi.mock('./remoteAuth', () => remoteAuth);
 
 import { apiFetch, recoverRemoteAuthFromSessionProbe } from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
-    deferRemoteAuthRedirect.mockReturnValue(true);
+    remoteAuth.deferRemoteAuthRedirect.mockReturnValue(true);
     vi.stubGlobal('window', {
-      location: { href: 'https://alex.avibe.bot/inbox', assign: vi.fn() },
+      location: { pathname: '/inbox', search: '?filter=open', assign: vi.fn() },
     });
   });
 
@@ -34,7 +37,7 @@ describe('apiFetch remote auth recovery', () => {
       const response = await apiFetch('/api/inbox');
 
       expect(response.status).toBe(401);
-      await vi.waitFor(() => expect(deferRemoteAuthRedirect).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(remoteAuth.deferRemoteAuthRedirect).toHaveBeenCalledOnce());
       expect(window.location.assign).not.toHaveBeenCalled();
     },
   );
@@ -48,7 +51,7 @@ describe('apiFetch remote auth recovery', () => {
     await apiFetch('/api/inbox');
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(deferRemoteAuthRedirect).not.toHaveBeenCalled();
+    expect(remoteAuth.deferRemoteAuthRedirect).not.toHaveBeenCalled();
   });
 
   it('honors the request signal while a shared CSRF request is pending', async () => {
@@ -127,7 +130,24 @@ describe('apiFetch remote auth recovery', () => {
       authorization_refresh_required: true,
     }));
 
-    expect(deferRemoteAuthRedirect).toHaveBeenCalledOnce();
+    expect(remoteAuth.deferRemoteAuthRedirect).toHaveBeenCalledOnce();
     expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
+  it('uses the dedicated login endpoint outside an iOS standalone PWA', async () => {
+    remoteAuth.deferRemoteAuthRedirect.mockReturnValue(false);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
+      ),
+    );
+
+    await apiFetch('/api/inbox');
+
+    await vi.waitFor(() => expect(window.location.assign).toHaveBeenCalledWith(
+      '/auth/login?next=%2Finbox%3Ffilter%3Dopen',
+    ));
+    expect(remoteAuth.remoteLoginPath).toHaveBeenCalledWith('/inbox?filter=open');
   });
 });

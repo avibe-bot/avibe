@@ -8,7 +8,9 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
+  remoteLoginPath,
   REMOTE_AUTH_REQUIRED_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
@@ -34,6 +36,44 @@ describe('remote auth navigation', () => {
     { ios: false, standalone: false },
   ])('keeps automatic login outside an iOS standalone PWA: %o', (context) => {
     expect(shouldDeferRemoteAuthRedirect(context)).toBe(false);
+  });
+
+  it('starts login through the dedicated endpoint while preserving the requested route', () => {
+    expect(remoteLoginPath('/chat/session-1?view=activity')).toBe(
+      '/auth/login?next=%2Fchat%2Fsession-1%3Fview%3Dactivity',
+    );
+  });
+
+  it.each(['https://evil.example/path', '//evil.example/path', 'chat/session-1'])(
+    'falls back to the app root for an unsafe login target: %s',
+    (target) => {
+      expect(remoteLoginPath(target)).toBe('/auth/login?next=%2F');
+    },
+  );
+
+  it.each(['/admin/logs', '/admin/settings/diagnostics'])(
+    'keeps remote session authentication enabled while bypassing setup checks for %s',
+    async (path) => {
+      const getSession = vi.fn(async () => ({ remote: true, authenticated: false }));
+
+      await expect(checkRemoteAuthForPath(path, getSession)).resolves.toEqual({
+        session: { remote: true, authenticated: false },
+        loginRequired: true,
+        checkSetup: false,
+      });
+      expect(getSession).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('checks setup after an authenticated remote session on regular app routes', async () => {
+    await expect(checkRemoteAuthForPath(
+      '/inbox',
+      async () => ({ remote: true, authenticated: true }),
+    )).resolves.toEqual({
+      session: { remote: true, authenticated: true },
+      loginRequired: false,
+      checkSetup: true,
+    });
   });
 
   it('signals AuthGuard instead of navigating automatically', () => {
