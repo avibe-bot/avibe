@@ -6,12 +6,6 @@ import { useToast } from '@/context/ToastContext';
 import { isIosDevice, isStandalonePwa } from '@/lib/platform';
 import { internalPwaLinkTarget, shouldBlockPwaLoopbackLink } from '@/lib/pwaNavigation';
 
-declare global {
-  interface Window {
-    __AVIBE_PWA_NAVIGATE_SAME_ORIGIN__?: (href: string) => void;
-  }
-}
-
 // iOS opens `_blank` links from a Home-Screen app in a secondary browser context
 // and may restore that context after evicting the PWA process. Keep every
 // same-origin navigation in this context, and keep blocking loopback URLs that
@@ -27,9 +21,10 @@ export const PwaLoopbackLinkGuard = () => {
 
     const openSameOrigin = (href: string) => {
       const target = internalPwaLinkTarget(href, window.location.href);
-      if (!target) return;
+      if (!target) return false;
       if (target.navigation === 'spa') navigate(target.path);
       else window.location.assign(target.path);
+      return true;
     };
 
     const onClick = (event: MouseEvent) => {

@@ -1,5 +1,11 @@
 import { isApplicationRouteHref } from './applicationRoutes';
 
+declare global {
+  interface Window {
+    __AVIBE_PWA_NAVIGATE_SAME_ORIGIN__?: (href: string) => boolean;
+  }
+}
+
 function normalizeHostname(hostname: string): string {
   return hostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
 }
@@ -69,4 +75,16 @@ export function internalPwaLinkTarget(
   } catch {
     return null;
   }
+}
+
+/**
+ * Open a link that normally requests a new browsing context while honoring the
+ * installed-PWA same-origin policy. The AppShell bridge returns true only when
+ * it handled the destination in the current PWA context; desktop and external
+ * destinations keep the browser's native `_blank` behavior.
+ */
+export function openLinkInNewContext(href: string, features?: string): Window | null {
+  if (typeof window === 'undefined') return null;
+  if (window.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__?.(href)) return null;
+  return window.open(href, '_blank', features);
 }

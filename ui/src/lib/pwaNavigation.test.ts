@@ -1,6 +1,52 @@
-import { describe, expect, it } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-import { internalPwaLinkTarget, shouldBlockPwaLoopbackLink } from './pwaNavigation';
+import * as ts from 'typescript';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  internalPwaLinkTarget,
+  openLinkInNewContext,
+  shouldBlockPwaLoopbackLink,
+} from './pwaNavigation';
+
+function sourceFiles(directory: URL): URL[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory);
+    if (entry.isDirectory()) return sourceFiles(child);
+    return /\.(ts|tsx)$/.test(entry.name) && !/\.test\.(ts|tsx)$/.test(entry.name) ? [child] : [];
+  });
+}
+
+function directWindowOpenCount(url: URL): number {
+  const path = fileURLToPath(url);
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(url, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  let count = 0;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === 'window' &&
+      node.expression.name.text === 'open'
+    ) {
+      count += 1;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return count;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('PWA navigation', () => {
   const remotePage = 'https://alex-app.avibe.bot/chat/session-123';
@@ -101,5 +147,49 @@ describe('internalPwaLinkTarget', () => {
     expect(internalPwaLinkTarget('https://github.com/avibe-bot/avibe', current)).toBeNull();
     expect(internalPwaLinkTarget('https://alex-app.avibe.bot:8443/help', current)).toBeNull();
     expect(internalPwaLinkTarget('mailto:hello@example.com', current)).toBeNull();
+  });
+});
+
+describe('programmatic PWA navigation', () => {
+  it('uses the installed-PWA bridge before opening a new context', () => {
+    const bridge = vi.fn((href: string) => href.startsWith('/chat/'));
+    const popup = {} as Window;
+    const nativeOpen = vi.fn(() => popup);
+    vi.stubGlobal('window', {
+      __AVIBE_PWA_NAVIGATE_SAME_ORIGIN__: bridge,
+      open: nativeOpen,
+    });
+
+    expect(openLinkInNewContext('/chat/session-456', 'noopener')).toBeNull();
+    expect(nativeOpen).not.toHaveBeenCalled();
+
+    expect(openLinkInNewContext('https://github.com/avibe-bot/avibe', 'noopener,noreferrer')).toBe(popup);
+    expect(nativeOpen).toHaveBeenCalledWith(
+      'https://github.com/avibe-bot/avibe',
+      '_blank',
+      'noopener,noreferrer',
+    );
+  });
+
+  it('keeps direct window.open calls confined to the shared helper and the preallocated desktop tab', () => {
+    const sourceRoot = new URL('../', import.meta.url);
+    const directCalls = sourceFiles(sourceRoot)
+      .map((url) => ({
+        path: fileURLToPath(url).slice(fileURLToPath(sourceRoot).length),
+        count: directWindowOpenCount(url),
+      }))
+      .filter(({ count }) => count > 0)
+      .sort((left, right) => left.path.localeCompare(right.path));
+
+    expect(directCalls).toEqual([
+      { path: 'components/workbench/ShowPageLaunchControl.tsx', count: 1 },
+      { path: 'lib/pwaNavigation.ts', count: 1 },
+    ]);
+
+    const preallocatedTab = readFileSync(
+      new URL('../components/workbench/ShowPageLaunchControl.tsx', import.meta.url),
+      'utf8',
+    );
+    expect(preallocatedTab).toContain("window.open('about:blank', '_blank')");
   });
 });

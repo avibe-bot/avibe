@@ -23,7 +23,7 @@ import clsx from 'clsx';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
-import { internalPwaLinkTarget } from '../lib/pwaNavigation';
+import { internalPwaLinkTarget, openLinkInNewContext } from '../lib/pwaNavigation';
 import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
 import { appTabHref, isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
@@ -255,7 +255,7 @@ function ShowPageRow({
                         if (!href) return;
                         const internalTarget = internalPwaLinkTarget(href, window.location.href);
                         if (tabHref || !internalTarget) {
-                          window.open(href, '_blank', 'noopener');
+                          openLinkInNewContext(href, 'noopener');
                         } else if (internalTarget.navigation === 'spa') {
                           onOpen();
                         } else {
