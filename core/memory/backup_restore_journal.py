@@ -8,17 +8,13 @@ import re
 import secrets
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Mapping
 
-from core.memory.clear_journal import (
-    _database_sidecars,
-    _ensure_private_parent,
-    _fsync_directory,
-    _prepare_database_path,
-    _require_private_database,
-    _require_private_regular,
-    _utc_now,
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    PrivateSqliteDatabase,
 )
 from core.memory.snapshot import MemorySnapshot
 
@@ -94,6 +90,7 @@ class MemoryBackupRestoreJournal:
             if database.as_posix().startswith("../") or database.as_posix().startswith("/"):
                 raise ValueError("invalid backup restore journal path")
             self._database_path = self._effective_home / database
+        self._database = PrivateSqliteDatabase(self._effective_home, self._database_path)
         self._initialize()
 
     @property
@@ -442,8 +439,12 @@ class MemoryBackupRestoreJournal:
         )
 
     def _initialize(self) -> None:
-        _ensure_private_parent(self._effective_home, self._database_path.parent)
-        _prepare_database_path(self._database_path)
+        try:
+            self._database.prepare()
+        except ConfinedFilesystemError as error:
+            raise MemoryBackupRestoreJournalError(
+                "Memory backup restore journal could not be prepared safely"
+            ) from error
         connection = self._connect()
         try:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -478,37 +479,23 @@ class MemoryBackupRestoreJournal:
             ) from error
         finally:
             connection.close()
-            self._harden_database_files()
-            _fsync_directory(self._database_path.parent)
+            self._harden_database_files(sync_parent=True)
 
     def _connect(self) -> sqlite3.Connection:
-        _require_private_database(self._database_path)
-        for path in _database_sidecars(self._database_path):
-            try:
-                info = os.lstat(path)
-            except FileNotFoundError:
-                continue
-            _require_private_regular(info, "Memory backup restore journal sidecar")
-        connection = sqlite3.connect(self._database_path, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=5000")
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
-        return connection
+        try:
+            return self._database.connect()
+        except ConfinedFilesystemError as error:
+            raise MemoryBackupRestoreJournalError(
+                "Memory backup restore journal is unsafe"
+            ) from error
 
-    def _harden_database_files(self) -> None:
-        for path in (self._database_path, *_database_sidecars(self._database_path)):
-            try:
-                info = os.lstat(path)
-            except FileNotFoundError:
-                continue
-            _require_private_regular(
-                info,
-                "Memory backup restore journal file",
-                require_mode=False,
-            )
-            os.chmod(path, 0o600)
+    def _harden_database_files(self, *, sync_parent: bool = False) -> None:
+        try:
+            self._database.harden(sync_parent=sync_parent)
+        except ConfinedFilesystemError as error:
+            raise MemoryBackupRestoreJournalError(
+                "Memory backup restore journal files could not be hardened safely"
+            ) from error
 
 
 def _schema_sql() -> str:
@@ -679,3 +666,7 @@ def _validated_actor(value: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value or len(value) > 256:
         raise ValueError("invalid backup restore actor")
     return value
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
