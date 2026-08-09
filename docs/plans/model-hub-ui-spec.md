@@ -584,8 +584,8 @@ as everywhere else in this document.
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable | — | Payload arrives → Ready |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock |
-| §1.1 | Per-source `needs_action` | Credential dead `[spec §4.5]` | F5 | `upstream.state.needsAction` | The credential is re-validated → the state the source held before. The card is one tap to 06; **replacing the credential is drawn on no frame** `[contract-gap]` G-12 |
-| §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `upstream.state.error` | The source leaves `error`; the card is one tap to 06 |
+| §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | The reported cause clears → the state the source held before. The card is one tap to 06; **replacing the credential is drawn on no frame** `[contract-gap]` G-12 |
+| §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`; the card is one tap to 06 |
 | §1.1 | Group waiting | Every member of that backend's chain is cooling and none is retry-ready `[contract]` | F5 — time alone resolves it | `gateway.group.status.waiting` | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the reported state and never the elapsed time |
 | §1.1 | Group interrupted | The native CLI that backend depends on is unavailable **in this process** `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it is a different word from 等待重试 |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
@@ -601,7 +601,7 @@ as everywhere else in this document.
 | §1.3 | Guard refused | The `PUT` came back refused, naming the hops it would remove | F3 — the shared confirm (§1.6 `Qp6FI`) renders it; this drawer starts no second one | `guard.title.saveOrder`, `guard.subtitle.saveOrder`, `guard.confirm.saveOrder`, `guard.label`, `guard.count`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要保存 re-sends the same `PUT` with `force` → Saving; 取消 → back to Dirty, nothing persisted |
 | §1.4 | Default | Opened | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 → Awaiting sign-in |
 | §1.4 | Second pass `[derived]` | Re-opened for an account that already has one of the two channels | F5 | `addSub.opt.added` | The taken option is inert; the remaining one is selected on open, whatever the recommendation says |
-| §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start` | → OAuth failed | `addSub.signIn` | OAuth completes → source created, dialog closes; dismissed any of the three ways → Dismissing |
+| §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start`, then `GET /api/models/oauth/status/<flow_id>` polled every 2s until `OAuthFlow.state` is terminal `[contract]` | → OAuth failed | `addSub.signIn` | `state` reads `success` → source created, dialog closes; `failed` → OAuth failed; `OAuthFlow.expires_at` passes with no terminal reading → OAuth failed, the same state and the same sentence `[contract]`; dismissed any of the three ways → Dismissing |
 | §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
 | §1.4 | OAuth failed | Provider or engine failure; classified `needs_action` `[spec §4.5]` | F1 | `addSub.error.oauthFailed`, `addSub.retry` | 重试 → Awaiting sign-in; 取消 → Dismissing |
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown` | 重试 once the engine recovers; 取消 → dismiss, nothing bound `[derived]` |
@@ -623,14 +623,14 @@ as everywhere else in this document.
 | §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Error (refetch failed) | `sourceDetail.action.refetch` | New list arrives → Ready, diffed; a refusal → Refetch refused |
 | §1.6 | Refetch refused | The refresh came back refused, naming the hops a shorter inventory would remove | F3 — `Qp6FI`, the same confirm this page already starts for a removal | `guard.title.refetch`, `guard.subtitle.refetch`, `guard.confirm.refetch`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要拉取 re-sends the same `POST` with `force` → Refetching; 取消 → Ready, the previous list kept |
 | §1.6 | Error (refetch failed) | The refetch was rejected | F2 lands here — the **previous list is kept** | `sourceDetail.status.error`, `sourceDetail.fail.refetch` | The bar carries the failure; 重新拉取 stays enabled → Refetching |
-| §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter, or a chip's × → Tier commit; blur / Escape → Ready, discarding whatever is still uncommitted in the input |
+| §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter, or a chip's × → Tier commit; Enter on an empty input, or on a value this row already carries, commits nothing and stays here — `minLength: 1` and `uniqueItems` `[contract]`; blur / Escape → Ready, discarding whatever is still uncommitted in the input |
 | §1.6 | Tier commit | A tier was added by Enter **or** removed by a chip's × — either way `PATCH /api/models/sources/<source_id>/models/<model_id>` carries the complete `reasoning_efforts` list `[contract]` | F1, on the row: the row keeps the pre-request list, states the failure and offers 重试 — an add leaves its text in the input, a removal puts its chip back | `sourceDetail.fail.tier`, `sourceDetail.retry` | Success → the answered list is what the row renders, still in Tiers editing |
 | §1.6 | Manual draft | 添加模型 pressed | F5 — a local draft, sent by nothing | `sourceDetail.entry.manual`, `sourceDetail.addRow.hint` | 添加 → Manual commit; 取消 discards the row and nothing is persisted |
 | §1.6 | Manual commit | 添加 pressed on the draft row — `POST /api/models/sources/<source_id>/models` | F1, on the draft row: **the row and everything typed in it are kept**, and the primary becomes 重试 | `sourceDetail.fail.addModel`, `sourceDetail.retry` | Success → the row becomes an ordinary 手动添加 row → Ready |
 | §1.6 | Removing a manual entry | The row menu's 移除 — `DELETE /api/models/sources/<source_id>/models/<model_id>`, guarded | F3 when the response is a guard refusal, F1 otherwise | `sourceDetail.row.remove` | Success → the row is gone → Ready |
 | §1.6 | Guard refused | The `DELETE` came back refused, naming the hops it would remove | F3 — `Qp6FI`, this product's one guarded-change confirm | `guard.title.removeModel`, `guard.subtitle.removeModel`, `guard.confirm.removeModel`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.cancel` | 仍要移除 re-sends the same `DELETE` with `force` → Removing a manual entry; 取消 → Ready, nothing removed |
 | §1.6 | Not supplying | The source is `standby` or `cooldown`, or `active` with nothing adopting it `[contract]` | F5 | `upstream.state.standby` | The source starts supplying again — only the bar changes |
-| §1.6 | Credential-invalid | The source is `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.credentialInvalid` | The credential is re-validated. The bar states the cause and the table stays live; **no repair control is drawn here or on 01** `[contract-gap]` G-12 |
+| §1.6 | Needs action | The source is `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | The reported cause clears. The bar states which cause `state.detail_key` carries and the table stays live; **no repair control is drawn here or on 01** `[contract-gap]` G-12 |
 | §1.6 | Unclassified error | The source is `error` `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`. The bar reads 异常 and claims no cause; the table and both actions stay live |
 | §1.7 | Nominal | No source is unavailable | F5 | — | A head source becomes unavailable → Takeover |
 | §1.7 | Takeover | The head is unavailable **and** a next candidate is serving | F5 | `takeover.pill`, `takeover.chip` | Recovery → Nominal, on the next turn `[spec §4.3]` |
@@ -669,10 +669,9 @@ a different key.
 | `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present |
 | `{{backend}}` | The backend's product name — Claude Code, Codex, opencode — never the internal id. | Always present |
 | `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present |
-| `{{host}}` | The source's host, as entered, without scheme or path. | Always present |
-| `{{source}}` | The serving source's display name. | Always present |
+| `{{host}}` | The source's host, as entered, without scheme or path. | **Absent when the source has no entered host** `[contract]`: `base_url` is `api_key`-kind only, null there means the vendor's official endpoint, and a subscription may not carry one at all. §1.6 states what the one string that interpolates it renders instead. |
+| `{{source}}` | A source's display name. | Always present |
 | `{{model}}` | A model's display id, as the source reports it. | Always present |
-| `{{plans}}` | The subscription plans a channel accepts, joined by `、` / `,`. | Always present |
 | `{{n}}` | A hop's 1-based position in the configured order. | Always present |
 | `{{time}}` | A relative timestamp — 3 分钟前 / 3 minutes ago. | Absent in `sourceDetail.status.listUpdated` when no fetch has ever succeeded; that state uses `sourceDetail.emptyNeverFetched` instead and never renders this key. In `upstream.state.unavailableRetry` it is what defines the state, so it is always present. |
 | `{{protocol}}` | The interface the probe proved, by its display name (§1.5's three options). | Always present in ⑤ / ⑤′, which are entered only after a protocol was proved. Never rendered by ④ / ④′, whose whole content is that no protocol was proved. |
@@ -691,7 +690,7 @@ what `scripts/check_model_hub_ui_states.py` reports as a class B gap.
 
 `scripts/check_model_hub_ui_states.py` regenerates its input from this file in the
 same run it reports — it reads the live document, never a snapshot committed
-beside it — and reports four gap classes, each of which is a set it computes
+beside it — and reports five gap classes, each of which is a set it computes
 from the text:
 
 | Class | What it reports |
@@ -700,13 +699,22 @@ from the text:
 | B | Rendered copy with no key, a key row missing its English column, a key cited that no copy table defines, or a `{{slot}}` with no §0.9 row. |
 | C | A §0.8 row with no exit, or a frame section that draws an element inventory and contributes no §0.8 row. |
 | D | A copy key whose leaf names a condition — error, empty, failure, undetermined, unavailable — that no §0.8 row cites. Under 约束四 that is either copy for an unreachable error, or a state this document forgot to write. |
+| E | A claim this document makes about the system — a route, a schema field, an enum value, a repo symbol — that the file with authority over that claim does not make. |
+
+Every class asks one question of a different inventory: does this citation name
+exactly one thing that exists? So the script holds **one** comparison, and each
+class names the inventories it reads through it. It matches whole tokens rather
+than substrings, reports a citation that resolves to nothing rather than passing
+it, and reports one name defined twice. No class compares names on its own,
+because five classes each inventing that comparison is five chances to invent it
+wrong — which is how nine of these gaps were reported as separate bugs.
 
 It reports the **input scale** it measured over before it reports any finding,
 and it fails loudly rather than passing when an extraction comes back empty,
 because a checker that silently runs on nothing reports green.
 
 What it does not claim: that this document is complete, that the copy is right,
-or that the states match the product. It claims those four sets are empty. The
+or that the states match the product. It claims those five sets are empty. The
 claim is worth exactly the coverage of its extractors and no more, which is why
 the scale is printed with the verdict rather than in a comment.
 
@@ -983,8 +991,6 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.state.supplying` `[spec]` | 正在供给 {{backends}} | Supplying {{backends}} |
 | `upstream.state.standby` | 备用 | Standby |
 | `upstream.state.unavailableRetry` | 暂不可用 · {{time}} 后自动重试 | Unavailable · retrying automatically after {{time}} |
-| `upstream.state.needsAction` `[derived]` | 凭据失效 | Credential invalid |
-| `upstream.state.error` `[derived]` | 异常 | Error |
 | `upstream.empty` `[derived]` | 还没有来源。先添加一个订阅或 API Key。 | No sources yet. Add a subscription or an API key first. |
 | `upstream.addSubscription` | 添加订阅 | Add subscription |
 | `upstream.addApiKey` | 添加 API Key | Add API key |
@@ -1234,9 +1240,9 @@ and transparent stroke** — it is a row-shaped affordance, not a card. Legend 1
 
 **States** — §0.8, rows marked §1.1.
 
-Credential-invalid is the one worth stating precisely `[derived]`: a
+Needs action is the one worth stating precisely `[derived]`: a
 `needs_action` source **stays in the list, in place**, with its status line
-replaced by the cause. It is not removed, not moved to the bottom, and not
+replaced by the cause `state.detail_key` names `[contract]`. It is not removed, not moved to the bottom, and not
 silently dropped from the chains that name it — a source you cannot see is a
 source you cannot fix. What the card offers is the cause and the way to the
 detail page; the control that *replaces* the credential is drawn on neither
@@ -1620,6 +1626,17 @@ second pass hides the taken option would make the hint's instruction unfollowabl
 The disabled-row rule is the same defect one level down — an option that is visible,
 carries a mark, and refuses to take it reads as a bug rather than as a record.
 
+**The subtitle is per-vendor copy, not two slots** `[frame]` `[contract]`. The frame draws
+claude.ai / Max · Pro and chatgpt.com / Plus · Pro, and this section registered that line
+as `{{host}} / {{plans}}` — two promises nothing here can keep. A subscription carries no
+`base_url` at all, so there is no entered host to interpolate; and no contract in this set
+publishes which plans a channel accepts, so there is no list to join either. Synthesizing
+the vendor's endpoint is ruled out for the reason §1.6 gives when it rules the same move
+out: it needs a vendor→URL table no contract here holds. Every other string in this dialog
+is already static per vendor — which is what the element inventory says this head is — so
+the subtitle is two rows beside `tos.claude` and `hint.chatgpt` rather than a template with
+nothing behind it. `{{plans}}` had no second consumer and its §0.9 row goes with it.
+
 **States** — §0.8, rows marked §1.4. It has no Loading state: nothing is fetched
 before the dialog opens.
 
@@ -1642,6 +1659,20 @@ is the `expects: none` branch, stated as that branch rather than as all of OAuth
 the input the other two need is registered as G-17: a contracted behaviour with no drawn
 affordance. The schema's own Claude example uses `paste_code`, so this is not a
 hypothetical vendor — it is the first one.
+
+**「Finishes by itself」 is not 「tells us by itself」** `[contract]`. `expects: none` means
+the user hands nothing back, not that anything notifies the client — so the completion
+this dialog waits for is **read**, not received: `GET /api/models/oauth/status/<flow_id>`
+is polled while the flow is non-terminal, at the 2s cadence and under the 15-minute bound
+`oauth-flow.schema.json` fixes for this shell, and a terminal `OAuthFlow.state` is what
+ends the wait. Without the poll *Awaiting sign-in* is a state with an entry and no exit:
+the flow finishes in the browser, the source exists, and this dialog is still sitting on
+a button the user already pressed. A single failed read is not a terminal reading and
+does not end the flow — the poll is bounded by the clock, not by the first blip. What
+ends a flow no terminal reading ever comes back for is `OAuthFlow.expires_at`, and it
+lands on *OAuth failed*: the same state and the same sentence as a provider refusal,
+because 重试 is the same one thing to do and a second message would promise a second
+remedy that does not exist.
 
 **All three failure rows keep the same foot** `[derived]`. The dialog's foot is 取消 /
 去登录 (`[frame]`), and a failure replaces the message, not the buttons: 去登录 becomes
@@ -1700,7 +1731,8 @@ not reused.
 | Key | 中文 | English |
 | --- | --- | --- |
 | `title` | 添加 {{vendor}} 订阅 | Add {{vendor}} subscription |
-| `subtitle` | {{host}} / {{plans}} | {{host}} / {{plans}} |
+| `subtitle.claude` `[frame]` | claude.ai / Max · Pro | claude.ai / Max · Pro |
+| `subtitle.chatgpt` `[frame]` | chatgpt.com / Plus · Pro | chatgpt.com / Plus · Pro |
 | `opt.native` | 原生使用 | Use natively |
 | `opt.native.desc.claude` `[frame]` | Claude Code 直接用这个订阅,凭据只留在本机。 | Claude Code uses this subscription directly; the credential stays on this machine. |
 | `opt.native.desc.chatgpt` `[frame]` | Codex 直接用这个 ChatGPT 账号登录。 | Codex signs in with this ChatGPT account directly. |
@@ -2165,10 +2197,10 @@ names for what is about to happen.**
 | `hint.safe` | 这些型号还有别的来源可用。 | These models still have another source available. |
 | `hint.interrupt` | 有型号会因此没有可用来源。 | Some models will be left with no usable source. |
 | `cancel` | 取消 | Cancel |
-| `title.removeModel` | 从 {{host}} 移除 {{model}} | Remove {{model}} from {{host}} |
+| `title.removeModel` | 从 {{source}} 移除 {{model}} | Remove {{model}} from {{source}} |
 | `subtitle.removeModel` | 这个型号会从这个来源的清单里消失 | This model disappears from this source's inventory |
 | `confirm.removeModel` | 仍要移除 | Remove anyway |
-| `title.refetch` | 重新拉取 {{host}} 的型号 | Refetch models from {{host}} |
+| `title.refetch` | 重新拉取 {{source}} 的型号 | Refetch models from {{source}} |
 | `subtitle.refetch` | 这次拉取会让部分型号从这个来源的清单里消失 | This refetch drops models from this source's inventory |
 | `confirm.refetch` | 仍要拉取 | Refetch anyway |
 | `title.saveOrder` | 保存 {{backend}} 的来源顺序 | Save the source order for {{backend}} |
@@ -2211,7 +2243,7 @@ text:
 | `active`, adopted by nothing | `$--muted` | `upstream.state.standby` |
 | `standby` | `$--muted` | `upstream.state.standby` |
 | `cooldown` | `$--gold` | `upstream.state.unavailableRetry` |
-| `needs_action` | `#FF6B6B` | `sourceDetail.status.credentialInvalid` `[derived]` |
+| `needs_action` | `#FF6B6B` | the `sourceDetail.status.needsAction.*` row `state.detail_key` selects `[derived]` `[contract]` |
 | `error` | `#FF6B6B` | `sourceDetail.status.error` `[derived]` |
 
 The split of `active` is the one place this bar reads a second field: 使用中 claims a backend is taking models
@@ -2221,10 +2253,28 @@ about a dead credential, in the flattering direction. `standby` and unadopted `a
 land on one word deliberately — they differ in *why* nothing is drawing from the source,
 and this bar is not where that difference is actionable.
 
+**`needs_action` is four causes, not one, and the row above resolves to whichever of them
+the payload carries** `[contract]`. `state.detail_key` is required on this state and its
+enum runs `models.source.needs_action.oauth_expired`,
+`models.source.needs_action.balance_exhausted`,
+`models.source.needs_action.credential_revoked`,
+`models.source.needs_action.account_banned` — four causes with four different remedies, of
+which only one is about a credential being wrong. One label reading 凭据失效 was therefore
+false on three of them, and false in the expensive direction: it sends a user whose balance
+ran out to re-enter a key that is fine. So the four have four strings, selected by the key
+the payload already carries. What this does **not** do is enumerate the ways a *request*
+can fail — that set is closed at F1–F5 and stays closed. `detail_key` is a field on the
+source, persisted and read back, and rendering a field the contract requires is not the
+same act as inventing a taxonomy for a transport error.
+
 The states this bar shares with the upstream card reuse the card's keys unchanged, and
 the two rose states are worded here because no frame words them anywhere; the card
 renders **these** keys rather than wording them a second time. Two vocabularies for one
-state is how they drift apart. There is no key for *paused supply*: `legend.unavailable`
+state is how they drift apart — and until this round the rule was broken in the place it
+was written: the `upstream.state.*` family carried its own needs-action and error rows,
+word for word, which is exactly the second vocabulary this paragraph forbids. Those two
+rows are gone and §0.8's §1.1 rows cite the keys declared here, so 凭据失效 could not
+survive in one table after being retired in the other. There is no key for *paused supply*: `legend.unavailable`
 belongs to frame 08's relation legend, where gold says a wire stopped carrying, and a
 source's own state is what §4.5 enumerates — a bar that borrowed the relation's word
 would report a fact about a link as a fact about the source. The
@@ -2249,8 +2299,9 @@ undefined on a reachable state, and the drawn state is 使用中, so the undefin
 falls through to *this source is fine* on the one screen the user opened because it is
 not. That is the same failure the paragraph above rejects for `needs_action`, one class
 further out. `error` therefore takes rose like `needs_action` — both mean *a person has
-to act* — but a **different word**, because they need different acts: 凭据失效 tells you
-to re-authenticate, while 异常 deliberately claims no cause. Naming a cause the product
+to act* — but a **different word**, because they need different acts: a `needs_action`
+source names its cause and the act that clears it, while 异常 deliberately claims no
+cause. Naming a cause the product
 did not classify would be worse than admitting it has none; what the user can still do is
 drawn either way, since 重新拉取 is enabled in every state.
 
@@ -2319,9 +2370,9 @@ Five rules:
   of `sourceDetail.empty` / `sourceDetail.emptyNeverFetched` the source's
   `last_discovered_at` selects. An empty table with a live add row is the shortest path
   out, which is why both strings end on an action.
-- **Credential-invalid** `[derived]` keeps the whole table visible and
+- **Needs action** `[derived]` keeps the whole table visible and
   read-only-ish: you can still see what you had configured. Hiding the inventory
-  because the key expired destroys the only copy of the user's intent.
+  because the credential stopped working destroys the only copy of the user's intent.
 - **重新拉取 is the only action here that contacts the upstream, and the contract has
   only one to draw** `[frame]` `[contract]` AC-26. The frame draws 重新拉取 and 添加模型
   and nothing else — no connectivity test — and of those two only 重新拉取 leaves the
@@ -2366,7 +2417,10 @@ Five rules:
 | Key | 中文 | English |
 | --- | --- | --- |
 | `status.inUse` | 使用中 | In use |
-| `status.credentialInvalid` `[derived]` | 凭据失效 | Credential invalid |
+| `status.needsAction.oauthExpired` `[derived]` `[contract]` | 需要重新登录 | Sign in again |
+| `status.needsAction.balanceExhausted` `[derived]` `[contract]` | 余额用完 | Out of balance |
+| `status.needsAction.credentialRevoked` `[derived]` `[contract]` | 凭据被吊销 | Credential revoked |
+| `status.needsAction.accountBanned` `[derived]` `[contract]` | 账号被限制 | Account restricted |
 | `status.error` `[derived]` | 异常 | Error |
 | `status.listUpdated` | · 型号列表更新于 {{time}} | · model list updated {{time}} |
 | `summary_one` | {{host}} · {{count}} 个型号 | {{host}} · {{count}} model |
@@ -2454,8 +2508,18 @@ page is the full inventory, so it scrolls (the frame's 13 rows are an instance, 
 a limit); long model ids truncate at 250 with the full value in `title`; a tier
 list wider than 470 wraps to a second line and grows the row rather than
 clipping — tiers are user-typed, so an arbitrary count is normal input, not an
-edge case; tier strings are free text and are neither validated nor
-case-normalized (D-5); the count `sourceDetail.summary` interpolates must be plural-safe
+edge case; tier strings are free text and are **not** case-normalized (D-5) — `high` and
+`High` are two tiers, because `reasoning_efforts` is a list of strings the upstream
+answers to and nothing here folds their case — but the two values the contract refuses are
+refused **before** the request rather than after it: `reasoning_efforts` declares
+`minLength: 1` and `uniqueItems` `[contract]`, so 回车 on an empty input and 回车 on a
+value the row already carries both commit nothing and send nothing. The alternative is a
+`PATCH` that can only ever be rejected, landing on 档位没保存上 with 重试 enabled over
+input that will fail every time it is retried. Prevention is also why no copy exists for
+that rejection: 约束四 asks for a state for every reachable error, and this one is not
+reachable. A duplicate is visible as the chip already sitting in the row, and an empty
+input is visible as an empty input, so neither no-op needs a sentence to explain
+itself; the count `sourceDetail.summary` interpolates must be plural-safe
 in English at 0 and 1, and it is `{{count}}` — the variable name is not a preference here
 but the thing i18next selects the plural form from, so this rule reads it from §1.6's copy
 table rather than naming its own.

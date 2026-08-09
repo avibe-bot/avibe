@@ -10,7 +10,7 @@ pass a path, or a git rev that is read through `git show`. It never consumes a
 snapshot committed beside it, because a snapshot can agree with a checker while
 both disagree with the file everyone else reads.
 
-Four gap classes, each a set computed from the text:
+Five gap classes, each a set computed from the text:
 
   A  a mutating call §1 names that no §0.8 row states a treatment for, or a
      §0.8 row whose failure cell is empty or names a treatment that does not exist
@@ -19,9 +19,20 @@ Four gap classes, each a set computed from the text:
   C  a §0.8 row with no exit, or a frame section that draws an element inventory
      and contributes no §0.8 row
   D  a copy key whose name declares a condition that no §0.8 row cites
+  E  a claim the spec makes about the system that the file with authority over
+     that claim — `api.md`, a schema, the repo — does not make
+
+Every class asks the same question of a different inventory: does this citation
+name exactly one thing that exists? So there is one comparison, `Universe` /
+`Match`, and each class names the universes it reads. The three rules that
+comparison carries — match by whole token, an empty match is a gap, one name
+defined twice is a gap — are the whole of what the classes rely on, which is why
+no class is allowed to compare names itself. Nine of these gaps were reported by
+reviewers as separate bugs while each class was still inventing its own
+comparison; they were one bug in five copies.
 
 The input scale is reported before the verdict. What this gate claims is exactly
-that those four sets are empty — not that the document is complete, not that the
+that those five sets are empty — not that the document is complete, not that the
 copy is right. A gate that claims more than its extractors can see reports green
 where it should report an error, so the extractors' reach is printed with the
 result rather than left in a comment.
@@ -35,6 +46,7 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +80,225 @@ def normalize_route(method: str, path: str) -> str:
     """
     path = re.sub(r"<[^>/]+>", "<>", path.split("?")[0].rstrip("/"))
     return f"{method} {path}"
+
+
+# --- the gate's one comparison ---------------------------------------------
+#
+# Every class used to grow its own. Class A asked whether a route appeared as a
+# *substring* of a register row's concatenated cells, and whether an exit's
+# target was `in` some state's name. Class B resolved a copy key by unique
+# suffix. Class D resolved the same keys against the same tables by a second,
+# different rule. Only the copy tables ever looked for a name defined twice.
+# Three review heads in a row each found the same defect in whichever class that
+# round's reviewer happened to read — not three bugs, one way of writing, with a
+# fresh chance to repeat it every time a class was added.
+#
+# So the comparison is written once, here, and no class writes another. Three
+# rules hold for every universe, enforced by this object rather than promised by
+# each caller:
+#
+#   token      a citation matches a definition as a whole dotted token, through
+#              the aliases the universe declares — never as a prefix, suffix or
+#              substring. `/models/runtime/start` does not resolve
+#              `/models/runtime/startup`; `auth` does not resolve `fail.auth`.
+#   empty      a citation that resolves to nothing is a finding, never a silent
+#              pass. `if not owners: continue` is how a mistyped field left a
+#              table bound to no contracted field with the gate reporting green.
+#   duplicate  one canonical token defined twice with different content is a
+#              finding: two answers to one question, and no way for a reader to
+#              know which one ships.
+#
+# The rules are properties of the comparison, so they arrive with it. A class
+# added later cannot opt out of `duplicate` by forgetting to write it, and
+# cannot weaken `token` for its own convenience, because it has no comparison of
+# its own to weaken.
+
+RULES = ("token", "empty", "duplicate")
+SIDES = ("spec", "authority")
+
+
+def segments(token: str) -> tuple[str, ...]:
+    """A dotted name as its parts. Comparison is over these, never over the string."""
+    return tuple(token.split("."))
+
+
+ORDINAL_RE = re.compile(r"^([①-⑳]′?)")
+
+
+def state_spellings(name: str) -> tuple[str, ...]:
+    """Every spelling a state answers to, written down where the state is defined.
+
+    §0.8 cites its own rows three ways: by the whole name, by the ordinal the
+    name leads with (`→ ③ / ④ / ⑤`), and by the name up to its first qualifier
+    (`→ Unreachable` for 「Unreachable (engine down)」). All three are real, so
+    all three are declared here — once, as that row's names. The alternative is
+    to discover them at resolution time with a prefix or substring test, which
+    is how 「Ready」 came to vouch for a cell pointing at 「Read」: a test that
+    loose cannot tell a legal short spelling from a typo.
+    """
+    spellings = {name}
+    ordinal = ORDINAL_RE.match(name)
+    if ordinal:
+        spellings.add(ordinal.group(1))
+    head = re.split(r"\s*[(,]", name, maxsplit=1)[0].strip()
+    if head:
+        spellings.add(head)
+    return tuple(sorted(spellings))
+
+
+@dataclass(frozen=True)
+class Match:
+    """What one citation resolved to. `empty` is a finding; so is `ambiguous`."""
+
+    universe: str
+    citation: str
+    hits: tuple[str, ...]
+    payloads: tuple[Any, ...]
+
+    @property
+    def empty(self) -> bool:
+        return not self.hits
+
+    @property
+    def wildcard(self) -> bool:
+        """The citation asked for a family, not for one name."""
+        return self.citation.endswith("*")
+
+    @property
+    def ambiguous(self) -> bool:
+        """More answers than the citation asked for.
+
+        A citation that names one thing and gets several has not identified
+        anything, and every class wants to say so. A trailing `*` asks for the
+        whole family, so many answers is the correct outcome there — the
+        distinction lives here rather than in each caller, because a caller
+        that forgets it is exactly how a rule stops being applied.
+        """
+        return len(self.hits) > 1 and not self.wildcard
+
+    @property
+    def one(self) -> Any:
+        return self.payloads[0]
+
+
+class Universe:
+    """A named set of exact identities, and the only place names are compared.
+
+    `side` records which file the definitions come from — the spec under review,
+    or an authority it must agree with — because that decides how a rule can be
+    exercised by a test. `owner` is the class that reports this universe's
+    duplicates, so a duplicate is attributed to the class that reads the table
+    it lives in rather than to whichever class happened to look first.
+    """
+
+    def __init__(self, name: str, side: str, owner: str) -> None:
+        if side not in SIDES:
+            raise ValueError(f"{side!r} is not one of {SIDES}")
+        self.name = name
+        self.side = side
+        self.owner = owner
+        self._payload: dict[str, Any] = {}
+        self._content: dict[str, Any] = {}
+        self._where: dict[str, Any] = {}
+        self._alias: dict[str, set[str]] = {}
+        self.duplicates: list[tuple[str, Any, Any]] = []
+
+    def define(
+        self,
+        token: str,
+        payload: Any,
+        *,
+        content: Any = None,
+        where: Any = None,
+        aliases: tuple[str, ...] = (),
+    ) -> "Universe":
+        """Declare one identity. A second declaration with different content is a gap.
+
+        `content` is what "the same definition" means for this universe — the
+        rendered text of a copy row, the cells of a contract row. Re-declaring a
+        token with the *same* content is a document naming one thing twice,
+        which is not a contradiction and is not reported.
+        """
+        body = payload if content is None else content
+        if token in self._payload:
+            if self._content[token] != body:
+                self.duplicates.append((token, self._where[token], where))
+        else:
+            self._payload[token] = payload
+            self._content[token] = body
+            self._where[token] = where
+        for alias in aliases:
+            if alias != token:
+                self._alias.setdefault(alias, set()).add(token)
+        return self
+
+    def __len__(self) -> int:
+        return len(self._payload)
+
+    def tokens(self) -> set[str]:
+        return set(self._payload)
+
+    def items(self) -> list[tuple[str, Any]]:
+        return sorted(self._payload.items())
+
+    def resolve(self, citation: str) -> Match:
+        """The one comparison. Exact token, then declared aliases, then families.
+
+        A citation ending in `*` names a family, and a family is still matched by
+        token: the prefix is split into segments and compared segment for
+        segment, so `sourceDetail.tiers.*` reaches `sourceDetail.tiers.add` and
+        never reaches `sourceDetail.tiersAdd`. String prefixing would reach both.
+        """
+        cite = citation.strip().strip("`")
+        if cite.endswith("*"):
+            prefix = segments(cite.rstrip("*").rstrip("."))
+            hits = {t for t in self._payload if segments(t)[: len(prefix)] == prefix}
+            for alias, targets in self._alias.items():
+                if segments(alias)[: len(prefix)] == prefix:
+                    hits |= targets
+            found = tuple(sorted(hits))
+        elif cite in self._payload:
+            found = (cite,)
+        else:
+            found = tuple(sorted(self._alias.get(cite, ())))
+        return Match(self.name, cite, found, tuple(self._payload[t] for t in found))
+
+
+# Which universes each class consults. A class that reads no universe compares
+# nothing, and a class that compares something not listed here has written a
+# comparison of its own — which is what the tiled mutation suite exists to
+# refuse. Adding a class means adding its row, and adding a universe means
+# adding that universe's cases for all three rules.
+#
+# One thing here is deliberately *not* a universe: the coverage sets class A
+# builds (`covered_routes`, `accounted`). Those are set arithmetic over tokens
+# `normalize_route` already canonicalised — is this route in that set — not name
+# resolution, so they need no resolver and get none. Class A is listed against
+# `routes` because it reads that universe as an inventory: it enumerates the
+# contracted mutations and asks which of them nothing reaches.
+CLASS_UNIVERSES: dict[str, tuple[str, ...]] = {
+    "A": ("routes", "states", "treatments"),
+    "B": ("copy", "slots"),
+    "C": ("frames",),
+    "D": ("copy",),
+    "E": ("routes", "schema files", "schema fields", "repo symbols"),
+}
+
+# The class list, spelled once. It was spelled `"ABCDE"` in the reporter and as
+# the keys of the label table, so a sixth class could be checked and never
+# printed — and the mutation suite, which tiles over it, would not have known to
+# ask for its cases.
+CLASSES: tuple[str, ...] = tuple(CLASS_UNIVERSES)
+
+CLASS_LABELS: dict[str, str] = {
+    "A": "mutating call with no treatment, or a treatment that does not exist",
+    "B": "copy cited but not defined, missing English, or an undeclared slot",
+    "C": "state with no exit, or a frame with no register row",
+    "D": "condition key no state cites",
+    "E": "a claim about the system that its authority file does not make",
+}
+assert set(CLASS_LABELS) == set(CLASSES), "a gate class with no label prints as nothing"
+
 KEY_REF_RE = re.compile(r"`([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_*]+)+)`")
 KEY_DEF_RE = re.compile(r"^\|\s*`([a-z][A-Za-z0-9._*]*)`([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
 SLOT_RE = re.compile(r"\{\{(\w+)\}\}")
@@ -204,7 +435,7 @@ def load_authorities(root: Path) -> dict[str, Any]:
     same moment the spec was written.
     """
     api_text = (root / API_CONTRACT).read_text(encoding="utf-8")
-    routes: dict[str, dict[str, Any]] = {}
+    routes = Universe("routes", "authority", "E")
     table_spans: list[str] = []
     for line in api_text.split("\n"):
         if not line.startswith("| "):
@@ -223,12 +454,17 @@ def load_authorities(root: Path) -> dict[str, Any]:
         # would reject. `guarded` still reads the whole cell, because that is
         # where the refusal envelope is named.
         request, _, response = cells[1].partition("→")
-        routes[normalize_route(m.group(1), m.group(2))] = {
-            "keys": literal_keys(request),
-            "response_keys": literal_keys(response),
-            "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
-            "cell": cells[1],
-        }
+        routes.define(
+            normalize_route(m.group(1), m.group(2)),
+            {
+                "keys": literal_keys(request),
+                "response_keys": literal_keys(response),
+                "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
+                "cell": cells[1],
+            },
+            content=cells[1],
+            where=cells[0],
+        )
     # The shared envelopes are defined in prose and in the JSON examples, and a
     # guarded route's row names them rather than spelling them out. Their
     # vocabulary is collected from everything that is not a route row, so a
@@ -239,20 +475,45 @@ def load_authorities(root: Path) -> dict[str, Any]:
     schemas: dict[str, set[str]] = {}
     properties: dict[str, set[str]] = {}
     enums: dict[str, dict[str, set[str]]] = {}
-    paths: dict[str, dict[str, dict[str, set[str]]]] = {}
+    files = Universe("schema files", "authority", "E")
+    # One canonical token per *declaration site*, with the bare field name as an
+    # alias. `agent-supply.schema.json` declares `supply_status` twice — once as
+    # the backend's rollup, once inside `named_agents[]` — and a citation of the
+    # bare name resolves to both, which is `Match.ambiguous` and a finding. That
+    # used to be a bespoke `len(owners) > 1` branch inside one class; it is now
+    # what the shared comparison does with any name two things answer to.
+    fields = Universe("schema fields", "authority", "E")
     for path in sorted((root / CONTRACTS).glob("*.schema.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
         schemas[path.name] = schema_vocabulary(doc)
         properties[path.name] = set(doc.get("properties", {}))
         enums[path.name] = enum_fields(doc)
-        paths[path.name] = enum_paths(doc, doc.get("title", path.stem))
+        files.define(path.name, schema_vocabulary(doc), content=path.name, where=path.name)
+        for name, decls in enum_paths(doc, doc.get("title", path.stem)).items():
+            for where, values in decls.items():
+                # A document names a field by any tail of its path —
+                # `detail_key`, `state.detail_key`, `Source.state.detail_key` —
+                # so every tail is declared as an alias rather than matched by
+                # `endswith`, which would also accept `te.detail_key`. Declaring
+                # them is what makes two paths sharing a tail resolve to two
+                # hits and report as ambiguous instead of picking one.
+                parts = segments(where)
+                tails = {".".join(parts[i:]) for i in range(1, len(parts))} | {name}
+                fields.define(
+                    where,
+                    {"schema": path.name, "values": values, "path": where},
+                    content=sorted(values),
+                    where=path.name,
+                    aliases=tuple(sorted(tails | {f"{path.name}::{t}" for t in tails | {where}})),
+                )
     return {
         "routes": routes,
         "envelope": envelope,
         "schemas": schemas,
         "properties": properties,
         "enums": enums,
-        "enum_paths": paths,
+        "schema files": files,
+        "schema fields": fields,
     }
 
 
@@ -370,17 +631,61 @@ def parse(text: str) -> dict[str, Any]:
             }
         )
 
+    # --- §0.8 states, §0.8 treatments, §1 frames -----------------------------
+    # A state's identity is its frame and its name together: 「Ready」 is a
+    # different state in every frame that has one, and a universe keyed by the
+    # bare name would call fifteen unrelated rows one contradictory definition.
+    states = Universe("states", "spec", "A")
+    for r in register:
+        frame = r["frame"].lstrip("§")
+        states.define(
+            f"{frame} · {r['state']}",
+            r,
+            content=(r["entry"], r["failure"], r["copy"], r["exit"]),
+            where=r["line"],
+            # Both qualified and bare: a cell inside §1.5 writes 「③」, prose
+            # elsewhere writes the state's own name. Two rows in one frame that
+            # claim the same spelling make that spelling ambiguous, which is a
+            # gap — 「Ready」 in two different frames is not.
+            aliases=tuple(
+                spelling
+                for name in state_spellings(r["state"])
+                for spelling in (name, f"{frame} · {name}")
+            ),
+        )
+
+    treatments = Universe("treatments", "spec", "A")
+    in_treat = False
+    for i, line in enumerate(lines):
+        if line.startswith("| # | Treatment |"):
+            in_treat = True
+            continue
+        if in_treat and not line.startswith("|"):
+            break
+        if not in_treat:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) == 3 and re.fullmatch(r"F\d+", cells[0]):
+            treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=i + 1)
+
+    frames = Universe("frames", "spec", "C")
+    for name, a, _b in spans:
+        if name.startswith("1."):
+            frames.define(name, a + 1, content=lines[a].strip(), where=a + 1)
+
     # --- §0.9 slots ----------------------------------------------------------
-    slots: set[str] = set()
+    slots = Universe("slots", "spec", "B")
     in_slots = False
-    for line in lines:
+    for i, line in enumerate(lines):
         if line.startswith("### 0.9"):
             in_slots = True
             continue
         if in_slots and line.startswith("### "):
             in_slots = False
         if in_slots and line.startswith("| `{{"):
-            slots.update(SLOT_RE.findall(line.split("|")[1]))
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            for slot in SLOT_RE.findall(cells[0]):
+                slots.define(slot, i + 1, content=tuple(cells[1:]), where=i + 1)
 
     # --- copy tables ---------------------------------------------------------
     # A copy row counts only inside a copy table, which starts at its own
@@ -388,8 +693,7 @@ def parse(text: str) -> dict[str, Any]:
     # this document also open with a backticked token — contract enum values,
     # ink names, schema fields — and reading those as key definitions is how a
     # checker invents keys nobody wrote.
-    defined: dict[str, dict[str, str]] = {}
-    duplicates: list[tuple[int, str, int]] = []
+    collected: list[dict[str, Any]] = []
     namespaces: set[str] = set()
     tables = 0
     rows = 0
@@ -422,18 +726,50 @@ def parse(text: str) -> dict[str, Any]:
         rows += 1
         if not ns:
             namespaces.add(key.split(".")[0])
-        # Two rows spelling the same *qualified* key are two answers to one
-        # question, and the reader has no way to know which one ships.
-        # Overwriting silently keeps the later one and reports nothing, so the
-        # checker would call a document with contradictory copy clean. The bare
-        # spelling is only an alias — `title` recurring once per namespace is
-        # the document reading normally, not a collision.
-        qualified = f"{ns}.{key}" if ns else key
-        prior = defined.get(qualified)
-        if prior and (prior["zh"], prior["en"]) != (zh, en):
-            duplicates.append((i + 1, qualified, prior["line"]))
-        for spelling in {key, qualified}:
-            defined[spelling] = {"zh": zh, "en": en, "line": i + 1, "raw": key}
+        collected.append(
+            {"key": key, "zh": zh, "en": en, "line": i + 1, "ns": ns,
+             "qualified": f"{ns}.{key}" if ns else key}
+        )
+
+    # One copy key is one canonical token, and an i18next plural pair is one key
+    # written on two rows — `count_one` and `count_other` answer the same
+    # question for different cardinalities, so they are assembled into the family
+    # before anything is declared. Declaring them separately and then teaching
+    # the comparison to forgive the collision is how a rule acquires an
+    # exception; assembling first means the duplicate rule needs no exception and
+    # still catches the case it exists for, two rows giving one key two texts.
+    copy = Universe("copy", "spec", "B")
+    families: dict[str, list[dict[str, Any]]] = {}
+    for row in collected:
+        stem = re.sub(r"_(?:one|other)$", "", row["qualified"])
+        families.setdefault(stem, []).append(row)
+    for canonical, members in families.items():
+        forms = [re.search(r"_(one|other)$", r["key"]) for r in members]
+        # A plural family is the only reason two rows may share one token, and
+        # it has to look like one: every member carries a form, and no form
+        # twice. Anything else sharing a token is two answers to one question,
+        # declared separately so the duplicate rule sees them.
+        is_family = (
+            len(members) > 1
+            and all(forms)
+            and len({f.group(1) for f in forms if f}) == len(members)
+        )
+        for group in [members] if is_family else [[r] for r in members]:
+            aliases = {canonical, f"models.hub.{canonical}"}
+            for row in group:
+                aliases |= {
+                    row["key"],
+                    re.sub(r"_(?:one|other)$", "", row["key"]),
+                    row["qualified"],
+                    f"models.hub.{row['qualified']}",
+                }
+            copy.define(
+                canonical,
+                sorted(group, key=lambda r: r["line"]),
+                content=sorted((r["zh"], r["en"]) for r in group),
+                where=min(r["line"] for r in group),
+                aliases=tuple(sorted(aliases)),
+            )
 
     # A citation is a copy key only when its first segment is a namespace some
     # copy table declares. That set is extracted in the same pass, so `api.md`,
@@ -472,9 +808,7 @@ def parse(text: str) -> dict[str, Any]:
 
     return {
         "register": register,
-        "slots": slots,
-        "defined": defined,
-        "duplicates": duplicates,
+        "universes": {u.name: u for u in (copy, slots, states, treatments, frames)},
         "tables": tables,
         "rows": rows,
         "refs": refs,
@@ -485,61 +819,16 @@ def parse(text: str) -> dict[str, Any]:
     }
 
 
-def resolves(key: str, defined: dict[str, Any]) -> bool:
-    """True when `key` names a defined copy row.
+def cited_rows(tokens: set[str], copy: Universe) -> set[int]:
+    """Lines of the copy rows `tokens` name, through the one comparison.
 
-    This is the gate's one permissive point, and it is permissive in exactly two
-    ways, both stated rather than hidden. A key may be written with or without
-    its `models.hub.` prefix, and prose may name a key by a unique suffix of it
-    (`status.ok` for `gateway.group.status.ok`) because that is how the document
-    reads when the namespace is obvious from the paragraph. A suffix that is not
-    unique does not resolve.
+    Two rules used to answer this question — class B's, which resolved a key by
+    unique suffix, and class D's, which resolved it by spelling — over the same
+    tables. Now there is one, and both classes ask it. Resolution is reported by
+    line because a key is written twice, bare inside its own table and qualified
+    outside it, and both spellings are the same row.
     """
-    if key in defined:
-        return True
-    bare = key[len("models.hub.") :] if key.startswith("models.hub.") else key
-    if bare in defined:
-        return True
-    for cand in (key, bare):
-        if cand.endswith("*") and any(d.startswith(cand.rstrip("*.")) for d in defined):
-            return True
-        if f"{cand}_one" in defined and f"{cand}_other" in defined:
-            return True
-        matches = {d for d in defined if d.endswith("." + cand)}
-        if len({defined[m]["line"] for m in matches}) == 1:
-            return True
-        plural = {d for d in defined if d.endswith("." + cand + "_one")}
-        if len(plural) == 1:
-            return True
-    return False
-
-
-def _bare(key: str) -> str:
-    return key[len("models.hub.") :] if key.startswith("models.hub.") else key
-
-
-def cited_rows(tokens: set[str], defined: dict[str, Any]) -> set[int]:
-    """Lines of the copy rows the backticked `tokens` name.
-
-    A citation is a token resolved against the copy tables, not a substring of
-    the prose. Searching one concatenated string let `fail.auth` count as a
-    citation of `auth`, and let a key count as cited because a *longer*
-    unrelated key contained it — the gate reporting covered for a comparison it
-    never made. Resolution is by line, because a key is written twice, bare
-    inside its own table and namespaced outside it, and both spellings are the
-    same row.
-    """
-    lines: set[int] = set()
-    for token in tokens:
-        for cand in (token, _bare(token)):
-            if cand.endswith("*"):
-                prefix = cand.rstrip("*.")
-                lines.update(d["line"] for s, d in defined.items() if s.startswith(prefix))
-                continue
-            for spelling in (cand, f"{cand}_one", f"{cand}_other"):
-                if spelling in defined:
-                    lines.add(defined[spelling]["line"])
-    return lines
+    return {row["line"] for t in tokens for rows in copy.resolve(t).payloads for row in rows}
 
 
 MAPPING_HEADER_RE = re.compile(r"^\|\s*`([A-Za-z][A-Za-z0-9_.\[\]]*)`((?:\s*`\[[a-z-]+\]`)*)\s*\|")
@@ -666,8 +955,12 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
     # this set is never a hypothesis about missing behaviour — it exists, it is
     # simply written on the wrong row — so a registered gap cannot excuse it.
     every_contracted_key: set[str] = set(auth["envelope"])
-    for row in auth["routes"].values():
+    for _token, row in auth["routes"].items():
         every_contracted_key |= row["keys"] | row["response_keys"]
+
+    symbols = Universe("repo symbols", "authority", "E")
+    auth["repo symbols"] = symbols
+    read_files: set[str] = set()
 
     guarded_named: dict[str, int] = {}
     for line_no, scope in claim_scopes(text.split("\n")):
@@ -681,9 +974,10 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
         named = {normalize_route(m, p) for m, p in ANY_ROUTE_RE.findall(scope)}
         for route in sorted(named):
             scale["routes"] += 1
-            if route not in auth["routes"]:
+            hit = auth["routes"].resolve(route)
+            if hit.empty:
                 add(f"L{line_no}", f"`{route}` is contracted by no `api.md` route row")
-            elif auth["routes"][route]["guarded"]:
+            elif hit.one["guarded"]:
                 guarded_named.setdefault(route, line_no)
 
         for m_body in BODY_RE.finditer(scope):
@@ -711,8 +1005,9 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
             )
             allowed: set[str] = set()
             for route in named:
-                row = auth["routes"].get(route)
-                if row:
+                hit = auth["routes"].resolve(route)
+                if not hit.empty:
+                    row = hit.one
                     allowed |= row["response_keys"] if answer else row["keys"]
                     if row["guarded"]:
                         allowed |= auth["envelope"]
@@ -735,13 +1030,18 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
                 if code != "409":
                     continue
                 scale["status branches"] += 1
-                unguarded = sorted(r for r in named if r in auth["routes"] and not auth["routes"][r]["guarded"])
+                unguarded = sorted(
+                    r
+                    for r in named
+                    for hit in [auth["routes"].resolve(r)]
+                    if not hit.empty and not hit.one["guarded"]
+                )
                 if unguarded:
                     add(f"L{line_no}", f"a 409 branch is claimed for {' / '.join(unguarded)}, which `api.md` does not guard")
 
         for schema in SCHEMA_CITE_RE.findall(scope):
             scale["schema citations"] += 1
-            if schema not in auth["schemas"]:
+            if auth["schema files"].resolve(schema).empty:
                 add(f"L{line_no}", f"`{schema}` is not a file in {CONTRACTS}")
                 continue
             claim = COUNT_CLAIM_RE.search(scope)
@@ -779,7 +1079,12 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
             path = root / rel
             if not path.is_file():
                 add(f"L{line_no}", f"`{rel}` is not a file in this repository")
-            elif symbol and symbol not in defined_symbols(path):
+                continue
+            if rel not in read_files:
+                read_files.add(rel)
+                for name in defined_symbols(path):
+                    symbols.define(f"{rel}:{name}", rel, content=rel, where=rel)
+            if symbol and symbols.resolve(f"{rel}:{symbol}").empty:
                 add(f"L{line_no}", f"`{rel}` defines no `{symbol}`")
 
     # A route `api.md` guards can be refused. The register is where a refusal
@@ -816,13 +1121,18 @@ def authority_claims(text: str, auth: dict[str, Any], root: Path, register: list
     # may legitimately occupy two rows.
     for line_no, field, drawn, cited, contracted in mapping_tables(text.split("\n")):
         scale["contract mapping tables"] += 1
-        owners = {
-            path: values
-            for name, decls in auth["enum_paths"].items()
-            if not cited or name in cited
-            for path, values in decls.get(field.split(".")[-1], {}).items()
-            if path == field or path.endswith(f".{field}")
-        }
+        hit = auth["schema fields"].resolve(field)
+        if cited:
+            # The lead-in named which schemas it is quoting, so the citation is
+            # `<file>::<field>` and a field of the same name in another file is
+            # not an answer to it.
+            hit = Match(
+                hit.universe,
+                field,
+                tuple(t for c in sorted(cited) for t in auth["schema fields"].resolve(f"{c}::{field}").hits),
+                tuple(p for c in sorted(cited) for p in auth["schema fields"].resolve(f"{c}::{field}").payloads),
+            )
+        owners = {p["path"]: p["values"] for p in hit.payloads}
         if not owners:
             # A header that carries `[contract]` has asserted that some schema
             # owns this vocabulary. Skipping the lookup when nothing resolves is
@@ -867,6 +1177,12 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
     p = parse(text)
     reg = p["register"]
     findings: list[dict[str, str]] = []
+
+    copy_u = p["universes"]["copy"]
+    slot_u = p["universes"]["slots"]
+    state_u = p["universes"]["states"]
+    treatment_u = p["universes"]["treatments"]
+    frame_u = p["universes"]["frames"]
 
     states = {r["state"] for r in reg}
     reg_frames = {r["frame"].lstrip("§") for r in reg}
@@ -913,16 +1229,32 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         if not cell or cell == "—":
             add("A", f"L{r['line']}", f"「{r['state']}」 states no failure treatment")
             continue
-        if TREAT_RE.search(cell):
+        # A treatment is resolved, not pattern-matched. `TREAT_RE` accepted any
+        # `F1`–`F5` and could not see an `F6`: the regex simply failed to match
+        # and the cell fell through to the *next* branch, where a `→ State` or
+        # nothing at all decided the verdict. A sixth treatment is the one thing
+        # §0.8 says is closed, and it was the one thing the check could not say.
+        cited_treatments = sorted(set(re.findall(r"\bF\d+\b", cell)))
+        if cited_treatments:
+            for t in cited_treatments:
+                if treatment_u.resolve(t).empty:
+                    add("A", f"L{r['line']}", f"「{r['state']}」 names {t}, which §0.8's closed set does not define")
             continue
         if re.search(r"(?:As |→\s*)§\d", cell):
             continue
         goto = GOTO_RE.search(cell)
+        frame = r["frame"].lstrip("§")
         if goto:
             targets = [t.strip() for t in re.split(r"[/,]| or ", goto.group(1)) if t.strip()]
-            if targets and all(
-                any(st == t or st.startswith(t) or t in st for st in states) for t in targets
-            ):
+            # `any(st == t or st.startswith(t) or t in st ...)` — a state named
+            # 「Ready」 vouched for a cell pointing at 「Read」, and a cell
+            # pointing at 「Saving」 was answered by 「Saving order」 in a frame
+            # that has both. A target now resolves against this row's own frame
+            # (「Ready」 is a different state in every frame) and has to land on
+            # exactly one row: none means the exit points nowhere, several means
+            # it points at two states at once, and neither is an exit.
+            hits = [state_u.resolve(f"{frame} · {t}") for t in targets]
+            if targets and all(not h.empty and not h.ambiguous for h in hits):
                 continue
         add("A", f"L{r['line']}", f"「{r['state']}」 failure cell names no F1–F5 and no known state: {cell!r}")
 
@@ -947,7 +1279,7 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         if in_scope_note or GAP_ROW_RE.match(line):
             accounted.update(normalize_route(m, path) for m, path in ANY_ROUTE_RE.findall(line))
     contracted_mutations = sorted(
-        r for r in auth["routes"] if r.startswith(("POST ", "PUT ", "PATCH ", "DELETE "))
+        r for r in auth["routes"].tokens() if r.startswith(("POST ", "PUT ", "PATCH ", "DELETE "))
     )
     for route in contracted_mutations:
         if route in accounted:
@@ -962,18 +1294,27 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         for k in KEY_REF_RE.findall(r["copy"]):
             cited.add((k, f"§0.8 L{r['line']}"))
     for key, where in sorted(cited):
-        if not resolves(key, p["defined"]):
+        hit = copy_u.resolve(key)
+        if hit.empty:
             add("B", where, f"key `{key}` is cited and never defined")
-    for key, d in sorted(p["defined"].items()):
-        if key != d["raw"]:
-            continue
-        if not d["en"]:
-            add("B", f"L{d['line']}", f"key `{key}` has no English column")
-        for slot in sorted(set(SLOT_RE.findall(d["zh"] + d["en"]))):
-            if slot not in p["slots"]:
-                add("B", f"L{d['line']}", f"key `{key}` interpolates `{{{{{slot}}}}}` with no §0.9 row")
-    for line_no, spelling, prior_line in p["duplicates"]:
-        add("B", f"L{line_no}", f"key `{spelling}` is defined twice with different text (also L{prior_line})")
+        elif hit.ambiguous:
+            add(
+                "B",
+                where,
+                f"key `{key}` is cited and answers to {len(hit.hits)} definitions "
+                f"({', '.join(hit.hits)}); the citation names none of them",
+            )
+    for _token, rows_ in copy_u.items():
+        for row in rows_:
+            if not row["en"]:
+                add("B", f"L{row['line']}", f"key `{row['key']}` has no English column")
+            for slot in sorted(set(SLOT_RE.findall(row["zh"] + row["en"]))):
+                if slot_u.resolve(slot).empty:
+                    add(
+                        "B",
+                        f"L{row['line']}",
+                        f"key `{row['key']}` interpolates `{{{{{slot}}}}}` with no §0.9 row",
+                    )
 
     # ---- C ------------------------------------------------------------------
     for r in reg:
@@ -982,6 +1323,14 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
     for sec in sorted(p["inventories"]):
         if sec not in reg_frames:
             add("C", f"§{sec}", f"§{sec} draws an element inventory and has no §0.8 row")
+    # And the mirror: a register row naming a frame that is not a §1 section.
+    # Nothing asked it, so a row could point at §1.60 — or at a section deleted
+    # in a later round — and its whole frame would quietly stop being checked,
+    # because every other class reaches a row *through* its frame.
+    for frame in sorted(reg_frames):
+        if frame_u.resolve(frame).empty:
+            row = next(r for r in reg if r["frame"].lstrip("§") == frame)
+            add("C", f"L{row['line']}", f"§0.8 rows are filed under §{frame}, which is no §1 section")
     # A section that splits its outcomes by origin — `②` reached by 添加, `②′`
     # by 拉取型号 — has made the origin part of what a state *is*. Every later
     # outcome then has an answer for both origins, and a failure written once in
@@ -1007,17 +1356,41 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
             )
 
     # ---- D ------------------------------------------------------------------
-    reg_cited = cited_rows({t for r in reg for t in KEY_REF_RE.findall(r["copy"])}, p["defined"])
-    conditions = [k for k, d in p["defined"].items() if k == d["raw"] and CONDITION_RE.search(k)]
-    for key in sorted(conditions):
-        d = p["defined"][key]
-        if d["line"] in reg_cited:
+    reg_cited = cited_rows({t for r in reg for t in KEY_REF_RE.findall(r["copy"])}, copy_u)
+    conditions = [
+        row
+        for _token, rows_ in copy_u.items()
+        for row in rows_
+        if CONDITION_RE.search(row["key"])
+    ]
+    for row in sorted(conditions, key=lambda r: r["line"]):
+        if row["line"] in reg_cited:
             continue
-        add("D", f"L{d['line']}", f"condition key `{key}` is cited by no §0.8 row")
+        add("D", f"L{row['line']}", f"condition key `{row['key']}` is cited by no §0.8 row")
 
     # ---- E ------------------------------------------------------------------
     e_findings, e_scale = authority_claims(text, auth, ROOT, reg)
     findings.extend(e_findings)
+
+    # ---- the duplicate rule, for every universe at once ---------------------
+    # Not a class. One canonical token declared twice with different content is
+    # the same defect wherever it happens, so it is reported wherever it
+    # happens, attributed to the class that reads the table it lives in. Before
+    # this, exactly one table was checked for it — the copy tables — because
+    # that is the one a reviewer happened to catch; §0.9, §0.8 and `api.md`
+    # could each say a thing twice and the later row silently won.
+    universes = list(p["universes"].values()) + [
+        auth["routes"], auth["schema files"], auth["schema fields"], auth["repo symbols"]
+    ]
+    for u in universes:
+        for token, first, second in u.duplicates:
+            where = f"L{second}" if isinstance(second, int) else str(second)
+            prior = f"L{first}" if isinstance(first, int) else str(first)
+            add(
+                u.owner,
+                where,
+                f"`{token}` is defined twice in {u.name} with different content (also {prior})",
+            )
 
     scale = {
         "register rows": len(reg),
@@ -1027,11 +1400,14 @@ def check(target: str | Path = SPEC) -> dict[str, Any]:
         "mutating calls scanned": len(seen),
         "contracted mutations to reach": len(contracted_mutations),
         "copy tables / rows": f"{p['tables']} / {p['rows']}",
-        "copy keys defined": len({d["raw"] for d in p["defined"].values()}),
+        "copy keys defined": len(copy_u),
         "condition-named keys": len(conditions),
-        "interpolation slots declared": len(p["slots"]),
+        "interpolation slots declared": len(slot_u),
+        "failure treatments declared": len(treatment_u),
+        "frame sections declared": len(frame_u),
         "prose key references": len(p["refs"]),
         "authority: contracted routes read": len(auth["routes"]),
+        "authority: schema enum declarations": len(auth["schema fields"]),
         "authority: route claims": e_scale["routes"],
         "authority: request/response body claims": e_scale["bodies"],
         "authority: guarded-status claims": e_scale["status branches"],
@@ -1078,16 +1454,9 @@ def main() -> int:
     by: dict[str, list[dict[str, str]]] = {}
     for f in r["findings"]:
         by.setdefault(f["class"], []).append(f)
-    labels = {
-        "A": "mutating call with no treatment, or a treatment that does not exist",
-        "B": "copy cited but not defined, missing English, or an undeclared slot",
-        "C": "state with no exit, or a frame with no register row",
-        "D": "condition key no state cites",
-        "E": "a claim about the system that its authority file does not make",
-    }
-    for cls in "ABCDE":
+    for cls in CLASSES:
         items = by.get(cls, [])
-        print(f"[{cls}] {labels[cls]}: {len(items)}")
+        print(f"[{cls}] {CLASS_LABELS[cls]}: {len(items)}")
         for f in items:
             print(f"   {f['where']:<16} {f['message']}")
     print(f"\ntotal gaps: {len(r['findings'])}")

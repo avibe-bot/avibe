@@ -4,6 +4,7 @@ import copy
 import json
 from dataclasses import fields
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from jsonschema import Draft7Validator, FormatChecker, ValidationError
@@ -305,167 +306,455 @@ def test_model_hub_ui_state_completeness_is_generated_from_live_files():
     assert result["ok"], result["findings"]
 
 
-@pytest.mark.parametrize(
-    "label,before,after,expect",
-    [
-        # The defect this gate was built for: a state issues a call and no row
-        # states what happens when it fails. This is the shape that survived
-        # review at f22c2a59 and had to be found by a human.
-        (
-            "treatment removed",
-            "F4 — `POST /api/models/oauth/cancel` is issued as the dialog",
-            "—",
-            "A",
-        ),
-        # The same row, treatment misnamed rather than missing.
-        ("treatment misnamed", "| F4 — `POST /api/models/oauth", "| F9 — `POST /api/models/oauth", "A"),
-        # A register row pointing at copy nobody wrote.
-        ("key cited, never defined", "`shell.notStarted` | Run pill", "`shell.notStartd` | Run pill", "B"),
-        # A key that would ship with no English string.
-        (
-            "English column dropped",
-            "| `install.progress` `[derived]` | 正在安装… | Installing… |",
-            "| `install.progress` `[derived]` | 正在安装… |  |",
-            "B",
-        ),
-        # A slot promised by a string with nothing declaring what fills it.
-        (
-            "undeclared slot",
-            "| `install.retry` `[derived]` | 重试 | Try again |",
-            "| `install.retry` `[derived]` | 重试 {{attempt}} | Try again {{attempt}} |",
-            "B",
-        ),
-        # A state a user can enter and not leave.
-        (
-            "exit removed",
-            "| 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |",
-            "| — |",
-            "C",
-        ),
-        # The substring comparison this gate used to do answered yes for every
-        # prefix, so a register row could drift onto a route that does not exist
-        # and still vouch for the real one. Exact tokens are what closes it.
-        (
-            "register row drifts onto a longer route",
-            "F4 — `POST /api/models/oauth/cancel` is issued as the dialog",
-            "F4 — `POST /api/models/oauth/cancellation` is issued as the dialog",
-            "A",
-        ),
-        # A route the spec names that the contract does not have. This is the
-        # class the round-10 review found by hand, six times.
-        (
-            "route literal drifts off api.md",
-            "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
-            "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}`",
-            "E",
-        ),
-        # The same sentence, right route and wrong body: `{hops}` belongs to the
-        # per-model chain save, and sending it here was a real finding.
-        (
-            "body key belongs to another route",
-            "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
-            "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}`",
-            "E",
-        ),
-        # A total rendering of a contracted vocabulary that quietly drops a row.
-        # The author cannot see the schema while writing the table, so nothing
-        # but a set comparison catches this.
-        (
-            "mapping table drops a contracted value",
-            "| `waiting` | 网关 · 等待重试 |",
-            "| `wating` | 网关 · 等待重试 |",
-            "E",
-        ),
-        # The same table, no longer saying which of two same-named declarations
-        # it renders. `supply_status` exists per backend and per named Agent,
-        # and reading one as the other was the substitution round 10 opened on.
-        (
-            "mapping table stops naming which declaration it renders",
-            "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
-            "| `supply_status` `[contract]` | Subtitle | Key |",
-            "E",
-        ),
-        # A repo symbol cited as evidence that no longer exists at that path.
-        ("cited symbol no longer exists", "service.py:list_agents", "service.py:list_agent_rows", "E"),
-        # A section that answers its other failures for both origins, with one
-        # failure left written once — the reader cannot tell whether pulling
-        # from a stopped engine fails the way adding does.
-        ("origin half deleted", "| ⑥′ Engine unavailable", "| ⑥″ Engine unavailable", "C"),
-        # `[contract-gap]` is also the marker that tells a checker to stop
-        # asking. Pointed at a number no §0.5 row defines, it must silence
-        # nothing at all.
-        (
-            "gap marker cites an unregistered number",
-            "`[contract]` `[contract-gap]` G-15 carries",
-            "`[contract]` `[contract-gap]` G-99 carries",
-            "A",
-        ),
-        # Round 11. `api.md` puts request and response in one cell, and a check
-        # that unions the two sides accepts the answer's vocabulary as a legal
-        # request body. Dropping the word that introduces this body as an answer
-        # must move it to the request side and fail there.
-        (
-            "a response body written as the request",
-            "and returns `{agent: AgentSupply}`",
-            "and sends `{agent: AgentSupply}`",
-            "E",
-        ),
-        # Round 11. A `[contract]` header asserts that some schema owns the
-        # vocabulary below it. When the field name resolves to no declaration,
-        # the set comparison has nothing to compare and used to skip in silence
-        # — the one outcome a gate that exists to catch drift may not have.
-        (
-            "mapping table names a field no schema declares",
-            "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
-            "| `AgentSupply.supply_stat` `[contract]` | Subtitle | Key |",
-            "E",
-        ),
-        # Round 11. Condition keys are stored bare and cited namespace-qualified,
-        # so the citation test has to resolve both spellings to one copy row.
-        # Matching on prefixes instead let a citation drift onto a longer key and
-        # still vouch for the row it left behind.
-        (
-            "a citation drifts onto a longer key",
-            "`sourceDetail.fail.tier`, `sourceDetail.retry`",
-            "`sourceDetail.fail.tiers`, `sourceDetail.retry`",
-            "D",
-        ),
-        # Round 11. Two rows in one table under one key ship whichever the
-        # loader read last. The key is legitimately re-used across namespaces —
-        # every table has a `title` — so only the qualified spelling collides.
-        (
-            "one qualified key defined twice",
-            "| `tiers.addFirst` | + 添加档位 | + Add tier |",
-            "| `tiers.add` | + 添加档位 | + Add tier |",
-            "B",
-        ),
-        # Round 11. The mirror of class A, and the generator behind five
-        # findings across two heads: a contracted mutation no surface reaches.
-        # Out of scope is a legitimate answer; not saying anything is not.
-        (
-            "a contracted mutation stops being accounted for",
-            "| `POST /api/models/migration/scan` | The migration surface.",
-            "| `POST /api/models/migration/scans` | The migration surface.",
-            "A",
-        ),
-    ],
+class GateCase(NamedTuple):
+    """One reintroduced defect, filed by what it proves rather than by its bug.
+
+    `cls` is the gate class expected to report it, `universe` the named
+    inventory the comparison runs against (None when the case exercises a
+    class's own logic rather than the shared comparator), and `rule` one of the
+    comparator's three structural rules — or `arm`, for a class-logic case that
+    predates them and still has to keep working.
+    """
+
+    cls: str
+    universe: str | None
+    rule: str
+    label: str
+    before: str
+    after: str
+    says: str
+
+
+# The three rules, restated as what a mutation has to show:
+#
+#   token      — a *near miss*: a name a substring, prefix or suffix matcher
+#                would have credited. This is the one that regressed twice.
+#   empty      — a *total miss*: nothing resolves, and the gate reports it
+#                instead of skipping the comparison in silence.
+#   duplicate  — one canonical token declared twice with different content.
+#
+# Filed by (class, universe, rule) rather than by bug, because the defect this
+# suite exists to prevent is not any single bug: it is a new class arriving with
+# a comparison of its own and nobody noticing which rules it forgot.
+GATE_MUTATIONS: tuple[GateCase, ...] = (
+    # --- A: routes, states, treatments ------------------------------------
+    GateCase(
+        "A", "routes", "token",
+        "register row drifts onto a longer route",
+        "F4 — `POST /api/models/oauth/cancel` is issued as the dialog",
+        "F4 — `POST /api/models/oauth/cancellation` is issued as the dialog",
+        "is named by no §0.8 row",
+    ),
+    GateCase(
+        "A", "states", "token",
+        "an exit points at a prefix of a real state",
+        "| → Unreachable | — | Payload arrives → Ready |",
+        "| → Unreach | — | Payload arrives → Ready |",
+        "names no F1–F5 and no known state",
+    ),
+    GateCase(
+        "A", "states", "empty",
+        "an exit points at a state nobody wrote",
+        "| → Unreachable | — | Payload arrives → Ready |",
+        "| → Nowhere at all | — | Payload arrives → Ready |",
+        "names no F1–F5 and no known state",
+    ),
+    GateCase(
+        "A", "states", "duplicate",
+        "two rows in one frame under one state name",
+        "| §1.0 | Impaired |",
+        "| §1.0 | Ready |",
+        "`1.0 · Ready` is defined twice in states",
+    ),
+    GateCase(
+        "A", "treatments", "token",
+        "the treatment a cell names becomes a prefix of the one defined",
+        "| F1 | Retry in place |",
+        "| F10 | Retry in place |",
+        "names F1, which §0.8's closed set does not define",
+    ),
+    GateCase(
+        "A", "treatments", "empty",
+        "treatment misnamed",
+        "| F4 — `POST /api/models/oauth",
+        "| F9 — `POST /api/models/oauth",
+        "which §0.8's closed set does not define",
+    ),
+    GateCase(
+        "A", "treatments", "duplicate",
+        "§0.8's closed set defines one number twice",
+        "| F2 | Keep the last good result |",
+        "| F1 | Keep the last good result |",
+        "`F1` is defined twice in treatments",
+    ),
+    # The defect this gate was built for: a state issues a call and no row
+    # states what happens when it fails. This is the shape that survived review
+    # at f22c2a59 and had to be found by a human.
+    #
+    # The anchor is the whole cell. Written as a fragment, the replacement left
+    # the rest of the sentence in place, class A fired for an unrelated reason —
+    # the route was no longer covered — and the case passed a class-only
+    # assertion while the arm it was written for never ran.
+    GateCase(
+        "A", None, "arm",
+        "treatment removed",
+        "| F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes "
+        "and its result is not awaited (D-15) |",
+        "| — |",
+        "states no failure treatment",
+    ),
+    # `[contract-gap]` is also the marker that tells a checker to stop asking.
+    # Pointed at a number no §0.5 row defines, it must silence nothing at all.
+    GateCase(
+        "A", "routes", "arm",
+        "gap marker cites an unregistered number",
+        "`[contract]` `[contract-gap]` G-15 carries",
+        "`[contract]` `[contract-gap]` G-99 carries",
+        "is named by no §0.8 row",
+    ),
+    # The mirror of class A, and the generator behind five findings across two
+    # heads: a contracted mutation no surface reaches. Out of scope is a
+    # legitimate answer; not saying anything is not.
+    GateCase(
+        "A", "routes", "arm",
+        "a contracted mutation stops being accounted for",
+        "| `POST /api/models/migration/scan` | The migration surface.",
+        "| `POST /api/models/migration/scans` | The migration surface.",
+        "is contracted and reached by no §0.8 row",
+    ),
+    # --- B: copy, slots -----------------------------------------------------
+    GateCase(
+        "B", "copy", "token",
+        "a citation truncated to a prefix two keys share",
+        "`shell.notStarted` | Run pill",
+        "`shell.not` | Run pill",
+        "key `shell.not` is cited and never defined",
+    ),
+    GateCase(
+        "B", "copy", "empty",
+        "key cited, never defined",
+        "`shell.notStarted` | Run pill",
+        "`shell.notStartd` | Run pill",
+        "is cited and never defined",
+    ),
+    # Two rows in one table under one key ship whichever the loader read last.
+    # The key is legitimately re-used across namespaces — every table has a
+    # `title` — so only the qualified spelling collides.
+    GateCase(
+        "B", "copy", "duplicate",
+        "one qualified key defined twice",
+        "| `tiers.addFirst` | + 添加档位 | + Add tier |",
+        "| `tiers.add` | + 添加档位 | + Add tier |",
+        "is defined twice in copy",
+    ),
+    GateCase(
+        "B", "slots", "token",
+        "a declared slot truncated to a prefix of the one strings use",
+        "| `{{host}}` | The source's host",
+        "| `{{hos}}` | The source's host",
+        "interpolates `{{host}}` with no §0.9 row",
+    ),
+    GateCase(
+        "B", "slots", "empty",
+        "undeclared slot",
+        "| `install.retry` `[derived]` | 重试 | Try again |",
+        "| `install.retry` `[derived]` | 重试 {{attempt}} | Try again {{attempt}} |",
+        "with no §0.9 row",
+    ),
+    GateCase(
+        "B", "slots", "duplicate",
+        "§0.9 declares one slot twice",
+        "| `{{source}}` | A source's display name. | Always present |",
+        "| `{{host}}` | A source's display name. | Always present |",
+        "`host` is defined twice in slots",
+    ),
+    # A key that would ship with no English string.
+    GateCase(
+        "B", None, "arm",
+        "English column dropped",
+        "| `install.progress` `[derived]` | 正在安装… | Installing… |",
+        "| `install.progress` `[derived]` | 正在安装… |  |",
+        "has no English column",
+    ),
+    # --- C: frames ----------------------------------------------------------
+    GateCase(
+        "C", "frames", "token",
+        "a register row filed under a prefix of a real section",
+        "| §1.0 | Impaired |",
+        "| §1 | Impaired |",
+        "filed under §1, which is no §1 section",
+    ),
+    GateCase(
+        "C", "frames", "empty",
+        "a register row filed under a section that does not exist",
+        "| §1.0 | Impaired |",
+        "| §1.60 | Impaired |",
+        "filed under §1.60, which is no §1 section",
+    ),
+    GateCase(
+        "C", "frames", "duplicate",
+        "two §1 headings claim one number",
+        "### 1.9 Frame 10 `g7MOA4`",
+        "### 1.8 Frame 10 `g7MOA4`",
+        "`1.8` is defined twice in frames",
+    ),
+    # A state a user can enter and not leave.
+    GateCase(
+        "C", None, "arm",
+        "exit removed",
+        "| 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |",
+        "| — |",
+        "has no exit",
+    ),
+    # A section that answers its other failures for both origins, with one
+    # failure left written once — the reader cannot tell whether pulling from a
+    # stopped engine fails the way adding does.
+    GateCase(
+        "C", None, "arm",
+        "origin half deleted",
+        "| ⑥′ Engine unavailable",
+        "| ⑥″ Engine unavailable",
+        "has no ′ row",
+    ),
+    # --- D: copy ------------------------------------------------------------
+    # Condition keys are stored bare and cited namespace-qualified, so the
+    # citation test has to resolve both spellings to one copy row. Matching on
+    # prefixes instead let a citation drift onto a longer key and still vouch
+    # for the row it left behind.
+    GateCase(
+        "D", "copy", "token",
+        "a citation drifts onto a longer key",
+        "`sourceDetail.fail.tier`, `sourceDetail.retry`",
+        "`sourceDetail.fail.tiers`, `sourceDetail.retry`",
+        "condition key `fail.tier` is cited by no §0.8 row",
+    ),
+    GateCase(
+        "D", "copy", "empty",
+        "the row a live citation names is renamed out from under it",
+        "| `fail.tier` `[derived]` | 档位没保存上",
+        "| `fail.tierZ` `[derived]` | 档位没保存上",
+        "condition key `fail.tierZ` is cited by no §0.8 row",
+    ),
+    # --- E: routes, schema files, schema fields, repo symbols ---------------
+    GateCase(
+        "E", "routes", "token",
+        "a route extended past a real one by one segment",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
+        "`PUT /api/models/agents/<backend>/sources/order` with `{order: string[]}`",
+        "is contracted by no `api.md` route row",
+    ),
+    # A route the spec names that the contract does not have. This is the class
+    # the round-10 review found by hand, six times.
+    GateCase(
+        "E", "routes", "empty",
+        "route literal drifts off api.md",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
+        "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}`",
+        "is contracted by no `api.md` route row",
+    ),
+    GateCase(
+        "E", "schema files", "token",
+        "a schema citation extended past a real filename",
+        "`source.schema.json` pins it non-null",
+        "`agent-source.schema.json` pins it non-null",
+        "`agent-source.schema.json` is not a file in",
+    ),
+    GateCase(
+        "E", "schema files", "empty",
+        "a schema citation naming no file",
+        "`source.schema.json` pins it non-null",
+        "`sources.schema.json` pins it non-null",
+        "`sources.schema.json` is not a file in",
+    ),
+    # The mapping table no longer saying which of two same-named declarations it
+    # renders. `supply_status` exists per backend and per named Agent, and
+    # reading one as the other was the substitution round 10 opened on.
+    GateCase(
+        "E", "schema fields", "token",
+        "mapping table stops naming which declaration it renders",
+        "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
+        "| `supply_status` `[contract]` | Subtitle | Key |",
+        "independent places",
+    ),
+    # A `[contract]` header asserts that some schema owns the vocabulary below
+    # it. When the field name resolves to no declaration, the set comparison has
+    # nothing to compare and used to skip in silence — the one outcome a gate
+    # that exists to catch drift may not have.
+    GateCase(
+        "E", "schema fields", "empty",
+        "mapping table names a field no schema declares",
+        "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
+        "| `AgentSupply.supply_stat` `[contract]` | Subtitle | Key |",
+        "the table maps no contracted field",
+    ),
+    GateCase(
+        "E", "repo symbols", "token",
+        "a cited symbol truncated to a prefix of the real one",
+        "service.py:list_agents",
+        "service.py:list_agent",
+        "defines no `list_agent`",
+    ),
+    GateCase(
+        "E", "repo symbols", "empty",
+        "cited symbol no longer exists",
+        "service.py:list_agents",
+        "service.py:list_agent_rows",
+        "defines no `list_agent_rows`",
+    ),
+    # A total rendering of a contracted vocabulary that quietly drops a row. The
+    # author cannot see the schema while writing the table, so nothing but a set
+    # comparison catches this.
+    GateCase(
+        "E", "schema fields", "arm",
+        "mapping table drops a contracted value",
+        "| `waiting` | 网关 · 等待重试 |",
+        "| `wating` | 网关 · 等待重试 |",
+        "renders",
+    ),
+    # The right route and the wrong body: `{hops}` belongs to the per-model
+    # chain save, and sending it here was a real finding.
+    GateCase(
+        "E", "routes", "arm",
+        "body key belongs to another route",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}`",
+        "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}`",
+        "not contracted for",
+    ),
+    # `api.md` puts request and response in one cell, and a check that unions
+    # the two sides accepts the answer's vocabulary as a legal request body.
+    # Dropping the word that introduces this body as an answer must move it to
+    # the request side and fail there.
+    GateCase(
+        "E", "routes", "arm",
+        "a response body written as the request",
+        "and returns `{agent: AgentSupply}`",
+        "and sends `{agent: AgentSupply}`",
+        "not contracted for",
+    ),
 )
-def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, label, before, after, expect):
+
+
+# A cell with no case, and the reason it has none. An exemption is written here
+# or the tiling test fails; it is never an omission nobody had to justify.
+UNREACHABLE_BY_CLASS: dict[tuple[str, str], str] = {
+    ("D", "duplicate"): (
+        "class D defines nothing. It reads the copy universe class B fills, and a "
+        "copy key declared twice is reported once, by B — the (B, copy, duplicate) case."
+    ),
+    ("E", "duplicate"): (
+        "class E resolves spec citations against the contract files, and the spec "
+        "declares nothing E resolves. The authority-side universes still carry the "
+        "rule; it is proved directly, by "
+        "test_authority_side_universes_report_a_duplicate_definition, because the "
+        "mutation harness may not edit a contract file."
+    ),
+}
+
+UNREACHABLE_BY_UNIVERSE: dict[tuple[str, str], str] = {
+    (name, "duplicate"): (
+        f"`{name}` is built from the frozen contract files, which this harness must not "
+        "edit. Its duplicate rule is proved directly instead, by "
+        "test_authority_side_universes_report_a_duplicate_definition."
+    )
+    for name in ("routes", "schema files", "schema fields", "repo symbols")
+}
+
+
+@pytest.mark.parametrize("case", GATE_MUTATIONS, ids=lambda c: f"{c.cls}/{c.rule}/{c.label}")
+def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: GateCase):
     """A gate nobody has watched fail is a gate that reports green.
 
-    Each case reintroduces one defect class into the live spec and asserts the
-    checker names it. Without this, `ok is True` above proves only that the
-    script ran.
+    Each case reintroduces one defect into the live spec and asserts the checker
+    names it — the right class *and* the right sentence. Class alone is not
+    enough: a mutation that trips some other arm of the same class would pass
+    while the rule it was written for stayed dead.
     """
     spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
-    assert spec.count(before) == 1, f"{label}: anchor no longer unique in the spec"
+    assert spec.count(case.before) == 1, f"{case.label}: anchor no longer unique in the spec"
 
     mutated = tmp_path / "mutated.md"
-    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+    mutated.write_text(spec.replace(case.before, case.after, 1), encoding="utf-8")
     result = check_model_hub_ui_states(mutated)
 
-    assert not result["ok"], f"{label}: the gate did not notice"
-    assert expect in {f["class"] for f in result["findings"]}, (label, result["findings"])
+    assert not result["ok"], f"{case.label}: the gate did not notice"
+    said = [f["message"] for f in result["findings"] if f["class"] == case.cls]
+    assert any(case.says in m for m in said), (case.label, case.says, result["findings"])
+
+
+def test_gate_mutation_suite_is_tiled_over_every_class_and_every_rule():
+    """The suite is filed by (class, universe, rule), and every cell is answered.
+
+    The gate grew one class at a time, each writing its own comparison, so each
+    new class was a fresh chance to repeat the same mistake — and the tests grew
+    the same way, one case per bug a reviewer happened to find. Tiling is what
+    stops that: a class or a universe added without its cases fails here, before
+    it can ship a comparison nobody has watched fail.
+    """
+    from scripts.check_model_hub_ui_states import CLASS_UNIVERSES, CLASSES, RULES
+
+    known_universes = {u for us in CLASS_UNIVERSES.values() for u in us} | {
+        "copy", "slots", "states", "treatments", "frames"
+    }
+    for case in GATE_MUTATIONS:
+        assert case.cls in CLASSES, f"{case.label}: class {case.cls} is not a gate class"
+        assert case.rule in (*RULES, "arm"), f"{case.label}: {case.rule} is not a rule"
+        assert case.universe is None or case.universe in known_universes, (
+            f"{case.label}: {case.universe} is not a universe the gate builds"
+        )
+
+    by_class = {(c.cls, c.rule) for c in GATE_MUTATIONS}
+    by_universe = {(c.universe, c.rule) for c in GATE_MUTATIONS if c.universe}
+
+    missing = [
+        (cls, rule)
+        for cls in CLASSES
+        for rule in RULES
+        if (cls, rule) not in by_class and (cls, rule) not in UNREACHABLE_BY_CLASS
+    ]
+    assert not missing, f"classes with no case and no declared reason: {missing}"
+
+    missing = [
+        (name, rule)
+        for name in sorted(known_universes)
+        for rule in RULES
+        if (name, rule) not in by_universe and (name, rule) not in UNREACHABLE_BY_UNIVERSE
+    ]
+    assert not missing, f"universes with no case and no declared reason: {missing}"
+
+    # An exemption that has been overtaken by a real case is a lie the next
+    # reader would believe, and a reason nobody wrote is not an exemption.
+    for cell, why in {**UNREACHABLE_BY_CLASS, **UNREACHABLE_BY_UNIVERSE}.items():
+        assert why.strip(), f"{cell} is exempted with no reason"
+    for cell in UNREACHABLE_BY_CLASS:
+        assert cell not in by_class, f"{cell} is exempted and also covered"
+    for cell in UNREACHABLE_BY_UNIVERSE:
+        assert cell not in by_universe, f"{cell} is exempted and also covered"
+
+
+def test_authority_side_universes_report_a_duplicate_definition():
+    """The rule the spec cannot exercise, proved on the comparator itself.
+
+    `routes`, `schema files`, `schema fields` and `repo symbols` are filled from
+    the frozen contract files, so no spec mutation can make one of them declare a
+    token twice. Prove it can fail — two rows, one token, different content — and
+    prove it passes on the real files, which is the half a fixture alone leaves
+    out.
+    """
+    from scripts.check_model_hub_ui_states import ROOT, Universe, load_authorities
+
+    for side in ("routes", "schema files", "schema fields", "repo symbols"):
+        u = Universe(side, "authority", "E")
+        u.define("t", {"a": 1}, content="first", where="one.md")
+        u.define("t", {"a": 2}, content="second", where="two.md")
+        assert u.duplicates == [("t", "one.md", "two.md")], side
+        # The same token with the same content is one row read twice, not two
+        # answers — restating a route in a second table may not become a gap.
+        u.define("t", {"a": 1}, content="first", where="three.md")
+        assert len(u.duplicates) == 1, side
+
+    auth = load_authorities(ROOT)
+    for side in ("routes", "schema files", "schema fields"):
+        assert not auth[side].duplicates, (side, auth[side].duplicates)
 
 
 def test_model_hub_ui_gate_target_zero_classes_prove_their_own_zero():
