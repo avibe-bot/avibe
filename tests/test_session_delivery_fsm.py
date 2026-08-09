@@ -35,6 +35,7 @@ from core.session_turns import (
     DeliveryRequest,
     SessionTurnManager,
     Turn,
+    _scheduled_merge_key,
 )
 from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
@@ -572,6 +573,100 @@ def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None
     assert alice["state"] == "claimed"
     assert bob["turn_id"] is None
     assert bob["state"] == "queued"
+
+
+def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
+    def row(source_session_id: str) -> dict:
+        return {
+            "metadata": {
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": source_session_id,
+                    }
+                }
+            }
+        }
+
+    assert _scheduled_merge_key(row("source-a")) != _scheduled_merge_key(row("source-b"))
+    assert _scheduled_merge_key(row("source-a")) == _scheduled_merge_key(row("source-a"))
+
+    agent_row = row("")
+    agent_row["metadata"][SCHEDULED_PROVENANCE_KEY]["platform_specific"].update(
+        {"source_kind": "agent", "source_actor": "source-agent-a"}
+    )
+    other_agent_row = row("")
+    other_agent_row["metadata"][SCHEDULED_PROVENANCE_KEY]["platform_specific"].update(
+        {"source_kind": "agent", "source_actor": "source-agent-b"}
+    )
+    assert _scheduled_merge_key(agent_row) != _scheduled_merge_key(other_agent_row)
+
+
+def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+
+    def scheduled_request(text: str, source_session_id: str) -> DeliveryRequest:
+        return DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content=text,
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": source_session_id,
+                    }
+                }
+            },
+        )
+
+    queued = [
+        asyncio.run(manager.deliver(scheduled_request(text, source), context=_context()))
+        for text, source in (("callback A", "source-a"), ("callback B", "source-b"))
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    first_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "callback A"
+    assert _row(engine, str(queued[0].delivery_id))["turn_id"] == first_turn_id
+    assert _row(engine, str(queued[1].delivery_id))["turn_id"] is None
+
+
+@pytest.mark.anyio
+async def test_scheduled_submit_decorates_before_native_steering(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    await _activate(manager, text="active")
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": "agent_run",
+            "source_session_id": "source-session",
+        }
+    )
+    result = await manager.submit(
+        "ses_fsm",
+        context,
+        "callback result",
+        source=SOURCE_SCHEDULED,
+        delivery_intent="steer",
+    )
+
+    assert result.route == "ran"
+    decorator.assert_awaited_once_with(context, "callback result", include_user_info=False)
+    manager._steer.assert_awaited_once()
+    assert manager._steer.await_args.args[1].text == "decorated: callback result"
 
 
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:

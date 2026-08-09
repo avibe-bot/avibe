@@ -18,7 +18,10 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
-from core.message_context import resolve_context_thread_id
+from core.message_context import (
+    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
+    resolve_context_thread_id,
+)
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
@@ -754,7 +757,13 @@ class MessageHandler(BaseHandler):
                 user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
-            if not (is_human and durable_delivery_owned):
+            scheduled_metadata_applied = bool(
+                source == self.TURN_SOURCE_SCHEDULED
+                and (context.platform_specific or {}).get(
+                    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
+                )
+            )
+            if not (is_human and durable_delivery_owned) and not scheduled_metadata_applied:
                 message = await self._prepend_message_metadata(
                     context,
                     message,

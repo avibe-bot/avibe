@@ -28,7 +28,10 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
-from core.message_context import resolve_turn_sink_key
+from core.message_context import (
+    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
+    resolve_turn_sink_key,
+)
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
@@ -297,10 +300,14 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
             or spec.get(SCHEDULED_TARGET_AGENT_KEY)
             or ""
         )
+    source_session_id = str(spec.get("source_session_id") or "").strip()
+    if not source_session_id and str(spec.get("source_kind") or "").strip() == "agent":
+        source_session_id = str(spec.get("source_actor") or "").strip()
     return (
         trigger_kind,
         definition_id,
         stable_agent_key,
+        source_session_id,
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -965,6 +972,24 @@ class SessionTurnManager:
         if self._build_context is None:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
+
+    async def prepare_scheduled_dispatch(
+        self,
+        context: "MessageContext",
+        text: str,
+    ) -> str:
+        """Decorate scheduled backend text before it enters durable Delivery."""
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        if spec.get(SCHEDULED_DISPATCH_METADATA_APPLIED_KEY):
+            return text
+        handler = getattr(self.controller, "message_handler", None)
+        decorator = getattr(handler, "_prepend_message_metadata", None)
+        if not callable(decorator):
+            return text
+        decorated = await decorator(context, text, include_user_info=False)
+        spec[SCHEDULED_DISPATCH_METADATA_APPLIED_KEY] = True
+        context.platform_specific = spec
+        return decorated
 
     @staticmethod
     def _apply_delivery_binding_provenance(
@@ -6017,6 +6042,17 @@ class SessionTurnManager:
             )
 
         spec = dict(getattr(context, "platform_specific", None) or {})
+        dispatch_text = text
+        scheduled_metadata = (
+            dict(spec.get("message_metadata") or {})
+            if isinstance(spec.get("message_metadata"), dict)
+            else {}
+        )
+        if source == SOURCE_SCHEDULED:
+            dispatch_text = await self.prepare_scheduled_dispatch(context, text)
+            scheduled_metadata[SCHEDULED_PROVENANCE_KEY] = capture_scheduled_provenance(
+                context
+            )
         with self._sqlite_engine().connect() as conn:
             busy = delivery_store.active_turn(conn, session_id) is not None
         source_value = "harness" if source == SOURCE_SCHEDULED else "user"
@@ -6031,7 +6067,7 @@ class SessionTurnManager:
         request = DeliveryRequest(
             session_id=session_id,
             priority=priority,
-            content=text,
+            content=dispatch_text,
             has_content=delivery_store.has_substantive_input(
                 text,
                 has_attachments=bool(getattr(context, "files", None)),
@@ -6044,7 +6080,7 @@ class SessionTurnManager:
             message_type="harness" if source == SOURCE_SCHEDULED else "user",
             display_text=str(spec.get("display_text") or text),
             content_json=spec.get("message_content") if isinstance(spec.get("message_content"), dict) else None,
-            metadata=spec.get("message_metadata") if isinstance(spec.get("message_metadata"), dict) else {},
+            metadata=scheduled_metadata,
             author_id=str(
                 spec.get("author_id")
                 or (spec.get("task_definition_id") if source == SOURCE_SCHEDULED else "")

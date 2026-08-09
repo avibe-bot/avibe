@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
 from modules.im import MessageContext
 
 # Reuses the isolated module loader (and controller/session stubs) from the
@@ -74,6 +75,18 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
         # And nothing is posted from here: the send waits for the runtime gate in
         # ``AgentService._begin_turn_status``, so a queued turn stays quiet.
         controller.message_dispatcher.emit_harness_prompt.assert_not_awaited()
+
+    async def test_durable_scheduled_text_with_metadata_marker_is_not_decorated_twice(self):
+        controller, handler = _build_handler()
+        context = _scheduled_context(
+            **{SCHEDULED_DISPATCH_METADATA_APPLIED_KEY: True}
+        )
+
+        await handler.handle_scheduled_message(context, "[Current Time: ...]\nFrom: #source\nwork")
+
+        handler._prepend_message_metadata.assert_not_awaited()
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(request.message, "[Current Time: ...]\nFrom: #source\nwork")
 
     async def test_subagent_prefixed_prompt_is_staged_unstripped(self):
         """Scenario: MESSAGE-DELIVERY-018
