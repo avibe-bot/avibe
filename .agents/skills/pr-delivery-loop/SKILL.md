@@ -134,6 +134,10 @@ description: The implementation-lane standard for delivering a PR across the Avi
 ## 3. Opening the PR
 
 - Non-draft (drafts don't trigger review). Title `type(scope): summary`.
+- Pass the repository's default branch explicitly with `gh pr create
+  --base <default-branch>`; derive it from GitHub rather than trusting a local
+  `branch.<name>.gh-merge-base` setting. After creation, read the PR back and
+  verify `baseRefName` is that default branch before treating the PR as open.
 - Body must include: the changed capability; affected scenario IDs when a
   catalog exists; evidence layers (unit / contract / scenario / residual manual
   checks); explicit dependencies ("requires #NNN merged first"); and a
@@ -162,8 +166,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   query `repos/<o>/<r>/issues/comments/<comment-id>/reactions` directly within ~2
   minutes. Require a reaction with `content == "eyes"` whose `user.login` is
   `chatgpt-codex-connector` or `chatgpt-codex-connector[bot]`; aggregate counts or
-  reactions from other users do not prove pickup. If absent, post the trigger
-  again. Never use `issues/<pr>/comments --jq '.[-1]'` to identify the trigger.
+  reactions from other users do not prove pickup. Before retriggering because
+  👀 is absent, check for a current-head Codex verdict or another in-flight
+  review signal; a completed review may already have withdrawn 👀. Never use
+  `issues/<pr>/comments --jq '.[-1]'` to identify the trigger.
   Outside that window every historical trigger reads 0 including the ones that
   were reviewed, so never infer "it never started" from a reaction count after
   the fact — look for a current-head verdict instead.
@@ -207,7 +213,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   objectively verifying the invariant with **two independent pieces of
   evidence**: `vibe watch list` shows exactly one armed (non-completed) watch
   for the PR, AND `ps aux | grep "[w]ait_pr.py"` shows a live process carrying
-  `--pr <N>`. Never trust that you armed one earlier in the turn, and never read
+  both `--repo <owner/name>` and `--pr <N>` for this repository. Never trust
+  that you armed one earlier in the turn, and never read
   `run_definitions.enabled` — that column is bookkeeping and it drifts both
   ways: long-removed watches keep `enabled=1` while `vibe watch show` returns
   null for them, and a watch reported as armed from a remembered id can be
