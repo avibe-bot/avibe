@@ -824,8 +824,8 @@ def _verify_state_file_writable(
 
     A missing state file is created here holding nothing but this PR's ownership, so
     the path is owned before any polling starts rather than after the first cursor
-    advance. It carries no cursors, so this cycle still baselines from the current PR
-    exactly as it did before.
+    advance. A managed first cycle must then pass ``--catch-up`` or seed a complete
+    cursor set before polling; it must never silently baseline from the current PR.
 
     An existing file that names no owner is adopted here too, cursors intact, because
     an absent owner is compatible with every managed watch and would otherwise let two
@@ -1259,6 +1259,14 @@ def main() -> int:
     # contains the PR's full history.
     resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
     resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
+    if two_phase and args.state_file and not args.catch_up:
+        seeded = _saved_int(saved, "pr_cursor") is not None if args.new_prs else resumed
+        if not seeded:
+            print(
+                "Managed first watch requires --catch-up or a pre-seeded complete state file; refusing to rebaseline.",
+                file=sys.stderr,
+            )
+            return 2
     # An explicit --since-*-comment-id asks for a replay from that id. The saved
     # `since` timestamp is only ever a shortcut for the saved cursor, so keeping it
     # would narrow the fetch to comments newer than the last poll and hide exactly

@@ -201,6 +201,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   and promotes them only after `AVIBE_WATCH_LAST_DELIVERY` changes. A delivery
   failure therefore replays the event instead of silently advancing the
   baseline, while concurrent watches cannot share a cursor accidentally.
+- A first managed cycle with an unseeded state file must explicitly use
+  `--catch-up` or fail closed; the normal PR-delivery path seeds the complete
+  cursor baseline before pushing, then starts the post-push waiter from that
+  file so a review that lands during the handoff cannot become the baseline.
 - Both modes load saved cursors before deriving their initial baseline:
   `--new-prs` reads `pr_cursor` before limiting the first pagination, and
   `--pr` restores the saved review/comment/reaction cursors before polling.
