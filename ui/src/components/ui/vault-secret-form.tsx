@@ -124,6 +124,9 @@ export const VaultSecretForm: React.FC<{
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   className?: string;
   cancelLabel?: string;
+  /** Terminally reject a pending provision request after confirmation in the dialog. */
+  onDeny?: () => void;
+  denyLabel?: string;
   defaultProtection?: VaultProtection;
   provisionRequestId?: string | null;
   requestSpec?: VaultRequestSpec | null;
@@ -138,6 +141,8 @@ export const VaultSecretForm: React.FC<{
   onCreated,
   className,
   cancelLabel,
+  onDeny,
+  denyLabel,
   defaultProtection = 'standard',
   provisionRequestId,
   requestSpec,
@@ -1086,11 +1091,17 @@ export const VaultSecretForm: React.FC<{
 
         {gatingNotices}
 
-        <div className="mt-1 flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+        <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+          {onDeny ? (
+            <Button type="button" variant="destructive-soft" className="w-full sm:mr-auto sm:w-auto" onClick={onDeny} disabled={submitting}>
+              <X className="size-3.5" />
+              {denyLabel ?? t('vaults.approval.deny')}
+            </Button>
+          ) : null}
+          <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={onCancel} disabled={submitting}>
             {cancelLabel ?? t('vaults.request.dismiss')}
           </Button>
-          <Button type="submit" disabled={!canSubmit}>
+          <Button type="submit" className="w-full sm:w-auto" disabled={!canSubmit}>
             {submitting ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
             {t('vaults.request.saveAndWake')}
           </Button>

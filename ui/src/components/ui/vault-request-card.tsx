@@ -30,9 +30,10 @@ export const VaultProvisionDialogProvider: React.FC<{
   requests: VaultRequest[];
   onResolved: () => void;
   onProvisionRequestHidden?: (requestId: string) => void;
+  onProvisionRequestDenied?: (requestId: string) => Promise<boolean | void> | boolean | void;
   disabled?: boolean;
   children: ReactNode;
-}> = ({ requests, onResolved, onProvisionRequestHidden, disabled = false, children }) => {
+}> = ({ requests, onResolved, onProvisionRequestHidden, onProvisionRequestDenied, disabled = false, children }) => {
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [dismissedRequestIds, setDismissedRequestIds] = useState<Set<string>>(() => new Set());
   const openProvisionDialog = useCallback((request: VaultRequest) => {
@@ -46,6 +47,19 @@ export const VaultProvisionDialogProvider: React.FC<{
       return new Set(current).add(requestId);
     });
   }, [onProvisionRequestHidden]);
+  const denyProvisionDialog = useCallback(async (requestId: string) => {
+    if (!onProvisionRequestDenied) return false;
+    const result = await onProvisionRequestDenied(requestId);
+    if (result === false) return false;
+    setActiveRequestId(null);
+    onProvisionRequestHidden?.(requestId);
+    setDismissedRequestIds((current) => {
+      if (current.has(requestId)) return current;
+      return new Set(current).add(requestId);
+    });
+    onResolved();
+    return true;
+  }, [onProvisionRequestDenied, onProvisionRequestHidden, onResolved]);
   const activeRequest = useMemo(
     () => requests.find((request) => request.id === activeRequestId && requestType(request) === 'provision'),
     [activeRequestId, requests],
@@ -64,6 +78,7 @@ export const VaultProvisionDialogProvider: React.FC<{
           }}
           request={activeRequest}
           onCancel={() => dismissProvisionDialog(activeRequest.id)}
+          onDeny={onProvisionRequestDenied ? () => denyProvisionDialog(activeRequest.id) : undefined}
           onCreated={() => {
             onProvisionRequestHidden?.(activeRequest.id);
             setActiveRequestId(null);

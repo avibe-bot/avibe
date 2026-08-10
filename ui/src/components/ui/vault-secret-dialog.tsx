@@ -1,8 +1,10 @@
 import { KeyRound, Pencil } from 'lucide-react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest, VaultRequestSpec, VaultSecret } from '@/context/ApiContext';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
+import { ConfirmDialog } from './confirm-dialog';
 import { VaultSecretForm } from './vault-secret-form';
 
 /**
@@ -27,11 +29,28 @@ export const VaultSecretDialog: React.FC<{
   notice?: React.ReactNode;
   onCancel?: () => void;
   cancelLabel?: string;
+  /** Terminally reject a pending provision request after user confirmation. */
+  onDeny?: () => Promise<boolean | void> | boolean | void;
+  denyLabel?: string;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   /** Called after a successful metadata edit (edit mode only). */
   onSaved?: (name: string) => void;
-}> = ({ open, onOpenChange, name, request, editSecret, notice, onCancel, cancelLabel, onCreated, onSaved }) => {
+}> = ({
+  open,
+  onOpenChange,
+  name,
+  request,
+  editSecret,
+  notice,
+  onCancel,
+  cancelLabel,
+  onDeny,
+  denyLabel,
+  onCreated,
+  onSaved,
+}) => {
   const { t } = useTranslation();
+  const [denyConfirmationOpen, setDenyConfirmationOpen] = useState(false);
   const card = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
   const requestSpec = (card?.spec ?? null) as VaultRequestSpec | null;
   const defaultProtection =
@@ -42,36 +61,61 @@ export const VaultSecretDialog: React.FC<{
   const title = isEdit ? t('vaults.edit.title') : isProvide ? t('vaults.request.title') : t('vaults.dialog.title');
   const subtitle = isEdit ? t('vaults.edit.subtitle') : isProvide ? t('vaults.request.help') : t('vaults.dialog.subtitle');
   const HeaderIcon = isEdit ? Pencil : KeyRound;
+  const canDeny = Boolean(onDeny && request);
+
+  const confirmDeny = async () => {
+    if (!onDeny) return;
+    const result = await onDeny();
+    if (result === false) return;
+    setDenyConfirmationOpen(false);
+    onOpenChange(false);
+  };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        {/* Accessible name; the visible heading is the branded header below. */}
-        <DialogTitle className="sr-only">{title}</DialogTitle>
-        <div className="flex items-start gap-3 pr-6">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
-            <HeaderIcon className="size-5" />
-          </span>
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[15px] font-semibold text-foreground">{title}</span>
-            <span className="text-xs text-muted-foreground">{subtitle}</span>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
+          {/* Accessible name; the visible heading is the branded header below. */}
+          <DialogTitle className="sr-only">{title}</DialogTitle>
+          <div className="flex items-start gap-3 pr-6">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
+              <HeaderIcon className="size-5" />
+            </span>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[15px] font-semibold text-foreground">{title}</span>
+              <span className="text-xs text-muted-foreground">{subtitle}</span>
+            </div>
           </div>
-        </div>
-        {notice ?? (
-          <VaultSecretForm
-            fixedName={fixedName}
-            editSecret={editSecret}
-            provisionRequestId={request?.id ?? null}
-            requestSpec={requestSpec}
-            defaultProtection={defaultProtection}
-            onCancel={onCancel ?? (() => onOpenChange(false))}
-            cancelLabel={cancelLabel}
-            onCreated={onCreated}
-            onSaved={onSaved}
-            treatExistingAsFulfilled={isProvide}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
+          {notice ?? (
+            <VaultSecretForm
+              fixedName={fixedName}
+              editSecret={editSecret}
+              provisionRequestId={request?.id ?? null}
+              requestSpec={requestSpec}
+              defaultProtection={defaultProtection}
+              onCancel={onCancel ?? (() => onOpenChange(false))}
+              cancelLabel={cancelLabel}
+              onDeny={canDeny ? () => setDenyConfirmationOpen(true) : undefined}
+              denyLabel={denyLabel}
+              onCreated={onCreated}
+              onSaved={onSaved}
+              treatExistingAsFulfilled={isProvide}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+      {canDeny ? (
+        <ConfirmDialog
+          open={denyConfirmationOpen}
+          onOpenChange={setDenyConfirmationOpen}
+          title={t('vaults.request.denyTitle')}
+          description={t('vaults.request.denyDescription')}
+          cancelLabel={t('vaults.approval.close')}
+          confirmLabel={denyLabel ?? t('vaults.approval.deny')}
+          destructive
+          onConfirm={confirmDeny}
+        />
+      ) : null}
+    </>
   );
 };

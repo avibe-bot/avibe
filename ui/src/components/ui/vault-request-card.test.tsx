@@ -14,14 +14,17 @@ vi.mock('./vault-secret-dialog', () => ({
     open,
     onOpenChange,
     onCancel,
+    onDeny,
   }: {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     onCancel?: () => void;
+    onDeny?: () => void;
   }) => open ? (
     <div role="dialog">
       <button type="button" aria-label="close dialog" onClick={() => onOpenChange(false)}>Close</button>
       <button type="button" onClick={onCancel}>Ignore</button>
+      {onDeny ? <button type="button" onClick={onDeny}>Deny</button> : null}
     </div>
   ) : null,
 }));
@@ -48,12 +51,13 @@ const request = {
   card: { request_type: 'provision' },
 } satisfies VaultRequest;
 
-const renderProvisionCard = (onProvisionRequestHidden = vi.fn()) => render(
+const renderProvisionCard = (onProvisionRequestHidden = vi.fn(), onProvisionRequestDenied = vi.fn()) => render(
   <I18nextProvider i18n={i18n}>
     <VaultProvisionDialogProvider
       requests={[request]}
       onResolved={vi.fn()}
       onProvisionRequestHidden={onProvisionRequestHidden}
+      onProvisionRequestDenied={onProvisionRequestDenied}
     >
       <VaultRequestCard request={request} onResolved={vi.fn()} />
     </VaultProvisionDialogProvider>
@@ -75,5 +79,15 @@ describe('VaultRequestCard provision dialog dismissal', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Ignore' }));
     expect(screen.queryByText(request.secret_name)).toBeNull();
     expect(onProvisionRequestHidden).toHaveBeenCalledWith(request.id);
+  });
+
+  it('offers a terminal Deny action alongside the chat-only dismissal', () => {
+    const onProvisionRequestDenied = vi.fn(() => true);
+    renderProvisionCard(vi.fn(), onProvisionRequestDenied);
+
+    fireEvent.click(screen.getByRole('button', { name: /provide/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+
+    expect(onProvisionRequestDenied).toHaveBeenCalledWith(request.id);
   });
 });
