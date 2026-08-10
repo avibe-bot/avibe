@@ -482,13 +482,7 @@ class ReceiptEmojiMappingTests(unittest.TestCase):
 
 
 class TerminalReceiptEmojiMappingTests(unittest.TestCase):
-    """⏹️/⚠️ are newer than the receipts above and are NOT mapped everywhere.
-
-    Slack is where the fix was needed and verified. Telegram publishes a fixed
-    reaction set that contains neither symbol, so the receipt degrades to no
-    reaction there — recorded rather than fixed, because the interruption
-    NOTICE is a real message and carries the meaning on its own.
-    """
+    """Terminal receipts must resolve to adapter-native reaction values."""
 
     receipts = (STOPPED_REACTION_EMOJI, INTERRUPTED_REACTION_EMOJI)
 
@@ -503,15 +497,16 @@ class TerminalReceiptEmojiMappingTests(unittest.TestCase):
                     # rejects them with ``invalid_name``.
                     self.assertTrue(name.isascii(), name)
 
-    def test_telegram_degrades_to_an_unsupported_reaction(self):
+    def test_telegram_maps_to_supported_distinct_reactions(self):
         from modules.im.telegram import TelegramBot
 
-        allowed = {"✍", "👌", "🤔", "🤷", "👀", "🤖"}
-        for emoji in self.receipts:
-            with self.subTest(emoji=emoji):
-                self.assertNotIn(
-                    TelegramBot._normalize_reaction_emoji(None, emoji), allowed
-                )
+        self.assertEqual(
+            [
+                TelegramBot._normalize_reaction_emoji(None, emoji)
+                for emoji in self.receipts
+            ],
+            ["🙊", "😱"],
+        )
 
 
 class DeliveryAdmissionContractTests(unittest.TestCase):
