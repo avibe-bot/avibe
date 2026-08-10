@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
 import json
@@ -17,6 +18,7 @@ from core.controller import Controller
 from core.handlers.message_handler import MessageHandler
 from core.memory import CaptureAccepted, CaptureDuplicate
 from core.memory.artifact import FakeMemoryArtifactManager
+from core.memory.everos import FakeMemoryProvider
 from core.memory.runtime import MemoryRuntime
 from core.memory.store import MemoryStore
 from modules.im.base import FileAttachment, MessageContext
@@ -30,6 +32,7 @@ from modules.im.message_facts import (
 
 
 PROJECT = "p-22222222222222222222222222222222"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Store:
@@ -730,11 +733,8 @@ def test_archive_memory_cli_session_skips_flush_when_memory_is_disabled(
     )
     assert runtime.available is True
     assert runtime._maintenance_open() is False
-
-    async def flush_must_not_run(**_kwargs) -> bool:
-        raise AssertionError("disabled Memory must not flush during archive")
-
-    monkeypatch.setattr(runtime, "_final_flush_under_admission", flush_must_not_run)
+    provider = FakeMemoryProvider()
+    runtime.module.replace_provider(provider)
     controller = _controller()
     controller.config.memory = disabled
     controller.memory_runtime = runtime
@@ -755,10 +755,44 @@ def test_archive_memory_cli_session_skips_flush_when_memory_is_disabled(
         assert store.resolve_current_session_scopes(session_id) == (
             (principal_id, PROJECT),
         )
+        assert provider.flushes == []
+        assert store.list_queue_rows()[0].state == "pending"
         with engine.connect() as conn:
             assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
     finally:
         engine.dispose()
+
+
+def test_removed_memory_runtime_lifecycle_symbols_have_no_callers() -> None:
+    """Keep callers on MemoryModule after lifecycle ownership moves there."""
+
+    module_internal = "_final_flush_" + "under_admission"
+    removed = {
+        module_internal,
+        "_final_flush_" + "timeout",
+        "_replace_" + "provider",
+    }
+    module_path = REPO_ROOT / "core" / "memory" / "module.py"
+    offenders: list[str] = []
+    for source_path in sorted(REPO_ROOT.rglob("*.py")):
+        if any(part in {".git", ".runtime", ".venv"} for part in source_path.parts):
+            continue
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            symbol: str | None = None
+            if isinstance(node, ast.Attribute):
+                symbol = node.attr
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Name)):
+                symbol = node.name if hasattr(node, "name") else node.id
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                symbol = node.value
+            if symbol not in removed:
+                continue
+            if source_path == module_path and symbol == module_internal:
+                continue
+            offenders.append(f"{source_path.relative_to(REPO_ROOT)}:{node.lineno}: {symbol}")
+
+    assert offenders == []
 
 
 def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
