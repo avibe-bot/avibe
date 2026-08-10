@@ -1377,7 +1377,7 @@ class ConsolidatedMessageDispatcher:
         if isinstance(notification, dict) and str(notification.get("failure_id") or "").strip():
             return output_semantics
         turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
-        if not turn_id or not self._terminal_agent_run_ids(context, output_semantics):
+        if not turn_id:
             return output_semantics
         metadata = dict(output_semantics.metadata)
         metadata["turn_failure_notification"] = {

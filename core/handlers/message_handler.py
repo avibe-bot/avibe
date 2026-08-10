@@ -13,6 +13,7 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
+from core.backend_failure import emit_backend_failure
 from core.message_output import (
     HARNESS_PROMPT_ECHO_SPEC_KEY,
     terminal_output_for,
@@ -845,17 +846,10 @@ class MessageHandler(BaseHandler):
                             session_id=str(bound_session_id),
                         )
             except KeyError:
-                await self._handle_missing_agent(context, agent_name)
-                # Synchronous terminal failure (no agent dispatched). Settle the
-                # turn through the OUTBOUND status chokepoint: an empty terminal
-                # error result turns the dot red + releases the SSE waiter (the
-                # missing-agent message was already shown above). No separate latch.
-                await self.controller.emit_agent_message(
+                await self._handle_missing_agent(
                     context,
-                    "result",
-                    "",
-                    is_error=True,
-                    output=terminal_output_for(request),
+                    agent_name,
+                    request=request,
                 )
                 # Clean up reaction on error
                 await self._remove_ack_reaction(context, request)
@@ -1612,14 +1606,30 @@ class MessageHandler(BaseHandler):
             logger.error(f"Error handling inline stop: {e}", exc_info=True)
             return False
 
-    async def _handle_missing_agent(self, context: MessageContext, agent_name: str):
-        """Notify user when a requested agent backend is unavailable."""
+    async def _handle_missing_agent(
+        self,
+        context: MessageContext,
+        agent_name: str,
+        *,
+        request: AgentRequest | None = None,
+    ) -> None:
+        """Notify and, for a dispatched Turn, settle a missing Agent failure."""
         target = agent_name or self.controller.agent_service.default_agent
         backend = self._missing_agent_backend(context, target)
         display_backend = display_name_for_backend(backend) if backend else str(target)
         hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
         hint = self._t(hint_key)
         msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
+        if request is not None:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                backend or str(target),
+                msg,
+                display_text=msg,
+                request=request,
+            )
+            return
         await self._get_im_client(context).send_message(context, msg)
         await self._stream_terminal_error(context, msg)
 

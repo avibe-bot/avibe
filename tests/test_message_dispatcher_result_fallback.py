@@ -284,6 +284,41 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(controller.im_client.sent_messages, [])
 
+    async def test_hfr_472_contract_is_snapshotted_before_the_first_run_arrives(self):
+        controller = self._terminal_lifecycle_controller()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        dispatcher._clear_consolidated_state = mock.AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-before-run",
+            },
+        )
+
+        await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "",
+            is_error=True,
+            output=MessageOutput(completes_turn=True, completes_run=True),
+        )
+
+        evidence = controller.session_turns.on_terminal_result.call_args.kwargs[
+            "terminal_evidence"
+        ]
+        self.assertEqual(
+            evidence["output_provenance"]["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-before-run",
+                "delivered": False,
+            },
+        )
+
     def test_visible_direct_error_does_not_create_a_turn_fallback_contract(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController(platform="slack"))
         context = MessageContext(

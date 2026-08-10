@@ -175,8 +175,10 @@ does not claim that an event was detected.
 - `HFR-459`: independent Activity completions reserve the SQLite writer before
   reading deferred participants and electing their shared Turn fallback owner.
 - `HFR-472`: an empty failed Harness Turn synthesizes the existing Turn failure
-  contract before its immutable snapshot, so every accepted Run shares one
-  fallback owner instead of emitting one notice per Run.
+  contract before its immutable snapshot, even before the first participant is
+  attached, so every accepted Run shares one fallback owner instead of emitting
+  one notice per Run. A primary error already delivered through the shared
+  backend-failure path carries its acknowledgement into the same contract.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

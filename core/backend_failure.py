@@ -258,16 +258,18 @@ async def emit_backend_failure(
     auth recovery supplied that immediate notification.
 
     ``delivery``, when supplied, is filled in with what the notify attempt actually
-    proved. Harness supplies an evidence object automatically because linked Runs
-    owe a durable fallback; other callers opt in when they need the same proof. A
-    clean return alone is not enough to distinguish a delivered message from a lost
-    one.
+    proved. A durable Turn or legacy Harness Run supplies an evidence object
+    automatically so Runs attached after settlement inherit the same proof. A clean
+    return alone is not enough to distinguish a delivered message from a lost one.
     """
 
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
     terminal = _terminal_output(request, output)
     harness_run_id = _harness_run_identity(context, request)
+    owns_failure_contract = bool(
+        _turn_failure_identity(context, request) or harness_run_id
+    )
     notification = backend_failure_notification_output(
         context,
         backend_name,
@@ -277,7 +279,7 @@ async def emit_backend_failure(
     )
     notification_identity = str(notification.metadata.get("failure_id") or "").strip()
     live_delivery = delivery
-    if harness_run_id and live_delivery is None:
+    if owns_failure_contract and live_delivery is None:
         live_delivery = DeliveryEvidence()
 
     platform_specific = getattr(context, "platform_specific", None) or {}
@@ -309,7 +311,7 @@ async def emit_backend_failure(
 
     async def settle_terminal_failure() -> None:
         terminal_output = terminal
-        if harness_run_id:
+        if owns_failure_contract:
             metadata = dict(terminal.metadata)
             metadata["turn_failure_notification"] = {
                 "failure_id": notification_identity,
@@ -354,9 +356,9 @@ async def emit_backend_failure(
         if handled_auth:
             return True
 
-    # ``delivery`` is passed only when the emitter supports it. Harness creates the
-    # object automatically, but controller-like test and integration doubles with
-    # the legacy signature must keep working.
+    # ``delivery`` is passed only when the emitter supports it. Durable Turn and
+    # Harness contexts create the object automatically, but controller-like test
+    # and integration doubles with the legacy signature must keep working.
     notify_kwargs: dict[str, Any] = {"output": notification}
     if live_delivery is not None:
         emit = controller.emit_agent_message

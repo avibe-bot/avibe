@@ -4241,8 +4241,9 @@ scenarios:
     kind: failure_recovery
     layer: contract
     backend: shared
-    # The shared dispatcher stamps one Turn failure identity before the immutable
-    # terminal snapshot; the existing atomic settlement elects one Run owner.
+    # The shared dispatcher stamps one Turn failure identity before participants
+    # arrive; an already shown primary keeps its acknowledgement, and the existing
+    # atomic settlement elects one Run owner only when participants exist.
     test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract
 manual_evidence:
   - local Incus backend process death after prompt acceptance
