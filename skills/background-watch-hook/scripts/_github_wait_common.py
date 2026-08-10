@@ -9,10 +9,11 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable, Generic, TypeVar
 
 
 RETRY_EXIT_CODE = 75
@@ -44,6 +45,8 @@ LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
 # is allowed to block for 30.
 REQUEST_TIMEOUT_SECONDS = 30
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+INITIAL_REQUEST_MAX_ATTEMPTS = 3
+INITIAL_REQUEST_BACKOFF_SECONDS = 1.0
 NOT_MODIFIED_STATUS = 304
 # GitHub compares timestamps at one-second resolution, and a bot that posts a
 # review as a batch stamps several comments within the same second. Rewinding the
@@ -52,6 +55,122 @@ NOT_MODIFIED_STATUS = 304
 SINCE_REWIND_SECONDS = 2
 
 _MISSING = object()
+_T = TypeVar("_T")
+
+
+class GitHubRequestError(RuntimeError):
+    """Base class for failures classified at the GitHub request boundary."""
+
+    retryable = False
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GitHubTransientError(GitHubRequestError):
+    """A network or retryable HTTP failure that a bounded waiter may retry."""
+
+    retryable = True
+
+
+class GitHubTerminalError(GitHubRequestError):
+    """A terminal GitHub failure that must stop the waiter."""
+
+
+class InitialRequestRetriesExhausted(GitHubTerminalError):
+    """A bounded initial GitHub request exhausted its transient retries."""
+
+
+class GitHubRequestResult(Generic[_T]):
+    """One classified request outcome; callers never catch request exceptions."""
+
+    __slots__ = ("error", "value")
+
+    def __init__(
+        self,
+        *,
+        value: _T | None = None,
+        error: GitHubRequestError | None = None,
+    ) -> None:
+        self.value = value
+        self.error = error
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
+
+def _classify_github_exception(
+    err: Exception,
+    *,
+    unauthenticated: bool = False,
+) -> GitHubRequestError:
+    if isinstance(err, GitHubRequestError):
+        return err
+    if isinstance(err, urllib.error.HTTPError):
+        code = int(err.code)
+        reason = str(err.reason)
+        if unauthenticated and code in {403, 429}:
+            return GitHubTerminalError(
+                "GitHub unauthenticated polling hit a rate limit; authenticate with "
+                "'gh auth login' or GITHUB_TOKEN/GH_TOKEN",
+                status_code=code,
+            )
+        error_type = GitHubTransientError if code in RETRYABLE_HTTP_STATUS_CODES else GitHubTerminalError
+        return error_type(f"GitHub HTTP {code} {reason}", status_code=code)
+    if isinstance(err, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
+        reason = str(getattr(err, "reason", err))
+        return GitHubTransientError(f"GitHub network failure: {reason}")
+    return GitHubTerminalError(
+        f"Unexpected GitHub request failure ({type(err).__name__}): {err}"
+    )
+
+
+def github_request(
+    operation: Callable[[], _T],
+    *,
+    unauthenticated: bool = False,
+) -> GitHubRequestResult[_T]:
+    """Run one GitHub operation through the transient/terminal taxonomy."""
+
+    try:
+        return GitHubRequestResult(value=operation())
+    except Exception as err:  # noqa: BLE001 - this is the classification boundary
+        return GitHubRequestResult(
+            error=_classify_github_exception(err, unauthenticated=unauthenticated)
+        )
+
+
+def retry_initial_request(
+    operation: Callable[[], _T],
+    *,
+    description: str,
+    unauthenticated: bool = False,
+) -> GitHubRequestResult[_T]:
+    """Retry initial network and retryable HTTP failures with bounded backoff."""
+
+    for attempt in range(1, INITIAL_REQUEST_MAX_ATTEMPTS + 1):
+        result = github_request(operation, unauthenticated=unauthenticated)
+        if result.succeeded or result.error is None or not result.error.retryable:
+            return result
+        failure = str(result.error)
+
+        if attempt == INITIAL_REQUEST_MAX_ATTEMPTS:
+            return GitHubRequestResult(
+                error=InitialRequestRetriesExhausted(
+                    f"{description} failed after {INITIAL_REQUEST_MAX_ATTEMPTS} attempts: {failure}"
+                )
+            )
+        delay = INITIAL_REQUEST_BACKOFF_SECONDS * (2 ** (attempt - 1))
+        print(
+            f"Transient {description} failure on attempt {attempt}/{INITIAL_REQUEST_MAX_ATTEMPTS}: "
+            f"{failure}; retrying in {delay:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+
+    return GitHubRequestResult(error=GitHubTerminalError("unreachable request state"))
 
 
 def no_event(summary: str = "") -> int:

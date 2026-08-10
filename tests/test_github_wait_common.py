@@ -47,6 +47,78 @@ def _not_modified() -> urllib.error.HTTPError:
     )
 
 
+def test_retry_initial_request_recovers_with_bounded_backoff() -> None:
+    module = _load_module()
+    attempts = 0
+
+    def _operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise urllib.error.URLError("temporary network failure")
+        return "ok"
+
+    with patch.object(module.time, "sleep", return_value=None) as sleep:
+        result = module.retry_initial_request(
+            _operation,
+            description="test request",
+        )
+
+    assert result.value == "ok"
+    assert result.error is None
+    assert attempts == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0]
+
+
+def test_retry_initial_request_does_not_retry_terminal_failure() -> None:
+    module = _load_module()
+    attempts = 0
+    error = urllib.error.HTTPError(
+        "https://api.github.com/example",
+        404,
+        "Not Found",
+        hdrs=None,
+        fp=None,
+    )
+
+    def _operation() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    with patch.object(module.time, "sleep", return_value=None) as sleep:
+        result = module.retry_initial_request(
+            _operation,
+            description="test request",
+        )
+
+    assert result.value is None
+    assert result.error is not None
+    assert result.error.retryable is False
+    assert attempts == 1
+    sleep.assert_not_called()
+
+
+def test_unauthenticated_rate_limit_is_terminal() -> None:
+    module = _load_module()
+    error = urllib.error.HTTPError(
+        "https://api.github.com/example",
+        429,
+        "Too Many Requests",
+        hdrs=None,
+        fp=None,
+    )
+
+    result = module.github_request(
+        lambda: (_ for _ in ()).throw(error),
+        unauthenticated=True,
+    )
+
+    assert result.error is not None
+    assert result.error.retryable is False
+    assert result.error.status_code == 429
+
+
 def test_github_get_without_cache_sends_no_conditional_header() -> None:
     module = _load_module()
     requests: list[object] = []

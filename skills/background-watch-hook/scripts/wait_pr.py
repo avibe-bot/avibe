@@ -33,6 +33,7 @@ from _github_wait_common import (  # noqa: E402
     get_token,
     github_get,
     github_graphql,
+    github_request,
     is_retryable_http_error,
     LAST_DELIVERY_ENV,
     later_since,
@@ -41,7 +42,7 @@ from _github_wait_common import (  # noqa: E402
     max_id,
     min_interval_for_unauthenticated,
     REQUEST_TIMEOUT_SECONDS,
-    RETRY_EXIT_CODE,
+    retry_initial_request,
     requests_per_poll,
     ResponseCache,
     squash,
@@ -1662,7 +1663,7 @@ def main() -> int:
 
     token_fingerprint = _token_fingerprint(token)
     viewer_login = None
-    if not args.include_self_comments:
+    if args.pr is not None and not args.include_self_comments:
         # The stored login spares a /user request on every cycle of a forever watch,
         # but only while the token still belongs to the account it was resolved for.
         # A rotated or swapped credential would otherwise keep filtering out the old
@@ -1697,9 +1698,9 @@ def main() -> int:
         else None
     )
 
-    try:
+    def _fetch_initial_state() -> tuple[dict[str, Any], int]:
         if args.pr is not None:
-            state, requests_per_poll_count = _fetch_state(
+            return _fetch_state(
                 args.repo,
                 args.pr,
                 token,
@@ -1707,29 +1708,32 @@ def main() -> int:
                 review_comment_since=initial_review_comment_since,
                 issue_comment_since=initial_issue_comment_since,
             )
-        else:
-            initial_pr_stop_after_id = None
-            initial_pr_max_pages = None
-            if since_pr_id is not None and not args.catch_up:
-                initial_pr_stop_after_id = since_pr_id
-            elif not args.catch_up:
-                initial_pr_max_pages = 1
-            state, requests_per_poll_count = _fetch_new_pr_state(
-                args.repo,
-                token,
-                stop_after_id=initial_pr_stop_after_id,
-                max_pages=initial_pr_max_pages,
-                cache=cache,
-            )
-    except urllib.error.HTTPError as err:
-        print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
-        return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
-    except urllib.error.URLError as err:
-        print(f"GitHub network error: {err.reason}", file=sys.stderr)
-        return RETRY_EXIT_CODE
-    except Exception as err:  # noqa: BLE001
-        print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
+        initial_pr_stop_after_id = None
+        initial_pr_max_pages = None
+        if since_pr_id is not None and not args.catch_up:
+            initial_pr_stop_after_id = since_pr_id
+        elif not args.catch_up:
+            initial_pr_max_pages = 1
+        return _fetch_new_pr_state(
+            args.repo,
+            token,
+            stop_after_id=initial_pr_stop_after_id,
+            max_pages=initial_pr_max_pages,
+            cache=cache,
+        )
+
+    initial_request = retry_initial_request(
+        _fetch_initial_state,
+        description="initial GitHub PR state request",
+        unauthenticated=token is None,
+    )
+    if initial_request.error is not None:
+        print(f"Failed to fetch initial PR state: {initial_request.error}", file=sys.stderr)
         return 1
+    if initial_request.value is None:
+        print("Initial GitHub PR state request completed without a result", file=sys.stderr)
+        return 1
+    state, requests_per_poll_count = initial_request.value
 
     # The remote target is now proven valid. Only now may this run create or adopt
     # its state path; a typo or inaccessible PR must leave no ownership claim.
@@ -2159,39 +2163,39 @@ def main() -> int:
 
         time.sleep(sleep_seconds)
 
-        try:
-            if args.pr is not None:
-                state, requests_per_poll_count = _fetch_state(
+        if args.pr is not None:
+            poll_request = github_request(
+                lambda: _fetch_state(
                     args.repo,
                     args.pr,
                     token,
                     cache=cache,
-                )
-            else:
-                state, requests_per_poll_count = _fetch_new_pr_state(
+                ),
+                unauthenticated=token is None,
+            )
+        else:
+            poll_request = github_request(
+                lambda: _fetch_new_pr_state(
                     args.repo,
                     token,
                     stop_after_id=pr_cursor if pr_cursor > 0 else None,
                     cache=cache,
-                )
-        except urllib.error.HTTPError as err:
-            if token is None and err.code in {403, 429}:
+                ),
+                unauthenticated=token is None,
+            )
+        if poll_request.error is not None:
+            print(f"GitHub polling failed: {poll_request.error}", file=sys.stderr)
+            if poll_request.error.retryable:
                 print(
-                    (
-                        "GitHub unauthenticated polling hit a rate limit. "
-                        "Authenticate with 'gh auth login' or GITHUB_TOKEN/GH_TOKEN."
-                    ),
+                    "Retryable GitHub request failure; continuing in this watch",
                     file=sys.stderr,
                 )
-                return 1
-            print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
-        except urllib.error.URLError as err:
-            print(f"GitHub network error during polling: {err.reason}", file=sys.stderr)
-            return RETRY_EXIT_CODE
-        except Exception as err:  # noqa: BLE001
-            print(f"Polling failed: {err}", file=sys.stderr)
+                continue
             return 1
+        if poll_request.value is None:
+            print("GitHub polling completed without a result", file=sys.stderr)
+            return 1
+        state, requests_per_poll_count = poll_request.value
 
         if token is None:
             unauthenticated_min = min_interval_for_unauthenticated(requests_per_poll_count)

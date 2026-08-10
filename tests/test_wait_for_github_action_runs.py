@@ -357,7 +357,7 @@ def test_main_uses_real_request_count_for_unauthenticated_interval() -> None:
     assert "GitHub Actions success" in stdout.getvalue()
 
 
-def test_main_retryable_startup_http_error_returns_retry_code() -> None:
+def test_main_retries_retryable_startup_http_error_inside_one_shot() -> None:
     module = _load_module()
     err = urllib.error.HTTPError(
         url="https://api.github.com/repos/example/repo/actions/runs",
@@ -366,15 +366,31 @@ def test_main_retryable_startup_http_error_returns_retry_code() -> None:
         hdrs=None,
         fp=None,
     )
+    completed = [
+        {
+            "id": 1,
+            "name": "CI",
+            "head_sha": "abc123",
+            "status": "completed",
+            "conclusion": "success",
+        }
+    ]
 
     with (
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "_fetch_workflow_runs", side_effect=err),
+        patch.object(
+            module,
+            "_fetch_workflow_runs",
+            side_effect=[err, err, (completed, 1)],
+        ) as fetch,
+        patch.object(module.time, "sleep", return_value=None) as sleep,
         patch("sys.argv", ["wait_action.py", "--repo", "cyhhao/sub2api", "--sha", "abc123", "--workflow", "CI"]),
     ):
         rc = module.main()
 
-    assert rc == module.RETRY_EXIT_CODE
+    assert rc == 0
+    assert fetch.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0]
 
 
 def test_main_unexpected_startup_error_fails_fast() -> None:
@@ -434,6 +450,58 @@ def test_main_stops_on_a_terminal_polling_http_error() -> None:
         rc = module.main()
 
     assert rc == 1
+
+
+def test_main_recovers_from_retryable_actions_polling_failure() -> None:
+    module = _load_module()
+    running = [
+        {
+            "id": 1,
+            "name": "CI",
+            "head_sha": "abc123",
+            "status": "in_progress",
+            "conclusion": None,
+        }
+    ]
+    completed = [
+        {
+            "id": 1,
+            "name": "CI",
+            "head_sha": "abc123",
+            "status": "completed",
+            "conclusion": "success",
+        }
+    ]
+    error = urllib.error.URLError("temporary network failure")
+
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(
+            module,
+            "_fetch_workflow_runs",
+            side_effect=[(running, 1), error, (completed, 1)],
+        ) as fetch,
+        patch.object(module.time, "sleep", return_value=None) as sleep,
+        patch(
+            "sys.argv",
+            [
+                "wait_action.py",
+                "--repo",
+                "cyhhao/sub2api",
+                "--sha",
+                "abc123",
+                "--workflow",
+                "CI",
+                "--interval",
+                "1",
+            ],
+        ),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert fetch.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 1.0]
 
 
 def test_main_only_on_failure_skips_agent_turn_for_green_run() -> None:

@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.12.0
+version: 0.12.1
 ---
 
 # Background Watch Hook
@@ -177,13 +177,30 @@ This skill ships bundled GitHub waiters:
 
 Use bundled waiters as examples or as ready-to-run building blocks. The main skill is still `vibe watch`; the waiter is only the thing that blocks until the condition is met.
 When running a bundled script through `uv`, prefer `uv run --no-project ...` so the script does not accidentally attach itself to an unrelated parent project.
-Bundled GitHub waiters use exit code `75` for retryable startup errors such as temporary network failures or GitHub `408/429/5xx` responses, and exit code `64` with the `avibe-watch: no-event` marker when a cycle finished with nothing worth an Agent turn.
+Bundled GitHub waiters classify temporary network failures and GitHub
+`408/429/5xx` responses as retryable. The one-shot PR and Actions waiters retry
+those failures inside the same process so the managed watch stays alive. A
+cycle-oriented waiter may use exit code `75` only when its supervisor explicitly
+opts into retrying that code. Exit code `64` with the
+`avibe-watch: no-event` marker means a cycle finished with nothing worth an Agent
+turn.
 
 The waiter is distributed with this skill, not with the caller's repository.
 Resolve the active skill directory before constructing a watch command:
 
 ```bash
 BACKGROUND_WATCH_HOOK_SKILL_FILE="${BACKGROUND_WATCH_HOOK_SKILL_FILE:-}"
+if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  for SKILL_FILE in \
+    "$REPO_ROOT/skills/background-watch-hook/SKILL.md" \
+    "$REPO_ROOT/.agents/skills/background-watch-hook/SKILL.md"; do
+    if [ -f "$SKILL_FILE" ]; then
+      BACKGROUND_WATCH_HOOK_SKILL_FILE="$SKILL_FILE"
+      break
+    fi
+  done
+fi
 if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
   for SKILL_ROOT in "${CODEX_HOME:-$HOME/.codex}/skills" "${AGENTS_HOME:-$HOME/.agents}/skills"; do
     [ -d "$SKILL_ROOT" ] || continue
@@ -202,6 +219,11 @@ Use the bundled GitHub waiter only when the watched thing is PR review activity.
 One-shot watch:
 
 ```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+  --repo avibe-bot/avibe --pr 151 --state-file "$STATE_FILE" --seed-state
+
+# Push or post the review trigger only after the baseline is durable.
 vibe watch add \
   --name "Watch PR 151 reviews" \
   --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
@@ -211,20 +233,13 @@ vibe watch add \
     --pr 151 \
     --actionable-only \
     --settle 20 \
+    --state-file "$STATE_FILE" \
     --interval 60
 ```
 
 Before a push or review trigger, seed an owner-specific state file from the
-current complete PR snapshot. Arm the post-action watch with that same file so
-activity that lands during the handoff remains visible:
-
-```bash
-STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151.json"
-uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
-  --repo avibe-bot/avibe --pr 151 --state-file "$STATE_FILE" --seed-state
-
-# Push or post the review trigger, then create the watch with STATE_FILE.
-```
+current complete PR snapshot. Arm the post-action watch with that exact file so
+activity that lands during the handoff remains visible.
 
 Use `--catch-up` only when deliberately processing historical activity. It is
 not a substitute for the pre-action baseline in a review loop.
@@ -253,6 +268,7 @@ lost to the timeout kill. Keep `--settle` well under `--timeout`.
 Catch up on existing activity first:
 
 ```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-catch-up.json"
 vibe watch add \
   --name "Catch up PR 151 reviews" \
   --message "PR #151 already has review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
@@ -260,12 +276,17 @@ vibe watch add \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
     --pr 151 \
+    --state-file "$STATE_FILE" \
     --catch-up
 ```
 
 Stay armed for future activity:
 
 ```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-forever.json"
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+  --repo avibe-bot/avibe --pr 151 --state-file "$STATE_FILE" --seed-state
+
 vibe watch add \
   --name "Monitor PR 151 reviews" \
   --forever \
@@ -278,7 +299,7 @@ vibe watch add \
     --pr 151 \
     --actionable-only \
     --settle 20 \
-    --state-file ~/.avibe/state/watch-cursors/pr-151.json \
+    --state-file "$STATE_FILE" \
     --interval 60
 ```
 
@@ -364,6 +385,10 @@ GitHub-specific notes:
 New PRs in a repository:
 
 ```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/new-prs-avibe.json"
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+  --repo avibe-bot/avibe --new-prs --state-file "$STATE_FILE" --seed-state
+
 vibe watch add \
   --name "Watch new PRs" \
   --message "The repository has new pull requests. Review the new PRs and continue as needed." \
@@ -371,6 +396,7 @@ vibe watch add \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
     --new-prs \
+    --state-file "$STATE_FILE" \
     --interval 60
 ```
 

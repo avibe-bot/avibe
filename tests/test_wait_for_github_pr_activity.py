@@ -858,22 +858,37 @@ def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:
     assert "pull_request #158" in stdout.getvalue()
 
 
-def test_main_returns_retry_exit_code_for_retryable_initial_pr_http_error() -> None:
+def test_main_retries_retryable_initial_pr_http_error_inside_one_shot() -> None:
     module = _load_module()
+    state = _pr_state()
+    state["issue_comments"] = [
+        {
+            "id": 501,
+            "body": "Review result",
+            "html_url": "https://github.com/example/repo/pull/153#issuecomment-501",
+            "user": {"login": "reviewer"},
+        }
+    ]
     stderr = io.StringIO()
     err = urllib.error.HTTPError("https://api.github.com/example", 503, "Service Unavailable", hdrs=None, fp=None)
 
     with (
-        patch.object(module, "_fetch_state", side_effect=err),
+        patch.object(module, "_fetch_state", side_effect=[err, err, (state, 1)]) as fetch,
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
+        patch.object(module.time, "sleep", return_value=None) as sleep,
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--catch-up"],
+        ),
         patch("sys.stderr", stderr),
     ):
         rc = module.main()
 
-    assert rc == 75
-    assert "GitHub API error: 503 Service Unavailable" in stderr.getvalue()
+    assert rc == 0
+    assert fetch.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0]
+    assert "Transient initial GitHub PR state request failure" in stderr.getvalue()
 
 
 def test_main_returns_terminal_exit_code_for_non_retryable_initial_pr_http_error() -> None:
@@ -891,25 +906,59 @@ def test_main_returns_terminal_exit_code_for_non_retryable_initial_pr_http_error
         rc = module.main()
 
     assert rc == 1
-    assert "GitHub API error: 404 Not Found" in stderr.getvalue()
+    assert "Failed to fetch initial PR state: GitHub HTTP 404 Not Found" in stderr.getvalue()
 
 
-def test_main_returns_retry_exit_code_for_initial_pr_network_error() -> None:
+def test_main_stops_after_bounded_initial_pr_network_retries() -> None:
     module = _load_module()
     stderr = io.StringIO()
     err = urllib.error.URLError("temporary network failure")
 
     with (
-        patch.object(module, "_fetch_state", side_effect=err),
+        patch.object(module, "_fetch_state", side_effect=err) as fetch,
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
         patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
         patch("sys.stderr", stderr),
     ):
         rc = module.main()
 
-    assert rc == 75
-    assert "GitHub network error: temporary network failure" in stderr.getvalue()
+    assert rc == 1
+    assert fetch.call_count == 3
+    assert "failed after 3 attempts" in stderr.getvalue()
+
+
+def test_main_recovers_from_retryable_pr_polling_failure() -> None:
+    module = _load_module()
+    updated = _pr_state()
+    updated["issue_comments"] = [
+        {
+            "id": 501,
+            "body": "New review result",
+            "html_url": "https://github.com/example/repo/pull/153#issuecomment-501",
+            "user": {"login": "reviewer"},
+        }
+    ]
+    error = urllib.error.URLError("temporary network failure")
+    stdout = io.StringIO()
+
+    with (
+        patch.object(module, "_fetch_state", side_effect=[(_pr_state(), 1), error, (updated, 1)]) as fetch,
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--interval", "1"],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert fetch.call_count == 3
+    assert "issue_comment #501" in stdout.getvalue()
 
 
 def test_main_stops_on_a_terminal_polling_http_error() -> None:
@@ -937,7 +986,38 @@ def test_main_stops_on_a_terminal_polling_http_error() -> None:
         rc = module.main()
 
     assert rc == 1
-    assert "GitHub API error during polling: 404 Not Found" in stderr.getvalue()
+    assert "GitHub polling failed: GitHub HTTP 404 Not Found" in stderr.getvalue()
+
+
+def test_new_pr_seed_does_not_resolve_viewer_login(tmp_path: Path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "new-prs.json"
+
+    with (
+        patch.object(module, "_fetch_new_pr_state", return_value=({"pull_requests": []}, 1)),
+        patch.object(module, "get_token", return_value="app-token"),
+        patch.object(
+            module,
+            "get_authenticated_login",
+            side_effect=AssertionError("new-PR mode must not call /user"),
+        ),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--new-prs",
+                "--state-file",
+                str(state_file),
+                "--seed-state",
+            ],
+        ),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert state_file.is_file()
 
 
 def test_main_fails_closed_when_authenticated_login_cannot_be_resolved() -> None:
