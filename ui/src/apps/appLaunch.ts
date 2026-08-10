@@ -170,12 +170,16 @@ export function isStandaloneAppTab(search: string): boolean {
  * standalone app opts into both behaviors in one place.
  *
  * Only the exact route matches: a standalone tab that navigates elsewhere (e.g. Files →
- * `/chat/<id>`) is an ordinary page again and gets the chrome back. Trailing slashes are
- * normalized away first, the same way `isApplicationRouteHref` does it: React Router
- * renders `/apps/files/` as the Files route, so the layout must agree with what mounted.
+ * `/chat/<id>`) is an ordinary page again and gets the chrome back.
+ *
+ * The pathname is normalized to what React Router actually MOUNTED first — trailing
+ * slashes stripped (as `isApplicationRouteHref` does) and case folded, since the router
+ * matches case-insensitively by default. `/Apps/Files/?standalone=1` mounts the Files
+ * page, so it must get the standalone layout too; disagreeing would leave the document
+ * half-standalone (windows suppressed, chrome restored).
  */
 export function isStandaloneAppRoutePath(pathname: string): boolean {
-  const normalized = pathname.replace(/\/+$/, '') || '/';
+  const normalized = pathname.replace(/\/+$/, '').toLowerCase() || '/';
   const id = normalized.startsWith('/apps/') ? normalized.slice('/apps/'.length) : '';
   return STANDALONE_BUILTIN_ROUTES.has(id);
 }

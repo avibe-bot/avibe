@@ -157,10 +157,15 @@ describe('isStandaloneAppRoutePath', () => {
     expect(isStandaloneAppRoutePath('/apps/show/sess42')).toBe(false);
   });
 
-  it('accepts the trailing-slash variant React Router still renders', () => {
+  it('accepts the route variants React Router still mounts', () => {
+    // Trailing slashes and casing are both matched loosely by the router, so the layout
+    // must agree with what mounted rather than with the literal URL.
     expect(isStandaloneAppRoutePath('/apps/terminal/')).toBe(true);
     expect(isStandaloneAppRoutePath('/apps/files//')).toBe(true);
+    expect(isStandaloneAppRoutePath('/Apps/Files')).toBe(true);
+    expect(isStandaloneAppRoutePath('/APPS/TERMINAL/')).toBe(true);
     expect(isStandaloneAppRoutePath('/apps/library/')).toBe(false);
+    expect(isStandaloneAppRoutePath('/Apps/Library')).toBe(false);
   });
 
   it('is false off the app routes', () => {

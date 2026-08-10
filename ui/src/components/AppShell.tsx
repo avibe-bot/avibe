@@ -4,7 +4,7 @@ import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Ha
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
+import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
 import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { memoryNavShouldBeVisible } from '../lib/memorySettings';
@@ -286,6 +286,33 @@ export const AppShell: React.FC = () => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
 
+  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
+  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
+  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
+  // and hands the whole viewport to the app. Both halves matter: the flag alone would
+  // strip the chrome off any page such a tab later navigates to, and the route alone
+  // would strip it inside the normal workbench. The app pages render their full-bleed
+  // body off the same signal (StandaloneAppTabContext).
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
+
+  // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
+  // (Files → "Open in Editor" / "Open Terminal Here") lands on `/apps/editor` WITHOUT the
+  // marker, while the document is still the single-app tab — `standaloneAppTab` is frozen
+  // at mount by design. Reloading, bookmarking, or copying that URL would otherwise bring
+  // back the full workbench chrome and the restored window layout the tab exists to avoid.
+  //
+  // `history.replaceState` rather than a router navigate: this only corrects what the
+  // address bar shows, and leaving the router's own location (and `location.key`) untouched
+  // keeps launch effects keyed on it — the Terminal's "open one tab per launch" — from
+  // firing a second time for the same navigation.
+  useEffect(() => {
+    if (!chromeless) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(APP_TAB_PARAM) === '1') return;
+    url.searchParams.set(APP_TAB_PARAM, '1');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [chromeless, location.pathname, location.search]);
+
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
@@ -409,14 +436,6 @@ export const AppShell: React.FC = () => {
   const isSearch = location.pathname === '/search';
   const isFullScreenMobile = isChat || isSearch;
 
-  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
-  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
-  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
-  // and hands the whole viewport to the app. Both halves matter: the flag alone would
-  // strip the chrome off any page such a tab later navigates to, and the route alone
-  // would strip it inside the normal workbench. The app pages render their full-bleed
-  // body off the same signal (StandaloneAppTabContext).
-  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
   return (
