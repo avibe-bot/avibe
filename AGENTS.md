@@ -187,11 +187,10 @@ Source-of-truth rule:
   new waiter activity after the prior review was terminal; close-out requires
   zero unresolved review threads across the entire PR, including earlier and
   outdated heads, not just a 0-finding latest review
-- after opening a PR, use the repo-local `pr-delivery-loop` waiter to keep a
-  review-fix loop running until the review passes; use
-  `.agents/skills/pr-delivery-loop/scripts/wait_pr.py` /
-  `.agents/skills/pr-delivery-loop/scripts/wait_action.py`, never hand-rolled
-  waiters, and create the watch immediately without waiting to be reminded
+- after opening a PR, use the `background-watch-hook` skill to keep a
+  review-fix loop running until the review passes; use that skill's bundled PR
+  and Actions waiters rather than hand-rolling one, and create the watch
+  immediately without waiting to be reminded
 - PR descriptions must name the changed capability, list affected scenario IDs
   when a catalog exists, and state which evidence layers were updated: unit,
   contract, scenario, and residual manual checks
