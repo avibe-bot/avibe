@@ -155,7 +155,7 @@ class _ProviderRootLock:
 
 
 class _PlannedReapTokens:
-    """One-shot provider-root handoff tokens bound to exact process generations."""
+    """One-shot provider-root handoffs backed by a live issuer lease."""
 
     def __init__(self, provider_root: Path) -> None:
         self._provider_root = provider_root
@@ -170,7 +170,7 @@ class _PlannedReapTokens:
             f"{lock_path.name}.handoff-",
         )
 
-    def record(self, pid: int, created_at: float) -> None:
+    def record(self, pid: int, created_at: float) -> _PlannedReapLease:
         confinement_root, directory, prefix = self._layout()
         path = self._path(directory, prefix, pid, created_at)
         ensure_private_directory(
@@ -178,11 +178,13 @@ class _PlannedReapTokens:
             directory,
             harden_confinement_root=False,
         )
+        created = False
         try:
             descriptor = create_confined_file(
                 confinement_root,
                 path,
             )
+            created = True
         except ConfinedFilesystemError:
             # Rediscovery can name the same exact sidecar twice. A secure token
             # is idempotent; a symlink, special file, or loose mode still fails.
@@ -190,7 +192,23 @@ class _PlannedReapTokens:
                 confinement_root,
                 path,
             )
-        os.close(descriptor)
+        try:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = os.fstat(descriptor)
+        except BaseException:
+            info = os.fstat(descriptor)
+            os.close(descriptor)
+            if created:
+                self._remove(path, (info.st_dev, info.st_ino))
+            raise
+        return _PlannedReapLease(
+            tokens=self,
+            descriptor=descriptor,
+            path=path,
+            identity=(info.st_dev, info.st_ino),
+        )
 
     def consume(self, pid: int, created_at: float) -> bool:
         try:
@@ -202,11 +220,28 @@ class _PlannedReapTokens:
             )
         except (ConfinedFilesystemError, OSError):
             return False
+        info = os.fstat(descriptor)
+        expected_identity = (info.st_dev, info.st_ino)
+        active_issuer = False
+        acquired = False
+        import fcntl
+
         try:
-            info = os.fstat(descriptor)
-            expected_identity = (info.st_dev, info.st_ino)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                active_issuer = True
+            else:
+                acquired = True
+            removed = self._remove(path, expected_identity)
         finally:
+            if acquired:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+        return active_issuer and removed
+
+    def _remove(self, path: Path, expected_identity: tuple[int, int]) -> bool:
+        confinement_root, directory, _prefix = self._layout()
         parent: int | None = None
         try:
             parent = open_confined_directory(
@@ -236,6 +271,39 @@ class _PlannedReapTokens:
             f"{pid}:{float(created_at).hex()}".encode("ascii")
         ).hexdigest()
         return directory / f"{prefix}{generation}"
+
+
+class _PlannedReapLease:
+    """Descriptor lease proving a planned-reap issuer is still active."""
+
+    def __init__(
+        self,
+        *,
+        tokens: _PlannedReapTokens,
+        descriptor: int,
+        path: Path,
+        identity: tuple[int, int],
+    ) -> None:
+        self._tokens = tokens
+        self._descriptor = descriptor
+        self._path = path
+        self._identity = identity
+
+    def release(self, *, remove_token: bool = True) -> bool:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return False
+        self._descriptor = None
+        removed = False
+        try:
+            if remove_token:
+                removed = self._tokens._remove(self._path, self._identity)
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+        return removed
 
 
 async def _wait_for_provider_root_lock(
@@ -348,7 +416,7 @@ class EverOSProcess:
         provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
-        self._provider_root = _canonical_provider_root(provider_root_path)
+        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
         self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._host = _SystemProcessHost() if _host is None else _host
@@ -692,6 +760,7 @@ class EverOSProcess:
             # Only its parent is needed to resolve the adjacent lock; provider
             # data remains untouched until lock admission succeeds.
             _ensure_owner_directory(self._memory_dir)
+            _require_provider_root_access_path(self._provider_root)
             root_lock = self._provider_root_lock()
             acquired = await _wait_for_provider_root_lock(
                 root_lock,
@@ -1095,7 +1164,7 @@ class EverOSRebuildProcess:
         provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
-        self._provider_root = _canonical_provider_root(provider_root_path)
+        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
         self._socket_path = self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._timeout_seconds = _positive_timeout(timeout_seconds, _REBUILD_TIMEOUT_SECONDS)
@@ -1118,12 +1187,16 @@ class EverOSRebuildProcess:
         """Reap any managed child that could still own this provider root."""
 
         _ensure_owner_directory(self._memory_dir)
+        _require_provider_root_access_path(self._provider_root)
         root_lock = self._provider_root_lock()
         root_lock.acquire()
         try:
             await self._reconcile_orphan_exclusive()
         finally:
-            root_lock.release()
+            try:
+                self._ownership.release_planned_reaps()
+            finally:
+                root_lock.release()
 
     async def _reconcile_orphan_exclusive(self) -> None:
         """Reap one managed child while the provider-root lock is held."""
@@ -1156,6 +1229,7 @@ class EverOSRebuildProcess:
             # its parent must exist before the adjacent lock can be resolved.
             # Provider data itself remains untouched until after lock admission.
             _ensure_owner_directory(self._memory_dir)
+            _require_provider_root_access_path(self._provider_root)
             root_lock = self._provider_root_lock()
             root_lock.acquire()
         except _ProviderRootBusy:
@@ -1175,7 +1249,10 @@ class EverOSRebuildProcess:
                 return RebuildProcessResult.FAILED
             return await self._run_exclusive()
         finally:
-            root_lock.release()
+            try:
+                self._ownership.release_planned_reaps()
+            finally:
+                root_lock.release()
 
     async def _run_exclusive(self) -> RebuildProcessResult:
         """Own the provider root from orphan reconciliation through retirement."""
@@ -1304,9 +1381,31 @@ def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
 
 
 def _canonical_provider_root(provider_root: Path | str) -> Path:
-    """One physical provider-root spelling for locks, records, env, and scans."""
+    """Resolve a read-only physical identity for locks and process matching."""
 
     return Path(os.path.abspath(os.fspath(provider_root))).resolve(strict=False)
+
+
+def _require_provider_root_access_path(provider_root: Path) -> None:
+    """Reject symlink traversal before any provider-root access or mutation."""
+
+    access_root = Path(os.path.abspath(os.fspath(provider_root)))
+    current = access_root
+    while True:
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise RuntimeError("memory provider root chain is unavailable") from error
+        else:
+            if stat.S_ISLNK(info.st_mode):
+                raise RuntimeError("memory provider root chain contains a symlink")
+            if current != access_root and not stat.S_ISDIR(info.st_mode):
+                raise RuntimeError("memory provider root parent is unsafe")
+        if current == current.parent:
+            return
+        current = current.parent
 
 
 def _provider_roots_match(value: object, expected: Path) -> bool:
@@ -1360,16 +1459,55 @@ class SidecarOwnership:
         self._python = Path(python) if python is not None else None
         self._host = _SystemProcessHost() if _host is None else _host
         self._planned_reaps = _PlannedReapTokens(self._provider_root)
+        self._planned_reap_leases: dict[tuple[int, str], _PlannedReapLease] = {}
 
     def record_planned_reap(self, pid: int, created_at: float) -> None:
         """Persist an exact one-shot handoff before terminating a live sidecar."""
 
-        self._planned_reaps.record(pid, created_at)
+        key = self._planned_reap_key(pid, created_at)
+        if key not in self._planned_reap_leases:
+            self._planned_reap_leases[key] = self._planned_reaps.record(
+                pid,
+                created_at,
+            )
 
     def consume_planned_reap(self, pid: int, created_at: float) -> bool:
         """Consume this process generation's handoff, if one was recorded."""
 
+        lease = self._planned_reap_leases.pop(
+            self._planned_reap_key(pid, created_at),
+            None,
+        )
+        if lease is not None:
+            return lease.release()
         return self._planned_reaps.consume(pid, created_at)
+
+    def cancel_planned_reap(self, pid: int, created_at: float) -> None:
+        """Revoke a handoff that failed before signalling its exact target."""
+
+        lease = self._planned_reap_leases.pop(
+            self._planned_reap_key(pid, created_at),
+            None,
+        )
+        if lease is not None:
+            lease.release()
+
+    def release_planned_reaps(self) -> None:
+        """End every remaining issuer lease before releasing root ownership."""
+
+        leases = tuple(self._planned_reap_leases.values())
+        self._planned_reap_leases.clear()
+        for lease in leases:
+            try:
+                lease.release()
+            except Exception:
+                # Closing the descriptor still revokes the issuer lease. An
+                # unlocked leftover token is stale and cannot suppress a crash.
+                logger.warning("Could not remove a stale planned-reap token")
+
+    @staticmethod
+    def _planned_reap_key(pid: int, created_at: float) -> tuple[int, str]:
+        return pid, float(created_at).hex()
 
     def record_launch(self, pid: int, created_at: float, process_group: int | None) -> None:
         """Persist the launched child's identity so a later boot can reap an orphan.
@@ -1521,7 +1659,7 @@ class SidecarOwnership:
             )
         finally:
             if planned_sidecar_reap and not terminated:
-                self.consume_planned_reap(pid, confirmed_create_time)
+                self.cancel_planned_reap(pid, confirmed_create_time)
         if not terminated:
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self.record_path})")
         # The recorded root is gone, but a helper it spawned after the last
@@ -1862,7 +2000,7 @@ class SidecarOwnership:
                 )
             finally:
                 if planned_sidecar_reap and not terminated:
-                    self.consume_planned_reap(pid, created_at)
+                    self.cancel_planned_reap(pid, created_at)
             foreign = sorted(set(foreign).union(later_foreign))
             if not terminated:
                 raise RuntimeError(
@@ -1959,7 +2097,12 @@ def _prepare_memory_child_directories(
         directories.append(settings.call_log_db_path.parent)
     for directory in directories:
         _ensure_owner_directory(directory)
-    _ensure_owner_directory(provider_root)
+    _require_provider_root_access_path(provider_root)
+    ensure_private_directory(
+        provider_root.parent,
+        provider_root,
+        harden_confinement_root=False,
+    )
 
 
 def _write_memory_child_config(
