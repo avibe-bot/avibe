@@ -4,13 +4,13 @@ import asyncio
 import json
 import secrets
 import threading
-import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 import aiohttp
 
+from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
     EngineHealth,
     EngineStatus,
@@ -67,25 +67,12 @@ async def _probe_protocol_response(
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
     if not root:
         raise EngineClientError("source requires a base URL for protocol observation")
-    parsed = urllib.parse.urlsplit(root)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or parsed.fragment
-    ):
-        raise EngineClientError("source base URL is invalid")
     endpoint = _endpoint_for_protocol(protocol).removeprefix("/v1")
-    url = urllib.parse.urlunsplit(
-        (
-            parsed.scheme,
-            parsed.netloc,
-            f"{parsed.path.rstrip('/')}{endpoint}",
-            parsed.query,
-            "",
-        )
-    )
+    try:
+        url = normalize_model_hub_base_url(root, append_path=endpoint)
+    except (TypeError, ValueError):
+        raise EngineClientError("source base URL is invalid")
+    assert url is not None
     headers = {
         "Authorization": f"Bearer {secret}",
         "Accept": "application/json",
@@ -390,12 +377,14 @@ class CLIProxyEngineAdapter:
             credential_ref,
         )
         normalized_vendor = vendor.strip().lower()
+        try:
+            normalized_base_url = normalize_model_hub_base_url(base_url)
+        except (TypeError, ValueError):
+            raise EngineStateError("invalid source base URL") from None
         if (
             metadata.get("kind") != "api_key"
             or metadata.get("vendor") != normalized_vendor
-            or metadata.get("base_url") != (
-                base_url.rstrip("/") if isinstance(base_url, str) else None
-            )
+            or metadata.get("base_url") != normalized_base_url
         ):
             raise EngineStateError("credential does not match observation target")
         secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)

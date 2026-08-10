@@ -97,6 +97,8 @@ class MigrationHost(Protocol):
         source: ModelHubSourceConfig,
     ) -> None: ...
 
+    def _added_to(self, source_id: str) -> list[dict]: ...
+
 
 @dataclass(frozen=True)
 class NativeManualModel:
@@ -639,7 +641,7 @@ async def apply_native_migration(
     *,
     mask_credential: Callable[[str], str],
     validate_base_url: Callable[[object], Optional[str]],
-) -> int:
+) -> tuple[int, list[dict]]:
     """Provision, probe, and atomically persist a selected migration batch."""
 
     if (
@@ -649,7 +651,7 @@ async def apply_native_migration(
     ):
         raise MigrationConflictError
     if not item_ids:
-        return 0
+        return 0, []
 
     async with host._mutation_lock:
         previous = host.store.load()
@@ -749,7 +751,12 @@ async def apply_native_migration(
 
             await host._commit_synced(previous, updated)
             persisted = True
-            return len(selected)
+            added_to = [
+                position
+                for item in selected
+                for position in host._added_to(item.source_id)
+            ]
+            return len(selected), added_to
         finally:
             if not persisted:
                 for source_id, credential_ref in reversed(provisioned):

@@ -355,23 +355,22 @@ def inspect_exact_hop(
 
 
 def _supply_status(
-    matching_sources: tuple[ModelHubSourceConfig, ...],
-    candidates: tuple[ModelHubSourceConfig, ...],
+    inspections: tuple[ExactHopInspection, ...],
     *,
     now: datetime | None,
     unavailable_source_ids: frozenset[str],
-    unsupported_source_ids: frozenset[str],
 ) -> SupplyStatus:
-    if not matching_sources:
+    if not inspections:
         return "interrupted"
-    if candidates:
-        return "ok" if candidates[0].id == matching_sources[0].id else "degraded"
+    if any(inspection.runnable for inspection in inspections):
+        return "ok" if all(inspection.runnable for inspection in inspections) else "degraded"
     if all(
-        source.id not in unavailable_source_ids
-        and source.id not in unsupported_source_ids
-        and source.state.status == "cooldown"
-        and not source_retry_ready(source, now)
-        for source in matching_sources
+        inspection.source is not None
+        and inspection.source.id not in unavailable_source_ids
+        and inspection.supply_eligible
+        and inspection.source.state.status == "cooldown"
+        and not source_retry_ready(inspection.source, now)
+        for inspection in inspections
     ):
         return "waiting"
     return "interrupted"
@@ -405,9 +404,6 @@ def resolve_model_hub_turn(
         )
 
     if backend == "opencode":
-        checked = tuple(agent.menu.checked if agent.menu else ())
-        if requested_model and requested_model not in checked:
-            requested_model = ""
         if not requested_model:
             return ModelHubTurnResolution(
                 backend=backend,
@@ -418,13 +414,6 @@ def resolve_model_hub_turn(
                 supply_status="interrupted",
             )
 
-    menu_provider_id: str | None = None
-    menu_model_id: str | None = None
-    if backend == "opencode":
-        menu_provider_id, menu_model_id = canonical_opencode_menu_identity(
-            requested_model
-        )
-
     route = agent.routes.get(requested_model)
     if route is None:
         return ModelHubTurnResolution(
@@ -434,6 +423,15 @@ def resolve_model_hub_turn(
             target_model=requested_model,
             source=None,
             supply_status="interrupted",
+            route_unconfigured=True,
+            route_reason="route_unconfigured",
+        )
+
+    menu_provider_id: str | None = None
+    menu_model_id: str | None = None
+    if backend == "opencode":
+        menu_provider_id, menu_model_id = canonical_opencode_menu_identity(
+            requested_model
         )
 
     inspected_hops = tuple(
@@ -533,10 +531,8 @@ def resolve_model_hub_turn(
         menu_model_id=menu_model_id,
         recoverable_source_ids=recoverable,
         supply_status=_supply_status(
-            matching_sources,
-            candidates,
+            inspected_hops,
             now=now,
             unavailable_source_ids=unavailable_source_ids,
-            unsupported_source_ids=unsupported_source_ids,
         ),
     )

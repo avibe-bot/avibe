@@ -170,13 +170,19 @@ def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]
     return value
 
 
-def _validate_model_hub_base_url(value: object) -> Optional[str]:
+def normalize_model_hub_base_url(
+    value: object,
+    *,
+    append_path: str | None = None,
+) -> Optional[str]:
+    """Validate a Source URL and optionally append an upstream API path."""
+
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Config 'model_hub.sources.base_url' is invalid")
     try:
-        parsed = urlsplit(value)
+        parsed = urlsplit(value.strip())
         hostname = parsed.hostname
     except ValueError as exc:
         raise ValueError("Config 'model_hub.sources.base_url' is invalid") from exc
@@ -208,7 +214,18 @@ def _validate_model_hub_base_url(value: object) -> Optional[str]:
             )
         ):
             raise ValueError("Config 'model_hub.sources.base_url' is invalid")
-    return value
+    if _contains_model_hub_credential_material(value):
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    path = parsed.path.rstrip("/")
+    if append_path is not None:
+        if not append_path.startswith("/") or append_path.startswith("//"):
+            raise ValueError("Model Hub URL path must be relative to the API root")
+        path = f"{path}{append_path}"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, parsed.query, ""))
+
+
+def _validate_model_hub_base_url(value: object) -> Optional[str]:
+    return normalize_model_hub_base_url(value)
 
 
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:

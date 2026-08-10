@@ -66,7 +66,7 @@ from vibe.model_hub_runtime.adapter import (
     CLIProxyEngineAdapter,
     _probe_protocol_response,
 )
-from vibe.model_hub_runtime.client import EngineClientError
+from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore
 
 
@@ -1177,12 +1177,13 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
 def test_source_observation_requires_distinct_protocol_probes_and_never_infers_from_order(
     tmp_path: Path,
 ) -> None:
+    base_url = "https://relay.example/v1?api-version=2026-07-23"
     state_store = EngineStateStore(tmp_path / "engine-state")
     credential_ref = state_store.store_api_key(
         "test-observation-key",
         vendor="openai",
         protocol=SOURCE_PROTOCOLS[-1],
-        base_url="https://relay.example/v1",
+        base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
         supervisor=Mock(),
@@ -1212,7 +1213,7 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
         ambiguous = asyncio.run(
             adapter.observe_source(
                 "openai",
-                "https://relay.example/v1",
+                base_url,
                 credential_ref,
                 SOURCE_PROTOCOLS,
             )
@@ -1236,7 +1237,7 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
         reordered = asyncio.run(
             adapter.observe_source(
                 "openai",
-                "https://relay.example/v1",
+                base_url,
                 credential_ref,
                 hinted_order,
             )
@@ -1268,7 +1269,7 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
         observed = asyncio.run(
             adapter.observe_source(
                 "openai",
-                "https://relay.example/v1",
+                base_url,
                 credential_ref,
                 hinted_order,
             )
@@ -1278,6 +1279,7 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
     assert observed.protocol == proved_protocol
     assert observed.model_ids == ("upstream-model",)
     assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
+    assert inventory_probe.await_args.kwargs["base_url"] == base_url
 
 
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
@@ -1316,6 +1318,44 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
     assert len(paths) == len(SOURCE_PROTOCOLS)
     assert len(set(paths)) == len(paths)
     assert {request_query for _path, request_query in requests} == {query}
+
+
+def test_model_discovery_preserves_query_when_appending_models_path() -> None:
+    query = "api-version=2026-07-23"
+
+    async def scenario() -> tuple[str, str, tuple[str, ...]]:
+        request_target: tuple[str, str] | None = None
+
+        async def list_models(request: web.Request) -> web.Response:
+            nonlocal request_target
+            request_target = (request.path, request.query_string)
+            return web.json_response({"data": [{"id": "upstream-model"}]})
+
+        app = web.Application()
+        app.router.add_get("/{tail:.*}", list_models)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            models = await probe_models(
+                vendor="custom",
+                protocol="openai_chat",
+                base_url=f"http://127.0.0.1:{port}/v1?{query}",
+                secret="test-observation-key",
+            )
+        finally:
+            await runner.cleanup()
+        assert request_target is not None
+        return request_target[0], request_target[1], models
+
+    path, request_query, models = asyncio.run(scenario())
+
+    assert path == "/v1/models"
+    assert request_query == query
+    assert models == ("upstream-model",)
 
 
 def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None:

@@ -136,6 +136,11 @@ def test_source_validator_enforces_final_cross_field_and_inventory_rules():
     with pytest.raises(ValueError):
         ModelHubSourceConfig.from_payload(credential_url)
 
+    safe_query_url = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    safe_query_url["base_url"] = "https://relay.example/v1/?api-version=2026-07-23"
+    parsed = ModelHubSourceConfig.from_payload(safe_query_url)
+    assert parsed.base_url == "https://relay.example/v1?api-version=2026-07-23"
+
 
 def _canonical(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()

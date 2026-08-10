@@ -610,6 +610,9 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
 
     result = asyncio.run(service.migration_apply([item["id"] for item in oauth_items]))
     assert result["applied"] == 2
+    assert {position["source_id"] for position in result["added_to"]} == {
+        source.id for source in store.config.sources
+    }
     assert {
         (source.vendor, source.kind, source.supply_channel, source.credential_ref) for source in store.config.sources
     } == {

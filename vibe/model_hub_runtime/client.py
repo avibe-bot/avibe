@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Mapping
 
 import aiohttp
 
+from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from vibe.model_hub_runtime.state import SourceRecord
 
@@ -362,16 +363,11 @@ async def probe_models(
     root = base_url or _OFFICIAL_BASE_URLS.get(normalized_vendor)
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
-    parsed = urllib.parse.urlparse(root)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
+    try:
+        url = normalize_model_hub_base_url(root, append_path="/models")
+    except (TypeError, ValueError):
         raise EngineClientError("source base URL is invalid")
+    assert url is not None
     headers = {"Authorization": f"Bearer {secret}", "Accept": "application/json"}
     if protocol == "anthropic":
         headers = {
@@ -379,7 +375,6 @@ async def probe_models(
             "anthropic-version": "2023-06-01",
             "Accept": "application/json",
         }
-    url = f"{root.rstrip('/')}/models"
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:

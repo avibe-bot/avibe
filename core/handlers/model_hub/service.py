@@ -9,7 +9,6 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
-from urllib.parse import parse_qsl, urlsplit
 
 from sqlalchemy import func, select
 
@@ -28,6 +27,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
+    normalize_model_hub_base_url,
 )
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
@@ -95,24 +95,6 @@ PROBE_RESULT_CONTRACT_VERSION = 5
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
-_CREDENTIAL_QUERY_KEYS = {
-    "access_token",
-    "api_key",
-    "apikey",
-    "auth",
-    "authorization",
-    "bearer",
-    "credential",
-    "key",
-    "password",
-    "passwd",
-    "secret",
-    "sig",
-    "signature",
-    "token",
-}
-
-
 class ModelHubError(Exception):
     def __init__(
         self,
@@ -275,42 +257,10 @@ def _mask_credential(value: str) -> str:
 
 
 def _validated_base_url(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise ModelHubError("discovery_failed")
     try:
-        parsed = urlsplit(value)
-        hostname = parsed.hostname
-    except ValueError:
+        return normalize_model_hub_base_url(value)
+    except (TypeError, ValueError):
         raise ModelHubError("discovery_failed") from None
-    if (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.fragment
-        or contains_credential_material(value)
-    ):
-        raise ModelHubError("discovery_failed")
-    for key, _ in parse_qsl(parsed.query, keep_blank_values=True):
-        normalized = key.strip().lower().replace("-", "_").replace(".", "_")
-        if normalized in _CREDENTIAL_QUERY_KEYS or any(
-            marker in normalized
-            for marker in (
-                "api_key",
-                "access_token",
-                "auth_token",
-                "token",
-                "authorization",
-                "signature",
-                "secret",
-                "password",
-                "credential",
-            )
-        ):
-            raise ModelHubError("discovery_failed")
-    return value
 
 
 def _builtin_model_ids(backend: str) -> tuple[str, ...]:
@@ -2022,6 +1972,7 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
 
             old_credential_ref = source.credential_ref
+            recovered = source.state.status in {"needs_action", "error"}
             replacement_ref = await self._engine_call(
                 self.adapter.provision_credential(
                     source.vendor,
@@ -2042,12 +1993,8 @@ class ModelHubService:
                 self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
 
-                interrupted_pairs = self._would_interrupt(config)
-                recovered = self._source(
-                    previous,
-                    source_id,
-                ).state.status in {"needs_action", "error"}
-                if interrupted_pairs and not recovered and not force:
+                interrupted_pairs = self._introduced_interruptions(previous, config)
+                if interrupted_pairs and not force:
                     raise ModelHubError(
                         "source_last_supplier",
                         status=409,
@@ -2198,6 +2145,26 @@ class ModelHubService:
                 )
         return gaps
 
+    def _introduced_interruptions(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+        *,
+        newly_empty_routes: frozenset[tuple[str, str]] = frozenset(),
+    ) -> list[dict]:
+        baseline = {
+            (item["backend"], item["model_id"])
+            for item in self._would_interrupt(previous)
+        }
+        return [
+            item
+            for item in self._would_interrupt(
+                updated,
+                newly_empty_routes=newly_empty_routes,
+            )
+            if (item["backend"], item["model_id"]) not in baseline
+        ]
+
     async def delete_source(self, source_id: str, *, force: bool = False) -> dict:
         async with self._mutation_lock:
             previous = self.store.load()
@@ -2221,7 +2188,8 @@ class ModelHubService:
                 for item in removed_hops
                 if not config.agents[item["backend"]].routes[item["menu_model"]].hops
             )
-            would_interrupt = self._would_interrupt(
+            would_interrupt = self._introduced_interruptions(
+                previous,
                 config,
                 newly_empty_routes=newly_empty_routes,
             )
@@ -2329,16 +2297,7 @@ class ModelHubService:
                 ).reason
                 == "model_unsupported"
             ]
-            previous_interruptions = {
-                (item["backend"], item["model_id"])
-                for item in self._would_interrupt(previous)
-            }
-            would_interrupt = [
-                item
-                for item in self._would_interrupt(config)
-                if (item["backend"], item["model_id"])
-                not in previous_interruptions
-            ]
+            would_interrupt = self._introduced_interruptions(previous, config)
             if (would_remove_hops or would_interrupt) and not force:
                 raise ModelHubError(
                     "source_model_in_route_chain" if would_remove_hops else "source_last_supplier",
@@ -2492,22 +2451,15 @@ class ModelHubService:
                 not in {(item.source_id, item.model_id) for item in route.hops}
             ]
             agent.routes[model_id] = route
-            previous_interruptions = {
-                (item["backend"], item["model_id"])
-                for item in self._would_interrupt(previous)
-            }
-            interrupted = [
-                item
-                for item in self._would_interrupt(
-                    config,
-                    newly_empty_routes=(
-                        frozenset({(backend, model_id)})
-                        if old_route.hops and not route.hops
-                        else frozenset()
-                    ),
-                )
-                if (item["backend"], item["model_id"]) not in previous_interruptions
-            ]
+            interrupted = self._introduced_interruptions(
+                previous,
+                config,
+                newly_empty_routes=(
+                    frozenset({(backend, model_id)})
+                    if old_route.hops and not route.hops
+                    else frozenset()
+                ),
+            )
             if interrupted and payload.get("force") is not True:
                 raise ModelHubError(
                     "source_last_supplier",
@@ -2658,6 +2610,8 @@ class ModelHubService:
                 parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
                 for identifier in parsed.checked:
                     canonical_opencode_menu_identity(identifier)
+                    if contains_credential_material(identifier):
+                        raise ValueError("OpenCode menu identifier contains credential material")
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
             agent.menu = parsed
@@ -2785,16 +2739,7 @@ class ModelHubService:
                 for item in source.models
                 if item.id != model_id
             ]
-            previous_interruptions = {
-                (item["backend"], item["model_id"])
-                for item in self._would_interrupt(previous)
-            }
-            would_interrupt = [
-                item
-                for item in self._would_interrupt(config)
-                if (item["backend"], item["model_id"])
-                not in previous_interruptions
-            ]
+            would_interrupt = self._introduced_interruptions(previous, config)
             if (removed_hops or would_interrupt) and not force:
                 raise ModelHubError(
                     "source_model_in_route_chain" if removed_hops else "source_last_supplier",
@@ -3607,7 +3552,7 @@ class ModelHubService:
 
     async def migration_apply(self, item_ids: object) -> dict:
         try:
-            applied = await apply_native_migration(
+            applied, added_to = await apply_native_migration(
                 self,
                 item_ids,
                 mask_credential=_mask_credential,
@@ -3615,7 +3560,11 @@ class ModelHubService:
             )
         except MigrationConflictError:
             raise ModelHubError("migration_item_conflict", status=409)
-        return {"applied": applied, "sources": self.list_sources()}
+        return {
+            "applied": applied,
+            "sources": self.list_sources(),
+            "added_to": added_to,
+        }
 
     async def _recover_resolution_sources(
         self,
@@ -3793,11 +3742,14 @@ class ModelHubService:
 
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
+        globally_blocked_source_ids: set[str] = set()
         for inspection in candidate_hops:
             source = inspection.source
             target_model = inspection.model_id
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
+            if source.id in globally_blocked_source_ids:
+                continue
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -3917,6 +3869,8 @@ class ModelHubService:
                         detail_key=detail_key,
                         reason=event_reason,
                     )
+                if event_reason != "permission_denied":
+                    globally_blocked_source_ids.add(source.id)
                 failed_source = source
                 failed_reason = event_reason
                 continue
