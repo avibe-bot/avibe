@@ -643,6 +643,15 @@ def _handle_cookie_cleared(response) -> bool:
     )
 
 
+def _manual_sign_in_required(response) -> bool:
+    """Whether this response tells the browser to stop reauthorizing silently."""
+
+    return any(
+        value.startswith(f"{cloud_management.MANUAL_COOKIE_NAME}=") and "Max-Age=0" not in value
+        for value in response.headers.getlist("set-cookie")
+    )
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -667,6 +676,9 @@ def test_unrelated_callback_never_revokes_an_active_grant(monkeypatch, tmp_path,
 
     assert response.status_code == 302
     assert not _handle_cookie_cleared(response)
+    # Nor may it downgrade the browser to manual sign-in: that is the same
+    # cross-site nuisance in a milder form.
+    assert not _manual_sign_in_required(response)
     assert cloud_management.resolve_grant("grant-1", "browser-1", None)[0] is not None
 
 
@@ -694,6 +706,9 @@ def test_own_flow_callback_failure_still_revokes_the_grant(monkeypatch, tmp_path
 
     assert response.status_code == 302
     assert _handle_cookie_cleared(response)
+    # AUTH-SETUP-305/306: a failure on the browser's own flow must also stop the
+    # silent-reauthorization retries, or the UI loops on the same failure.
+    assert _manual_sign_in_required(response)
     assert cloud_management.resolve_grant("grant-1", "browser-1", None)[0] is None
 
 
