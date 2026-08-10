@@ -322,6 +322,8 @@ class GateCase(NamedTuple):
     class's own logic rather than the shared comparator), and `rule` one of the
     comparator's three structural rules — or `arm`, for a class-logic case that
     predates them and still has to keep working.
+
+    `within` is the section the anchor is read inside; see `_region`.
     """
 
     cls: str
@@ -331,6 +333,7 @@ class GateCase(NamedTuple):
     before: str
     after: str
     says: str
+    within: str
 
 
 # The three rules, restated as what a mutation has to show:
@@ -368,6 +371,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded",
         "重新拉取 pressed — `POST /api/models/sources/<source_id>/refreshes`, guarded",
         "is named by no §0.8 row",
+        within="0.8",
     ),
     GateCase(
         "A", "states", "token",
@@ -375,6 +379,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| → Unreachable / Sources unread / Partial | — |",
         "| → Unreach / Sources unread / Partial | — |",
         "names no F1–F5 and no known state",
+        within="0.8",
     ),
     GateCase(
         "A", "states", "empty",
@@ -382,6 +387,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| → Unreachable / Sources unread / Partial | — |",
         "| → Nowhere at all / Sources unread / Partial | — |",
         "names no F1–F5 and no known state",
+        within="0.8",
     ),
     GateCase(
         "A", "states", "duplicate",
@@ -389,6 +395,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| §1.0 | Impaired |",
         "| §1.0 | Ready |",
         "`1.0 · Ready` is defined twice in states",
+        within="0.8",
     ),
     GateCase(
         "A", "treatments", "token",
@@ -396,6 +403,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| F1 | Retry in place |",
         "| F10 | Retry in place |",
         "names F1, which §0.8's closed set does not define",
+        within="0.8",
     ),
     GateCase(
         "A", "treatments", "empty",
@@ -403,6 +411,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| F4 — `POST /api/models/oauth",
         "| F9 — `POST /api/models/oauth",
         "which §0.8's closed set does not define",
+        within="0.8",
     ),
     GateCase(
         "A", "treatments", "duplicate",
@@ -410,6 +419,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| F2 | Keep the last good result |",
         "| F1 | Keep the last good result |",
         "`F1` is defined twice in treatments",
+        within="0.8",
     ),
     # The defect this gate was built for: a state issues a call and no row
     # states what happens when it fails. This is the shape that survived review
@@ -426,6 +436,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "and its result is not awaited (D-15) |",
         "| — |",
         "states no failure treatment",
+        within="0.8",
     ),
     # `[contract-gap]` is also the marker that tells a checker to stop asking.
     # Pointed at a number no §0.5 row defines, it must silence nothing at all.
@@ -435,6 +446,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-99 carries",
         "is named by no §0.8 row",
+        within="1.5",
     ),
     # The same rule read from the registry side: a row that stops parsing as a
     # row stops being a registration, and the route it was excusing goes back to
@@ -457,6 +469,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| G-12 |",
         "| gap 12 |",
         "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
+        within="0.5",
     ),
     # The same row, with its route left in place and moved one column right. A
     # register accounts for what it declares missing; the column beside it is
@@ -472,6 +485,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "by sending the contracted `DELETE /api/models/sources/<id>` | the only 移除",
         " | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除",
         "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
+        within="0.5",
     ),
     # And the register whose declared column cannot be found at all. A column is
     # located by its header, so renaming one is the one edit that could quietly
@@ -483,6 +497,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| # | Surface | Missing | Verified absent at `ceace07f` |",
         "| # | Surface | What is absent | Verified absent at `ceace07f` |",
         "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
+        within="0.5",
     ),
     # The same marker pointed at a *prefix* of a registered number. Set
     # intersection got this right by accident and would have gone on getting it
@@ -494,6 +509,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-1 carries",
         "is named by no §0.8 row",
+        within="1.5",
     ),
     # The other direction, and the one the cell above was standing in for: the
     # extraction stopped at the last digit it wanted rather than at the end of
@@ -507,6 +523,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-15x carries",
         "is named by no §0.8 row",
+        within="1.5",
     ),
     # The same near miss reached through a joiner instead of a letter. The first
     # boundary rejected `G-15x` and still credited `G-15.1`, because it was
@@ -519,6 +536,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`[contract]` `[contract-gap]` G-15 carries",
         "`[contract]` `[contract-gap]` G-15.1 carries",
         "is named by no §0.8 row",
+        within="1.5",
     ),
     # Reviewer's repro, round 14: a route first mentioned inside a
     # registered-gap paragraph and then drawn as an unmarked affordance. The
@@ -531,6 +549,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\n06's header carries a 移除来源 "
         "button that sends `DELETE /api/models/sources/<id>` and returns to 01.",
         "is named by no §0.8 row",
+        within="1.4",
     ),
     # The mirror of class A, and the generator behind five findings across two
     # heads: a contracted mutation no surface reaches. Out of scope is a
@@ -541,6 +560,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `POST /api/models/migration/scan` | The migration surface.",
         "| `POST /api/models/migration/scans` | The migration surface.",
         "is contracted and reached by no §0.8 row",
+        within="0.4",
     ),
     # The defect that ran for nineteen rounds: §1.6 attributed §1.3's order save
     # to a bare `PUT`, which names no token, so every route arm read the sentence
@@ -553,6 +573,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "because it is not yet a request. It moves a row",
         "because it is not yet a `PUT`. It moves a row",
         "with no path, so no route arm can read the claim",
+        within="1.6",
     ),
     # One predicate written twice, eight hundred lines apart: the frame that owns
     # a failure disperses it into a set of its own states, and every other frame
@@ -576,6 +597,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "→ §1.0 Unreachable / §1.0 Sources unread — the same three "
         "§1.0 disperses first paint into, because this row is",
         "defers its failure to §1.0's set and does not name Partial",
+        within="0.8",
     ),
     GateCase(
         "A", None, "arm",
@@ -586,6 +608,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "(no sources) — the same three §1.0 disperses first paint into, because "
         "this row is",
         "names Empty (no sources), which §1.0 does not disperse into",
+        within="0.8",
     ),
     # --- B: copy, slots -----------------------------------------------------
     GateCase(
@@ -594,6 +617,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`shell.notStarted` | Run pill",
         "`shell.not` | Run pill",
         "key `shell.not` is cited and never defined",
+        within="0.8",
     ),
     GateCase(
         "B", "copy", "empty",
@@ -601,6 +625,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`shell.notStarted` | Run pill",
         "`shell.notStartd` | Run pill",
         "is cited and never defined",
+        within="0.8",
     ),
     # Two rows in one table under one key ship whichever the loader read last.
     # The key is legitimately re-used across namespaces — every table has a
@@ -611,6 +636,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `tiers.addFirst` | + 添加档位 | + Add tier |",
         "| `tiers.add` | + 添加档位 | + Add tier |",
         "is defined twice in copy",
+        within="1.6",
     ),
     GateCase(
         "B", "slots", "token",
@@ -618,6 +644,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `{{host}}` | The source's host",
         "| `{{hos}}` | The source's host",
         "interpolates `{{host}}` with no §0.9 row",
+        within="0.9",
     ),
     GateCase(
         "B", "slots", "empty",
@@ -625,6 +652,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `install.retry` `[derived]` | 重试 | Try again |",
         "| `install.retry` `[derived]` | 重试 {{attempt}} | Try again {{attempt}} |",
         "with no §0.9 row",
+        within="1.0",
     ),
     GateCase(
         "B", "slots", "duplicate",
@@ -632,6 +660,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `{{source}}` | A source's display name. | Always present |",
         "| `{{host}}` | A source's display name. | Always present |",
         "`host` is defined twice in slots",
+        within="0.9",
     ),
     # A key that would ship with no English string.
     GateCase(
@@ -640,6 +669,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `install.progress` `[derived]` | 正在安装… | Installing… |",
         "| `install.progress` `[derived]` | 正在安装… |  |",
         "has no English column",
+        within="1.0",
     ),
     # §0.9 names its consumers and the copy tables interpolate: one set, written
     # twice, by two authors who cannot see each other. Both directions get a
@@ -655,6 +685,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `addSub.title`, `adopt.effects.1` |",
         "| `addSub.title`, `adopt.effects.1`, `order.title` |",
         "and no such copy row does",
+        within="0.9",
     ),
     GateCase(
         "B", "slots", "arm",
@@ -662,6 +693,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `addSub.title`, `adopt.effects.1` |",
         "| `addSub.title` |",
         "and §0.9's row does not list it",
+        within="0.9",
     ),
     # The same generator one grain further out: a vocabulary declared as copy
     # keys and enumerated again as the strings those keys render. §1.0's mapping
@@ -675,6 +707,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "网关 · 暂时全部在冷却, 网关 · 无可用来源, 网关 · 未选型号",
         "网关 · 暂时全部在冷却, 网关 · 未选型号",
         "is missing",
+        within="1.9",
     ),
     # --- C: frames ----------------------------------------------------------
     GateCase(
@@ -683,6 +716,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| §1.0 | Impaired |",
         "| §1 | Impaired |",
         "filed under §1, which is no §1 section",
+        within="0.8",
     ),
     GateCase(
         "C", "frames", "empty",
@@ -690,6 +724,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| §1.0 | Impaired |",
         "| §1.60 | Impaired |",
         "filed under §1.60, which is no §1 section",
+        within="0.8",
     ),
     GateCase(
         "C", "frames", "duplicate",
@@ -697,6 +732,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "### 1.9 Frame 10 `g7MOA4`",
         "### 1.8 Frame 10 `g7MOA4`",
         "`1.8` is defined twice in frames",
+        within="1.9",
     ),
     # A state a user can enter and not leave.
     GateCase(
@@ -705,6 +741,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |",
         "| — |",
         "has no exit",
+        within="0.8",
     ),
     # A section that answers its other failures for both origins, with one
     # failure left written once — the reader cannot tell whether pulling from a
@@ -715,6 +752,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| ⑥′ Engine unavailable",
         "| ⑥″ Engine unavailable",
         "has no ′ row",
+        within="0.8",
     ),
     # The other half of the same arm: a step only one origin performs is
     # admissible, and what makes it admissible is the sentence naming the twin
@@ -727,6 +765,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "There is no ⑦′, because Pull origin persists nothing",
         "Pull origin persists nothing",
         "does not say 「no ⑦′」 either",
+        within="0.8",
     ),
     # A recovery exit that re-reads a collection and branches on the answer is a
     # dispatch, and owes every reading a landing. The arm used to find its
@@ -740,6 +779,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`needs_action` → Needs action, `error`",
         "`error`",
         "a row that routes this frame by `Source.state.status`",
+        within="0.8",
     ),
     # §0.8 files the guarded refusal under the frames that reach it, and §1 prose
     # answers the same question again whenever it explains who opens the shared
@@ -754,6 +794,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "exactly as §0.9 and §1.6 rule the same hole",
         "exactly as §0.9 and §1.3 rule the same hole",
         "reaches the guarded refusal",
+        within="1.1",
     ),
     # The same misattribution in the document's other habit. A frame heading
     # gives the frame three names, and §1 prose uses all of them — "Frames 09
@@ -766,6 +807,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "exactly as §0.9 and §1.6 rule the same hole",
         "exactly as §0.9 and 03 rule the same hole",
         "reaches the guarded refusal",
+        within="1.1",
     ),
     # --- D: copy ------------------------------------------------------------
     # Condition keys are stored bare and cited namespace-qualified, so the
@@ -778,6 +820,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`sourceDetail.fail.tier`, `sourceDetail.retry`",
         "`sourceDetail.fail.tiers`, `sourceDetail.retry`",
         "condition key `fail.tier` is cited by no §0.8 row",
+        within="0.8",
     ),
     GateCase(
         "D", "copy", "empty",
@@ -785,6 +828,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `fail.tier` `[derived]` | 档位没保存上",
         "| `fail.tierZ` `[derived]` | 档位没保存上",
         "condition key `fail.tierZ` is cited by no §0.8 row",
+        within="1.6",
     ),
     # --- E: routes, schema files, schema fields, repo symbols ---------------
     GateCase(
@@ -793,6 +837,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
         "`PUT /api/models/agents/<backend>/sources/order` with `{order: string[]}` `[contract]`",
         "is contracted by no `api.md` route row",
+        within="0.8",
     ),
     # A route the spec names that the contract does not have. This is the class
     # the round-10 review found by hand, six times.
@@ -802,6 +847,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
         "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}` `[contract]`",
         "is contracted by no `api.md` route row",
+        within="0.8",
     ),
     GateCase(
         "E", "schema files", "token",
@@ -809,6 +855,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`source.schema.json` pins it non-null",
         "`agent-source.schema.json` pins it non-null",
         "`agent-source.schema.json` is not a file in",
+        within="1.0",
     ),
     GateCase(
         "E", "schema files", "empty",
@@ -816,6 +863,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`source.schema.json` pins it non-null",
         "`sources.schema.json` pins it non-null",
         "`sources.schema.json` is not a file in",
+        within="1.0",
     ),
     # The mapping table no longer saying which of two same-named declarations it
     # renders. `supply_status` exists per backend and per named Agent, and
@@ -826,6 +874,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
         "| `supply_status` `[contract]` | Subtitle | Key |",
         "independent places",
+        within="1.0",
     ),
     # A `[contract]` header asserts that some schema owns the vocabulary below
     # it. When the field name resolves to no declaration, the set comparison has
@@ -837,6 +886,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
         "| `AgentSupply.supply_stat` `[contract]` | Subtitle | Key |",
         "the table maps no contracted field",
+        within="1.0",
     ),
     GateCase(
         "E", "repo symbols", "token",
@@ -844,6 +894,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "service.py:list_agents",
         "service.py:list_agent",
         "defines no `list_agent`",
+        within="0.5",
     ),
     GateCase(
         "E", "repo symbols", "empty",
@@ -851,6 +902,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "service.py:list_agents",
         "service.py:list_agent_rows",
         "defines no `list_agent_rows`",
+        within="0.5",
     ),
     # Reviewer's finding, round 14: `ast.walk` credited every `Store` name in the
     # file, so any local variable vouched for a citation. `cancelled` is one —
@@ -861,6 +913,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "service.py:list_agents",
         "service.py:cancelled",
         "defines no `cancelled`",
+        within="0.5",
     ),
     # The §0.5 registry, read as a universe. Its three rules are exercised where
     # the marker is spent: class A's route coverage (above) and class E's claim
@@ -877,6 +930,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| Contradicting evidence. | pending |\n"
         "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
         "is defined twice in gaps with different content",
+        within="0.5",
     ),
     # A number no row defines silences nothing. This case used to be reached
     # from the registry side — de-number G-9's row and watch the 409 it excused
@@ -893,6 +947,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nA 409 conflict answer to "
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-99.",
         "a 409 branch is claimed for",
+        within="1.4",
     ),
     # E's own use of the marker, against a near miss: the claim cites `G-1`,
     # which is a prefix of `G-15` and a row nobody wrote. Citing a registered
@@ -905,6 +960,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nA 409 conflict answer to "
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-1.",
         "a 409 branch is claimed for",
+        within="1.4",
     ),
     # The same suffix miss on the other arm that honours the marker. Both ask
     # through one comparison, so one boundary fixes both — and one direction
@@ -917,6 +973,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nA 409 conflict answer to "
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9x.",
         "a 409 branch is claimed for",
+        within="1.4",
     ),
     GateCase(
         "E", "gaps", "token",
@@ -925,6 +982,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nA 409 conflict answer to "
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9.1.",
         "a 409 branch is claimed for",
+        within="1.4",
     ),
     # A total rendering of a contracted vocabulary that quietly drops a row. The
     # author cannot see the schema while writing the table, so nothing but a set
@@ -935,6 +993,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| `waiting` | 网关 · 暂时全部在冷却 |",
         "| `wating` | 网关 · 暂时全部在冷却 |",
         "renders",
+        within="1.0",
     ),
     # The right route and the wrong body: `{hops}` belongs to the per-model
     # chain save, and sending it here was a real finding.
@@ -944,6 +1003,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
         "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}` `[contract]`",
         "not contracted for",
+        within="0.8",
     ),
     # `api.md` puts request and response in one cell, and a check that unions
     # the two sides accepts the answer's vocabulary as a legal request body.
@@ -955,6 +1015,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "and returns `{agent: AgentSupply}`",
         "and sends `{agent: AgentSupply}`",
         "not contracted for",
+        within="1.3",
     ),
     # --- the four defects that spent the exit clause -----------------------
     #
@@ -977,6 +1038,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nA refusal body "
         "`{ok, reason_key}` is `[contract-gap]` G-9.",
         "an unbound body claim cannot be checked",
+        within="1.4",
     ),
     # A withdrawn number still resolves — the row is kept, struck through, so
     # the register says what happened to it — so the `empty` case above cannot
@@ -988,6 +1050,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nRetiring an entry issues "
         "`PATCH /api/models/sources/<source_id>/retire` `[contract-gap]` G-15.",
         "is named by no §0.8 row",
+        within="1.4",
     ),
     # G-15 is live and names `PATCH /api/models/sources/<id>`. Position cannot
     # decide this — §1.4's G-17 sits two characters from a route it is not
@@ -1000,6 +1063,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the surface of truth when it does not.\n\nA 409 conflict answer to "
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-15.",
         "a 409 branch is claimed for",
+        within="1.4",
     ),
     # The shared envelopes are answers. Unioned into a request allowance they
     # widened it by every key any response anywhere carries, so a metadata edit
@@ -1010,6 +1074,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`{display_name?, base_url?}`",
         "`{display_name?, base_url?, source?}`",
         "not contracted for",
+        within="0.5",
     ),
     # Two of `api.md`'s rows spell no answer in the cell: they name it — "OAuth
     # result" — and a section below spells it out, as three readings selected by
@@ -1026,6 +1091,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by`",
         "the `create` terminal answers with `{flow, source, recovered, interrupted_pairs}`",
         "not contracted for",
+        within="0.8",
     ),
     # A schema citation used to confirm the file and never the field, so a
     # misspelling sat behind a citation that looked verified. Two cues state
@@ -1038,6 +1104,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`source.schema.json`'s `models` describes",
         "`source.schema.json`'s `model_list` describes",
         "declares no `model_list`",
+        within="0.7",
     ),
     GateCase(
         "E", "schema files", "arm",
@@ -1045,6 +1112,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`masked_credential` are each",
         "`masked_key` are each",
         "declares no `masked_key`",
+        within="1.1",
     ),
     # §0.9 declares which keys interpolate each slot; §1.0 enumerates the same
     # set four hundred lines away, in prose. Two enumerations of one set, and
@@ -1058,6 +1126,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`gateway.modelCount`, `gateway.collapse`, `addKey.pull.result`, `guard.count`,",
         "`gateway.modelCount`, `gateway.collapse`, `addKey.pull.result`,",
         "and leaves out `guard.count`",
+        within="1.0",
     ),
     # The other direction, and it needs its own case because the arm answers it
     # with a different comparison. A dropped key is caught against §0.9; a key
@@ -1072,6 +1141,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`sourceDetail.refetch.removed` and `takeover.pill` — nine",
         "`sourceDetail.refetch.removed`, `chain.derived.hops` and `takeover.pill` — nine",
         "enumerates `chain.derived.hops` among the keys",
+        within="1.0",
     ),
     # A frame's element inventory quotes the line an implementer is to draw,
     # which is a copy row's string written a second time in the section that
@@ -1085,6 +1155,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "and one `{{mode}} · {{health}}` line",
         "and one `{{mode}} · {{status}}` line",
         "and no copy row renders it",
+        within="1.1",
     ),
     # The same generator one grain further in: a frame's mapping table says what
     # each value of a field is drawn as, and a §0.8 row keyed on one of those
@@ -1115,6 +1186,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
         "`shell.starting` | Run pill → Starting |",
         "enters on `not_started` and renders `shell.starting`, but §1.0's own mapping of",
+        within="0.8",
     ),
     # Arm N reads the exit cell against the frame's own value table, and the
     # defect arrives from either side: the dispatch narrows, or a state starts
@@ -1127,6 +1199,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`not_started` → Not started, `degraded` → Impaired",
         "`degraded` → Impaired",
         "reading `not_started` as 「Not started」",
+        within="0.8",
     ),
     GateCase(
         "C", None, "arm",
@@ -1135,6 +1208,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| An install confirm was accepted, and supply reads `waiting` "
         "`[contract-gap]` G-10 |",
         "reading `waiting` as 「Installing」",
+        within="0.8",
     ),
     # And the third side, which membership could not see: the dispatch names
     # every reading and sends one of them to the wrong state. The head this arm
@@ -1148,6 +1222,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`not_started` → Not started",
         "`not_started` → Ready",
         "sends `not_started` to 「Ready」, and §1.0 keys 「Not started」",
+        within="0.8",
     ),
     GateCase(
         "C", None, "arm",
@@ -1155,6 +1230,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`cooldown` → Cooling",
         "`cooldown` → Needs action",
         "sends `cooldown` to 「Needs action」, and §1.6 keys 「Cooling」",
+        within="0.8",
     ),
 )
 
@@ -1200,6 +1276,62 @@ UNREACHABLE_BY_ARM: dict[tuple[str, str, str], str] = {
 }
 
 
+SECTION_HEAD_RE = re.compile(r"^#{2,3} (\d+(?:\.\d+)?) ", re.M)
+
+
+def _region(spec: str, section: str, label: str) -> tuple[int, int]:
+    """Where `section` runs — its heading to the next one, subsections included.
+
+    An anchor is a quotation, and a quotation is only ever unique somewhere. Read
+    document-wide it is hostage to every other section: round 26 broke four cases
+    at once by giving a second frame the same exit sentence, and the correct
+    reading of that failure — the cases are right, the spec is right, the anchors
+    were written too wide — took a transcript to recover. So each case names the
+    section it is quoting from, and the anchor has to be unique only there.
+
+    The pattern insists on a heading that begins with a number, because §1.1's
+    body carries a fenced pseudocode block whose comments start with `# 0.` — a
+    terminator that stopped at those would cut the section in half.
+    """
+    assert section, f"{label}: every case must name the section its anchor is read inside"
+    head = re.search(rf"^#{{2,3}} {re.escape(section)} ", spec, re.M)
+    assert head, f"{label}: the spec has no section {section}"
+    nxt = SECTION_HEAD_RE.search(spec, head.end())
+    return head.start(), nxt.start() if nxt else len(spec)
+
+
+def _mutate(spec: str, case) -> str:
+    """`case.before` → `case.after`, once, inside the section the case names."""
+    start, end = _region(spec, case.within, case.label)
+    region = spec[start:end]
+    assert region.count(case.before) == 1, (
+        f"{case.label}: anchor is not unique in §{case.within} — it matches "
+        f"{region.count(case.before)} times. Re-anchor on what identifies the "
+        "target (the row's own cell, the sentence's own subject) or move the case "
+        "to the section it now belongs in; do not widen the quotation to make it "
+        "unique again, and do not scope it by hand at the call site."
+    )
+    return spec[:start] + region.replace(case.before, case.after, 1) + spec[end:]
+
+
+def test_an_anchor_is_read_inside_its_own_section_only():
+    """Round 26, in miniature: a twin elsewhere is not this case's business.
+
+    Both halves matter. Without the first, editing one frame can redden cases
+    written against another, and the suite starts teaching that anchors should be
+    long rather than specific. Without the second, a case could silently mutate a
+    neighbouring row it was never about.
+    """
+    case = GateCase("A", "routes", "token", "probe", "`POST /x`", "`POST /y`", "", "0.8")
+
+    twinned = "### 0.8 Register\n\n`POST /x` here\n\n### 1.6 Frame 06\n\n`POST /x` there\n"
+    assert _mutate(twinned, case) == twinned.replace("`POST /x`", "`POST /y`", 1)
+
+    doubled = "### 0.8 Register\n\n`POST /x` here\n\n`POST /x` again\n"
+    with pytest.raises(AssertionError, match=r"not unique in §0\.8"):
+        _mutate(doubled, case)
+
+
 @pytest.mark.parametrize("case", GATE_MUTATIONS, ids=lambda c: f"{c.cls}/{c.rule}/{c.label}")
 def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: GateCase):
     """A gate nobody has watched fail is a gate that reports green.
@@ -1210,10 +1342,9 @@ def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: 
     while the rule it was written for stayed dead.
     """
     spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
-    assert spec.count(case.before) == 1, f"{case.label}: anchor no longer unique in the spec"
 
     mutated = tmp_path / "mutated.md"
-    mutated.write_text(spec.replace(case.before, case.after, 1), encoding="utf-8")
+    mutated.write_text(_mutate(spec, case), encoding="utf-8")
     # A document written to a temporary directory is in no checkout, so it has no
     # authorities of its own. Every case here mutates the spec side, and the
     # authorities it is checked against are this repository's — said out loud
@@ -1235,13 +1366,15 @@ def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: 
 class InnocentCase(NamedTuple):
     """Legal text inserted into the spec; the gate must stay green.
 
-    `before`/`after` place the text, and `pins` names the rule it holds down.
+    `before`/`after` place the text, `within` the section they are read inside,
+    and `pins` names the rule it holds down.
     """
 
     label: str
     pins: str
     before: str
     after: str
+    within: str
 
 
 GATE_INNOCENT: tuple[InnocentCase, ...] = (
@@ -1251,6 +1384,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "*Why:* a wire describes a *relation between two things*;",
         "Two of those readings, 正常, 降级, are the ones a user sees most.\n"
         "*Why:* a wire describes a *relation between two things*;",
+        within="1.9",
     ),
     # The slot-consumer arm has a threshold of its own: three keys joined by
     # nothing but list punctuation. Below it a paragraph is discussing keys, not
@@ -1271,6 +1405,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "`gateway.group.emptyModels` instead. Both\ninterpolate `{{count}}`, and neither "
         "sentence is enumerating anything.\n\n"
         "**Slot-bearing keys** `[derived]`.",
+        within="1.0",
     ),
     # The quoted-shape arm has to let a *shorter* line through, because this
     # document has a named absence rule: a slot with nothing to fill it drops
@@ -1288,6 +1423,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "`{{request}} · {{reason}}`\n— two segments of three, with nothing substituted "
         "for the one that went missing.\n\n"
         "**`undetermined.hint` used to contradict AC-27, and now states it.**",
+        within="1.5",
     ),
     # The cross-frame dispersal arm compares two sets of *states*, and states are
     # written here the way prose wants them: a register row is titled Unreachable
@@ -1314,6 +1450,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "§1.0 disperses first paint into, because this is",
         "→ §1.0 Unreachable (engine down) / §1.0 Partial / §1.0 Sources unread — the "
         "same three §1.0 disperses first paint into, because this is",
+        within="0.8",
     ),
     # Arm N asks that every reading a frame draws be somewhere the load can
     # land, and a dispatch may say so in either of two vocabularies: the value
@@ -1337,6 +1474,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "class C's dispatch arm accepts either vocabulary, the reading or its state",
         "`not_started` → Not started, `degraded` → Impaired",
         "a runtime that has never been started → Not started, `degraded` → Impaired",
+        within="0.8",
     ),
     # The correspondence half of the same arm needs its own line, and this is
     # where it falls: a reading a frame splits by a condition lands in two
@@ -1351,6 +1489,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "`standby` or an `active` nothing adopts → Not supplying",
         "`standby` or an `active` nothing adopts → Not supplying, and once the engine "
         "resumes `standby` → Ready",
+        within="0.8",
     ),
     # The green half of the OAuth-terminal case. The same sentence, written as
     # the body it is describing, has to pass — otherwise the section is read as
@@ -1362,6 +1501,7 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "class E reads a named answer from the section that spells it, by reading",
         "the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by`",
         "the `create` terminal answers with `{flow, source, added_to, adopted_by}`",
+        within="0.8",
     ),
 )
 
@@ -1378,10 +1518,9 @@ def test_gate_stays_green_on_text_that_only_looks_like_a_defect(tmp_path, case: 
     red case above still passes.
     """
     spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
-    assert spec.count(case.before) == 1, f"{case.label}: anchor no longer unique in the spec"
 
     mutated = tmp_path / "mutated.md"
-    mutated.write_text(spec.replace(case.before, case.after, 1), encoding="utf-8")
+    mutated.write_text(_mutate(spec, case), encoding="utf-8")
     result = check_model_hub_ui_states(mutated, authorities=ROOT)
     assert result["authority_origin"] == "this checkout"
     assert result["ok"], (case.pins, result["findings"], result["empty_inventories"])
