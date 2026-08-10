@@ -59,6 +59,7 @@ _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 _REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 _REBUILD_LOCK_PREFIX = "cascade-rebuild-"
 _REBUILD_LOCK_DIRECTORY = ".avibe-memory-locks"
+_REBUILD_HANDSHAKE_TIMEOUT_SECONDS = 30.0
 _REBUILD_TIMEOUT_SECONDS = 30 * 60.0
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
@@ -181,6 +182,8 @@ class _ProcessHost(Protocol):
 
     def find_sidecars(self, *, socket_path: Path) -> dict[int, float]: ...
 
+    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]: ...
+
     def find_rebuilds(
         self,
         *,
@@ -189,6 +192,8 @@ class _ProcessHost(Protocol):
     ) -> dict[int, float]: ...
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]: ...
+
+    async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool: ...
 
     def signal(
         self,
@@ -852,14 +857,16 @@ class EverOSRebuildProcess:
         _host: _ProcessHost | None = None,
     ) -> None:
         self._python = Path(python) if python is not None else None
-        self._effective_home = (
+        effective_home_path = (
             Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
         )
+        self._effective_home = Path(os.path.abspath(os.fspath(effective_home_path)))
         self._memory_dir = self._effective_home / "memory"
         self._attachments_root = attachment_pin_root(self._effective_home)
-        self._provider_root = (
+        provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
+        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
         self._socket_path = self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._timeout_seconds = _positive_timeout(timeout_seconds, _REBUILD_TIMEOUT_SECONDS)
@@ -916,11 +923,10 @@ class EverOSRebuildProcess:
                 or not _rebuild_settings_complete(self._settings)
             ):
                 return RebuildProcessResult.FAILED
-            _prepare_memory_child_directories(
-                memory_dir=self._memory_dir,
-                provider_root=self._provider_root,
-                settings=self._settings,
-            )
+            # The default provider root is below this Avibe-owned directory, so
+            # its parent must exist before the adjacent lock can be resolved.
+            # Provider data itself remains untouched until after lock admission.
+            _ensure_owner_directory(self._memory_dir)
             root_lock = self._provider_root_lock()
             root_lock.acquire()
         except _ProviderRootBusy:
@@ -929,6 +935,15 @@ class EverOSRebuildProcess:
             logger.exception("EverOS cascade rebuild admission failed")
             return RebuildProcessResult.FAILED
         try:
+            try:
+                _prepare_memory_child_directories(
+                    memory_dir=self._memory_dir,
+                    provider_root=self._provider_root,
+                    settings=self._settings,
+                )
+            except Exception:
+                logger.exception("EverOS cascade rebuild admission failed")
+                return RebuildProcessResult.FAILED
             return await self._run_exclusive()
         finally:
             root_lock.release()
@@ -939,7 +954,6 @@ class EverOSRebuildProcess:
         process: asyncio.subprocess.Process | None = None
         process_group: int | None = None
         identities: dict[int, float] = {}
-        child_released = False
         try:
             await self._reconcile_orphan_exclusive()
             _write_memory_child_config(
@@ -965,6 +979,18 @@ class EverOSRebuildProcess:
             )
             process_group = self._host.process_group(process.pid)
             identities = self._host.snapshot_tree(process.pid, process_group)
+            stopped, handshake_interrupted = await _finish_handoff_despite_cancellation(
+                self._host.wait_for_stopped(
+                    process.pid,
+                    _REBUILD_HANDSHAKE_TIMEOUT_SECONDS,
+                )
+            )
+            _merge_owned_processes(
+                identities,
+                self._host.snapshot_tree(process.pid, process_group),
+            )
+            if not stopped:
+                raise RuntimeError("rebuild child did not enter ownership handshake")
             if not _host_identity_is_live(self._host, process.pid, identities):
                 raise RuntimeError("could not establish rebuild process ownership")
             self._ownership.record_launch(
@@ -973,8 +999,7 @@ class EverOSRebuildProcess:
                 process_group,
             )
             _release_rebuild_child(process)
-            child_released = True
-            if spawn_interrupted:
+            if spawn_interrupted or handshake_interrupted:
                 result = RebuildProcessResult.INTERRUPTED
             else:
                 try:
@@ -993,11 +1018,6 @@ class EverOSRebuildProcess:
 
         if process is None:
             return result
-        if not child_released:
-            try:
-                _release_rebuild_child(process)
-            except OSError:
-                logger.warning("EverOS cascade rebuild handshake release failed", exc_info=True)
         try:
             cleanup_interrupted = await _finish_cleanup_despite_cancellation(
                 _terminate_owned_process_tree(
@@ -1244,6 +1264,9 @@ class SidecarOwnership:
             role=group_match_role,
         )
         _remove_sidecar_record(self.record_path)
+        if discover_missing:
+            await self._reap_unidentified_child()
+            _remove_sidecar_record(self.record_path)
 
     async def _terminate_orphan_tree(self, pid: int, created_at: float) -> bool:
         """Reap an orphan's whole tree, not just the pid the record names.
@@ -1448,9 +1471,13 @@ class SidecarOwnership:
         orphan, and a tree that will not exit fails the launch and keeps the record.
         """
 
+        sidecar_anchors = self._host.find_sidecars(socket_path=self._socket_path)
+        sidecar_anchors.update(
+            self._host.find_sidecars_by_root(provider_root=self._provider_root)
+        )
         sidecars = [
             (_MemoryChildRole.SIDECAR, pid, created_at)
-            for pid, created_at in self._host.find_sidecars(socket_path=self._socket_path).items()
+            for pid, created_at in sidecar_anchors.items()
         ]
         rebuilds = [
             (_MemoryChildRole.CASCADE_REBUILD, pid, created_at)
@@ -2099,6 +2126,14 @@ def _cmdline_serves_socket(cmdline: tuple[str, ...], socket_path: Path) -> bool:
     return _SIDECAR_ENTRYPOINT_MODULE in cmdline and "--uds" in cmdline and str(socket_path) in cmdline
 
 
+def _cmdline_is_sidecar(cmdline: tuple[str, ...]) -> bool:
+    return len(cmdline) == 5 and cmdline[1:4] == (
+        "-m",
+        _SIDECAR_ENTRYPOINT_MODULE,
+        "--uds",
+    )
+
+
 def _cmdline_matches_role(
     cmdline: tuple[str, ...],
     *,
@@ -2268,6 +2303,45 @@ def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
         # A claimed process whose creation time is withheld carries the negative
         # sentinel: it can never be signaled by identity, and it never counts as
         # reaped, so it fails the launch closed instead of being written off.
+        claimed[candidate.pid] = -1.0 if created_at is None else float(created_at)
+    return claimed
+
+
+def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
+    """Live exact sidecar entrypoints owned by this uid and provider root."""
+
+    claimed: dict[int, float] = {}
+    own_pid = os.getpid()
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if callable(getuid) else None
+    for candidate in psutil.process_iter():
+        if candidate.pid == own_pid:
+            continue
+        try:
+            uid = _process_real_uid(candidate)
+            if own_uid is not None and uid != own_uid:
+                continue
+            cmdline = _disclosed_identity_field(candidate.cmdline)
+            if cmdline is None:
+                continue
+            rendered = tuple(str(value) for value in cmdline)
+            if not _cmdline_is_sidecar(rendered):
+                continue
+            environment = _disclosed_process_environment(candidate)
+            created_at = _disclosed_identity_field(candidate.create_time)
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error:
+            continue
+        if environment is None:
+            raise RuntimeError(
+                f"sidecar identity could not be verified (pid {candidate.pid})"
+            )
+        if environment.get("EVEROS_ROOT") != str(provider_root):
+            continue
+        role = environment.get("AVIBE_MEMORY_CHILD_ROLE")
+        if role not in (None, _MemoryChildRole.SIDECAR.value):
+            continue
         claimed[candidate.pid] = -1.0 if created_at is None else float(created_at)
     return claimed
 
@@ -2714,6 +2788,9 @@ class _SystemProcessHost:
     def find_sidecars(self, *, socket_path: Path) -> dict[int, float]:
         return _processes_serving_owned_socket(socket_path=socket_path)
 
+    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]:
+        return _processes_serving_owned_root(provider_root=provider_root)
+
     def find_rebuilds(
         self,
         *,
@@ -2727,6 +2804,22 @@ class _SystemProcessHost:
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]:
         return _live_owned_processes(identities)
+
+    async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
+        while True:
+            try:
+                status = psutil.Process(pid).status()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                return False
+            except psutil.Error as exc:
+                raise RuntimeError("could not verify rebuild child handshake") from exc
+            if status == psutil.STATUS_STOPPED:
+                return True
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.01, remaining))
 
     def signal(
         self,

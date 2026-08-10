@@ -71,6 +71,7 @@ class _FakeProcessHost:
     trees: dict[tuple[int, int | None], dict[int, float]] = field(default_factory=dict)
     groups: dict[int, tuple[dict[int, float], list[int]]] = field(default_factory=dict)
     sidecars: dict[int, float] = field(default_factory=dict)
+    root_sidecars: dict[int, float] = field(default_factory=dict)
     rebuilds: dict[int, float] = field(default_factory=dict)
     live_processes: dict[int, float] = field(default_factory=dict)
     listeners: set[int] = field(default_factory=set)
@@ -128,6 +129,10 @@ class _FakeProcessHost:
         self.sidecar_scans.append(socket_path)
         return dict(self.sidecars)
 
+    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]:
+        del provider_root
+        return dict(self.root_sidecars)
+
     def find_rebuilds(
         self,
         *,
@@ -173,6 +178,10 @@ class _FakeProcessHost:
         if self.wait_results:
             return self.wait_results.popleft()
         return not self.live(identities)
+
+    async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+        del pid, timeout_seconds
+        return True
 
     def has_tcp_listener(self, identities: Mapping[int, float]) -> bool:
         self.listener_checks.append(dict(identities))
@@ -1984,6 +1993,38 @@ async def test_rebuild_requires_only_complete_embedding_settings(tmp_path: Path)
     assert len(host.spawn_calls) == 1
 
 
+async def test_rebuild_normalizes_relative_provider_root_before_launch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    expected_root = provider_parent / "everos-root"
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "home",
+        provider_root=Path("shared/everos-root"),
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.COMPLETED
+    assert process._provider_root == expected_root
+    assert (expected_root / "everos.toml").is_file()
+    assert host.spawn_calls[0][4]["EVEROS_ROOT"] == str(expected_root)
+    assert memory_process._provider_rebuild_lock_path(
+        provider_root=process._provider_root
+    ).parent.parent == provider_parent
+
+
 @pytest.mark.parametrize(
     "missing_field",
     ["embedding_base_url", "embedding_model", "embedding_api_key"],
@@ -2440,12 +2481,8 @@ def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
         stderr=subprocess.PIPE,
         text=True,
     )
+    assert asyncio.run(_SystemProcessHost().wait_for_stopped(child.pid, 10))
     child_process = psutil.Process(child.pid)
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and child.poll() is None:
-        if child_process.status() == psutil.STATUS_STOPPED:
-            break
-        time.sleep(0.01)
     assert child.poll() is None
     assert child_process.status() == psutil.STATUS_STOPPED
     child.send_signal(signal.SIGCONT)
@@ -2475,6 +2512,107 @@ async def test_rebuild_releases_child_only_after_persisting_ownership(tmp_path: 
 
     assert await process.run() is RebuildProcessResult.COMPLETED
     assert releases == [signal.SIGCONT]
+
+
+async def test_rebuild_waits_for_stopped_handshake_before_record_and_release(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _DelayedHandshakeHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handshake_started = asyncio.Event()
+            self.child_stopped = asyncio.Event()
+
+        async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+            del pid, timeout_seconds
+            self.handshake_started.set()
+            await self.child_stopped.wait()
+            return True
+
+    host = _DelayedHandshakeHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    task = asyncio.create_task(process.run())
+
+    await asyncio.wait_for(host.handshake_started.wait(), timeout=0.5)
+    assert releases == []
+    assert not process._ownership.record_path.exists()
+    host.child_stopped.set()
+
+    assert await task is RebuildProcessResult.COMPLETED
+    assert releases == [signal.SIGCONT]
+
+
+async def test_rebuild_cancellation_finishes_stopped_handoff_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _DelayedHandshakeHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handshake_started = asyncio.Event()
+            self.child_stopped = asyncio.Event()
+
+        async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+            del pid, timeout_seconds
+            self.handshake_started.set()
+            await self.child_stopped.wait()
+            return True
+
+    host = _DelayedHandshakeHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    task = asyncio.create_task(process.run())
+
+    await asyncio.wait_for(host.handshake_started.wait(), timeout=0.5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert releases == []
+    assert not process._ownership.record_path.exists()
+    host.child_stopped.set()
+
+    assert await task is RebuildProcessResult.INTERRUPTED
+    assert releases == [signal.SIGCONT]
+    assert not host.live_processes
+    assert not process._ownership.record_path.exists()
+
+
+async def test_rebuild_never_releases_without_a_stopped_handshake(tmp_path: Path) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _MissingHandshakeHost(_FakeProcessHost):
+        async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+            del pid, timeout_seconds
+            return False
+
+    host = _MissingHandshakeHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+
+    assert await _rebuild_process(tmp_path, host).run() is RebuildProcessResult.FAILED
+    assert releases == []
+    assert not host.live_processes
 
 
 async def test_rebuild_refuses_a_provider_root_locked_by_another_process(tmp_path: Path) -> None:
@@ -2577,7 +2715,6 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
     lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
     assert lock_path.parent.parent == provider_root.parent
     provider_root.rmdir()
-    provider_root.mkdir(mode=0o700)
     contender_host = _FakeProcessHost()
     contender = EverOSRebuildProcess(
         sys.executable,
@@ -2599,9 +2736,19 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
         with pytest.raises(memory_process._ProviderRootBusy):
             await contender.reconcile_orphan()
         assert reconcile_entered is False
+        assert not provider_root.exists()
         assert await contender.run() is RebuildProcessResult.ROOT_BUSY
         assert reconcile_entered is False
         assert contender_host.spawn_calls == []
+        assert not provider_root.exists()
+
+        provider_root.mkdir(mode=0o755)
+        sentinel = provider_root / "owner-data"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        assert await contender.run() is RebuildProcessResult.ROOT_BUSY
+        assert stat.S_IMODE(provider_root.stat().st_mode) == 0o755
+        assert sentinel.read_text(encoding="utf-8") == "unchanged"
+        assert sorted(path.name for path in provider_root.iterdir()) == ["owner-data"]
         assert contender._ownership.record_path != memory_process.sidecar_record_path(
             owner_home / "memory"
         )
@@ -2882,6 +3029,87 @@ def test_rebuild_discovery_accepts_only_the_exact_role_owned_candidate(
         )
 
 
+def test_sidecar_root_discovery_requires_exact_uid_argv_root_and_role(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    own_uid = os.getuid() if hasattr(os, "getuid") else 0
+    command = (
+        sys.executable,
+        "-m",
+        "core.memory.sidecar",
+        "--uds",
+        str(tmp_path / "other-home/memory/.rt/everos.sock"),
+    )
+    environment = {
+        "EVEROS_ROOT": str(tmp_path),
+        "AVIBE_MEMORY_CHILD_ROLE": "sidecar",
+    }
+    exact = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=environment,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [exact])
+    assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME
+    }
+
+    legacy = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment={"EVEROS_ROOT": str(tmp_path)},
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [legacy])
+    assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME
+    }
+
+    rejected = [
+        _RebuildDiscoveryCandidate(
+            cmdline=(*command, "--extra"),
+            uid=own_uid,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=(sys.executable, "-m", "http.server"),
+            uid=own_uid,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid + 1,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid,
+            environment={**environment, "EVEROS_ROOT": str(tmp_path / "other")},
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid,
+            environment={**environment, "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild"},
+        ),
+    ]
+    for candidate in rejected:
+        monkeypatch.setattr(
+            memory_process.psutil,
+            "process_iter",
+            lambda candidate=candidate: [candidate],
+        )
+        assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {}
+
+    unverifiable = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [unverifiable])
+    with pytest.raises(RuntimeError, match="sidecar identity could not be verified"):
+        memory_process._processes_serving_owned_root(provider_root=tmp_path)
+
+
 @pytest.mark.parametrize("record_state", ["absent", "corrupt"])
 async def test_rebuild_boot_discovers_and_reaps_an_unrecorded_exact_child(
     tmp_path: Path,
@@ -3084,6 +3312,51 @@ async def test_rebuild_boot_reaps_a_role_recorded_orphan(tmp_path: Path) -> None
     assert not process._ownership.record_path.exists()
 
 
+async def test_rebuild_boot_discovers_exact_survivor_after_reaping_valid_record(
+    tmp_path: Path,
+) -> None:
+    recorded = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    survivor = {_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1}
+    host = _FakeProcessHost(
+        rebuilds=dict(survivor),
+        process_groups={
+            _ORPHAN_PID: _ORPHAN_PID,
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_DESCENDANT_PID,
+        },
+        identities={},
+        trees={(_ORPHAN_PID, _ORPHAN_PID): recorded},
+        groups={
+            _ORPHAN_PID: ({}, []),
+            _ORPHAN_DESCENDANT_PID: (survivor, []),
+        },
+        live_processes={**recorded, **survivor},
+    )
+    process = _rebuild_process(tmp_path, host)
+    host.identities.update(
+        {
+            _ORPHAN_PID: _rebuild_identity(process),
+            _ORPHAN_DESCENDANT_PID: _rebuild_identity(
+                process,
+                create_time=_ORPHAN_CREATE_TIME + 1,
+            ),
+        }
+    )
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(_rebuild_record(process)),
+        encoding="utf-8",
+    )
+
+    await process.reconcile_orphan()
+
+    assert host.live_processes == {}
+    assert {next(iter(owned)) for owned, *_rest in host.signal_calls} == {
+        _ORPHAN_PID,
+        _ORPHAN_DESCENDANT_PID,
+    }
+    assert not process._ownership.record_path.exists()
+
+
 async def test_rebuild_boot_cancellation_waits_for_orphan_reaping(tmp_path: Path) -> None:
     class _BlockingReapHost(_FakeProcessHost):
         def __init__(self, **kwargs) -> None:
@@ -3184,6 +3457,25 @@ async def test_rebuild_boot_reaps_multiple_exact_sidecars_before_rebuild(
     assert not process._ownership.record_path.exists()
 
 
+async def test_rebuild_boot_reaps_sidecar_from_another_home_on_shared_root(
+    tmp_path: Path,
+) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        root_sidecars=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+
+    await process.reconcile_orphan()
+
+    assert host.live_processes == {}
+    assert host.signal_calls == [(identities, signal.SIGTERM, _ORPHAN_PID, None)]
+    assert not process._ownership.record_path.exists()
+
+
 async def test_rebuild_boot_fails_closed_on_ambiguous_discovery(tmp_path: Path) -> None:
     host = _FakeProcessHost(
         rebuilds={
@@ -3201,6 +3493,20 @@ async def test_rebuild_boot_fails_closed_on_ambiguous_discovery(tmp_path: Path) 
 async def test_rebuild_boot_fails_closed_on_mixed_role_discovery(tmp_path: Path) -> None:
     host = _FakeProcessHost(
         sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        rebuilds={_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1},
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous EverOS child ownership"):
+        await _rebuild_process(tmp_path, host).reconcile_orphan()
+
+    assert host.signal_calls == []
+
+
+async def test_rebuild_boot_fails_closed_on_cross_home_sidecar_and_rebuild(
+    tmp_path: Path,
+) -> None:
+    host = _FakeProcessHost(
+        root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
         rebuilds={_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1},
     )
 
@@ -3253,6 +3559,8 @@ async def test_rebuild_record_failure_reaps_the_just_spawned_child(
     tmp_path: Path,
 ) -> None:
     child = _RebuildChild(None)
+    releases: list[int] = []
+    child.send_signal = releases.append
     identities = {child.pid: _ORPHAN_CREATE_TIME}
     host = _FakeProcessHost(
         spawns=deque([child]),
@@ -3271,5 +3579,6 @@ async def test_rebuild_record_failure_reaps_the_just_spawned_child(
     monkeypatch.setattr(memory_process, "_write_private_text", fail_record)
 
     assert await process.run() is RebuildProcessResult.FAILED
+    assert releases == []
     assert not host.live_processes
     assert host.signal_calls
