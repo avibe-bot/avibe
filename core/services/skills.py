@@ -394,7 +394,7 @@ def _filter_skill_listing(
                 ]
                 if not skill["agents"]:
                     continue
-            filtered_skills.append(skill)
+            filtered_skills.append(_remote_safe_skill_payload(skill))
 
     filtered = dict(result)
     filtered["skills"] = filtered_skills
@@ -404,6 +404,37 @@ def _filter_skill_listing(
         summary["project"] = sum(1 for skill in filtered_skills if skill.get("scope") == "project")
         filtered["summary"] = summary
     return filtered
+
+
+def _remote_safe_skill_payload(skill: dict[str, Any]) -> dict[str, Any]:
+    """Return the installed-Skill fields safe to expose across the tunnel."""
+
+    projected = {
+        key: skill[key]
+        for key in (
+            "name",
+            "scope",
+            "description",
+            "version",
+            "tags",
+            "sourceType",
+            "installedAt",
+            "updatedAt",
+            "status",
+            "localVersion",
+            "remoteVersion",
+        )
+        if key in skill
+    }
+    projected["path"] = ""
+    raw_agents = skill.get("agents")
+    if isinstance(raw_agents, list):
+        projected["agents"] = [
+            {key: agent[key] for key in ("id", "name") if key in agent}
+            for agent in raw_agents
+            if isinstance(agent, dict)
+        ]
+    return projected
 
 
 def _resource_ids_for_skill_name(
@@ -465,10 +496,10 @@ def _require_skill_use_access(
 
     if not context.can_use_resource("skill"):
         raise SkillAccessError()
-    if context.is_trusted_local or context.is_instance_owner or scope == "global":
+    if context.is_trusted_local or context.is_instance_owner:
         return
     if not project_dir:
-        if scope == "all":
+        if scope in {"all", "global"}:
             return
         raise SkillAccessError()
 

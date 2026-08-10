@@ -222,6 +222,7 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
 
     assert catalog.status_code == 200
     assert {item["session_id"] for item in catalog.get_json()["pages"]} == {"ses-public", "ses-scope"}
+    assert all("path" not in item for item in catalog.get_json()["pages"])
     assert mutation.status_code == 403
     assert mutation.get_json()["code"] == "resource_access_forbidden"
     assert page.status_code == 302

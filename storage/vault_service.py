@@ -41,6 +41,8 @@ from storage.models import (
     vault_operation_challenges,
     vault_requests,
     vault_secrets,
+    message_deliveries,
+    session_turns,
 )
 from storage.vault_addresses import derive_addresses
 from storage.vault_crypto import Sealed
@@ -1172,11 +1174,11 @@ def _update_request_waiter(
         waiter["timed_out_at"] = timed_out_at
     delivery_payload["waiter"] = waiter
 
-    values: dict[str, Any] = {"delivery": json.dumps(delivery_payload)}
-    if status == "completed" and row_dict.get("callback_status") == "pending":
-        values["callback_status"] = "skipped"
-
-    conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(**values))
+    conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id)
+        .values(delivery=json.dumps(delivery_payload))
+    )
     if status == "completed":
         _skip_sibling_callbacks_for_completed_waiter(conn, request_id)
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
@@ -1437,6 +1439,13 @@ def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
         if grants and not any(grant.get("delivery_ready") for grant in grants):
             return False
     return True
+
+
+def request_callback_consumed_by_waiter(row: dict[str, Any]) -> bool:
+    """Whether the terminal result already returned through a synchronous CLI waiter."""
+
+    _, delivery = _request_json_payloads(row)
+    return str(_request_waiter(delivery).get("status") or "") == "completed"
 
 
 def expire_overdue_requests(conn: Connection) -> None:
@@ -2933,6 +2942,42 @@ def record_deliveries(conn: Connection, names: list[str], *, requester: Any = No
         audit(conn, "delivered", secret_name=name, requester=requester, delivery={"mode": mode})
 
 
+def _active_session_turn_anchor(
+    conn: Connection,
+    session_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Return the current Turn's durable message and Turn identities.
+
+    Claude's SDK client keeps one session-level caller environment, so a command
+    spawned during a later turn cannot carry that turn's native message id. The
+    durable Turn/initial Delivery already owns the identity we need and is safe to
+    use while the turn is starting or active. A message id is returned only after
+    acceptance has materialized it; the Turn id remains usable before then.
+    """
+    identity = str(session_id or "").strip()
+    if not identity:
+        return None, None
+    row = conn.execute(
+        select(
+            session_turns.c.id.label("turn_id"),
+            message_deliveries.c.message_id,
+        )
+        .join(
+            message_deliveries,
+            message_deliveries.c.id == session_turns.c.initial_delivery_id,
+        )
+        .where(session_turns.c.session_id == identity)
+        .where(session_turns.c.state.in_(("starting", "active")))
+        .order_by(session_turns.c.updated_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None, None
+    message_id = str(row.get("message_id") or "").strip() or None
+    turn_id = str(row.get("turn_id") or "").strip() or None
+    return message_id, turn_id
+
+
 def create_provision_request(
     conn: Connection,
     name: str,
@@ -2961,7 +3006,13 @@ def create_provision_request(
         raise SecretNameCaseConflictError(name, pending_name)
     status = "fulfilled" if already else "pending"
     normalized_spec = normalize_provision_spec(spec)
-    session_id = requester.get("session_id") if isinstance(requester, dict) else None
+    requester_payload = dict(requester) if isinstance(requester, dict) else requester
+    session_id = requester_payload.get("session_id") if isinstance(requester_payload, dict) else None
+    resolved_message_id = message_id
+    if isinstance(requester_payload, dict) and not resolved_message_id:
+        _, derived_turn_id = _active_session_turn_anchor(conn, session_id)
+        if derived_turn_id and not str(requester_payload.get("turn_id") or "").strip():
+            requester_payload["turn_id"] = derived_turn_id
     card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec, session_id=session_id)
     delivery_payload: dict[str, Any] = {"card": card}
     if reason:
@@ -2974,10 +3025,10 @@ def create_provision_request(
                 id=request_id,
                 request_type="provision",
                 secret_name=name,
-                requester=json.dumps(requester) if requester is not None else None,
+                requester=json.dumps(requester_payload) if requester_payload is not None else None,
                 delivery=json.dumps(delivery_payload),
                 status=status,
-                message_id=message_id,
+                message_id=resolved_message_id,
                 created_at=now,
                 decided_at=now if already else None,
             )
@@ -2987,7 +3038,7 @@ def create_provision_request(
         if pending_name is not None and pending_name != name:
             raise SecretNameCaseConflictError(name, pending_name) from exc
         raise VaultServiceError("failed to create provision request") from exc
-    audit(conn, "provision_requested", secret_name=name, requester=requester, request_id=request_id)
+    audit(conn, "provision_requested", secret_name=name, requester=requester_payload, request_id=request_id)
     return {
         "id": request_id,
         "secret_name": name,

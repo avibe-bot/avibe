@@ -48,6 +48,9 @@ export const OWNER_INSTANCE_CAPABILITIES: InstanceCapabilities = Object.fromEntr
   Object.keys(DENIED_INSTANCE_CAPABILITIES).map((key) => [key, true]),
 ) as InstanceCapabilities;
 
+export const canCreateLocalProject = (capabilities: InstanceCapabilities): boolean =>
+  capabilities.can_manage_projects && capabilities.can_use_files;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 

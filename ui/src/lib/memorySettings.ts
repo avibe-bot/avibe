@@ -1,4 +1,8 @@
-import type { MemoryEndpointConfig, MemoryEndpointPatch, MemorySettingsResult } from '../context/ApiContext';
+import type {
+  MemoryEndpointConfig,
+  MemoryEndpointPatch,
+  MemorySettingsResult,
+} from '../context/ApiContext';
 import { isMemoryOk } from './memoryRead';
 
 

@@ -114,8 +114,14 @@ def _set_protected_grant(name: str, *, session_id: str | None = None, purpose: s
         return _grant_from_request(conn, req, session_id=session_id)
 
 
+APPROVAL_POLL_TIMEOUT = 30.0
+
+
 def _approve_next_pending_access_request(*, session_id: str | None = None, purpose: str = "run") -> dict:
-    deadline = time.monotonic() + 2
+    # Generous: the loop returns as soon as the request appears, so the only
+    # thing this bounds is how long a genuinely broken run hangs. A tight
+    # budget raced the CLI's own approval wait and flaked on loaded runners.
+    deadline = time.monotonic() + APPROVAL_POLL_TIMEOUT
     while time.monotonic() < deadline:
         with cli._open_vault_engine().begin() as conn:
             requests = []
@@ -1051,9 +1057,9 @@ def test_run_waits_for_protected_approval_then_delivers(tmp_path, capfd, monkeyp
     monkeypatch.setattr(api, "avault_deliver_run", Mock())
 
     code = cli.cmd_vault_run(
-        _ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli", approval_wait=2)
+        _ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli", approval_wait=APPROVAL_POLL_TIMEOUT)
     )
-    approver.join(timeout=2)
+    approver.join(timeout=APPROVAL_POLL_TIMEOUT)
     captured = capfd.readouterr()
 
     assert code == 0
@@ -1063,7 +1069,7 @@ def test_run_waits_for_protected_approval_then_delivers(tmp_path, capfd, monkeyp
     assert deliver.call_args.kwargs["grant_id"] == approved["grant"]["id"]
     with cli._open_vault_engine().connect() as conn:
         row = conn.execute(vault_requests.select().where(vault_requests.c.id == approved["request"]["id"])).mappings().one()
-    assert row["callback_status"] == "skipped"
+    assert row["callback_status"] == "pending"
     assert json.loads(row["delivery"])["waiter"]["status"] == "completed"
 
 

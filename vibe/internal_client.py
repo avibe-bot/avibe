@@ -30,7 +30,7 @@ from config import paths
 
 logger = logging.getLogger(__name__)
 
-_SOCKET_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
+_SOCKET_ERRORS = (httpx.TransportError, OSError)
 _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 _CHECK_POSIX_SOCKET_MODE = os.name != "nt"
@@ -170,8 +170,6 @@ async def stream_dispatch(
         raise
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
-
-
 async def stream_events(
     *,
     socket_path: Optional[Path] = None,
@@ -642,6 +640,322 @@ async def test_backend_auth(
     except httpx.TimeoutException as exc:
         raise InternalServerTimeout(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+async def reconcile_memory(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_RECONCILE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Ask the controller to apply persisted Memory settings in place."""
+
+    return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_restart(
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Wait without a reporting deadline for the retained Runtime restart."""
+
+    return await _memory_request(
+        "POST",
+        "/internal/memory/restart",
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
+def memory_install_runtime_sync(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_INSTALL_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Ask the controller to install EverOS through its live lifecycle."""
+
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/install-runtime",
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_status(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_failures(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_profile(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "GET",
+        "/internal/memory/profile",
+        headers=_memory_user_key_headers(
+            "GET",
+            "/internal/memory/profile",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_search(
+    query: str,
+    limit: int,
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "POST",
+        "/internal/memory/search",
+        payload={"query": query, "limit": limit},
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/search",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_log(
+    *,
+    cursor: str | None,
+    limit: int,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/log"
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    return await _memory_request(
+        "GET",
+        path,
+        params=params,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_log_entry(
+    memcell_id: str,
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/log/entry"
+    return await _memory_request(
+        "GET",
+        path,
+        params={"memcell_id": memcell_id},
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_clear(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "POST",
+        "/internal/memory/clear",
+        payload={"confirm": True},
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/clear",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_status_sync(
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "GET",
+        "/internal/memory/status",
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_profile_sync(
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "GET",
+        "/internal/memory/profile",
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_search_sync(
+    query: str,
+    limit: int,
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/search",
+        payload={"query": query, "limit": limit},
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_remember_sync(
+    text: str,
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/remember",
+        payload={"text": text},
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def _memory_request(
+    method: str,
+    route: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    params: dict[str, str | int] | None = None,
+    headers: dict[str, str] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float | None,
+) -> dict[str, Any]:
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    client_timeout = (
+        httpx.Timeout(None, connect=5.0)
+        if timeout is None
+        else httpx.Timeout(timeout, connect=min(timeout, 5.0))
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=client_timeout,
+        ) as client:
+            response = await client.request(
+                method,
+                route,
+                json=payload,
+                params=params,
+                headers=headers,
+            )
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {"status": "failed", "error": "memory_provider_response_invalid"}
+    return {"status_code": response.status_code, "body": body}
+
+
+def _memory_request_sync(
+    method: str,
+    route: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float,
+) -> dict[str, Any]:
+    target = _verified_socket_path(socket_path)
+    transport = httpx.HTTPTransport(uds=str(target))
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            response = client.request(method, route, json=payload, headers=headers)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {"status": "failed", "error": "memory_provider_response_invalid"}
+    return {"status_code": response.status_code, "body": body}
+
+
+def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    return {CALLER_SESSION_HEADER: session_id}
+
+
+def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import (
+        MEMORY_UI_PROOF_HEADER,
+        build_ui_read_proof,
+        process_ui_read_secret,
+    )
+
+    headers = {MEMORY_USER_KEY_HEADER: user_key}
+    secret = process_ui_read_secret()
+    if secret:
+        headers[MEMORY_UI_PROOF_HEADER] = build_ui_read_proof(
+            secret,
+            method=method,
+            path=path,
+            user_key=user_key,
+        )
+    return headers
 
 
 async def notify_vault_request_created(

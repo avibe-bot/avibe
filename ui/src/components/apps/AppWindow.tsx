@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { ExternalLink, MessageCircle, Minus, Plus, X, type LucideIcon } from 'lucide-react';
 
+import { appTabHref } from '../../apps/appLaunch';
 import { APP_REGISTRY } from '../../apps/registry';
 import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
@@ -167,6 +168,9 @@ export const AppWindow: React.FC<{
   // A standalone-surface app (v1: showpage) exposes an external URL for its own
   // browser tab; the title bar then shows an open-in-new-tab button.
   const externalHref = def.externalHref?.(win.params);
+  const safeExternalHref = externalHref
+    ? appTabHref({ appId: win.appId, sessionId: showpageSid })
+    : null;
   // The same app may own a session chat (v1: showpage) — the title bar then also
   // shows a chat-bubble button that jumps there and minimizes this window.
   const chatHref = def.chatHref?.(win.params);
@@ -226,16 +230,21 @@ export const AppWindow: React.FC<{
       // and React/the browser moves focus out automatically.
       inert={win.minimized}
       tabIndex={-1}
-      onPointerDown={(e) => {
+      onPointerDownCapture={() => {
+        // Capture runs before toolbar controls stop propagation, so every pointer
+        // activation claims the window without stealing DOM focus from the target.
         wm.focus(win.id);
+      }}
+      onPointerDown={(e) => {
         // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus from
-        // an inner control/editor/terminal the click lands in (xterm's screen isn't a
-        // textarea, so it needs an explicit exemption or terminal input would break).
+        // an inner control/editor/terminal the click lands in. FocusCapture below
+        // then gives the same window foreground ownership and raises its z-order.
         const tgt = e.target as HTMLElement;
         if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor,.xterm')) {
           rootRef.current?.focus({ preventScroll: true });
         }
       }}
+      onFocusCapture={() => wm.focus(win.id)}
       onAnimationEnd={(e) => {
         // Only the root's own close animation drives the unmount (ignore the
         // entrance, and any child animation bubbling up). Minimize doesn't animate
@@ -350,9 +359,9 @@ export const AppWindow: React.FC<{
               <MessageCircle className="size-3.5" />
             </button>
           )}
-          {externalHref && (
+          {safeExternalHref && (
             <a
-              href={externalHref}
+              href={safeExternalHref}
               target="_blank"
               rel="noopener noreferrer"
               title={t('apps.window.openInNewTab')}

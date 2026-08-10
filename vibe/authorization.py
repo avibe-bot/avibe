@@ -377,6 +377,9 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
     for method, pattern in (
         ("DELETE", r"^/api/sessions/[^/]+(?:/queue/[^/]+)?$"),
         ("POST", r"^/api/sessions/[^/]+/fork$"),
+        ("GET", r"^/api/sessions/[^/]+/draft$"),
+        ("PUT", r"^/api/sessions/[^/]+/draft$"),
+        ("POST", r"^/api/sessions/[^/]+/mark-read$"),
         (
             "POST",
             r"^/api/sessions/[^/]+/(?:attachments|cancel|queue/[^/]+/send-now)$",
@@ -390,6 +393,20 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("DELETE", r"^/api/settings/thread$"),
         ("GET", r"^/api/bind-codes$"),
         ("DELETE", r"^/api/projects/[^/]+$"),
+        ("GET", r"^/api/harness/(?:runs|bootstrap|runs/[^/]+)$"),
+        ("GET", r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|vmk)$"),
+        ("GET", r"^/api/global-prompts$"),
+        # Model Hub source listing returns credential metadata
+        # (credential_ref, masked_credential, account_label, custom base_url,
+        # usage/billing) that must not cross the tunnel; the mutation surface
+        # is already fail-closed local-only, so the read stays local-only too.
+        ("GET", r"^/api/models/sources$"),
+        ("HEAD", r"^/api/models/sources$"),
+        ("GET", r"^/api/skills/(?:check|find)$"),
+        ("HEAD", r"^/api/skills/(?:check|find)$"),
+        ("POST", r"^/api/vault/requests/(?:access|sign)$"),
+        ("GET", r"^/api/users$"),
+        ("HEAD", r"^/api/users$"),
     )
 )
 
@@ -417,11 +434,11 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|settings|vmk|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
+            r"^/api/vault/(?:settings|requests|requests/[^/]+|provision-requests/[^/]+|provision-requests/by-id/[^/]+|grants|audit)$",
         ),
         (
             frozenset({"POST"}),
-            r"^/api/show-pages/[^/]+/(?:ensure|rotate-share|share-id|visibility)$",
+            r"^/api/show-pages/[^/]+/ensure$",
         ),
         (
             frozenset({"GET", "HEAD", "PUT"}),
@@ -447,12 +464,11 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/(?:projects/[^/]+/agents-md|global-prompts)$",
+            r"^/api/projects/[^/]+/agents-md$",
         ),
-        (frozenset({"GET", "HEAD"}), r"^/api/skills/(?:check|find)$"),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/models/(?:sources|agents|events|runtime/status)$",
+            r"^/api/models/(?:agents|events|runtime/status)$",
         ),
         (
             frozenset({"GET", "HEAD"}),
@@ -464,17 +480,25 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/backend/(?:[^/]+/runtime|(?:claude|codex)/auth|[^/]+/auth/oauth/status/[^/]+)$",
+            r"^/api/backend/[^/]+/auth/oauth/status/[^/]+$",
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/(?:opencode/permission-status|remote-access/status)$",
+            r"^/api/remote-access/status$",
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/harness/(?:counts|tasks|watches|runs|bootstrap|runs/[^/]+)$",
+            r"^/api/harness/counts$",
         ),
-        (frozenset({"GET", "HEAD"}), r"^/api/users$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/memory/(?:settings|status|failures|profile|log|log/entry)$",
+        ),
+        (frozenset({"PATCH"}), r"^/api/memory/settings$"),
+        (
+            frozenset({"POST"}),
+            r"^/api/memory/(?:search|runtime/restart|clear)$",
+        ),
     )
 )
 
@@ -523,6 +547,8 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
             else REMOTE_HTTP_LOCAL_ONLY
         )
         return HttpAuthorizationPolicy(minimum_role, remote_access)
+    if path == "/status":
+        return HttpAuthorizationPolicy(None, REMOTE_HTTP_LOCAL_ONLY)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
 

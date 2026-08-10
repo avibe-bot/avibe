@@ -30,6 +30,8 @@ export interface SessionActionsOptions {
   /** Capability gate for otherwise-live sessions. Remote Organization readers
    *  can inspect a session but must not receive local write actions. */
   writable?: boolean;
+  /** Local lifecycle writes such as Fork and Archive; metadata writes remain available remotely. */
+  lifecycleWritable?: boolean;
   /** Project whose cached list holds the row — a CACHE address, not a permission.
    *  Defaults to ``session.project_id``, which is ``null`` for a standalone session
    *  (no project-bound scope); the writes run either way. */
@@ -65,6 +67,7 @@ export interface SessionActionsHandle {
 export const useSessionActions = ({
   session,
   writable = true,
+  lifecycleWritable = writable,
   projectId,
   onRenameStart,
   onOpenSession,
@@ -204,8 +207,8 @@ export const useSessionActions = ({
         onSelect: () => insertTarget?.insertSessionReference(target.id, target.title),
       });
     }
-    rows.push(
-      {
+    if (lifecycleWritable) {
+      rows.push({
         id: 'fork',
         group: 'continue',
         icon: GitFork,
@@ -217,15 +220,17 @@ export const useSessionActions = ({
         pending: forking,
         title: canFork ? undefined : t('workbench.sessionForkUnavailable'),
         onSelect: () => void fork(),
-      },
-      {
-        id: 'hide',
-        group: 'continue',
-        icon: EyeOff,
-        label: t('workbench.sessionHideToBackground'),
-        onSelect: hide,
-      },
-      {
+      });
+    }
+    rows.push({
+      id: 'hide',
+      group: 'continue',
+      icon: EyeOff,
+      label: t('workbench.sessionHideToBackground'),
+      onSelect: hide,
+    });
+    if (lifecycleWritable) {
+      rows.push({
         id: 'archive',
         group: 'lifecycle',
         icon: Archive,
@@ -233,8 +238,8 @@ export const useSessionActions = ({
         hint: archiveHint,
         danger: true,
         onSelect: requestArchive,
-      },
-    );
+      });
+    }
     return rows;
   }, [
     target,
@@ -248,9 +253,10 @@ export const useSessionActions = ({
     hide,
     requestArchive,
     archiveHint,
+    lifecycleWritable,
   ]);
 
-  const archiveDialog = target ? (
+  const archiveDialog = lifecycleWritable && target ? (
     <ArchiveSessionDialog
       sessionId={archiveOpen ? archiveRequestId : null}
       sessionTitle={target.title}
@@ -263,5 +269,5 @@ export const useSessionActions = ({
     />
   ) : null;
 
-  return { actions, archiveDialog, requestArchive, canArchive: target != null };
+  return { actions, archiveDialog, requestArchive, canArchive: lifecycleWritable && target != null };
 };

@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,10 +13,12 @@ from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     set_dispatch_phase,
 )
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+from core.session_activities import SessionActivity, activity_completion_output
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
-from modules.claude_sdk_compat import TextBlock
+from modules.claude_sdk_compat import TextBlock, UserMessage
 
 
 class _StubSessions:
@@ -500,6 +502,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         interrupt_called = asyncio.Event()
 
         class _Client:
+
             async def query(self, _text, *, session_id):
                 query_started.set()
                 await release_query.wait()
@@ -881,29 +884,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending_reactions[composite_key], [("m2", ":eyes:")])
         self.assertTrue(controller.session_manager.session.session_active[composite_key])
 
-    def test_steered_result_after_assistant_response_is_not_suppressed(self):
-        controller = _StubController()
-        agent = ClaudeAgent(controller)
-        composite_key = "session-1:/tmp/work"
-        agent._steering_generations[composite_key] = 1
-        agent._steering_terminal_barriers[composite_key] = ["accepted"]
-        agent._steering_response_generations[composite_key] = 1
-
-        self.assertFalse(agent._terminal_claim_superseded(composite_key, 1))
-        self.assertIsNone(agent._next_terminal_barrier(composite_key))
-
     def test_buffered_result_without_steered_assistant_is_suppressed(self):
         controller = _StubController()
         agent = ClaudeAgent(controller)
         composite_key = "session-1:/tmp/work"
         agent._steering_generations[composite_key] = 1
-        agent._steering_terminal_barriers[composite_key] = ["accepted"]
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "unknown"
 
         self.assertTrue(agent._terminal_claim_superseded(composite_key, 1))
-        self.assertIsNone(agent._next_terminal_barrier(composite_key))
+        self.assertEqual(agent._pending_steering_input_state(composite_key), "unknown")
 
     async def test_steered_assistant_and_result_settle_the_pending_turn(self):
-        """HFR-435: the steered Assistant owns its following terminal result."""
+        """A Result before the native input echo remains nonterminal."""
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
         controller.emit_agent_message = AsyncMock()
@@ -927,9 +924,22 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             ack_reaction_emoji=None,
         )
         agent._pending_requests[composite_key] = [pending_request]
-        agent._steering_generations[composite_key] = 1
-        agent._steering_terminal_barriers[composite_key] = ["accepted"]
-
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+        primary_result = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "primary final answer",
+                "duration_ms": 1,
+            },
+        )()
         text_block = TextBlock("steered final answer")
         assistant_message = type(
             "AssistantMessage",
@@ -942,13 +952,15 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             {
                 "subtype": "success",
                 "result": "steered final answer",
-                "duration_ms": 1,
+                "duration_ms": 2,
             },
         )()
 
         class _Client:
             def receive_messages(self):
                 async def _iterate():
+                    yield primary_result
+                    yield UserMessage("steered prompt")
                     yield assistant_message
                     yield result_message
 
@@ -966,11 +978,656 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "steered final answer",
             subtype="success",
-            duration_ms=1,
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "output",
+            "primary final answer",
+            parse_mode="markdown",
+            output=ANY,
+        )
+        self.assertNotIn(composite_key, agent._pending_requests)
+
+    async def test_presteer_result_stays_visible_without_agent_initiated_turn(self):
+        """HFR-460: queued native steering keeps its user-owned Turn."""
+
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        output_tokens = []
+        output_semantics = []
+
+        async def _emit_output(emit_context, message_type, *_args, **kwargs):
+            if message_type == "output":
+                output_tokens.append(
+                    emit_context.platform_specific.get("agent_runtime_turn_token")
+                )
+                output_semantics.append(kwargs.get("output"))
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit_output)
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        begin_agent_initiated_turn = AsyncMock()
+        controller.agent_service = SimpleNamespace(
+            activity_registry=None,
+            begin_agent_initiated_turn=begin_agent_initiated_turn,
+        )
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-delayed-steer:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "turn_token": "T1",
+                "agent_runtime_turn_token": "R1",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T2",
+                    "agent_runtime_turn_token": "R2",
+                }
+            ),
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+        primary_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("primary work completed")]},
+        )()
+        primary_result = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "primary work completed",
+                "duration_ms": 1,
+            },
+        )()
+        steered_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("screenshots ready")]},
+        )()
+        steered_result = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "screenshots ready",
+                "duration_ms": 2,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield primary_assistant
+                    yield primary_result
+                    yield UserMessage("steered prompt")
+                    yield steered_assistant
+                    yield steered_result
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-delayed-steer",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "output",
+            "primary work completed",
+            parse_mode="markdown",
+            output=ANY,
+        )
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "screenshots ready",
+            subtype="success",
+            duration_ms=2,
             parse_mode="markdown",
             request=pending_request,
         )
         self.assertNotIn(composite_key, agent._pending_requests)
+        self.assertEqual(output_tokens, ["R2"])
+        self.assertEqual(len(output_semantics), 1)
+        self.assertFalse(output_semantics[0].records_run_output)
+        begin_agent_initiated_turn.assert_not_awaited()
+
+    async def test_presteer_result_settles_its_claimed_activity_without_closing_turn(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock(return_value="primary-output")
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        composite_key = "session-presteer-activity:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        activity = SessionActivity(
+            id="activity-primary",
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="session-presteer-activity",
+            kind="task",
+            status="completed",
+            turn_id="T1",
+            run_id="run-primary",
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            output_activities=[activity],
+            output=activity_completion_output(
+                activity,
+                detached=False,
+                completes_turn=True,
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "primary result",
+                            "duration_ms": 1,
+                        },
+                    )()
+                    yield UserMessage("steered prompt")
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "steered result",
+                            "duration_ms": 2,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-presteer-activity",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        primary_call = controller.emit_agent_message.await_args_list[0]
+        self.assertEqual(primary_call.args[1:3], ("output", "primary result"))
+        primary_output = primary_call.kwargs["output"]
+        self.assertFalse(primary_output.completes_turn)
+        self.assertTrue(primary_output.settles_run)
+        self.assertEqual(primary_output.activity_id, "activity-primary")
+        self.assertEqual(primary_output.run_ids, ("run-primary",))
+        self.assertEqual(pending_request.output_activities, [])
+        self.assertTrue(pending_request.output.completes_turn)
+        self.assertIsNone(pending_request.output.activity_id)
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered result",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+
+    async def test_silent_presteer_result_settles_activity_without_a_message_id(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock(return_value=None)
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        composite_key = "session-silent-presteer-activity:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        activity = SessionActivity(
+            id="activity-primary",
+            backend="claude",
+            runtime_key=composite_key,
+            session_id="session-silent-presteer-activity",
+            kind="task",
+            status="completed",
+            turn_id="T1",
+            run_id="run-primary",
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            output_activities=[activity],
+            output=activity_completion_output(
+                activity,
+                detached=False,
+                completes_turn=True,
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._turns_with_foreground_tools.add(composite_key)
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "tool-only primary",
+                            "duration_ms": 1,
+                        },
+                    )()
+                    yield UserMessage("steered prompt")
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "steered result",
+                            "duration_ms": 2,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-silent-presteer-activity",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        primary_call = controller.emit_agent_message.await_args_list[0]
+        self.assertEqual(primary_call.args[1], "output")
+        self.assertEqual(
+            primary_call.args[2],
+            "<silent>Claude turn completed without assistant text.</silent>",
+        )
+        self.assertEqual(pending_request.output_activities, [])
+        self.assertNotIn(composite_key, agent._turns_with_foreground_tools)
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered result",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+
+    async def test_user_echo_allows_one_result_to_own_primary_and_steer(self):
+        """HFR-435: Claude may merge a steer into the primary Result."""
+
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-merged-steer:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield UserMessage("steered prompt")
+                    yield type(
+                        "AssistantMessage",
+                        (),
+                        {"content": [TextBlock("primary and steer answered")]},
+                    )()
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "primary and steer answered",
+                            "duration_ms": 2,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-merged-steer",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "primary and steer answered",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._pending_requests)
+        self.assertNotIn(composite_key, agent._native_input_receipts)
+
+    async def test_user_echo_retires_primary_assistant_before_result_only_steer(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock(return_value="primary-output")
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-assistant-receipt:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "accepted"
+        agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield type(
+                        "AssistantMessage",
+                        (),
+                        {"content": [TextBlock("primary answer")]},
+                    )()
+                    yield UserMessage("steered prompt")
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "steered result",
+                            "duration_ms": 2,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-assistant-receipt",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_awaited_once_with(
+            context,
+            "output",
+            "primary answer",
+            parse_mode="markdown",
+            output=ANY,
+        )
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered result",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._last_assistant_text)
+
+    async def test_repeated_user_echoes_allow_one_merged_result_to_settle(self):
+        """HFR-460: repeated steering does not require one Result per input."""
+
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-repeated-steer:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        for text in ("first steer", "second steer"):
+            receipt = agent._register_native_input(
+                composite_key,
+                text,
+                kind="steer",
+            )
+            receipt.state = "accepted"
+            agent._advance_steering_generation(composite_key)
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield UserMessage("first steer")
+                    yield UserMessage("second steer")
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {
+                            "subtype": "success",
+                            "result": "both steers answered",
+                            "duration_ms": 3,
+                        },
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-repeated-steer",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "both steers answered",
+            subtype="success",
+            duration_ms=3,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._pending_requests)
+        self.assertNotIn(composite_key, agent._native_input_receipts)
+
+    async def test_ambiguous_results_emit_each_answer_in_order(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        emissions = []
+
+        async def _emit_output(_context, message_type, text, **_kwargs):
+            emissions.append((message_type, text))
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit_output)
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        async def _emit_result(_context, text, **_kwargs):
+            emissions.append(("result", text))
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_assistant_message=lambda parts: "\n\n".join(parts),
+        )
+        composite_key = "session-ambiguous:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._turns_with_foreground_tools.add(composite_key)
+        agent._foreground_tool_use_ids[composite_key] = {"primary-tool"}
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "unknown"
+        agent._advance_steering_generation(composite_key)
+
+        primary_assistant = type(
+            "AssistantMessage",
+            (),
+            {"content": [TextBlock("primary answer")]},
+        )()
+        primary_result = type(
+            "ResultMessage",
+            (),
+            {"subtype": "success", "result": "primary answer", "duration_ms": 1},
+        )()
+        steered_result = type(
+            "ResultMessage",
+            (),
+            {"subtype": "success", "result": "steered answer", "duration_ms": 2},
+        )()
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield primary_assistant
+                    yield primary_result
+                    yield UserMessage("steered prompt")
+                    yield steered_result
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-ambiguous",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "output",
+            "primary answer",
+            parse_mode="markdown",
+            output=ANY,
+        )
+        agent.emit_result_message.assert_awaited_once_with(
+            context,
+            "steered answer",
+            subtype="success",
+            duration_ms=2,
+            parse_mode="markdown",
+            request=pending_request,
+        )
+        self.assertNotIn(composite_key, agent._ambiguous_primary_results)
+        self.assertNotIn(composite_key, agent._pending_requests)
+        self.assertEqual(
+            emissions,
+            [("output", "primary answer"), ("result", "steered answer")],
+        )
 
     async def test_buffered_pre_steer_assistant_keeps_primary_result_ownership(self):
         controller = _StubController()
@@ -998,7 +1655,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[composite_key] = [pending_request]
         assistant_received = asyncio.Event()
         release_assistant = asyncio.Event()
-        terminal_processed = asyncio.Event()
+        result_receive_waiting = asyncio.Event()
+        release_result = asyncio.Event()
         end_stream = asyncio.Event()
 
         original_begin = agent._maybe_begin_agent_initiated_turn
@@ -1009,15 +1667,6 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             return await original_begin(*args, **kwargs)
 
         agent._maybe_begin_agent_initiated_turn = _hold_assistant
-        terminal_claim = agent._terminal_claim_superseded
-
-        def _observe_terminal_claim(*args):
-            superseded = terminal_claim(*args)
-            if asyncio.current_task() is receiver_task:
-                terminal_processed.set()
-            return superseded
-
-        agent._terminal_claim_superseded = _observe_terminal_claim
         assistant_message = type(
             "AssistantMessage",
             (),
@@ -1037,6 +1686,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             def receive_messages(self):
                 async def _iterate():
                     yield assistant_message
+                    result_receive_waiting.set()
+                    await release_result.wait()
                     yield result_message
                     await end_stream.wait()
 
@@ -1052,15 +1703,89 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await assistant_received.wait()
-        agent._advance_steering_generation(composite_key)
         release_assistant.set()
-        await asyncio.wait_for(terminal_processed.wait(), timeout=1)
+        await result_receive_waiting.wait()
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "unknown"
+        agent._advance_steering_generation(composite_key)
+        release_result.set()
+        for _ in range(100):
+            if composite_key in agent._ambiguous_primary_results:
+                break
+            await asyncio.sleep(0)
+        else:
+            self.fail("primary Result was not buffered behind the steering EOF boundary")
 
         self.assertEqual(agent._pending_requests[composite_key], [pending_request])
         agent.emit_result_message.assert_not_awaited()
 
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_buffered_tool_only_result_keeps_foreground_state_through_eof(self):
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        composite_key = "session-buffered-tool:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        pending_request = SimpleNamespace(
+            context=context,
+            started_at=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._turns_with_foreground_tools.add(composite_key)
+        receipt = agent._register_native_input(
+            composite_key,
+            "steered prompt",
+            kind="steer",
+        )
+        receipt.state = "unknown"
+        agent._advance_steering_generation(composite_key)
+
+        result_message = type(
+            "ResultMessage",
+            (),
+            {
+                "subtype": "success",
+                "result": "Bash completed",
+                "duration_ms": 1,
+            },
+        )()
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    yield result_message
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-buffered-tool",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        selected = agent.emit_result_message.await_args.args[1]
+        self.assertIn("<silent>", selected)
+        self.assertNotIn("Bash completed", selected)
+        self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_toolcall_emit_adopts_current_pending_turn_token(self):
         controller = _StubController()
@@ -1719,7 +2444,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._remove_ack_reaction = AsyncMock()
         agent.session_handler = SimpleNamespace(
             handle_session_error=AsyncMock(
-                side_effect=lambda *_args: settlement_order.append("handle")
+                side_effect=lambda *_args, **_kwargs: settlement_order.append("handle")
             ),
             cleanup_session=AsyncMock(),
             claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGABRT",
@@ -1744,6 +2469,459 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         terminal_call = controller.emit_agent_message.await_args
         self.assertIn("SIGABRT", terminal_call.kwargs["terminal_error"])
         self.assertFalse(agent._pending_requests.get(composite_key))
+
+    async def test_receiver_eof_contained_teardown_skips_durable_failure_row(self):
+        """A contained teardown must stay silent on every surface.
+
+        ``handle_session_error`` only suppresses the IM send; the durable
+        ``notify`` row is what the web Chat renders, so a contained failure has
+        to skip that too or the containment is surface-specific.
+        """
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        composite_key = "session-eof-contained:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=True),
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Command failed with exit code -9",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        )
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            await agent._handle_receiver_eof(composite_key, pending_request.context)
+
+        agent.session_handler.handle_session_error.assert_awaited_once()
+        persist.assert_not_called()
+
+    async def test_contained_teardown_records_no_model_hub_failure(self):
+        """Operational cleanup is not evidence about a Model Hub source.
+
+        ``record_model_hub_native_failure`` converts the pending attempt into a
+        failed one — ``unclassified_error`` for ``-9`` — and the silent result
+        can then settle that provenance as exhausted. Classifying the teardown
+        only after the recording has already run corrupts source health for a
+        process the service killed itself, so the probe has to come first.
+        """
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        composite_key = "session-eof-teardown:/tmp/work"
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        probed: list[object] = []
+
+        def _is_intentional(_key, _error, *, client=None):
+            probed.append(client)
+            return True
+
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=_is_intentional,
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Command failed with exit code -9",
+        )
+        client = SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)))
+        controller.claude_sessions[composite_key] = client
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+
+        await agent._handle_receiver_eof(composite_key, pending_request.context)
+
+        agent.record_model_hub_native_failure.assert_not_awaited()
+        # The exact client whose returncode was read, not a fresh lookup.
+        self.assertEqual(probed, [client])
+
+    # --- contained teardown settlement (#1204) -------------------------------
+    #
+    # #1202 stopped a service-initiated teardown from being REPORTED as a backend
+    # failure. The emit that follows still described it as one: an ordinary silent
+    # ``result`` carrying only the terminal-turn default, so an ``agent_runs`` row
+    # was terminalized from an empty body and the durable Turn read ``failed``.
+    # These assert the settlement now matches the classification on all three paths
+    # that can reach it, and — the point of the negative controls — that an ordinary
+    # backend failure is untouched.
+
+    def assert_contained_settlement(self, emitter):
+        """The terminal emit routed a contained teardown through the settlement lane."""
+
+        call = emitter.await_args
+        self.assertEqual(call.args[1:3], ("result", ""))
+        self.assertEqual(call.kwargs["level"], "silent")
+        output = call.kwargs["output"]
+        self.assertEqual(output.settled_by, SETTLED_BY_BACKEND_REFRESH)
+        # ``settles_run`` False keeps the empty body out of
+        # ``_record_agent_run_terminal_result``; the settlement lane owns the row.
+        self.assertFalse(output.settles_run)
+        self.assertTrue(output.completes_turn)
+        # No terminal result was produced, and that stays true whoever killed the
+        # process: clearing the flag would collapse the status bubble to a green
+        # ``done`` for a turn that answered nothing.
+        self.assertTrue(call.kwargs["is_error"])
+        # Suppressing the DIAGNOSTIC is what separates this from a real failure —
+        # the dispatcher reads the pair as an intentional silent end (``stopped``)
+        # rather than a fault, and the settlement carries the machine-readable cause.
+        self.assertIsNone(call.kwargs["terminal_error"])
+
+    def assert_uncontained_settlement(self, emitter, diagnostic_fragment):
+        """An ordinary backend failure still settles as one."""
+
+        call = emitter.await_args
+        self.assertEqual(call.args[1:3], ("result", ""))
+        self.assertTrue(call.kwargs["is_error"])
+        self.assertIn(diagnostic_fragment, call.kwargs["terminal_error"])
+        self.assertIsNone(call.kwargs["output"].settled_by)
+        self.assertTrue(call.kwargs["output"].settles_run)
+
+    def _eof_agent(self, composite_key, *, contained, returncode=-9):
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=contained),
+            claude_teardown_is_intentional=lambda *_a, **_k: contained,
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: f"Claude process terminated: {returncode}",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=returncode)),
+        )
+        controller.receiver_tasks[composite_key] = asyncio.current_task()
+        return controller, agent, pending_request
+
+    async def test_receiver_eof_contained_teardown_settles_as_backend_refresh(self):
+        key = "session-eof-settle:/tmp/work"
+        controller, agent, request = self._eof_agent(key, contained=True)
+
+        await agent._handle_receiver_eof(key, request.context)
+
+        self.assert_contained_settlement(controller.emit_agent_message)
+
+    async def test_receiver_eof_real_failure_still_settles_as_a_backend_failure(self):
+        """The negative control: only a CLASSIFIED teardown gets the new semantics."""
+
+        key = "session-eof-real:/tmp/work"
+        controller, agent, request = self._eof_agent(key, contained=False, returncode=-6)
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent._handle_receiver_eof(key, request.context)
+
+        self.assert_uncontained_settlement(controller.emit_agent_message, "-6")
+
+    async def test_receiver_eof_without_a_returncode_settles_as_a_backend_failure(self):
+        """A live process that merely stopped talking was never classified at all.
+
+        This is the branch that skips ``handle_session_error`` entirely, so
+        ``contained`` is only ever its initial value. If that default were True the
+        most common EOF — no returncode, no explanation — would silently become an
+        infrastructure interruption.
+        """
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        key = "session-eof-alive:/tmp/work"
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "eof-turn",
+                    "agent_runtime_turn_token": "eof-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[key] = [request]
+        agent._remove_specific_pending_reaction = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(cleanup_session=AsyncMock())
+        controller.claude_sessions[key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+        )
+        controller.receiver_tasks[key] = asyncio.current_task()
+
+        await agent._handle_receiver_eof(key, request.context)
+
+        self.assert_uncontained_settlement(
+            controller.emit_agent_message,
+            "Claude receiver ended without a terminal result",
+        )
+
+    def _receiver_exception_agent(self, composite_key, *, contained):
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "exc-turn",
+                    "agent_runtime_turn_token": "exc-runtime",
+                }
+            ),
+        )
+        agent._pending_requests[composite_key] = [request]
+        agent._clear_pending_reactions = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        agent.session_handler = SimpleNamespace(
+            handle_session_error=AsyncMock(return_value=contained),
+            claude_teardown_is_intentional=lambda *_a, **_k: contained,
+            mark_session_idle=lambda _key: None,
+            cleanup_session=AsyncMock(),
+            claude_error_diagnostic=lambda _key, _error: "Claude process terminated: SIGTERM",
+        )
+        controller.claude_sessions[composite_key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-15)),
+        )
+        return controller, agent, request
+
+    async def test_receiver_exception_contained_teardown_settles_as_backend_refresh(self):
+        key = "session-exc-settle:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=True)
+
+        await agent._handle_receiver_exception(
+            key, request.context, RuntimeError("Cannot write to terminated process (exit code: -15)")
+        )
+
+        self.assert_contained_settlement(controller.emit_agent_message)
+
+    async def test_receiver_exception_real_failure_still_settles_as_a_backend_failure(self):
+        key = "session-exc-real:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=False)
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent._handle_receiver_exception(
+                key, request.context, RuntimeError("boom")
+            )
+
+        self.assert_uncontained_settlement(controller.emit_agent_message, "SIGTERM")
+
+    async def test_receiver_exception_requeues_a_claimed_activity_batch(self):
+        """A dying receiver must not take an Activity claim down with it.
+
+        The EOF path already requeues before its terminal emit; this one only
+        peeked at the FIFO head, so the request still owned the batch and the
+        ``run_ids`` on its ``activity_completion_output``. With the contained
+        settlement declining to complete the Run, emitting on that output would
+        skip those Runs AND drop the claim -- the batch would be neither
+        delivered nor redeliverable. Requeueing restores it and strips the
+        provenance the release can no longer honour.
+        """
+
+        key = "session-exc-activity:/tmp/work"
+        controller, agent, request = self._receiver_exception_agent(key, contained=True)
+        activity = SessionActivity(
+            id="activity-1",
+            backend="claude",
+            runtime_key=key,
+            session_id="ses-1",
+            kind="background_task",
+            status="completed",
+            run_id="run-1",
+        )
+        request.output_activities = [activity]
+        request.output = activity_completion_output(
+            activity,
+            activities=[activity],
+            detached=False,
+            completes_turn=True,
+        )
+        registry = SimpleNamespace(requeue_completed_outputs=Mock())
+        agent._activity_registry = lambda: registry
+
+        await agent._handle_receiver_exception(
+            key,
+            request.context,
+            RuntimeError("Cannot write to terminated process (exit code: -15)"),
+        )
+
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        self.assertEqual(request.output_activities, [])
+        self.assert_contained_settlement(controller.emit_agent_message)
+        released = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(released.activity_ids, ())
+        self.assertIsNone(released.activity_batch_id)
+        self.assertEqual(released.run_ids, ())
+
+    async def test_direct_query_contained_teardown_settles_as_backend_refresh(self):
+        """The third path: the query itself fails, no receiver ever runs."""
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        runtime_key = "wechat_o9:reviewer:/tmp/work"
+        client = SimpleNamespace(
+            query=AsyncMock(
+                side_effect=RuntimeError("Cannot write to terminated process (exit code: -9)")
+            ),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+            _vibe_runtime_base_session_id="wechat_o9:reviewer",
+            _vibe_runtime_session_key=runtime_key,
+        )
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=lambda *_a, **_k: True,
+            cleanup_session=AsyncMock(),
+            capture_session_id=lambda *_: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        with patch("core.message_mirror.persist_agent_message") as persist:
+            await agent.handle_message(request)
+
+        agent.record_model_hub_native_failure.assert_not_awaited()
+        persist.assert_not_called()
+        self.assert_contained_settlement(controller.emit_agent_message)
+
+    async def test_direct_query_requeues_a_claimed_activity_batch(self):
+        """The same claim leak on the path where no receiver ever runs.
+
+        The request joins the FIFO before ``client.query`` is awaited, so a
+        background Activity that finishes while the query is in flight attaches
+        its batch to exactly this request -- the race the auth branch above
+        already requeues for. If the query then fails into a contained teardown,
+        the release declines to complete the Run and drops the claim with it.
+        Requeue like both receiver paths do.
+        """
+
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        runtime_key = "wechat_o9:activity:/tmp/work"
+        activity = SessionActivity(
+            id="activity-2",
+            backend="claude",
+            runtime_key=runtime_key,
+            session_id="ses-2",
+            kind="background_task",
+            status="completed",
+            run_id="run-2",
+        )
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id="wechat_o9:/tmp/work",
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        async def _query_after_activity_lands(*_args, **_kwargs):
+            # The batch attaches to the queued request mid-query, then the
+            # transport turns out to be gone.
+            request.output_activities = [activity]
+            request.output = activity_completion_output(
+                activity,
+                activities=[activity],
+                detached=False,
+                completes_turn=True,
+            )
+            raise RuntimeError("Cannot write to terminated process (exit code: -9)")
+
+        client = SimpleNamespace(
+            query=AsyncMock(side_effect=_query_after_activity_lands),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+            _vibe_runtime_base_session_id="wechat_o9:activity",
+            _vibe_runtime_session_key=runtime_key,
+        )
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(return_value=True),
+            claude_teardown_is_intentional=lambda *_a, **_k: True,
+            cleanup_session=AsyncMock(),
+            capture_session_id=lambda *_: None,
+        )
+        agent = ClaudeAgent(controller)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent._prepare_message_with_files = lambda req: req.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+        registry = SimpleNamespace(
+            requeue_completed_outputs=Mock(),
+            has_active=lambda *_a, **_k: False,
+            has_completed_output=lambda *_a, **_k: False,
+        )
+        agent._activity_registry = lambda: registry
+
+        with patch("core.message_mirror.persist_agent_message"):
+            await agent.handle_message(request)
+
+        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        self.assertEqual(request.output_activities, [])
+        self.assert_contained_settlement(controller.emit_agent_message)
+        released = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(released.activity_ids, ())
+        self.assertIsNone(released.activity_batch_id)
+        self.assertEqual(released.run_ids, ())
 
     async def test_receiver_eof_terminated_auth_adopts_turn_before_recovery(self):
         controller = _StubController()

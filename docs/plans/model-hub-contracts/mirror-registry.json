@@ -1,5 +1,83 @@
 {
-  "contract_version": 4,
+  "contract_version": 5,
+  "input_generation": {
+    "mode": "same_run_live_files",
+    "external_snapshot": "content_fingerprint_required"
+  },
+  "authority_table_discovery": {
+    "files": ["docs/plans/model-hub.md"]
+  },
+  "absence_checks": [
+    {
+      "id": "A1",
+      "source_file": "docs/plans/model-hub-implementation.md",
+      "pattern": "no `([A-Za-z][A-Za-z0-9_]+)` alias exists",
+      "scope_files": [
+        "docs/plans/model-hub-contracts/README.md",
+        "docs/plans/model-hub-contracts/adapter-interface.py",
+        "docs/plans/model-hub-contracts/source.schema.json",
+        "docs/plans/model-hub-contracts/api.md",
+        "docs/plans/model-hub-contracts/opencode-overlay.md"
+      ]
+    },
+    {
+      "id": "A2",
+      "source_file": "docs/plans/model-hub-implementation.md",
+      "pattern": "`([A-Za-z][A-Za-z0-9_]+)` is derived [^\\n]+ and is never persisted",
+      "scope_files": [
+        "docs/plans/model-hub-contracts/turn-provenance.schema.json",
+        "docs/plans/model-hub-contracts/api.md"
+      ]
+    }
+  ],
+  "schema_absence_checks": [
+    {
+      "id": "A3",
+      "source_file": "docs/plans/model-hub-implementation.md",
+      "start_marker": "The final set contains no",
+      "scope_globs": [
+        "docs/plans/model-hub-contracts/*.schema.json"
+      ]
+    }
+  ],
+  "field_contracts": [
+    {
+      "id": "P1",
+      "schema_file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
+      "file": "docs/plans/model-hub-implementation.md",
+      "row_id": "FC-08",
+      "negated_pattern": "`([a-z][a-z0-9_]+)` is derived [^|]+ and is never persisted"
+    }
+  ],
+  "api_boundary_only_errors": [
+    {
+      "value": "source_model_managed_upstream",
+      "contract_file": "docs/plans/model-hub-contracts/api.md",
+      "negative_test_file": "tests/test_model_hub_api.py",
+      "negative_test": "test_discovered_source_model_delete_is_rejected_as_upstream_managed",
+      "forbidden_ui_globs": [
+        "ui/src/components/settings/models/**/*.ts",
+        "ui/src/components/settings/models/**/*.tsx",
+        "ui/src/i18n/*.json",
+        "vibe/i18n/*.json"
+      ]
+    }
+  ],
+  "repo_absence_checks": [
+    {
+      "id": "A4",
+      "term_parts": ["custom", "models"],
+      "scope_globs": ["**/*.md", "**/*.py", "**/*.json", "**/*.ts", "**/*.tsx"]
+    }
+  ],
+  "route_body_absence_checks": [
+    {
+      "id": "A5",
+      "contract_file": "docs/plans/model-hub-contracts/api.md",
+      "path_fragment": "/api/models/sources/<source_id>/models",
+      "forbidden_field": "source_id"
+    }
+  ],
   "entries": [
     {
       "id": "M1",
@@ -57,8 +135,7 @@
       },
       "exclusions": [
         "recovery",
-        "manual",
-        "mapping"
+        "manual"
       ],
       "exclusion_sets": [
         {
@@ -169,7 +246,8 @@
             "/properties/served/properties/channel",
             "/properties/terminal_error/properties/channel",
             "/properties/canceled_attempt/properties/channel"
-          ]
+          ],
+          "exclude": [null]
         },
         {
           "schema": "probe-result.schema.json",
@@ -202,16 +280,172 @@
           }
         }
       ]
+    }
+  ],
+  "decision_tables": [
+    {
+      "id": "D1",
+      "domain": "credential failure handling",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Credential-failure decision matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "credential."
+        }
+      ]
     },
     {
-      "id": "N1",
-      "vocabulary": "source recommendation rule",
-      "rule": "none",
-      "home": {
-        "schema": "agent-supply.schema.json",
-        "path": "/properties/sources/properties/policy"
+      "id": "D2",
+      "domain": "turn outcome and copy",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Turn-outcome copy matrix",
+        "column": "Decision"
       },
-      "reason": "The deterministic ordering predicate has one normative home in model-hub.md section 4.2 and is not a shared vocabulary."
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "turn."
+        }
+      ]
+    },
+    {
+      "id": "D3",
+      "domain": "Source mutation envelopes",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Source-mutation envelope matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "mutation."
+        }
+      ],
+      "authority_fields": {
+        "kind": "markdown_field_names",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Source-mutation envelope matrix",
+        "column": "Guarded `409`"
+      },
+      "authority_fields_scope": [
+        "docs/plans/model-hub-contracts/api.md"
+      ]
+    },
+    {
+      "id": "D4",
+      "domain": "native configuration import actions",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Native-config import action matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "import."
+        }
+      ]
+    },
+    {
+      "id": "D5",
+      "domain": "Source protocols",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "source.schema.json",
+        "paths": ["/properties/protocol"]
+      },
+      "consumers": [
+        {
+          "kind": "python_literal_annotation",
+          "file": "config/v2_config.py",
+          "class": "ModelHubSourceConfig",
+          "field": "protocol"
+        },
+      {
+        "kind": "python_string_assignment",
+        "file": "vibe/model_hub_runtime/state.py",
+        "name": "_PROTOCOLS"
+      },
+      {
+        "kind": "marker_tail",
+        "file": "docs/plans/model-hub-contracts/adapter-interface.py",
+        "marker": "authority-consumer: protocol "
+      },
+      {
+        "kind": "marker_tail",
+        "file": "docs/plans/model-hub-contracts/opencode-overlay.md",
+        "marker": "authority-consumer: protocol "
+      },
+      {
+        "kind": "marker_tail",
+        "file": "docs/plans/model-hub-contracts/api.md",
+        "marker": "authority-consumer: protocol "
+      }
+      ]
+    },
+    {
+      "id": "D6",
+      "domain": "configuration eligibility reasons",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "agent-supply.schema.json",
+        "paths": [
+          "/properties/sources/properties/eligibility/items/properties/reason_key"
+        ],
+        "exclude": [null]
+      },
+      "consumers": [
+        {
+          "kind": "schema_vocabulary",
+          "schema": "agent-supply.schema.json",
+          "paths": [
+            "/properties/sources/properties/eligibility/items/allOf/0/then/properties/reason_key"
+          ]
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/en.json",
+          "path": "/models/eligibility",
+          "prefix": "models.eligibility."
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/zh.json",
+          "path": "/models/eligibility",
+          "prefix": "models.eligibility."
+        }
+      ]
+    }
+  ],
+  "ownership_checks": [
+    {
+      "id": "O1",
+      "kind": "python_importers_have_exactly_one_lane",
+      "module": "core.handlers.model_hub.resolver",
+      "exclude_globs": ["core/handlers/model_hub/**"],
+      "lane_table_file": "docs/plans/model-hub-implementation.md",
+      "lane_table_heading": "v3 current lanes (binding)"
+    }
+  ],
+  "file_mirrors": [
+    {
+      "id": "F1",
+      "left": "docs/plans/model-hub-contracts/adapter-interface.py",
+      "right": "core/handlers/model_hub/adapter.py"
     }
   ]
 }

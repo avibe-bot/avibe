@@ -279,7 +279,7 @@ def test_remove_provider_model_keeps_empty_model_tombstone_and_options(tmp_path:
     assert config["provider"]["deepseek"]["options"]["baseURL"] == "https://api.deepseek.com"
 
 
-def test_upsert_custom_openai_compatible_provider_writes_opencode_shape(tmp_path: Path) -> None:
+def test_upsert_custom_openai_chat_provider_writes_opencode_shape(tmp_path: Path) -> None:
     upsert_opencode_custom_provider(
         "my-relay",
         "My Relay",

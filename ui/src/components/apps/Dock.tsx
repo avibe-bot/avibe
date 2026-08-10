@@ -11,6 +11,7 @@ import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { useShowPageInventory } from '../useShowPages';
 import { isDragRelease } from './dragClick';
@@ -151,7 +152,7 @@ export const Dock: React.FC = () => {
     const href = tabHrefFor(item);
     setMenu(null);
     if (!href) return false;
-    window.open(href, '_blank', 'noopener,noreferrer');
+    openLinkInNewContext(href, 'noopener,noreferrer');
     return true;
   };
 

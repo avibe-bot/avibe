@@ -34,6 +34,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -390,7 +391,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // routes correctly regardless of where it's called from.
   const openInEditor = useCallback(
     (path: string, filename: string, mtime: number | null) => {
-      if (window.matchMedia('(min-width: 768px)').matches) {
+      if (isDesktopViewport()) {
         wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
       } else {
         routerNavigate('/apps/editor', { state: { path, filename, mtime } });
@@ -403,7 +404,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // supplies resolved metadata when it has already been fetched (content hits / ambiguous names).
   const openPreview = useCallback(
     (item: RowItem, entry: FsEntry = item.entry, editable = isEditableFile(entry), mtime = entry.mtime) => {
-      if (window.matchMedia('(min-width: 768px)').matches) {
+      if (isDesktopViewport()) {
         wm.openApp('preview', { title: entry.name, params: { path: item.full, name: entry.name } });
       } else {
         setPreview({ path: item.full, name: entry.name, mtime, editable });
@@ -417,7 +418,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // route with the dir in router state. Mirrors openInEditor.
   const openTerminalHere = useCallback(
     (dir: string) => {
-      if (window.matchMedia('(min-width: 768px)').matches) {
+      if (isDesktopViewport()) {
         wm.openApp('terminal', { params: { cwd: dir } });
       } else {
         routerNavigate('/apps/terminal', { state: { cwd: dir } });
@@ -522,7 +523,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // hidden, so fall back to the inline create row so a file can still be made.
   const onNewFile = useCallback(() => {
     if (!cwd) return;
-    if (window.matchMedia('(min-width: 768px)').matches) {
+    if (isDesktopViewport()) {
       wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
     } else {
       startNewEntry('file');

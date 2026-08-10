@@ -324,6 +324,108 @@ def test_finalize_scheduled_delivery_can_alias_into_delivery_scope() -> None:
     assert controller.sessions.thread_marks == [("scheduled", "C999", "181818.456")]
 
 
+def test_finalize_scheduled_delivery_never_clears_a_reserved_definition_anchor() -> None:
+    """A ``--create-session`` definition Session survives its first visible delivery.
+
+    Regression for the orphaning bug: ``clear_source`` is decided upstream from
+    ``session_target.thread_id is None``, which a durable definition anchor also
+    satisfies, and the clear is a HARD delete. Deleting the row leaves
+    ``run_definitions.session_id`` dangling, so every later fire dies at dispatch.
+    The alias must still happen; only the delete is refused.
+    """
+    controller = _Controller(platform="discord", dm_threads=False)
+    handler = SessionHandler(controller)
+    definition_anchor = "discord_C123:definition_ab12cd34ef56"
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="discord",
+        platform_specific={
+            "is_dm": False,
+            "turn_source": "scheduled",
+            "turn_base_session_id": definition_anchor,
+            "agent_session_target": {
+                "id": "sess-durable-1",
+                "session_anchor": definition_anchor,
+            },
+            "delivery_override": {"channel_id": "C123"},
+            "scheduled_delivery_alias": {
+                "mode": "sent_message",
+                "session_key": "discord::C123",
+                "clear_source": True,
+            },
+        },
+    )
+
+    handler.finalize_scheduled_delivery(context, "919191.777")
+
+    assert controller.sessions.alias_calls == [
+        ("discord::C123", definition_anchor, "discord_919191.777")
+    ]
+    assert controller.sessions.clear_calls == []
+
+
+def test_finalize_scheduled_delivery_still_clears_a_throwaway_provisional_anchor() -> None:
+    """The guard is not a blanket disable: an unbound provisional anchor still clears."""
+    controller = _Controller(platform="discord", dm_threads=False)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="discord",
+        platform_specific={
+            "is_dm": False,
+            "turn_source": "scheduled",
+            "turn_base_session_id": "discord_scheduled-8f2c",
+            "delivery_override": {"channel_id": "C123"},
+            "scheduled_delivery_alias": {
+                "mode": "sent_message",
+                "session_key": "discord::C123",
+                "clear_source": True,
+            },
+        },
+    )
+
+    handler.finalize_scheduled_delivery(context, "929292.888")
+
+    assert controller.sessions.clear_calls == [("discord::C123", "discord_scheduled-8f2c")]
+
+
+def test_finalize_scheduled_delivery_clears_when_reserved_row_is_a_different_anchor() -> None:
+    """Only the reserved row's own anchor is protected.
+
+    A context may carry a reserved Session while the turn ran off a separate provisional
+    anchor. Protecting that unrelated anchor would leak throwaway rows, so the guard
+    compares anchors rather than merely observing that a reserved row exists.
+    """
+    controller = _Controller(platform="discord", dm_threads=False)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="C123",
+        platform="discord",
+        platform_specific={
+            "is_dm": False,
+            "turn_source": "scheduled",
+            "turn_base_session_id": "discord_scheduled-7a1b",
+            "agent_session_target": {
+                "id": "sess-durable-2",
+                "session_anchor": "discord_C123:definition_ffeeddccbbaa",
+            },
+            "delivery_override": {"channel_id": "C123"},
+            "scheduled_delivery_alias": {
+                "mode": "sent_message",
+                "session_key": "discord::C123",
+                "clear_source": True,
+            },
+        },
+    )
+
+    handler.finalize_scheduled_delivery(context, "939393.999")
+
+    assert controller.sessions.clear_calls == [("discord::C123", "discord_scheduled-7a1b")]
+
+
 def test_alias_session_base_clears_source_even_when_alias_already_exists() -> None:
     controller = _Controller(platform="slack", dm_threads=False)
     controller.sessions.alias_result = False
@@ -418,7 +520,7 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     cleanup_calls = []
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None) -> None:
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
         cleanup_calls.append((key, current_receiver_task))
 
     handler.cleanup_session = _cleanup_session
@@ -446,3 +548,234 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     assert "Claude process terminated: SIGABRT (signal 6)" in diagnostic
     assert "Claude stderr tail:\nfatal: Claude CLI aborted\ntransport closed" in diagnostic
+
+
+def test_service_initiated_teardown_signal_is_not_reported_as_session_error() -> None:
+    """A SIGKILL the service issued itself must not read as a backend crash.
+
+    Cleanup escalates SIGTERM to SIGKILL, so the SDK surfaces ``exit code -9``
+    for a process Avibe terminated deliberately. Without this containment the
+    failure falls through to the generic branch and the user is told the
+    session failed for an unknown reason.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    cleanup_calls = []
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+        cleanup_calls.append(key)
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+        )
+    )
+
+    assert cleanup_calls == [composite_key]
+    assert controller.im_client.sent_messages == []
+
+
+def test_teardown_intent_does_not_suppress_errors_from_the_next_generation() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    # A replacement client took the key, so the previous teardown says nothing
+    # about this failure.
+    handler._clear_claude_teardown_intent(composite_key)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+        )
+    )
+
+    assert len(controller.im_client.sent_messages) == 1
+    _, message = controller.im_client.sent_messages[0]
+    assert "Command failed with exit code -9" in message
+
+
+def test_unrelated_error_during_teardown_window_is_still_reported() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code 1"),
+        )
+    )
+
+    assert len(controller.im_client.sent_messages) == 1
+
+
+def test_client_teardown_marker_suppresses_signal_error_without_key_record() -> None:
+    """A client the service marked for teardown is authoritative on its own.
+
+    The per-key record is dropped when a replacement client registers, but the
+    marked client object still identifies exactly which generation was killed
+    deliberately.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    controller.claude_sessions[composite_key] = client
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._clear_claude_teardown_intent(composite_key)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+        )
+    )
+
+    assert controller.im_client.sent_messages == []
+
+
+def test_teardown_containment_matches_colon_delimited_exit_code() -> None:
+    """The SDK reports write failures as ``(exit code: -9)``.
+
+    Once cleanup has popped the client there is no returncode to read, so the
+    message text is the only signal and both SDK spellings must match.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._mark_claude_teardown_intentional(composite_key, None)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    contained = asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Cannot write to terminated process (exit code: -9)"),
+        )
+    )
+
+    assert contained is True
+    assert controller.im_client.sent_messages == []
+
+
+def test_reported_session_errors_are_not_marked_contained() -> None:
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    contained = asyncio.run(
+        handler.handle_session_error(
+            "slack_C123:/tmp/workdir",
+            context,
+            RuntimeError("boom"),
+        )
+    )
+
+    assert contained is False
+    assert len(controller.im_client.sent_messages) == 1
+
+
+def test_old_generation_teardown_is_contained_after_a_replacement_registers() -> None:
+    """The caller's own client decides, not whatever now holds the key.
+
+    A query from the torn-down generation can reach the handler after a
+    replacement has registered and cleared the key record. The old client was
+    already popped from ``claude_sessions``, so re-reading the map here would
+    classify the delayed ``-9`` against the healthy replacement and report a
+    deliberate teardown as a genuine backend failure.
+    """
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    torn_down = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    replacement = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+    )
+    controller.claude_sessions[composite_key] = replacement
+
+    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+        return None
+
+    handler.cleanup_session = _cleanup_session
+    handler._clear_claude_teardown_intent(composite_key)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    contained = asyncio.run(
+        handler.handle_session_error(
+            composite_key,
+            context,
+            RuntimeError("Command failed with exit code -9"),
+            client=torn_down,
+        )
+    )
+
+    assert contained is True
+    assert controller.im_client.sent_messages == []
+
+
+def test_claude_teardown_is_intentional_probes_the_callers_client() -> None:
+    """The public probe answers before any backend-health evidence is recorded."""
+    controller = _Controller(platform="slack", dm_threads=False)
+    controller.im_client = _FakeIM()
+    handler = SessionHandler(controller)
+    composite_key = "slack_C123:/tmp/workdir"
+    torn_down = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+        _vibe_intentional_teardown=True,
+    )
+    healthy = SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)))
+    controller.claude_sessions[composite_key] = healthy
+    error = RuntimeError("Command failed with exit code -9")
+
+    assert handler.claude_teardown_is_intentional(composite_key, error, client=torn_down) is True
+    assert handler.claude_teardown_is_intentional(composite_key, error, client=healthy) is False
+    # No client named and nothing marked: an ordinary failure, not a teardown.
+    assert handler.claude_teardown_is_intentional(composite_key, error) is False

@@ -1285,6 +1285,41 @@ def is_direct_loopback_memory_request() -> bool:
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
+def memory_ui_user_key() -> str | None:
+    """Resolve the Memory principal for a trusted browser request.
+
+    Direct loopback keeps the install-local identity. Remote browser access is
+    admitted only through the configured Avibe Cloud origin with a valid signed
+    session cookie; LAN and arbitrary proxy routes remain closed. Reads require
+    the same origin evidence as mutations so a remote session cookie cannot be
+    used as a cross-origin Memory oracle.
+    """
+
+    if is_direct_loopback_memory_request():
+        return "avibe:local"
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return None
+    source = _request_origin(request.headers.get("Origin")) or _request_origin(
+        request.headers.get("Referer")
+    )
+    if not source or not _same_origin(source, _current_origin()):
+        return None
+    try:
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        return None
+    return f"avibe:remote:{subject.strip()}"
+
+
 def _normalized_host(value: str | None) -> str:
     raw_host = (value or "").lower().strip()
     if raw_host.startswith("[") and "]" in raw_host:
@@ -1469,6 +1504,7 @@ def _remote_auth_exempt_path() -> bool:
     path = request.path
     return (
         path == "/health"
+        or path == "/auth/login"
         or path == "/auth/callback"
         or path == "/auth/organization/callback"
         or path == "/auth/organization/start"
@@ -1509,6 +1545,11 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         }
         or request.path == "/favicon.ico"
     )
+
+
+def _is_ui_static_request() -> bool:
+    endpoint = request._request.scope.get("endpoint")
+    return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
@@ -1639,6 +1680,14 @@ def _strip_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", query, ""))
 
 
+def _oauth_retry_requested(value: Any) -> bool:
+    target = _safe_remote_redirect_target(value)
+    return any(
+        key == REMOTE_OAUTH_RETRY_PARAM and val == "1"
+        for key, val in parse_qsl(urlsplit(target).query, keep_blank_values=True)
+    )
+
+
 def _add_oauth_retry_param(value: str) -> str:
     target = _strip_oauth_retry_param(value)
     parsed = urlsplit(target)
@@ -1687,6 +1736,7 @@ def _show_page_id_from_private_route(path: str) -> str | None:
 def _redirect_to_vibe_cloud_login(
     config: V2Config,
     *,
+    next_target: Any | None = None,
     show_page_reauth: bool = False,
 ):
     from vibe import remote_access
@@ -1695,16 +1745,20 @@ def _redirect_to_vibe_cloud_login(
     code_verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    raw_next = request.full_path if request.query_string else request.path
+    raw_next = (
+        next_target
+        if next_target is not None
+        else (request.full_path if request.query_string else request.path)
+    )
     next_target = _strip_show_page_reauth_param(_strip_oauth_retry_param(raw_next))
     if show_page_reauth:
         next_target = _add_show_page_reauth_param(next_target)
-    show_page_id = _show_page_id_from_private_route(request.path)
+    show_page_id = _show_page_id_from_private_route(urlsplit(next_target).path)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
         next_target=next_target,
-        retry=request.args.get(REMOTE_OAUTH_RETRY_PARAM) == "1",
+        retry=_oauth_retry_requested(raw_next),
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
@@ -2256,12 +2310,14 @@ def enforce_remote_access_cookie():
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = payload
         return None
-    if request.method == "GET" and not request.path.startswith("/api/"):
-        # Bound unauthenticated login-start floods at the door (this writes a
-        # handshake + sets cookies); a real user spends only a couple per login.
-        if _auth_rate_limited():
-            return _auth_rate_limit_response()
-        return _redirect_to_vibe_cloud_login(config)
+    # The SPA shell is non-sensitive and its APIs remain protected. Serving it
+    # lets AuthGuard keep an iOS Home-Screen cold launch on the installed app's
+    # origin instead of automatically crossing into an OAuth browser sheet.
+    if _is_ui_static_request():
+        return None
+    if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
+        target = request.full_path if request.query_string else request.path
+        return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
 
 
@@ -3934,26 +3990,52 @@ async def model_hub_opencode_menu_put():
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["POST"])
-async def model_hub_custom_models_post():
+@app.route("/api/models/sources/<source_id>/models", methods=["POST"])
+async def model_hub_source_models_post(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         source = await _model_hub_service().add_custom_model(
-            _model_hub_json_object("source_not_found", status=404)
+            source_id,
+            _model_hub_json_object("mapping_target_unavailable")
         )
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["DELETE"])
-async def model_hub_custom_models_delete():
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["PATCH"],
+)
+async def model_hub_source_models_patch(source_id, model_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().update_model_reasoning_efforts(
+            source_id,
+            model_id,
+            _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["DELETE"],
+)
+async def model_hub_source_models_delete(source_id, model_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        source = await _model_hub_service().delete_custom_model(
+            source_id,
+            model_id,
+            force=payload.get("force") is True,
+        )
         return _model_hub_success(source=source)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -4789,6 +4871,21 @@ def _show_page_error_response(exc):
     return _coded_error_response(code, str(exc), status)
 
 
+def _is_remote_show_page_request() -> bool:
+    context = getattr(g, "authorization_context", None)
+    return bool(
+        (context is not None and context.is_remote)
+        or getattr(g, "remote_session_payload", None) is not None
+        or _is_remote_access_request(_load_remote_access_config())
+    )
+
+
+def _show_page_payload_for_request(payload: dict) -> dict:
+    if not _is_remote_show_page_request():
+        return payload
+    return {key: value for key, value in payload.items() if key != "path"}
+
+
 @app.route("/api/show-pages", methods=["GET"])
 def show_pages_list_get():
     from storage import project_access_service
@@ -4796,6 +4893,14 @@ def show_pages_list_get():
 
     payload = api.list_show_pages()
     context = getattr(g, "authorization_context", None)
+    if _is_remote_show_page_request():
+        payload = {
+            **payload,
+            "pages": [
+                _show_page_payload_for_request(page)
+                for page in payload.get("pages", [])
+            ],
+        }
     if context is not None and not context.is_instance_owner:
         engine = _projects_engine()
         with engine.connect() as conn:
@@ -4833,7 +4938,7 @@ def show_page_ensure_post(session_id):
     from vibe import api
 
     try:
-        return jsonify(api.ensure_show_page(session_id))
+        return jsonify(_show_page_payload_for_request(api.ensure_show_page(session_id)))
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4964,11 +5069,15 @@ def show_page_icon_get(session_id):
         response.headers["X-Content-Type-Options"] = "nosniff"
         # A directly-navigated SVG must not execute scripts in the API origin.
         response.headers["Content-Security-Policy"] = "sandbox"
-        # `immutable` is honest now: `?v=` is enforced against the served bytes, so a
-        # given URL maps to exactly one byte-content — a changed icon gets a new token
-        # → a new URL → a fresh fetch, and the cache can never be poisoned across a
-        # content revert. A plain Response also never honors `Range` (no 206/416).
-        response.headers["Cache-Control"] = "private, max-age=604800, immutable"
+        # Local URLs may cache immutably because `?v=` is enforced against the served
+        # bytes. Remote responses must revalidate the ACL on every request so a revoked
+        # user or a different account in the same browser cannot reuse cached bytes.
+        # A plain Response also never honors `Range` (no 206/416).
+        response.headers["Cache-Control"] = (
+            "private, no-store"
+            if _is_remote_show_page_request()
+            else "private, max-age=604800, immutable"
+        )
         return response
     except ShowPageError as exc:
         if exc.code == "resource_access_forbidden":
@@ -6139,6 +6248,28 @@ async def remote_access_diagnostics():
     return jsonify(result), 200 if result.get("ok") else 409
 
 
+@app.route("/auth/login", methods=["GET"])
+def remote_access_login():
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return jsonify({"error": "remote_access_not_enabled"}), 400
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.enabled:
+        return jsonify({"error": "remote_access_disabled"}), 503
+    if not cloud.session_secret:
+        return jsonify({"error": "remote_access_session_secret_missing"}), 503
+
+    next_target = _safe_remote_redirect_target(request.args.get("next"))
+    session = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
+    if session is not None:
+        return redirect(next_target)
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    return _redirect_to_vibe_cloud_login(config, next_target=next_target)
+
+
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
     from vibe import remote_access
@@ -6334,13 +6465,22 @@ def _remote_resource_access_context():
 def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, connection: Any) -> dict[str, Any]:
     from storage import resource_access_service
 
+    can_manage = resource_access_service.can_manage_resource_acl(
+        user_context,
+        policy["resource_kind"],
+        policy["resource_id"],
+        connection=connection,
+    )
+    group_ids = policy.get("group_ids") or []
+    if not can_manage:
+        group_ids = sorted(set(group_ids).intersection(user_context.group_ids or set()))
     return {
         "resource_kind": policy["resource_kind"],
         "resource_id": policy["resource_id"],
         "access_level": policy["access_level"],
         "owner_user_id": policy.get("owner_user_id"),
         "organization_id": policy.get("organization_id"),
-        "group_ids": policy.get("group_ids") or [],
+        "group_ids": group_ids,
         "policy_revision": policy.get("policy_revision"),
         "last_applied_control_plane_revision": policy.get("last_applied_control_plane_revision"),
         "can_use": resource_access_service.can_use_resource(
@@ -6349,12 +6489,7 @@ def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, conn
             policy["resource_id"],
             connection=connection,
         ),
-        "can_manage": resource_access_service.can_manage_resource_acl(
-            user_context,
-            policy["resource_kind"],
-            policy["resource_id"],
-            connection=connection,
-        ),
+        "can_manage": can_manage,
     }
 
 
@@ -8312,9 +8447,6 @@ async def sessions_bootstrap(session_id: str):
     from vibe import internal_client
 
     authorization_context = getattr(g, "authorization_context", None)
-    can_manage_instance = bool(
-        authorization_context and authorization_context.can_manage_instance
-    )
     engine = _projects_engine()
     with engine.connect() as conn:
         try:
@@ -8348,7 +8480,10 @@ async def sessions_bootstrap(session_id: str):
             if can_chat
             else []
         )
-        draft = message_deliveries.get_draft(conn, session_id) if can_chat else None
+        can_access_draft = can_chat and not bool(
+            authorization_context and authorization_context.is_remote
+        )
+        draft = message_deliveries.get_draft(conn, session_id) if can_access_draft else None
 
     agents_payload = {"agents": [], "default_agent_name": None}
     if can_chat:
@@ -8361,22 +8496,18 @@ async def sessions_bootstrap(session_id: str):
             logger.exception("sessions_bootstrap: failed to load Vibe Agents")
 
     try:
-        config_payload = vibe_api.client_config_payload(settings_service.load_config_or_default())
+        config = settings_service.load_config_or_default()
+        config_payload = (
+            vibe_api.remote_config_payload(config)
+            if authorization_context and authorization_context.is_remote
+            else vibe_api.client_config_payload(config)
+        )
     except Exception:
         logger.exception("sessions_bootstrap: failed to load config")
         config_payload = None
-    if config_payload is not None and not can_manage_instance:
-        ui_payload = config_payload.get("ui")
-        config_payload = {
-            "ui": {
-                key: ui_payload[key]
-                for key in ("chat_message_font_size", "show_agent_activity", "show_tool_calls")
-                if isinstance(ui_payload, dict) and key in ui_payload
-            }
-        }
 
     visible_queued = queued if can_chat else []
-    visible_draft = draft if can_chat else None
+    visible_draft = draft if can_access_draft else None
 
     try:
         turn_result = await internal_client.turn_state(session_id)
@@ -8916,6 +9047,12 @@ def sessions_messages_list(session_id: str):
     # ``around_id`` centers the window on a specific message (search deep-link
     # jump); it takes precedence over after/before/tail in the service.
     around_id = request.args.get("around_id") or None
+    # Legacy IM caller contexts may carry only the platform-native message id;
+    # storage resolves it to the durable row before applying cursor pagination.
+    around_native_id = request.args.get("around_native_id") or None
+    around_native_platform = request.args.get("around_native_platform") or None
+    around_turn_id = request.args.get("around_turn_id") or None
+    around_run_id = request.args.get("around_run_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -8937,6 +9074,10 @@ def sessions_messages_list(session_id: str):
             after_id=after_id,
             before_id=before_id,
             around_id=around_id,
+            around_native_id=around_native_id,
+            around_native_platform=around_native_platform,
+            around_turn_id=around_turn_id,
+            around_run_id=around_run_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             tail=tail,
@@ -9945,6 +10086,8 @@ def asr_telemetry():
         "backlogAtStop",
         "totalDurationMs",
         "stopToInsertionMs",
+        "firstPreviewMs",
+        "stopToFinalMs",
     }
     for key in integer_fields:
         if key not in payload:
@@ -9968,6 +10111,11 @@ def asr_telemetry():
         if not isinstance(payload["retry"], bool):
             return jsonify({"error": "invalid_field", "field": "retry"}), 400
         sanitized["retry"] = payload["retry"]
+
+    if "realtime" in payload:
+        if not isinstance(payload["realtime"], bool):
+            return jsonify({"error": "invalid_field", "field": "realtime"}), 400
+        sanitized["realtime"] = payload["realtime"]
 
     logger.info(
         "voice_reliability %s",
@@ -10556,6 +10704,20 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
 
 def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
     """Project-filter aggregate payloads whose values depend on the recipient."""
+    if event_type == "vaults.updated" and context is not None and context.is_remote:
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return payload
+        if isinstance(envelope, dict) and isinstance(envelope.get("data"), dict):
+            return json.dumps(
+                {
+                    **envelope,
+                    "data": {"scope": envelope["data"].get("scope", "")},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     if event_type != "inbox.unread.changed":
         return payload
     try:
@@ -13031,6 +13193,32 @@ def _show_runtime_config_script(
         "(function(){"
         f"var next={payload};"
         "globalThis.__AVIBE_SHOW__=Object.assign({},globalThis.__AVIBE_SHOW__||{},next);"
+        "function parentNavigate(){"
+        "try{"
+        "var candidate=window.parent!==window&&window.parent.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__;"
+        "return typeof candidate==='function'?candidate:null;"
+        "}catch(_){return null;}"
+        "}"
+        "function isIosStandalone(){"
+        "var ua=navigator.userAgent||'';"
+        "var ios=/iP(hone|ad|od)/.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);"
+        "return ios&&(navigator.standalone===true||(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches));"
+        "}"
+        "document.addEventListener('click',function(event){"
+        "var bridge=parentNavigate();"
+        "if(!bridge&&!isIosStandalone())return;"
+        "var element=event.target instanceof Element?event.target:null;"
+        "var anchor=element&&element.closest('a[href]');"
+        "if(!anchor||String(anchor.target).toLowerCase()!=='_blank'||anchor.hasAttribute('download'))return;"
+        "var target;try{target=new URL(anchor.href,window.location.href);}catch(_){return;}"
+        "if(target.origin!==window.location.origin||!/^https?:$/.test(target.protocol))return;"
+        "event.preventDefault();event.stopImmediatePropagation();"
+        "var path=target.pathname+target.search+target.hash;"
+        "var base=String(next.basePath||'');"
+        "var withinShow=base&&(target.pathname===base.slice(0,-1)||target.pathname.indexOf(base)===0);"
+        "if(window.parent!==window&&!withinShow&&bridge){bridge(target.href);return;}"
+        "window.location.assign(path);"
+        "},true);"
         "}());"
         "</script>"
     )

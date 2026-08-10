@@ -394,6 +394,11 @@ class SlackBot(BaseIMClient):
     def _is_dm_context(self, context: MessageContext) -> bool:
         if bool((context.platform_specific or {}).get("is_dm", False)):
             return True
+        if context.channel_id and context.channel_id == context.user_id:
+            # A DM context whose channel_id was left as the USER id. Slack has no
+            # channel with a ``U``/``W`` id, so this shape only ever arises from a
+            # DM scope that never resolved its bound dm_chat_id.
+            return True
         return self._channel_looks_like_dm(context.channel_id)
 
     def _is_own_bot_message(self, event: Dict[str, Any], bot_user_id: Optional[str]) -> bool:
@@ -491,6 +496,36 @@ class SlackBot(BaseIMClient):
             context.channel_id = recovered_channel_id
             context.thread_id = None
             return await self._chat_post_message(**kwargs)
+
+    async def _recover_dm_channel_id(self, context: MessageContext, failed_channel_id: Optional[str]) -> Optional[str]:
+        """Resolve the real ``D...`` channel for a DM context that lost it.
+
+        Mirrors ``_post_message_with_dm_recovery`` for endpoints that do NOT
+        tolerate a user id as ``channel`` (``reactions.add`` / ``reactions.remove``
+        answer ``channel_not_found``). Repairs the context in place and persists the
+        resolved id as the user's ``dm_chat_id`` so the next turn starts correct.
+        """
+        if not self._is_dm_context(context) or not context.user_id:
+            return None
+        try:
+            recovered_channel_id = await self._open_dm_channel(context.user_id)
+        except Exception as exc:
+            logger.warning("Failed to recover Slack DM channel for user %s: %s", context.user_id, exc)
+            return None
+        if not recovered_channel_id or recovered_channel_id == failed_channel_id:
+            return None
+
+        logger.warning(
+            "Recovered Slack DM channel %s for user %s (context carried %s)",
+            recovered_channel_id,
+            context.user_id,
+            failed_channel_id,
+        )
+        context.channel_id = recovered_channel_id
+        record = self._get_bound_user_record(context.user_id)
+        if record is not None:
+            self._persist_bound_dm_channel(context.user_id, record, recovered_channel_id)
+        return recovered_channel_id
 
     @staticmethod
     def _find_text_split_index(text: str, max_chars: int) -> int:
@@ -1355,7 +1390,8 @@ class SlackBot(BaseIMClient):
         Slack's ``reactions.add`` / ``reactions.remove`` require the short name
         (e.g. ``ok_hand``), NOT the raw unicode character — sending the codepoint
         returns ``invalid_name``. Every emoji used as a reaction by the processing
-        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent.
+        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent,
+        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered.
         """
         name = (emoji or "").strip()
         if name.startswith(":") and name.endswith(":") and len(name) > 2:
@@ -1367,6 +1403,10 @@ class SlackBot(BaseIMClient):
             "robot": "robot_face",
             "👌": "ok_hand",
             "ok": "ok_hand",
+            "✍️": "writing_hand",
+            "✍": "writing_hand",
+            "🤔": "thinking_face",
+            "🤷": "shrug",
         }
         return aliases.get(name, name)
 
@@ -1411,6 +1451,25 @@ class SlackBot(BaseIMClient):
             except Exception:
                 pass
 
+            if error_code == "channel_not_found":
+                recovered_channel_id = await self._recover_dm_channel_id(context, context.channel_id)
+                if recovered_channel_id:
+                    try:
+                        await self.web_client.reactions_add(
+                            channel=recovered_channel_id,
+                            timestamp=message_id,
+                            name=name,
+                        )
+                        return True
+                    except SlackApiError as retry_err:
+                        retry_error_code = (
+                            retry_err.response.get("error") if getattr(retry_err, "response", None) else None
+                        )
+                        if retry_error_code == "already_reacted":
+                            return True
+                        logger.warning("Slack reaction add failed after DM recovery: %s", retry_error_code or retry_err)
+                        return False
+
             # NOTE: reaction failures were previously DEBUG-only; surface at INFO/WARN for operability.
             if error_code in ["missing_scope", "not_in_channel", "channel_not_found"]:
                 logger.warning(f"Slack reaction add failed: error={error_code}, needed={needed}")
@@ -1437,6 +1496,20 @@ class SlackBot(BaseIMClient):
             )
             return True
         except SlackApiError as err:
+            error_code = err.response.get("error") if getattr(err, "response", None) else None
+            if error_code == "channel_not_found":
+                recovered_channel_id = await self._recover_dm_channel_id(context, context.channel_id)
+                if recovered_channel_id:
+                    try:
+                        await self.web_client.reactions_remove(
+                            channel=recovered_channel_id,
+                            timestamp=message_id,
+                            name=name,
+                        )
+                        return True
+                    except SlackApiError as retry_err:
+                        logger.warning("Slack reaction remove failed after DM recovery: %s", retry_err)
+                        return False
             logger.debug(f"Failed to remove Slack reaction: {err}")
             return False
         except Exception as err:

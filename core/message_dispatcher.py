@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
@@ -36,9 +37,11 @@ from core.message_output import (
 )
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
+    SETTLEMENTS_WITHOUT_RESULT,
 )
 from core.session_activities import SessionActivity
 from core.session_turns import emit_matches_active_turn
@@ -228,7 +231,16 @@ async def _stream_chunk(
         # terminal STATUS is still first-writer-wins in the store, so a result whose row
         # write already landed keeps its ``succeeded`` — this only stops the reason from
         # silently disagreeing with what the user was told.
-        if sink.get("settled_by") != SETTLED_BY_STOPPED:
+        #
+        # A contained backend teardown is the same case for the same reason: the
+        # service retired the runtime itself and the release already named that as
+        # the settlement, so a straggler result must not relabel an infrastructure
+        # interruption as a healthy terminal result. Only these two are protected --
+        # NOT all of ``SETTLEMENTS_WITHOUT_RESULT`` -- because
+        # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
+        # releaser writes, and upgrading THAT when a real result lands is the whole
+        # point of this line.
+        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH):
             sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:
@@ -1117,7 +1129,7 @@ class ConsolidatedMessageDispatcher:
         self,
         context: MessageContext,
         text: str,
-        message_id: str,
+        message_id: str | None,
         *,
         terminal_status: Optional[str] = None,
     ) -> None:
@@ -1156,8 +1168,69 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput,
         provenance: dict[str, Any],
     ) -> None:
-        for run_id in run_ids:
-            get_run = getattr(store, "get_run", None)
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        output_id = str(output_semantics.idempotency_key or "").strip()
+        if not output_id and output_semantics.sequence is not None:
+            output_id = f"sequence:{output_semantics.sequence}"
+        if not output_id and terminal_status:
+            output_id = "terminal"
+        if not output_id:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+            output_id = f"content:{digest}"
+        record_turn_outputs = getattr(store, "record_turn_run_outputs", None)
+        if callable(record_turn_outputs):
+            deferred_run_ids = (
+                [
+                    run_id
+                    for run_id in normalized_run_ids
+                    if terminal_status and self._run_has_blocking_activity(run_id)
+                ]
+                if terminal_status
+                else []
+            )
+            record_turn_outputs(
+                normalized_run_ids,
+                output_id=output_id,
+                text=text,
+                message_id=message_id,
+                sequence=output_semantics.sequence,
+                provenance=provenance,
+                terminal_status=terminal_status,
+                error=terminal_error,
+                deferred_run_ids=deferred_run_ids,
+            )
+            return
+        get_run = getattr(store, "get_run", None)
+        eligible_run_ids = (
+            [
+                run_id
+                for run_id in normalized_run_ids
+                if failure_notices.turn_fallback_owner_eligible(get_run(run_id))
+            ]
+            if callable(get_run)
+            else normalized_run_ids
+        )
+        terminal_provenance = dict(provenance)
+        notification = terminal_provenance.get("turn_failure_notification")
+        if isinstance(notification, dict) and eligible_run_ids:
+            notification = dict(notification)
+            current_owner = str(notification.get("fallback_run_id") or "").strip()
+            if not (
+                current_owner
+                and callable(get_run)
+                and failure_notices.turn_fallback_owner_eligible(
+                    get_run(current_owner)
+                )
+            ):
+                notification["fallback_run_id"] = min(eligible_run_ids)
+            terminal_provenance["turn_failure_notification"] = notification
+        for run_id in normalized_run_ids:
             if callable(get_run) and _run_is_cancelled(get_run(run_id)):
                 continue
             run_terminal_status = terminal_status
@@ -1170,24 +1243,23 @@ class ConsolidatedMessageDispatcher:
                     }
                     if terminal_error is not None:
                         defer_kwargs["error"] = terminal_error
+                    deferred_metadata = {
+                        key: value
+                        for key in ("turn_id", "turn_failure_notification")
+                        if (value := terminal_provenance.get(key)) is not None
+                    }
+                    if deferred_metadata:
+                        defer_kwargs["metadata"] = deferred_metadata
                     defer_terminal(run_id, **defer_kwargs)
                 run_terminal_status = None
             record_output = getattr(store, "record_run_output", None)
             if callable(record_output):
-                output_id = str(output_semantics.idempotency_key or "").strip()
-                if not output_id and output_semantics.sequence is not None:
-                    output_id = f"sequence:{output_semantics.sequence}"
-                if not output_id and run_terminal_status:
-                    output_id = "terminal"
-                if not output_id:
-                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
-                    output_id = f"content:{digest}"
                 record_kwargs = {
                     "output_id": output_id,
                     "text": text,
                     "message_id": message_id,
                     "sequence": output_semantics.sequence,
-                    "provenance": provenance,
+                    "provenance": terminal_provenance,
                     "terminal_status": run_terminal_status,
                 }
                 if terminal_error is not None:
@@ -1210,6 +1282,78 @@ class ConsolidatedMessageDispatcher:
                     run_id,
                     **record_kwargs,
                 )
+
+    def _terminal_agent_run_ids(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> list[str]:
+        run_ids: list[str] = []
+        for value in output_semantics.run_ids:
+            run_id = str(value or "").strip()
+            if run_id and run_id not in run_ids:
+                run_ids.append(run_id)
+        explicit_run_id = str(output_semantics.run_id or "").strip()
+        if explicit_run_id and explicit_run_id not in run_ids:
+            run_ids.append(explicit_run_id)
+        explicit_run_ids = output_semantics.metadata.get("run_ids")
+        if isinstance(explicit_run_ids, list):
+            for value in explicit_run_ids:
+                run_id = str(value or "").strip()
+                if run_id and run_id not in run_ids:
+                    run_ids.append(run_id)
+        if not run_ids:
+            run_ids = _owned_agent_run_ids(context.platform_specific or {})
+            for durable_run_id in self._durable_accepted_agent_run_ids(context):
+                if durable_run_id not in run_ids:
+                    run_ids.append(durable_run_id)
+        return run_ids
+
+    def _output_with_turn_fallback_owner(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> MessageOutput:
+        """Elect the fallback before writing the immutable terminal snapshot."""
+
+        notification = output_semantics.metadata.get("turn_failure_notification")
+        if not isinstance(notification, dict):
+            return output_semantics
+        run_ids = self._terminal_agent_run_ids(context, output_semantics)
+        if not run_ids:
+            return output_semantics
+        current_owner = str(notification.get("fallback_run_id") or "").strip()
+        store = None
+        try:
+            store = SQLiteBackgroundTaskStore()
+            eligible = [
+                run_id
+                for run_id in run_ids
+                if failure_notices.turn_fallback_owner_eligible(store.get_run(run_id))
+            ]
+            current_owner_eligible = bool(
+                current_owner
+                and failure_notices.turn_fallback_owner_eligible(
+                    store.get_run(current_owner)
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Failed to elect terminal Turn fallback owner",
+                exc_info=True,
+            )
+            return output_semantics
+        finally:
+            if store is not None:
+                store.close()
+        if not eligible:
+            return output_semantics
+        notification = dict(notification)
+        if not current_owner_eligible:
+            notification["fallback_run_id"] = min(eligible)
+        metadata = dict(output_semantics.metadata)
+        metadata["turn_failure_notification"] = notification
+        return replace(output_semantics, metadata=metadata)
 
     def _run_has_blocking_activity(self, run_id: str) -> bool:
         service = getattr(self.controller, "agent_service", None)
@@ -1365,28 +1509,11 @@ class ConsolidatedMessageDispatcher:
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
     ) -> None:
-        payload = context.platform_specific or {}
         semantics = output_semantics or MessageOutput(completes_turn=True)
+        if not semantics.records_run_output:
+            return
         require_confirmation = semantics.requires_delivery_for_run_settlement
-        run_ids: list[str] = []
-        for value in semantics.run_ids:
-            run_id = str(value or "").strip()
-            if run_id and run_id not in run_ids:
-                run_ids.append(run_id)
-        explicit_run_id = str(semantics.run_id or "").strip()
-        if explicit_run_id and explicit_run_id not in run_ids:
-            run_ids.append(explicit_run_id)
-        explicit_run_ids = semantics.metadata.get("run_ids")
-        if isinstance(explicit_run_ids, list):
-            for value in explicit_run_ids:
-                run_id = str(value or "").strip()
-                if run_id and run_id not in run_ids:
-                    run_ids.append(run_id)
-        if not run_ids:
-            run_ids = _owned_agent_run_ids(payload)
-            for durable_run_id in self._durable_accepted_agent_run_ids(context):
-                if durable_run_id not in run_ids:
-                    run_ids.append(durable_run_id)
+        run_ids = self._terminal_agent_run_ids(context, semantics)
         if not run_ids:
             return
         terminal_status = None
@@ -1872,6 +1999,11 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
+        if canonical_type == "result" and output_semantics.completes_turn:
+            output_semantics = self._output_with_turn_fallback_owner(
+                context,
+                output_semantics,
+            )
         activity_batch_incomplete = bool(
             output_semantics.requires_delivery_for_run_settlement
             and output_semantics.metadata.get("activity_batch_complete") is False
@@ -1892,20 +2024,35 @@ class ConsolidatedMessageDispatcher:
         # a clean turn is "done" (✅); a failure is "stopped" (⏹) when it was an
         # intentional silent stop (e.g. user stop), else "failed" (⏹). An explicit
         # diagnostic distinguishes a silent backend failure from a silent stop.
-        if not is_error:
+        #
+        # The settlement outranks ``is_error`` here, as it already does on every
+        # other terminal surface. A user Stop is not an error -- nobody's backend
+        # broke -- so it emits with the flag CLEAR, and reading the flag alone put
+        # a green ``✅ done`` on a turn the user called off before it answered.
+        # ``SETTLEMENTS_WITHOUT_RESULT`` is the existing "no terminal result will
+        # ever arrive for this run" set, which is exactly the condition that
+        # forbids the word ``done``; membership is tested rather than naming
+        # ``stopped``, so a future settlement in that set cannot regress to a
+        # green footer by being forgotten here.
+        if not is_error and output_semantics.settled_by not in SETTLEMENTS_WITHOUT_RESULT:
             terminal_reason = "done"
         elif level == "silent" and terminal_error is None:
             terminal_reason = "stopped"
         else:
             terminal_reason = "failed"
 
-        if canonical_type == "result":
+        visible_output_type = canonical_type in {"result", "output"}
+        if visible_output_type:
             if not current_runtime_turn and not output_semantics.detached:
-                logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
+                logger.info(
+                    "Dropping stale %s emit for superseded runtime turn in %s",
+                    canonical_type,
+                    self._get_session_key(context),
+                )
                 return None
         raw_text = text
         enhanced = None
-        if canonical_type == "result" and level != "silent":
+        if visible_output_type and level != "silent":
             quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
             enhanced = process_reply(raw_text, include_quick_replies=quick_replies_on)
             text = enhanced.visible_text
@@ -1921,6 +2068,7 @@ class ConsolidatedMessageDispatcher:
                 manager.on_terminal_result(
                     context,
                     is_error=is_error,
+                    settled_by=self._turn_release_settlement(output_semantics),
                     terminal_evidence={
                         "result_text": self._fold_footer(terminal_body, result_footer),
                         "terminal_error": terminal_error,
@@ -1954,13 +2102,28 @@ class ConsolidatedMessageDispatcher:
                         "Activity output batch recovery is incomplete",
                         delivered=False,
                     )
+                # This row is the IM turn's ONLY terminal boundary — an IM turn has
+                # no durable execution owner, and ``list_turn_groups`` /
+                # ``_latest_source_message_anchor`` both close a turn on it. So a
+                # settlement that ends a turn without a result must still write one;
+                # skipping it leaves the turn logically open, which renders as a
+                # still-running activity card long after the runtime is gone. Only
+                # ``stopped`` is exempt, and only because the stop path reports the
+                # boundary itself. Passing the settlement lets the row say
+                # ``canceled`` where ``is_error`` alone would have said ``failed`` —
+                # a contained backend teardown gets a boundary that is honest about
+                # being an interruption rather than a backend fault.
                 if (
                     mutates_turn_lifecycle
                     and context.platform != "avibe"
                     and self._turn_release_settlement(output_semantics)
                     != SETTLED_BY_STOPPED
                 ):
-                    persist_silent_terminal(context, is_error=is_error)
+                    persist_silent_terminal(
+                        context,
+                        is_error=is_error,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
@@ -2008,7 +2171,18 @@ class ConsolidatedMessageDispatcher:
         # cross-platform history) — persist_agent_message attributes IM rows to
         # this target's scope.
         target_context = self._get_target_context(context)
+        suppresses_outward_delivery = bool(
+            (context.platform_specific or {}).get("suppress_delivery")
+        )
         output_metadata = output_semantics.provenance(context) if output is not None else None
+        if suppresses_outward_delivery:
+            # A background transcript row is local history, not an outward receipt.
+            # Mark that fact durably: a later user-visible fallback keeps the stable
+            # native identity but must send before promoting the row to a receipt.
+            output_metadata = {
+                **(output_metadata or {}),
+                "delivery_suppressed": True,
+            }
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
 
         # For a result, persist the SAME cleaned text the user receives:
@@ -2017,7 +2191,7 @@ class ConsolidatedMessageDispatcher:
         # raw text would surface markup in the inbox preview / chat transcript
         # that was never shown. Computed once here and reused for delivery below.
         persist_text = text
-        if canonical_type == "result":
+        if visible_output_type:
             persist_text = enhanced.text if enhanced.text.strip() else text
 
         accepted_message = None
@@ -2032,10 +2206,27 @@ class ConsolidatedMessageDispatcher:
             )
         )
         for candidate in native_output_candidates:
-            accepted_message = agent_message_exists(target_context, candidate)
-            if accepted_message:
-                native_output_id = candidate
-                break
+            candidate_message = agent_message_exists(target_context, candidate)
+            if not candidate_message:
+                continue
+            candidate_metadata = (
+                candidate_message.get("metadata")
+                if isinstance(candidate_message, Mapping)
+                else None
+            )
+            if (
+                not suppresses_outward_delivery
+                and isinstance(candidate_metadata, Mapping)
+                and candidate_metadata.get("delivery_suppressed") is True
+            ):
+                logger.info(
+                    "Replaying local-only agent output %s to its outward target",
+                    candidate,
+                )
+                continue
+            accepted_message = candidate_message
+            native_output_id = candidate
+            break
         if accepted_message:
             logger.info("Skipping duplicate agent output %s", native_output_id)
             accepted_output_semantics = self._output_with_accepted_provenance(
@@ -2055,7 +2246,7 @@ class ConsolidatedMessageDispatcher:
             # re-send, report nothing, and then either walk on to another delivery
             # rung (a duplicate by another route) or exhaust its backoff and
             # dead-letter a notice the user already has.
-            if delivery is not None:
+            if delivery is not None and not suppresses_outward_delivery:
                 delivery.send_returned = True
                 delivery.delivered_id = native_output_id
                 delivery.persisted_row = {
@@ -2143,12 +2334,12 @@ class ConsolidatedMessageDispatcher:
         # and the persisted row is the inbox/transcript source of truth.
         persists_without_delivery = target_context.platform == "avibe"
 
-        if (context.platform_specific or {}).get("suppress_delivery"):
+        if suppresses_outward_delivery:
             try:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
-                if canonical_type == "result":
-                    result_type = "error" if is_error else "result"
+                if visible_output_type:
+                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
                             raw_text,
@@ -2181,7 +2372,7 @@ class ConsolidatedMessageDispatcher:
                         metadata=output_metadata,
                         native_message_id=native_output_id,
                     )
-                message_id = (persisted_output or {}).get("id") or (
+                local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
                 terminal_status = None
@@ -2196,7 +2387,7 @@ class ConsolidatedMessageDispatcher:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
                         recorded_text,
-                        message_id,
+                        None,
                         is_error=is_error,
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
@@ -2205,7 +2396,7 @@ class ConsolidatedMessageDispatcher:
                     self._record_suppressed_run_message(
                         context,
                         recorded_text,
-                        message_id,
+                        None,
                         terminal_status=terminal_status,
                     )
                 if mutates_turn_lifecycle:
@@ -2228,7 +2419,7 @@ class ConsolidatedMessageDispatcher:
                             "Suppressed Activity output local settlement is incomplete",
                             delivered=False,
                         )
-                return message_id
+                return local_message_id
             finally:
                 if mutates_turn_lifecycle:
                     await self._finish_processing_indicator_turn(context)
@@ -2284,7 +2475,7 @@ class ConsolidatedMessageDispatcher:
                     delivery.error_stage = STAGE_STREAM
             return message_id
 
-        if canonical_type == "result":
+        if visible_output_type:
             try:
                 primary_message_id: Optional[str] = None
                 scheduled_anchor_message_id: Optional[str] = None
@@ -2554,7 +2745,7 @@ class ConsolidatedMessageDispatcher:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
                     # as an unread agent reply (unread queries are result-only). Codex P2.
-                    result_type = "error" if is_error else "result"
+                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         # Keep the ``file://`` links in the persisted avibe text so the
                         # workbench media-proxy rewrite (in ``persist_agent_message``)
@@ -2664,7 +2855,7 @@ class ConsolidatedMessageDispatcher:
                         context,
                         text=display_text,
                         message_id=primary_message_id,
-                        kind="result",
+                        kind=canonical_type,
                         completes_turn=mutates_turn_lifecycle,
                     )
                 elif mutates_turn_lifecycle:

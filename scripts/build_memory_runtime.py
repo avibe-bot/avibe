@@ -17,15 +17,14 @@ import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
-EVEROS_VERSION = "1.1.3"
+EVEROS_VERSION = "1.2.1"
 PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57"
+LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
 UV_VERSION = "0.9.18"
 BIN_PATH = "bin/python"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 EXPECTED_PLATFORMS = {
     "darwin-arm64",
-    "darwin-x64",
     "linux-arm64",
     "linux-x64",
 }

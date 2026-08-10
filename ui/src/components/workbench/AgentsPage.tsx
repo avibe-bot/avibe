@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FileText,
   Funnel,
+  Lock,
   LockKeyhole,
   Loader2,
   Maximize2,
@@ -48,6 +49,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
+import { canEditAgentDefinitions } from '../../lib/remoteAuth';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
@@ -93,6 +95,10 @@ export const AgentsPage: React.FC = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const visibleTabs = remote ? (['definitions'] as const) : AGENTS_TAB_ORDER;
   const activeTab = remote ? 'definitions' : agentsTab;
+  // Every Agent editor control is local-only; remote instances get a read-only
+  // catalog. Organization onboarding stays available — it is separately
+  // permitted by the remote policy.
+  const canEditAgents = canEditAgentDefinitions({ remote });
 
   const refreshOnboarding = useCallback(async () => {
     if (!capabilities.can_manage_agents) {
@@ -497,15 +503,24 @@ export const AgentsPage: React.FC = () => {
         </div>
         <BackendFilter value={backendFilter} onChange={setBackendFilter} />
         <div className="flex-1" />
-        <Button type="button" variant="outline" size="xs" onClick={() => setShowGlobalPrompts(true)}>
-          <FileText className="size-3.5" />
-          {t('globalPrompts.button')}
-        </Button>
-        <ImportMenu onImport={onImport} importing={importing} />
-        <Button type="button" variant="brand" size="xs" onClick={() => setShowNew(true)}>
-          <Plus />
-          {t('agents.newAgent')}
-        </Button>
+        {canEditAgents ? (
+          <>
+            <Button type="button" variant="outline" size="xs" onClick={() => setShowGlobalPrompts(true)}>
+              <FileText className="size-3.5" />
+              {t('globalPrompts.button')}
+            </Button>
+            <ImportMenu onImport={onImport} importing={importing} />
+            <Button type="button" variant="brand" size="xs" onClick={() => setShowNew(true)}>
+              <Plus />
+              {t('agents.newAgent')}
+            </Button>
+          </>
+        ) : (
+          <Badge variant="secondary" title={t('agents.remoteReadOnlyHint')}>
+            <Lock className="size-3" />
+            {t('agents.remoteReadOnly')}
+          </Badge>
+        )}
       </div>
 
       {activeTab === 'definitions' && error && (
@@ -563,10 +578,12 @@ export const AgentsPage: React.FC = () => {
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-16 text-center">
               <Bot className="size-8 text-muted" />
               <div className="text-[14px] font-semibold text-foreground">{t('agents.empty')}</div>
-              <Button type="button" variant="brand" size="sm" onClick={() => setShowNew(true)}>
-                <Plus />
-                {t('agents.newAgent')}
-              </Button>
+              {canEditAgents && (
+                <Button type="button" variant="brand" size="sm" onClick={() => setShowNew(true)}>
+                  <Plus />
+                  {t('agents.newAgent')}
+                </Button>
+              )}
             </div>
           )}
 
@@ -582,6 +599,7 @@ export const AgentsPage: React.FC = () => {
             <AgentDetailPanel
               agent={selected}
               isDefault={defaultName === selected.name}
+              canEdit={canEditAgents}
               onChange={updateField}
               onSetDefault={onSetDefault}
               onRenamed={onRenamed}
@@ -592,8 +610,12 @@ export const AgentsPage: React.FC = () => {
         )}
       </div>
 
-      <NewAgentDialog open={showNew} onClose={() => setShowNew(false)} onCreated={onCreated} />
-      <GlobalPromptsDialog open={showGlobalPrompts} onClose={() => setShowGlobalPrompts(false)} />
+      {canEditAgents && (
+        <>
+          <NewAgentDialog open={showNew} onClose={() => setShowNew(false)} onCreated={onCreated} />
+          <GlobalPromptsDialog open={showGlobalPrompts} onClose={() => setShowGlobalPrompts(false)} />
+        </>
+      )}
     </div>
   );
 };
@@ -847,6 +869,8 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
 interface DetailProps {
   agent: VibeAgentFull;
   isDefault: boolean;
+  /** False on remote instances, where every mutating control is unavailable. */
+  canEdit: boolean;
   onChange: (patch: VibeAgentUpdatePayload) => void;
   onSetDefault: () => Promise<void>;
   onRenamed: (newName: string) => void;
@@ -858,11 +882,14 @@ interface DetailProps {
 // Name → Backend (read-only) → Model (Combobox) → Reasoning effort →
 // System Prompt (collapsible) → footer Run / Delete. Name is editable
 // for user agents. The backend renames the row and its references atomically;
-// system agents keep their locked identity.
-const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
+// system agents keep their locked identity. On a remote instance `canEdit` is
+// false and the panel degrades to a read-only view of the same fields.
+const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, onChange, onSetDefault, onRenamed, onDelete, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  // System agents are locked everywhere; remote access locks every agent.
+  const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
@@ -923,6 +950,11 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
     );
   }, [agent.backend, api]);
 
+  const lockHint = system
+    ? t('agents.detail.systemLocked')
+    : canEdit
+      ? undefined
+      : t('agents.remoteReadOnlyHint');
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
@@ -935,7 +967,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
       setName(agent.name);
       return;
     }
-    if (system) {
+    if (locked) {
       setName(agent.name);
       return;
     }
@@ -1003,6 +1035,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
         <Switch
           checked={agent.enabled}
           onCheckedChange={(next) => onChange({ enabled: next })}
+          disabled={!canEdit}
+          title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
           label={t('agents.detail.enabled')}
         />
       </div>
@@ -1026,7 +1060,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
             <Star className="size-3" />
             {t('agents.detail.defaultActive')}
           </Badge>
-        ) : (
+        ) : !canEdit ? null : (
           <Button
             type="button"
             variant="outline"
@@ -1053,11 +1087,11 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
               if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
               if (e.key === 'Escape') setName(agent.name);
             }}
-            disabled={system || renaming}
-            title={system ? t('agents.detail.systemLocked') : undefined}
+            disabled={locked || renaming}
+            title={lockHint}
             className="flex-1 bg-transparent text-[13px] font-medium text-foreground outline-none disabled:cursor-not-allowed disabled:opacity-70"
           />
-          {!system && <Pencil className="size-3 shrink-0 text-muted" />}
+          {!locked && <Pencil className="size-3 shrink-0 text-muted" />}
         </div>
       </Field>
 
@@ -1069,12 +1103,12 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           onBlur={() => {
-            if (!system && description !== (agent.description ?? '')) {
+            if (!locked && description !== (agent.description ?? '')) {
               onChange({ description: description.trim() || null });
             }
           }}
-          disabled={system}
-          title={system ? t('agents.detail.systemLocked') : undefined}
+          disabled={locked}
+          title={lockHint}
           rows={2}
           placeholder={t('agents.detail.descriptionPlaceholder')}
           className="text-[13px] disabled:cursor-not-allowed disabled:opacity-70"
@@ -1096,33 +1130,44 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
         </div>
       </Field>
 
-      {/* Model — Combobox with chevron + searchable + custom values. */}
+      {/* Model — Combobox with chevron + searchable + custom values. Remote
+          instances get the same value as a locked chip (the Backend field's
+          read-only treatment) because the update endpoint is local-only. */}
       <Field label={t('agents.detail.model')}>
-        <Combobox
-          options={modelOptions}
-          value={model}
-          onValueChange={(next) => {
-            const value = next.trim();
-            if (!value) return;
-            setModel(value);
-            const patch: Partial<VibeAgentFull> = { model: value };
-            // If the new model can't use the current effort, fall back to a
-            // valid one and persist it in the same patch — otherwise the record
-            // keeps an effort the model can't run (Codex P2).
-            const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
-            if (effort && !opts.includes(effort)) {
-              const fallback = opts.includes('medium') ? 'medium' : opts[0];
-              if (fallback) {
-                setEffort(fallback);
-                patch.reasoning_effort = fallback;
+        {!canEdit ? (
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
+            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
+              {model || t('agents.noConfig')}
+            </span>
+            <Lock className="size-3 shrink-0 text-muted" />
+          </div>
+        ) : (
+          <Combobox
+            options={modelOptions}
+            value={model}
+            onValueChange={(next) => {
+              const value = next.trim();
+              if (!value) return;
+              setModel(value);
+              const patch: Partial<VibeAgentFull> = { model: value };
+              // If the new model can't use the current effort, fall back to a
+              // valid one and persist it in the same patch — otherwise the record
+              // keeps an effort the model can't run (Codex P2).
+              const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
+              if (effort && !opts.includes(effort)) {
+                const fallback = opts.includes('medium') ? 'medium' : opts[0];
+                if (fallback) {
+                  setEffort(fallback);
+                  patch.reasoning_effort = fallback;
+                }
               }
-            }
-            onChange(patch);
-          }}
-          placeholder={t('agents.detail.modelPlaceholder')}
-          emptyText={t('agents.detail.modelEmpty')}
-          allowCustomValue
-        />
+              onChange(patch);
+            }}
+            placeholder={t('agents.detail.modelPlaceholder')}
+            emptyText={t('agents.detail.modelEmpty')}
+            allowCustomValue
+          />
+        )}
       </Field>
 
       {/* Reasoning effort — design.pen LsjxT */}
@@ -1137,13 +1182,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
               <button
                 key={opt}
                 type="button"
+                disabled={!canEdit}
+                title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
                 onClick={() => {
                   setEffort(opt);
                   onChange({ reasoning_effort: opt });
                 }}
                 className={clsx(
-                  'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition',
+                  'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',
                   active ? 'bg-mint-soft font-bold text-mint' : 'font-medium text-muted hover:text-foreground',
+                  !canEdit && !active && 'opacity-70 hover:text-muted',
                 )}
               >
                 {opt}
@@ -1179,28 +1227,33 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
             </span>
           </button>
           {/* Expand into the full editor modal (large input + Markdown
-              edit/preview) — the shared EditorDialog primitive. */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="size-9 shrink-0 text-muted hover:text-foreground"
-            onClick={() => setEditorOpen(true)}
-            aria-label={t('agents.detail.systemPromptExpand')}
-            title={t('agents.detail.systemPromptExpand')}
-          >
-            <Maximize2 className="size-3.5" />
-          </Button>
+              edit/preview) — the shared EditorDialog primitive. The editor
+              saves, so it stays local-only. */}
+          {canEdit && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-9 shrink-0 text-muted hover:text-foreground"
+              onClick={() => setEditorOpen(true)}
+              aria-label={t('agents.detail.systemPromptExpand')}
+              title={t('agents.detail.systemPromptExpand')}
+            >
+              <Maximize2 className="size-3.5" />
+            </Button>
+          )}
         </div>
         {systemPromptOpen && (
           <Textarea
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
             onBlur={() => {
-              if (systemPrompt !== (agent.system_prompt ?? '')) {
+              if (canEdit && systemPrompt !== (agent.system_prompt ?? '')) {
                 onChange({ system_prompt: systemPrompt.trim() || null });
               }
             }}
+            readOnly={!canEdit}
+            title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
             rows={6}
             placeholder={t('agents.create.systemPromptPlaceholder')}
             className="text-[12px]"
@@ -1212,38 +1265,44 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, onChange, o
           button was redundant with the top Enable toggle and was
           removed. */}
       <div className="flex items-center gap-2 pt-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          onClick={() => setRunning(true)}
-          className="border-mint/40 bg-mint-soft text-mint hover:brightness-110"
-        >
-          <Play className="size-3" />
-          {t('agents.detail.run')}
-        </Button>
-        <div className="flex-1" />
-        {!system ? (
-          <Button
-            type="button"
-            variant="destructive-soft"
-            size="xs"
-            onClick={onDelete}
-          >
-            <Trash2 className="size-3" />
-            {t('common.delete')}
-          </Button>
+        {canEdit ? (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={() => setRunning(true)}
+              className="border-mint/40 bg-mint-soft text-mint hover:brightness-110"
+            >
+              <Play className="size-3" />
+              {t('agents.detail.run')}
+            </Button>
+            <div className="flex-1" />
+            {!system ? (
+              <Button
+                type="button"
+                variant="destructive-soft"
+                size="xs"
+                onClick={onDelete}
+              >
+                <Trash2 className="size-3" />
+                {t('common.delete')}
+              </Button>
+            ) : (
+              <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
+            )}
+          </>
         ) : (
-          <span className="text-[10px] text-muted">{t('agents.detail.systemLocked')}</span>
+          <span className="text-[10px] text-muted">{t('agents.remoteReadOnlyHint')}</span>
         )}
       </div>
 
-      {running && <RunAgentDialog agent={agent} onClose={() => setRunning(false)} />}
+      {canEdit && running && <RunAgentDialog agent={agent} onClose={() => setRunning(false)} />}
 
       {/* Full-screen system-prompt editor — large input + Markdown preview.
           Opening from collapsed or expanded both jump straight here. */}
       <EditorDialog
-        open={editorOpen}
+        open={canEdit && editorOpen}
         onClose={() => setEditorOpen(false)}
         title={t('agents.detail.systemPrompt')}
         description={t('agents.detail.systemPromptEditorHint')}

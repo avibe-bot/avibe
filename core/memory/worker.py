@@ -77,13 +77,19 @@ class MemoryWorker:
         self._system_paused = False
         self._system_pause_until: datetime | None = None
         self._activation_pending = True
-        self._recovery_sessions: list[str] = []
+        self._recovery_sessions: list[tuple[str, str]] = []
 
     def begin_activation(self) -> None:
         """Require durable recovery before a recreated drain task can claim."""
 
         self._activation_pending = True
         self._recovery_sessions = []
+
+    def begin_new_lease_activation(self) -> None:
+        """Rotate the claim lease before activating a replacement worker."""
+
+        self._boot_id = uuid.uuid4().hex
+        self.begin_activation()
 
     def pause_claims(self) -> None:
         """Prevent future claims while allowing a current provider call to finish."""
@@ -163,7 +169,7 @@ class MemoryWorker:
                 # become searchable immediately. The store marks a whole session
                 # in flight only for crash recovery and previously delivered rows;
                 # it is not a license to defer this flush to the end of the tick.
-                result = await self._flush_session(row.session_id)
+                result = await self._flush_session(row.session_id, row.project_ref)
                 if _opens_breaker(result):
                     await self._open_processing_fault()
                     break
@@ -201,8 +207,8 @@ class MemoryWorker:
 
     async def _drain_recovery_sessions(self, *, half_open: bool) -> bool:
         while self._recovery_sessions:
-            session_id = self._recovery_sessions[0]
-            result = await self._flush_session(session_id)
+            session_id, project_ref = self._recovery_sessions[0]
+            result = await self._flush_session(session_id, project_ref)
             self._recovery_sessions.pop(0)
             if _opens_breaker(result):
                 await self._open_processing_fault()
@@ -234,6 +240,7 @@ class MemoryWorker:
         capture = ProviderCapture(
             principal_id=row.principal_id,
             session_ref=row.session_id,
+            project_ref=row.project_ref,
             text=row.payload_text,
             provider_timestamp_ms=row.provider_timestamp_ms,
             attachments=attachments,
@@ -277,13 +284,17 @@ class MemoryWorker:
         )
         return settled.settled
 
-    async def _flush_session(self, session_id: str) -> FlushResult:
-        marked = await self._store_call(self._store.mark_flush_in_flight, session_id)
+    async def _flush_session(self, session_id: str, project_ref: str) -> FlushResult:
+        marked = await self._store_call(
+            self._store.mark_flush_in_flight,
+            session_id,
+            project_ref,
+        )
         if not marked:
             return FlushUnknown(reason="transport")
         try:
             result = await asyncio.wait_for(
-                self._provider.flush(session_id),
+                self._provider.flush(session_id, project_ref),
                 timeout=self._flush_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -297,6 +308,7 @@ class MemoryWorker:
         await self._store_call(
             self._store.record_flush_verdict,
             session_id,
+            project_ref,
             result,
             now=_iso_from_datetime(self._current_time()),
         )
@@ -445,7 +457,20 @@ class MemoryWorker:
             return False
 
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
-        return await asyncio.to_thread(method, *args, **kwargs)
+        task = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+        if cancellation is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                pass
+            raise cancellation
+        return task.result()
 
     def _pause_for_system_failure(self, now: datetime) -> None:
         self._system_paused = True

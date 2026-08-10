@@ -27,6 +27,7 @@ import {
   withSecretDraft,
 } from '../../lib/secretFields';
 import { copyTextToClipboard } from '../../lib/utils';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { EmbeddedConfigShell, EyebrowBadge, WizardCard } from '../visual';
 import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
@@ -35,7 +36,7 @@ import { Input } from '../ui/input';
 import { errorMessage } from '@/lib/errorMessage';
 
 const LinkButton: React.FC<{ url: string; label: string }> = ({ url, label }) => (
-  <Button variant="brand" size="sm" onClick={() => window.open(url, '_blank')} disabled={!url}>
+  <Button variant="brand" size="sm" onClick={() => openLinkInNewContext(url)} disabled={!url}>
     <ExternalLink size={14} strokeWidth={2.25} />
     {label}
   </Button>

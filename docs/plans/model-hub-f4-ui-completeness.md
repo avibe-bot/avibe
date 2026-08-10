@@ -25,7 +25,7 @@ already implemented on master (`cf1b4314`).
    sources only — `native_cli` test is rejected server-side), delete
    (`DELETE`, with the only-supplier guard: a `mode_switch_blocked` response
    escalates the confirm to a `?force=1` delete). Custom-model delete lives in
-   the OpenCode drawer's edit dialog (`DELETE /custom-models`).
+   the OpenCode drawer's edit dialog (`DELETE /sources/<source_id>/models/<model_id>`).
 
 3. **P1-03 / R30 — Migration triggers.** New self-contained `MigrationBanner`
    (scans on mount, shows a dismissible strip when importable native configs

@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 
 interface ProjectPickerProps {
   projects: WorkbenchProject[];
@@ -22,6 +23,7 @@ interface ProjectPickerProps {
 export const ProjectPicker: React.FC<ProjectPickerProps> = ({ projects, targetId, onSelect, onNewProject, disabled }) => {
   const { t } = useTranslation();
   const { capabilities } = useInstanceAuthorization();
+  const canCreateProject = canCreateLocalProject(capabilities);
   return (
     // min-w-0 lets this shrink inside the sheet's CSS grid so the chip row
     // scrolls horizontally instead of stretching the whole sheet wide.
@@ -50,7 +52,7 @@ export const ProjectPicker: React.FC<ProjectPickerProps> = ({ projects, targetId
             </Button>
           );
         })}
-        {capabilities.can_manage_projects && (
+        {canCreateProject && (
           <Button
             type="button"
             variant="outline"

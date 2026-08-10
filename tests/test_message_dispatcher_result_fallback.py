@@ -9,15 +9,24 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
-from core.message_output import MessageOutput, stop_output_for
+from core.delivery_evidence import DeliveryEvidence
+from core.message_output import (
+    MessageOutput,
+    contained_teardown_output_for,
+    stop_output_for,
+)
 from core.run_settlement import (
+    NON_COMPLETING_TURN_SETTLEMENTS,
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
     SETTLED_BY_TURN_ONLY_RESULT,
     SETTLEMENT_TERMINAL_STATUS,
     SETTLEMENTS_WITHOUT_RESULT,
 )
+from core.session_turns import SessionTurnManager
 from modules.im import MessageContext
+from storage.agent_activity_service import _outcome_status
 
 
 class _StubSettingsManager:
@@ -137,6 +146,89 @@ class _StubController:
 
 
 class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_terminal_snapshot_elects_fallback_after_excluding_canceled_runs(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-fallback",
+                "accepted_agent_run_ids": ["run-a", "run-b"],
+            },
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-fallback",
+                    "delivered": False,
+                }
+            },
+        )
+        store = mock.Mock()
+        store.get_run.side_effect = lambda run_id: {
+            "run-a": {"id": "run-a", "status": "canceled"},
+            "run-b": {"id": "run-b", "status": "running"},
+        }.get(run_id)
+
+        with mock.patch(
+            "core.message_dispatcher.SQLiteBackgroundTaskStore",
+            return_value=store,
+        ):
+            enriched = dispatcher._output_with_turn_fallback_owner(context, output)
+
+        self.assertEqual(
+            enriched.metadata["turn_failure_notification"]["fallback_run_id"],
+            "run-b",
+        )
+        store.close.assert_called_once_with()
+
+    def test_terminal_recording_delegates_owner_election_to_the_atomic_store_batch(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController(platform="slack"))
+        store = mock.Mock()
+        store.get_run.side_effect = AssertionError(
+            "the dispatcher must not snapshot participant state outside the batch"
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            idempotency_key="terminal-output",
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-fallback",
+                    "delivered": False,
+                    "fallback_run_id": "run-a",
+                }
+            },
+        )
+
+        dispatcher._record_agent_run_terminal_for_ids(
+            store=store,
+            run_ids=["run-a", "run-b"],
+            text="",
+            message_id=None,
+            terminal_status="failed",
+            terminal_error="stream disconnected",
+            output_semantics=output,
+            provenance=dict(output.metadata),
+        )
+
+        store.record_turn_run_outputs.assert_called_once_with(
+            ["run-a", "run-b"],
+            output_id="terminal-output",
+            text="",
+            message_id=None,
+            sequence=None,
+            provenance=output.metadata,
+            terminal_status="failed",
+            error="stream disconnected",
+            deferred_run_ids=[],
+        )
+        store.get_run.assert_not_called()
+
     async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
         controller = _StubController(platform="slack")
         controller.agent_service = type(
@@ -261,6 +353,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.session_turns.on_terminal_result.assert_called_once_with(
             context,
             is_error=False,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
             terminal_evidence={
                 "result_text": "final output",
                 "terminal_error": None,
@@ -330,6 +423,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.session_turns.on_terminal_result.assert_called_once_with(
             context,
             is_error=False,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
             terminal_evidence={
                 "result_text": "already delivered",
                 "terminal_error": None,
@@ -444,7 +538,11 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
                 completes_run=False,
             )
 
-        persist.assert_called_once_with(context, is_error=False)
+        persist.assert_called_once_with(
+            context,
+            is_error=False,
+            settled_by=SETTLED_BY_TURN_ONLY_RESULT,
+        )
 
     async def test_stop_output_release_names_the_stop_and_records_no_run_terminal(self):
         """HFR-036: the synthetic result a user stop emits must NOT record the run.
@@ -476,6 +574,94 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_STOPPED], "canceled")
         dispatcher._record_agent_run_terminal_result.assert_not_called()
         persist.assert_not_called()
+
+    async def test_contained_teardown_release_names_backend_refresh_and_records_no_run_terminal(
+        self,
+    ):
+        """#1204: a teardown the service performed itself is an infrastructure
+        interruption, not a backend result.
+
+        #1202 stopped these from being SHOWN as backend errors; the emit that
+        followed still terminalized an ``agent_runs`` row from an empty body. Same
+        fix shape as the stop above: name the settlement so the lanes reach the
+        writer that maps ``backend_refresh`` to ``failed`` with a structured cause
+        (invariant 2 of ``docs/plans/harness-run-reliability.md``), and claim no run
+        terminal so the empty body never becomes the result.
+
+        The IM boundary is still written, unlike the stop above — an IM turn has no
+        durable execution owner, so this row is the ONLY thing that closes it — but
+        it is written with the settlement, so it records ``canceled`` rather than
+        asserting a backend fault.
+        """
+        controller = self._terminal_lifecycle_controller()
+
+        with mock.patch("core.message_dispatcher.persist_silent_terminal") as persist:
+            dispatcher, context = await self._emit_silent_terminal(
+                controller,
+                completes_run=False,
+                output=contained_teardown_output_for(None),
+            )
+
+        controller.mark_turn_complete.assert_called_once_with(
+            context,
+            settled_by=SETTLED_BY_BACKEND_REFRESH,
+        )
+        self.assertIn(SETTLED_BY_BACKEND_REFRESH, SETTLEMENTS_WITHOUT_RESULT)
+        # Still terminal, still a failed RUN — the cause is what changed.
+        self.assertEqual(SETTLEMENT_TERMINAL_STATUS[SETTLED_BY_BACKEND_REFRESH], "failed")
+        # The TURN is canceled, not failed: retired, not broken.
+        self.assertEqual(
+            NON_COMPLETING_TURN_SETTLEMENTS[SETTLED_BY_BACKEND_REFRESH], "canceled"
+        )
+        dispatcher._record_agent_run_terminal_result.assert_not_called()
+        persist.assert_called_once_with(
+            context,
+            is_error=False,
+            settled_by=SETTLED_BY_BACKEND_REFRESH,
+        )
+
+    def test_durable_turn_outcome_never_completes_a_result_less_settlement(self):
+        """The Turn-level half of #1204, at the mapper both surfaces share.
+
+        ``_durable_terminal_outcome`` special-cased ``stopped`` only, so a
+        ``backend_refresh`` release with no error flag recorded the durable Turn as
+        ``completed`` — a retired runtime reported as a finished answer, and a
+        straight contradiction of what ``release_for_backend_refresh`` writes for
+        the very same event.
+        """
+        outcome = SessionTurnManager._durable_terminal_outcome
+
+        self.assertEqual(
+            outcome(is_error=False, settled_by=SETTLED_BY_BACKEND_REFRESH), "canceled"
+        )
+        # The settlement outranks the flag: how the turn ended is not a function of
+        # whether a result was produced, and both agree it was retired.
+        self.assertEqual(
+            outcome(is_error=True, settled_by=SETTLED_BY_BACKEND_REFRESH), "canceled"
+        )
+        self.assertEqual(
+            outcome(is_error=False, settled_by=SETTLED_BY_STOPPED), "canceled"
+        )
+        # Unnamed releases are unchanged — this must not become a blanket override.
+        self.assertEqual(outcome(is_error=False, settled_by=None), "completed")
+        self.assertEqual(outcome(is_error=True, settled_by=None), "failed")
+        self.assertEqual(
+            outcome(is_error=False, settled_by=SETTLED_BY_TERMINAL_RESULT), "completed"
+        )
+
+    def test_activity_group_status_renders_a_canceled_boundary_as_interrupted(self):
+        """The IM trace and the durable Turn must not disagree on one settlement.
+
+        ``list_turn_groups`` already rendered a ``canceled`` durable Turn as
+        ``interrupted``; the silent marker that stands in for one on IM was mapped
+        with a separate two-way test that could only say ``failed`` or ``done``, so
+        the same teardown showed a green ``done`` chip there.
+        """
+        self.assertEqual(_outcome_status("canceled"), "interrupted")
+        self.assertEqual(_outcome_status("not_written"), "interrupted")
+        self.assertEqual(_outcome_status("failed"), "failed")
+        self.assertEqual(_outcome_status("completed"), "done")
+        self.assertEqual(_outcome_status(None), "done")
 
     async def test_slack_result_uses_native_markdown_sender_when_available(self):
         im_client = _NativeMarkdownIMClient()
@@ -803,14 +989,55 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             user_id="U1", channel_id="C1", platform="slack",
             platform_specific={"suppress_delivery": True},
         )
+        evidence = DeliveryEvidence()
         with mock.patch(
             "core.message_dispatcher.persist_agent_message",
             return_value={"id": "msg-background"},
         ) as persist:
-            message_id = await dispatcher.emit_agent_message(context, "result", "private output")
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private output",
+                delivery=evidence,
+            )
         persist.assert_called_once()
         self.assertEqual(message_id, "msg-background")
         self.assertEqual(controller.im_client.sent_messages, [])
+        self.assertIsNone(evidence.ack_evidence)
+
+    async def test_suppressed_history_id_is_not_recorded_as_run_delivery(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._record_suppressed_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "scheduled",
+                "task_execution_id": "run-background",
+            },
+        )
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value={"id": "msg-local-history"},
+        ):
+            returned = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private output",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    idempotency_key="stable-output",
+                ),
+            )
+
+        self.assertEqual(returned, "msg-local-history")
+        self.assertIsNone(
+            dispatcher._record_suppressed_agent_run_terminal_result.call_args.args[2]
+        )
 
     async def test_suppressed_result_records_folded_footer(self):
         """A suppressed Web result keeps structured UI metrics while its run
@@ -845,6 +1072,68 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             await dispatcher.emit_agent_message(context, "notify", "heads up")
         persist.assert_called_once()
         self.assertEqual(persist.call_args.args[1], "notify")
+
+    async def test_output_is_delivered_and_persisted_without_settling(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        with (
+            mock.patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "msg-output"},
+            ) as persist,
+            mock.patch(
+                "core.message_dispatcher._stream_chunk",
+                new=mock.AsyncMock(),
+            ) as stream,
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "output",
+                "primary answer",
+                output=MessageOutput(completes_turn=False, completes_run=False),
+            )
+
+        self.assertEqual(message_id, "msg-1")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "primary answer", "markdown")])
+        self.assertEqual(persist.call_args.args[1], "output")
+        stream.assert_awaited_once()
+        self.assertEqual(stream.call_args.kwargs["kind"], "output")
+        self.assertFalse(stream.call_args.kwargs["completes_turn"])
+
+    async def test_output_can_explicitly_skip_agent_run_recording(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"accepted_agent_run_ids": ["run-steer"]},
+        )
+
+        with (
+            mock.patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "msg-output"},
+            ),
+            mock.patch.object(
+                dispatcher,
+                "_record_agent_run_terminal_for_ids",
+            ) as record,
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "output",
+                "primary answer",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    records_run_output=False,
+                ),
+            )
+
+        record.assert_not_called()
 
     async def test_notify_not_persisted_when_send_fails(self):
         class _FailClient(_StubIMClient):
@@ -1083,6 +1372,52 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
         controller.session_turns.on_terminal_delivery_complete(context)
         self.assertEqual(controller.status_calls, [("ses-1", "failed")])
 
+    async def test_contained_teardown_does_not_project_a_failed_session(self):
+        """The settlement outranks ``is_error`` for the sidebar too.
+
+        No durable Turn owns this session, so this projection IS its terminal
+        state. ``is_error`` is honestly ``True`` -- nothing answered -- but the
+        service retired the runtime itself, and there is no dot between ``idle``
+        and ``failed`` to say so. Without the settlement this read ``failed``,
+        contradicting every other surface the same release writes.
+        """
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                output=contained_teardown_output_for(None),
+                terminal_error=None,
+            )
+        controller.session_turns.on_terminal_delivery_complete(context)
+        self.assertEqual(controller.status_calls, [("ses-1", "idle")])
+
+    async def test_unnamed_silent_failure_still_projects_a_failed_session(self):
+        """Negative control: only a NAMED non-completing settlement is exempt."""
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                terminal_error="provider unavailable",
+            )
+        controller.session_turns.on_terminal_delivery_complete(context)
+        self.assertEqual(controller.status_calls, [("ses-1", "failed")])
+
     async def test_silent_backend_failure_collapses_status_as_failed(self):
         controller = _AvibeStatusController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
@@ -1101,6 +1436,56 @@ class MessageDispatcherStatusChokepointTests(unittest.IsolatedAsyncioTestCase):
             context,
             controller.im_client,
             reason="failed",
+        )
+
+    async def test_user_stop_collapses_status_as_stopped(self):
+        """A turn the user called off is not a turn that succeeded.
+
+        The footer word was derived from ``is_error`` alone, and a stop emits with
+        that flag CLEAR -- correctly, nobody's backend broke. So the last thing the
+        user saw after pressing Stop was a green ``✅ done`` on a turn that never
+        answered. The settlement is the fact that contradicts it, exactly as it does
+        on the Turn-outcome and sidebar surfaces.
+        """
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                level="silent",
+                output=stop_output_for(None),
+            )
+
+        dispatcher._collapse_status_bubble.assert_awaited_once_with(
+            context,
+            controller.im_client,
+            reason="stopped",
+        )
+
+    async def test_silent_success_still_collapses_as_done(self):
+        """The negative control, on the same call site the stop test asserts.
+
+        A silent turn that simply chose not to speak (a ``<silent>`` reply) carries
+        no settlement and no error, and must keep the green word. Only membership in
+        ``SETTLEMENTS_WITHOUT_RESULT`` takes it away.
+        """
+
+        controller = _AvibeStatusController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        context = _avibe_ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(context, "result", "", level="silent")
+
+        dispatcher._collapse_status_bubble.assert_awaited_once_with(
+            context,
+            controller.im_client,
+            reason="done",
         )
 
     async def test_notify_does_not_settle_dot(self):

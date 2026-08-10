@@ -328,7 +328,10 @@ def _build_controller_double(handler=None):
 
 
 def _set_memory_cli_sessions(controller, principals: dict[str, str]) -> None:
-    controller.memory_principal_for_cli_session = lambda session_id: principals.get(session_id)
+    project_id = "p-11111111111111111111111111111111"
+    controller.memory_scope_for_cli_session = lambda session_id: (
+        (principals[session_id], project_id) if session_id in principals else None
+    )
 
 
 # ---------------------------------------------------------------------
@@ -592,11 +595,11 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
             assert user_key == "avibe:local"
             return "u-11111111111111111111111111111111"
 
-        async def profile_payload(self, principal_id):
+        async def profile_payload(self, principal_id, _project_id):
             calls.append(("profile", principal_id))
             return {"status": "ok", "items": []}
 
-        async def search_payload(self, query, limit, principal_id):
+        async def search_payload(self, query, limit, principal_id, _project_id):
             calls.append(("search", (query, limit, principal_id)))
             return {"status": "ok", "items": []}
 
@@ -613,6 +616,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         return {"ok": True, "state": "ready"}
 
     controller.memory_runtime = _Runtime()
+    controller.default_memory_project_id = lambda: "p-11111111111111111111111111111111"
     _set_memory_cli_sessions(
         controller,
         {"session-1": "u-11111111111111111111111111111111"},
@@ -707,7 +711,8 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     ]
     captured_request = next(value for name, value in calls if name == "capture")
     assert captured_request.source_message_id.startswith(
-        "agent:u-11111111111111111111111111111111:session-1:"
+        "agent:u-11111111111111111111111111111111:"
+        "p-11111111111111111111111111111111:session-1:"
     )
     assert captured_request.session_id == "session-1"
     assert captured_request.principal_id == "u-11111111111111111111111111111111"
@@ -865,7 +870,10 @@ def test_memory_internal_reads_accept_an_associated_agent_session():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "items": []}
-    controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id)
+    controller.memory_runtime.profile_payload.assert_awaited_once_with(
+        principal_id,
+        "p-11111111111111111111111111111111",
+    )
 
 
 def test_memory_internal_read_rejects_agent_session_with_forged_local_owner_header():
@@ -911,14 +919,17 @@ def test_memory_internal_reads_keep_two_session_principals_isolated():
 
     first_principal = "u-11111111111111111111111111111111"
     second_principal = "u-22222222222222222222222222222222"
+    project_id = "p-11111111111111111111111111111111"
     calls: list[tuple[str, str]] = []
 
     class _Runtime:
-        async def profile_payload(self, principal_id):
+        async def profile_payload(self, principal_id, requested_project_id):
+            assert requested_project_id == project_id
             calls.append(("profile", principal_id))
             return {"status": "ok", "items": [{"kind": "profile", "text": principal_id}]}
 
-        async def search_payload(self, _query, _limit, principal_id):
+        async def search_payload(self, _query, _limit, principal_id, requested_project_id):
+            assert requested_project_id == project_id
             calls.append(("search", principal_id))
             return {"status": "ok", "items": [{"kind": "fact", "text": principal_id}]}
 
@@ -6731,3 +6742,108 @@ def test_shutdown_records_stopped_even_if_the_done_callback_never_runs(monkeypat
     asyncio.run(run())
 
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
+
+def _seed_slack_dm_session(conn, tmp_path, *, dm_chat_id: str, user_id: str = "U_DM"):
+    """Create a Slack DM Session whose scope_id is the USER id, like production."""
+
+    import json as _json
+
+    from core.services import sessions as sessions_service
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    now = "2026-08-09T00:00:00Z"
+    scope_id = upsert_scope(
+        conn,
+        platform="slack",
+        scope_type="user",
+        native_id=user_id,
+        now=now,
+    )
+    payload = {"bound_at": now}
+    if dm_chat_id:
+        payload["dm_chat_id"] = dm_chat_id
+    conn.execute(
+        scope_settings.insert().values(
+            scope_id=scope_id,
+            enabled=1,
+            role=None,
+            workdir=str(tmp_path),
+            agent_name=None,
+            agent_backend=None,
+            agent_variant=None,
+            model=None,
+            reasoning_effort=None,
+            require_mention=None,
+            settings_version=1,
+            settings_json=_json.dumps(payload),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    return sessions_service.create_session(
+        conn,
+        scope_id=scope_id,
+        agent_backend="claude",
+        agent_name="claude",
+    )
+
+
+def test_build_session_context_uses_bound_dm_channel_for_dm_scope(monkeypatch, tmp_path):
+    """A DM Session's scope_id is the USER id, which is not a channel.
+
+    Slack's ``chat.postMessage`` tolerates a user id (it opens the DM), so sending
+    kept working — but ``reactions.add`` answers ``channel_not_found``, so the
+    reaction ack failed and silently downgraded to the ack message. The builder
+    must swap in the bound ``dm_chat_id`` like every other resolver does.
+    """
+
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = _seed_slack_dm_session(conn, tmp_path, dm_chat_id="D_REAL")
+
+    context = internal_server._build_session_context(session["id"])
+
+    assert context.platform == "slack"
+    assert context.user_id == "U_DM"
+    assert context.channel_id == "D_REAL"
+    assert context.platform_specific["is_dm"] is True
+
+
+def test_build_session_context_falls_back_to_scope_id_without_dm_binding(monkeypatch, tmp_path):
+    """No recorded dm_chat_id -> keep the old behaviour rather than inventing one."""
+
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = _seed_slack_dm_session(conn, tmp_path, dm_chat_id="", user_id="U_UNBOUND")
+
+    context = internal_server._build_session_context(session["id"])
+
+    assert context.channel_id == "U_UNBOUND"
+
+
+def test_build_session_context_respects_explicit_channel_override(monkeypatch, tmp_path):
+    """An explicit channel_id (Delivery hydration) still wins over the binding."""
+
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = _seed_slack_dm_session(conn, tmp_path, dm_chat_id="D_REAL", user_id="U_OVERRIDE")
+
+    context = internal_server._build_session_context(session["id"], channel_id="D_EXPLICIT")
+
+    assert context.channel_id == "D_EXPLICIT"

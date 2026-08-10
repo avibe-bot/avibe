@@ -233,43 +233,9 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
         headers=headers,
         json={},
     )
-    assert mark_read.status_code == 200
-    assert mark_read.get_json()["unread_counts"] == {}
-    assert mark_read.get_json()["unread_by_session"] == {}
-    event_type, event_data = published[-1]
-    assert event_type == "inbox.unread.changed"
-    raw_payload = json.dumps({"type": event_type, "data": event_data})
-    alice_context = AuthorizationContext(
-        instance_role="editor",
-        email="alice@example.com",
-        is_remote=True,
-    )
-    alice_payload = json.loads(
-        ui_server._workbench_event_payload_for_context(
-            alice_context,
-            event_type,
-            raw_payload,
-        )
-    )
-    assert alice_payload["data"]["unread_counts"] == {}
-    assert alice_payload["data"]["unread_by_session"] == {}
-
-    owner_payload = json.loads(
-        ui_server._workbench_event_payload_for_context(None, event_type, raw_payload)
-    )
-    assert owner_payload["data"]["unread_counts"] == {
-        project_access_service.project_scope_id(ids["project_b"]): 1,
-    }
-    assert owner_payload["data"]["unread_by_session"] == {ids["session_b"]: 1}
-    filtered_owner_payload = json.loads(
-        ui_server._workbench_event_payload_for_context(
-            alice_context,
-            event_type,
-            json.dumps(owner_payload),
-        )
-    )
-    assert filtered_owner_payload["data"]["unread_counts"] == {}
-    assert filtered_owner_payload["data"]["unread_by_session"] == {}
+    assert mark_read.status_code == 403
+    assert mark_read.get_json()["code"] == "remote_execution_disabled"
+    assert published == []
 
     allowed_action = client.post(
         f"/api/sessions/{ids['session_a']}/attachments",
@@ -359,7 +325,34 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert editor_payload["agents"][0]["name"] == "editor-agent"
     assert editor_payload["default_agent_name"] == "editor-agent"
     assert editor_payload["queued"][0]["text"] == "editor-only queued prompt"
-    assert editor_payload["draft"] == {"text": "editor-only draft"}
+    assert editor_payload["draft"] == {"text": ""}
+    assert editor_payload["config"] == api.remote_config_payload(config)
+
+    owner = _remote_client(config, role="owner", email="owner@example.com")
+    owner_payload = _get(owner, f"/api/sessions/{ids['session_a']}/bootstrap").get_json()
+    assert owner_payload["config"] == api.remote_config_payload(config)
+    assert "runtime" not in owner_payload["config"]
+
+    local_payload = app.test_client().get(
+        f"/api/sessions/{ids['session_a']}/bootstrap",
+        base_url="http://localhost",
+    ).get_json()
+    assert local_payload["config"]["runtime"]["default_cwd"] == "."
+
+    draft_get = _get(client, f"/api/sessions/{ids['session_a']}/draft")
+    draft_put = client.put(
+        f"/api/sessions/{ids['session_a']}/draft",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(client, REMOTE_ORIGIN),
+        json={"text": "remote overwrite"},
+    )
+    assert draft_get.status_code == 403
+    assert draft_get.get_json()["code"] == "remote_execution_disabled"
+    assert draft_put.status_code == 403
+    assert draft_put.get_json()["code"] == "remote_execution_disabled"
+    with engine.connect() as conn:
+        assert message_deliveries.get_draft(conn, ids["session_a"])["text"] == "editor-only draft"
     editor_project = _get(client, f"/api/projects/{ids['project_a']}").get_json()
     assert editor_project["capabilities"] == {"can_chat": True}
 
@@ -559,6 +552,14 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
             .where(scopes.c.native_id == ids["project_a"])
             .values(metadata_json=json.dumps({"host_path_hint": "/private/host"}))
         )
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == ids["session_a"])
+            .values(
+                workdir=str((tmp_path / "project-a").resolve()),
+                metadata_json=json.dumps({"host_session_hint": "/private/session"}),
+            )
+        )
     engine.dispose()
 
     viewer = _remote_client(config, role="viewer", email="alice@example.com")
@@ -635,6 +636,13 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
         row["folder_path"] == "" and row["metadata"] == {}
         for row in owner_bootstrap["projects"]
     )
+    owner_sessions = _get(owner, "/api/sessions").get_json()["sessions"]
+    owner_session_a = next(row for row in owner_sessions if row["id"] == ids["session_a"])
+    assert owner_session_a["workdir"] is None
+    assert owner_session_a["metadata"] == {}
+    owner_session_a = _get(owner, f"/api/sessions/{ids['session_a']}").get_json()
+    assert owner_session_a["workdir"] is None
+    assert owner_session_a["metadata"] == {}
     assert _get(owner, f"/api/sessions/{ids['unscoped']}").status_code == 200
 
     local = app.test_client()
@@ -643,6 +651,12 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     local_project_a = next(row for row in local_projects if row["id"] == ids["project_a"])
     assert local_project_a["folder_path"] == str((tmp_path / "project-a").resolve())
     assert local_project_a["metadata"] == {"host_path_hint": "/private/host"}
+    local_session_a = local.get(
+        f"/api/sessions/{ids['session_a']}",
+        base_url="http://localhost",
+    ).get_json()
+    assert local_session_a["workdir"] == str((tmp_path / "project-a").resolve())
+    assert local_session_a["metadata"] == {"host_session_hint": "/private/session"}
     assert local.get(f"/api/sessions/{ids['unscoped']}", base_url="http://localhost").status_code == 200
 
 

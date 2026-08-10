@@ -31,6 +31,7 @@ import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { OrganizationShell } from '../features/organization/OrganizationShell';
+import { isAdvancedSettingsPath, isMemorySettingsPath } from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -306,6 +307,7 @@ export const AppShell: React.FC = () => {
     ['/agents', '/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
+  const localSystemPath = location.pathname.startsWith('/admin/settings/service');
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
@@ -314,6 +316,7 @@ export const AppShell: React.FC = () => {
   const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
   if (
     (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    (localSystemPath && !capabilities.can_use_system) ||
     resourceUseDenied ||
     (fileOnlyPath && !capabilities.can_use_files) ||
     (terminalOnlyPath && !capabilities.can_use_terminal)
@@ -381,20 +384,16 @@ export const AppShell: React.FC = () => {
       match: (p) => p.startsWith('/admin/settings/backends'),
     },
     ...(memoryNavVisible
-      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain }]
+      ? [{ to: '/admin/settings/memory', label: t('memory.betaTitle'), icon: Brain, match: isMemorySettingsPath }]
       : []),
     {
-      // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
-      // backends moved out to their own sidebar destinations above, so exclude
-      // their routes from the active match.
+      // 高级设置: the remaining Settings tabs (messaging leads). Platforms,
+      // backends, models, and Memory have their own sidebar destinations, so
+      // exclude those routes from the active match.
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (p) =>
-        p.startsWith('/admin/settings') &&
-        !p.startsWith('/admin/settings/platforms') &&
-        !p.startsWith('/admin/settings/backends') &&
-        !p.startsWith('/admin/settings/models'),
+      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
 
@@ -411,12 +410,19 @@ export const AppShell: React.FC = () => {
       ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
       : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
+    {
+      to: '/admin/settings/messaging',
+      label: t('nav.advancedSettings'),
+      icon: Settings,
+      match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
+    },
   ];
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
   const adminBottomBarPaths = new Set([
     '/admin/dashboard',
     ...(ORGANIZATION_NAV_ENABLED ? ['/admin/organization/overview'] : []),
+    '/admin/settings/messaging',
   ]);
   const adminSheetItems = adminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))

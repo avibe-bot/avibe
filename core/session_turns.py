@@ -35,6 +35,7 @@ from core.web_push_notifications import (
 )
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
+    NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
@@ -501,6 +502,12 @@ class DeliveryResult:
     state: str
     turn_id: str | None = None
     reason: str | None = None
+    # How this input reached its Turn. ``accepted`` alone cannot tell a Delivery
+    # that STARTED its own Turn from one that was STEERED into a Turn already
+    # running: both settle as ``accepted``. Surfaces that report the admission
+    # back to the user need that distinction, because a started Turn already
+    # owns its own processing indicator while a steered input has none.
+    admission: Literal["", "started", "steered"] = ""
 
 
 @dataclass(frozen=True)
@@ -640,7 +647,15 @@ class SessionTurnManager:
         run_ids: set[str] | list[str],
         turn: dict[str, Any],
     ) -> None:
-        normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        turn_id = str(turn.get("id") or "").strip()
+        durable_ids = self.accepted_agent_run_ids_for_turn(turn_id) if turn_id else []
+        normalized = sorted(
+            {
+                str(run_id)
+                for run_id in [*run_ids, *durable_ids]
+                if str(run_id).strip()
+            }
+        )
         if not normalized:
             return
         service = (
@@ -1569,11 +1584,16 @@ class SessionTurnManager:
             or attempted_turn_id
             or ""
         ).strip()
+        state = str(delivery["state"])
         return DeliveryResult(
             delivery_id,
             str(delivery.get("message_id") or "").strip() or None,
-            str(delivery["state"]),
+            state,
             turn_id or None,
+            # Every caller reaches here right after dispatching a Turn this
+            # Delivery participates in, so an owned state means this input
+            # started the work rather than joining a Turn already running.
+            admission="started" if state in {"claimed", "accepted"} else "",
         )
 
     @classmethod
@@ -2136,6 +2156,16 @@ class SessionTurnManager:
             {
                 "delivery_id": str(deliveries[0]["id"]),
                 "delivery_ids": [str(row["id"]) for row in deliveries],
+                # Every reaction target this Turn absorbed. Only the first
+                # Delivery hydrates the dispatch context, so without this the
+                # admission receipts of the merged rest are never cleared.
+                "delivery_ack_targets": [
+                    target
+                    for target in (
+                        self._delivery_ack_target(row) for row in deliveries
+                    )
+                    if target
+                ],
                 # Every display snapshot this Turn dispatches, in FIFO order.
                 # ``_hydrate_delivery_context`` set the singular ``display_text`` from
                 # the FIRST Delivery only, while ``_segment_dispatch_text`` sends the
@@ -2997,6 +3027,7 @@ class SessionTurnManager:
                 str((saved or {}).get("message_id") or delivery_id),
                 "accepted",
                 target_turn_id or None,
+                admission="steered",
             )
         if should_drain:
             await self.drain_delivery_queue(session_id)
@@ -4458,9 +4489,17 @@ class SessionTurnManager:
                     interruption == SETTLED_BY_STOPPED
                     and not cancel_defers_queue_resume
                 )
+                # Same map as every other Turn-outcome surface. This branch used
+                # to hardcode ``stopped``, so a rolling refresh landed ``failed``
+                # here while ``release_for_backend_refresh`` -- the very caller
+                # that cancelled this runner -- wrote ``canceled`` for the durable
+                # Turns it reached directly. One teardown, two outcomes, decided
+                # by which writer won the race. ``restarted`` is absent from the
+                # map and still falls through to ``failed``: a service shutdown
+                # is not a cancellation.
                 result = self._terminalize_durable_turn(
                     turn_id,
-                    "canceled" if interruption == SETTLED_BY_STOPPED else "failed",
+                    NON_COMPLETING_TURN_SETTLEMENTS.get(interruption, "failed"),
                     settled_by=interruption,
                     evidence_kind=(
                         "service_shutdown"
@@ -4589,6 +4628,78 @@ class SessionTurnManager:
             return True
         return False
 
+    @staticmethod
+    def _delivery_ack_target(delivery: dict[str, Any]) -> Optional[str]:
+        """Return the message an admission receipt for this Delivery sits on.
+
+        Usually the sender's own message, but a quick-reply callback is
+        dispatched with ``message_id=None`` (to bypass platform event dedup) and
+        reacts on its bot echo instead. That echo id only survives in the
+        durable admission context.
+        """
+
+        admission_context = delivery_store.delivery_admission_context(delivery)
+        if isinstance(admission_context, dict):
+            target = admission_context.get("processing_indicator_message_id")
+            if target:
+                return str(target)
+        payload = delivery_store.delivery_payload(delivery)
+        return str(payload.get("native_message_id") or "").strip() or None
+
+    def _delivery_receipt_context(
+        self,
+        session_id: str,
+        delivery: dict[str, Any],
+    ) -> Optional["MessageContext"]:
+        """Rebuild just enough routing to react on one Delivery's own message."""
+
+        payload = delivery_store.delivery_payload(delivery)
+        platform = str(payload.get("platform") or "")
+        native_message_id = str(payload.get("native_message_id") or "").strip()
+        target = self._delivery_ack_target(delivery)
+        if not platform or platform == "avibe" or not target:
+            # Nothing to decorate: only an IM input has a reaction target, and
+            # the Workbench composer is P3 (it never reaches a pending steer).
+            return None
+        context = self._delivery_context(session_id)
+        context.platform = platform
+        context.message_id = native_message_id or None
+        spec = dict(context.platform_specific or {})
+        spec["processing_indicator_message_id"] = target
+        context.platform_specific = spec
+        return context
+
+    async def _report_delivery_receipts(
+        self,
+        session_id: str,
+        deliveries: list[dict[str, Any]],
+        *,
+        state: str,
+        admission: str = "",
+    ) -> None:
+        """Report the admission outcome of Deliveries settled away from ingress.
+
+        The admission call that returned ``pending_steer`` already told the
+        sender its message was queued, but the attempt that resolves it runs
+        later (``_run_pending_steers``, recovery) and its result is consumed
+        there, not by the ingress caller — so this is the only place that can
+        report that the message joined the running turn (✍️), was definitively
+        refused (🤷), or is still unconfirmed (🤔).
+        """
+
+        indicator = getattr(self.controller, "processing_indicator", None)
+        ack = getattr(indicator, "ack_delivery_state", None)
+        if not callable(ack):
+            return
+        for delivery in deliveries or []:
+            try:
+                context = self._delivery_receipt_context(session_id, delivery)
+                if context is None:
+                    continue
+                await ack(context, state=state, admission=admission)
+            except Exception as err:
+                logger.debug("Failed to report admission receipt: %s", err)
+
     async def _run_pending_steers(
         self,
         session_id: str,
@@ -4641,7 +4752,17 @@ class SessionTurnManager:
                     attempt_id=attempt_id,
                 ),
             )
-            await self._finish_steer(delivery_id, receipt, context=context)
+            result = await self._finish_steer(delivery_id, receipt, context=context)
+            # Every row of the attempt settles together, so the leader's outcome
+            # is the batch's outcome: accepted upgrades 👌 to ✍️, a definitive
+            # refusal after the Session went inactive retires it to 🤷, and an
+            # unconfirmed receipt reports 🤔.
+            await self._report_delivery_receipts(
+                session_id,
+                claimed_batch,
+                state=result.state,
+                admission=result.admission,
+            )
 
     def _publish_materialized_delivery(self, delivery_id: str) -> None:
         """Publish one accepted immutable Message after its transaction commits."""
@@ -5375,6 +5496,14 @@ class SessionTurnManager:
                 ),
                 context=context,
             )
+            # Recovery re-enters ``deliver`` behind the ingress handler's back,
+            # so the receipt this admission earned has no other reporter.
+            await self._report_delivery_receipts(
+                observation.session_id,
+                [delivery],
+                state=result.state,
+                admission=result.admission,
+            )
             return result.state != "reserved"
         target_turn_id = str(delivery.get("current_target_turn_id") or "")
         if delivery["state"] == "pending_steer" and target_turn_id:
@@ -5738,6 +5867,14 @@ class SessionTurnManager:
                     reservation["id"],
                 )
             else:
+                # Same as the observation path: nothing else reports the
+                # admission outcome of a Delivery revived by recovery.
+                await self._report_delivery_receipts(
+                    target_session,
+                    [reservation],
+                    state=result.state,
+                    admission=result.admission,
+                )
                 if result.state != "reserved":
                     recovered.append(target_session)
         with self._sqlite_engine().connect() as conn:
@@ -7102,10 +7239,30 @@ class SessionTurnManager:
 
     @staticmethod
     def _durable_terminal_outcome(*, is_error: bool, settled_by: str | None) -> str:
+        """Map a release to the durable Turn outcome. The settlement wins.
+
+        A named settlement in ``SETTLEMENTS_WITHOUT_RESULT`` says the Turn ended
+        WITHOUT the backend producing a terminal result, so ``completed`` is never
+        truthful for one -- yet only ``stopped`` used to be excluded, which left
+        ``backend_refresh`` recording a retired runtime as a completed Turn. That is
+        the same event ``release_for_backend_refresh`` writes as ``canceled``
+        (``failed`` for a start it could not resolve), so the two paths for one
+        service-initiated teardown disagreed depending on which reached the row
+        first.
+
+        ``canceled`` rather than ``failed`` because the Turn was retired, not broken;
+        the RUN still settles ``failed`` with ``interrupt_reason=backend_refresh``
+        through ``SETTLEMENT_TERMINAL_STATUS``, so invariant 2 of
+        ``docs/plans/harness-run-reliability.md`` keeps its structured cause.
+        ``restarted`` is deliberately absent -- its call site already forces
+        ``failed`` before reaching here, and a service shutdown is not a cancellation.
+        """
+
+        non_completing = NON_COMPLETING_TURN_SETTLEMENTS.get(settled_by or "")
+        if non_completing is not None:
+            return non_completing
         if is_error:
             return "failed"
-        if settled_by == SETTLED_BY_STOPPED:
-            return "canceled"
         return "completed"
 
     def _finish_durable_terminal_result(
@@ -7153,9 +7310,16 @@ class SessionTurnManager:
         context: "MessageContext",
         *,
         is_error: bool,
+        settled_by: str | None = None,
         terminal_evidence: dict[str, Any] | None = None,
     ) -> None:
-        """OUTBOUND turn chokepoint for the active terminal ``result``."""
+        """OUTBOUND turn chokepoint for the active terminal ``result``.
+
+        ``settled_by`` is the release's named settlement, latched alongside
+        ``is_error`` so the post-delivery boundary can tell a Turn that ended
+        WITHOUT a result on purpose from a backend that broke. Optional because a
+        release may not name one; absent, the flag decides as before.
+        """
         if self.controller is None:
             return
         if not self.is_active_emit(context):
@@ -7186,6 +7350,7 @@ class SessionTurnManager:
             "session_id": session_id,
             "logical_turn_id": logical_turn_id,
             "is_error": is_error,
+            "settled_by": settled_by or None,
             "terminal_evidence": dict(terminal_evidence or {}),
         }
         context.platform_specific = payload
@@ -7204,6 +7369,7 @@ class SessionTurnManager:
         session_id = str(latch.get("session_id") or "")
         logical_turn_id = str(latch.get("logical_turn_id") or "")
         is_error = bool(latch.get("is_error"))
+        latched_settlement = str(latch.get("settled_by") or "")
         if not session_id:
             return
         durable_turn_exists = False
@@ -7219,9 +7385,23 @@ class SessionTurnManager:
                     exc_info=True,
                 )
         if not durable_turn_exists:
+            # No durable Turn row owns this session's outcome (IM, CLI, legacy),
+            # so this projection IS the session's terminal state. ``is_error``
+            # alone would call every result-less release a failure -- including a
+            # release whose settlement says the Turn was ended on purpose. A
+            # service-initiated backend teardown is the case that matters: the
+            # flag is honestly ``True`` (nothing answered) while the settlement
+            # says infrastructure, not fault, and the sidebar has no third dot to
+            # say so. ``idle`` is what the stop path already projects for the
+            # other member of that map, so one deliberate non-completion no
+            # longer reads two different ways depending on which one it was.
             self.controller.set_agent_status(
                 session_id,
-                "failed" if is_error else "idle",
+                (
+                    "failed"
+                    if is_error and latched_settlement not in NON_COMPLETING_TURN_SETTLEMENTS
+                    else "idle"
+                ),
             )
             return
         current = self.in_flight.get(session_id)
@@ -7337,7 +7517,10 @@ class SessionTurnManager:
                             platform="avibe",
                             author="harness",
                             source="harness",
-                            message_type="harness",
+                            # This durable row owns the backend-started Turn for
+                            # Stop/FSM/history, but it is not a user instruction
+                            # and must not render as a chat bubble.
+                            message_type="agent_initiated",
                             text=trigger_text,
                             metadata={
                                 "source": "agent_initiated",

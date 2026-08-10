@@ -84,6 +84,14 @@ class MessageHandler(BaseHandler):
 
         task.add_done_callback(_on_done)
 
+    async def drain_memory_capture_tasks(self) -> None:
+        """Settle captures accepted before controller shutdown closes Memory."""
+
+        while self._memory_capture_tasks:
+            tasks = tuple(self._memory_capture_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._memory_capture_tasks.difference_update(tasks)
+
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
         await self._handle_turn(context, message, source=self.TURN_SOURCE_HUMAN)
@@ -442,6 +450,12 @@ class MessageHandler(BaseHandler):
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            materialized_agent_identity = bool(
+                vibe_agent
+                and isinstance(session_target, dict)
+                and not session_target.get("agent_id")
+                and not session_target.get("agent_name")
+            )
             # A session may pin a setting to NOTHING on purpose. The cascade above
             # cannot express that: every `or` reads NULL as "inherit", which is the
             # correct reading for the whole existing table and the WRONG one for a
@@ -452,38 +466,48 @@ class MessageHandler(BaseHandler):
             # silently re-route every session that is merely inheriting.
             explicit_overrides: set[str] = set()
             if isinstance(session_target, dict):
-                session_meta = session_target.get("metadata")
-                if isinstance(session_meta, dict):
-                    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+                from storage.session_reclaim import explicit_override_names
 
-                    marked = session_meta.get(SESSION_SETTINGS_OVERRIDE_KEY)
-                    if isinstance(marked, (list, tuple, set)):
-                        explicit_overrides = {str(name) for name in marked}
+                explicit_overrides = explicit_override_names(session_target.get("metadata"))
             if "model" in explicit_overrides:
                 effective_model = session_target.get("model")
             if "reasoning_effort" in explicit_overrides:
                 effective_reasoning_effort = session_target.get("reasoning_effort")
-            # Materialize the resolved route into EMPTY workbench session
-            # columns NOW, at turn start. A session created on an inherited
-            # default carries NULLs (dispatch resolves the live Agent default);
-            # without pinning, the chat header shows an agent with no model /
-            # effort after the first message. Pinning at turn START — not at
-            # native bind — means any later explicit header pick in this turn
-            # (including an explicit clear to NULL) lands after this write and
-            # is never undone by it. IM (scope/anchor) rows never carry
-            # ``agent_session_target`` and are untouched: their model semantics
-            # stay with channel routing.
-            if isinstance(session_target, dict) and session_target.get("id") and (
-                (effective_model and not session_target.get("model"))
-                or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+            # Materialize the resolved route into EMPTY Workbench session
+            # columns at turn start. A session created on an inherited default
+            # carries NULLs (dispatch resolves the live Agent default); without
+            # pinning, the chat header shows an Agent with no model / effort
+            # after the first message. Scheduled IM turns can carry the same
+            # target projection, so the platform gate is essential: their model
+            # semantics remain owned by channel routing.
+            if (
+                context.platform == "avibe"
+                and isinstance(session_target, dict)
+                and session_target.get("id")
+                and (
+                    materialized_agent_identity
+                    or (effective_model and not session_target.get("model"))
+                    or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+                )
             ):
                 materialize = getattr(self.sessions, "materialize_agent_session_route", None)
                 if callable(materialize):
                     try:
                         materialize(
                             str(session_target["id"]),
+                            agent_id=vibe_agent.id if materialized_agent_identity else None,
+                            agent_name=vibe_agent.name if materialized_agent_identity else None,
                             model=effective_model,
                             reasoning_effort=effective_reasoning_effort,
+                            expected_route={
+                                "agent_id": session_target.get("agent_id"),
+                                "agent_name": session_target.get("agent_name"),
+                                "agent_backend": session_target.get("agent_backend"),
+                                "agent_variant": session_target.get("agent_variant"),
+                                "model": session_target.get("model"),
+                                "reasoning_effort": session_target.get("reasoning_effort"),
+                                "explicit_overrides": sorted(explicit_overrides),
+                            },
                         )
                     except Exception:
                         logger.debug("Session route materialization failed; dispatch continues", exc_info=True)
@@ -500,6 +524,9 @@ class MessageHandler(BaseHandler):
                 else None
             )
             restored_route = restored_route if isinstance(restored_route, dict) else None
+
+            if durable_delivery_owned:
+                self._restore_reaction_target(context, delivery_context)
 
             if restored_route is not None:
                 base_session_id = str(
@@ -675,6 +702,12 @@ class MessageHandler(BaseHandler):
                     delivery_intent=delivery_intent,
                     downloaded_attachment_paths=downloaded_attachment_paths,
                     admission_context={
+                        # The reaction target is not always the sender's own
+                        # message (a quick reply reacts on its bot echo), and it
+                        # cannot be rebuilt from the Delivery snapshot.
+                        "processing_indicator_message_id": self._reaction_target(
+                            context
+                        ),
                         "message_handler_route": {
                             "base_session_id": base_session_id,
                             "composite_session_id": composite_key,
@@ -1024,7 +1057,64 @@ class MessageHandler(BaseHandler):
             from core.inbox_events import bus
 
             bus.publish("queue.updated", {"session_id": session_id})
+        # This is the only place that knows an input's admission outcome: a
+        # Delivery that did not start its own turn returns here and the caller
+        # stops, so without a receipt the user sees nothing at all for every
+        # message sent while a turn is running.
+        await self._ack_delivery_admission(context, result)
         return True
+
+    @staticmethod
+    def _reaction_target(context: MessageContext) -> Optional[str]:
+        """The message this input's reactions belong on, when it is not its own.
+
+        A quick-reply callback is dispatched with ``message_id=None`` (to bypass
+        platform event dedup) and reacts on its bot echo instead. The echo id
+        only exists in this process, so it has to travel with the Delivery.
+        """
+
+        target = (context.platform_specific or {}).get(
+            "processing_indicator_message_id"
+        )
+        return str(target) if target else None
+
+    @staticmethod
+    def _restore_reaction_target(
+        context: MessageContext,
+        delivery_context: Any,
+    ) -> None:
+        """Put a Delivery's reaction target back on its rehydrated context.
+
+        Durable hydration restores only the native message id, so without this a
+        promoted quick-reply Delivery computes a different receipt key: its 👌
+        would never be cleared and its own indicator would target the synthetic
+        delivery id instead of the echo.
+        """
+
+        if not isinstance(delivery_context, dict):
+            return
+        target = delivery_context.get("processing_indicator_message_id")
+        if not target:
+            return
+        spec = dict(context.platform_specific or {})
+        spec["processing_indicator_message_id"] = str(target)
+        context.platform_specific = spec
+
+    async def _ack_delivery_admission(self, context: MessageContext, result: Any) -> None:
+        """Report one admission outcome back to the sender, best effort."""
+
+        indicator = getattr(self.controller, "processing_indicator", None)
+        ack = getattr(indicator, "ack_delivery_state", None)
+        if not callable(ack):
+            return
+        try:
+            await ack(
+                context,
+                state=str(getattr(result, "state", "") or ""),
+                admission=str(getattr(result, "admission", "") or ""),
+            )
+        except Exception as err:
+            logger.debug("Failed to acknowledge delivery admission: %s", err)
 
     @staticmethod
     def _cleanup_unowned_attachment_paths(paths: List[str]) -> None:
@@ -1082,15 +1172,19 @@ class MessageHandler(BaseHandler):
         thread_ts = context.thread_id or context.message_id
         if not message_ts or not thread_ts:
             return False
-        dedup_keys = self._processed_message_dedup_keys(context, thread_ts, message_ts)
-        legacy_keys = (str(context.channel_id), thread_ts, message_ts)
-        if self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys):
-            return True
+        legacy_keys = (str(context.channel_id), str(thread_ts), str(message_ts))
+        dedup_keys = self._processed_message_dedup_keys(context, str(thread_ts), str(message_ts))
         checker = getattr(self.sessions, "has_processed_message", None)
         if callable(checker):
-            return bool(checker(*dedup_keys))
+            if checker(*dedup_keys):
+                return True
+            return self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys)
         checker = getattr(self.sessions, "is_message_already_processed", None)
-        return bool(callable(checker) and checker(*dedup_keys))
+        if not callable(checker):
+            return False
+        if checker(*dedup_keys):
+            return True
+        return self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys)
 
     def _claim_native_human_event(self, context: MessageContext) -> bool:
         """Fence a native control input that intentionally creates no Delivery."""
@@ -1099,17 +1193,19 @@ class MessageHandler(BaseHandler):
         thread_ts = context.thread_id or context.message_id
         if not message_ts or not thread_ts:
             return True
-        dedup_keys = self._processed_message_dedup_keys(context, thread_ts, message_ts)
-        legacy_keys = (str(context.channel_id), thread_ts, message_ts)
-        try_record = getattr(self.sessions, "try_record_processed_message", None)
+        legacy_keys = (str(context.channel_id), str(thread_ts), str(message_ts))
+        dedup_keys = self._processed_message_dedup_keys(context, str(thread_ts), str(message_ts))
         if self._claimed_before_dedup_namespacing(dedup_keys, legacy_keys):
-            recorded = False
-        elif callable(try_record):
+            return False
+        try_record = getattr(self.sessions, "try_record_processed_message", None)
+        if callable(try_record):
             recorded = try_record(*dedup_keys)
         else:
             recorded = not self.sessions.is_message_already_processed(*dedup_keys)
             if recorded:
-                self.sessions.record_processed_message(*dedup_keys)
+                self.sessions.record_processed_message(
+                    *dedup_keys,
+                )
         if not recorded:
             logger.info(
                 "Skipping already processed message: channel=%s, thread=%s, message=%s",

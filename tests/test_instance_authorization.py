@@ -171,6 +171,7 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("POST", "/api/sessions/ses-1/fork") == "editor"
     assert required_instance_role("POST", "/api/projects") == "owner"
     assert required_instance_role("GET", "/api/new-management-surface") == "owner"
+    assert required_instance_role("GET", "/status") is None
     assert required_instance_role("GET", "/show/ses-1/") == "viewer"
     assert required_instance_role("POST", "/show/ses-1/api/action") == "editor"
     assert required_instance_role("GET", "/assets/app.js") is None
@@ -179,6 +180,20 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
 @pytest.mark.parametrize(
     ("method", "path"),
     [
+        ("GET", "/api/backend/codex/runtime"),
+        ("GET", "/api/backend/claude/auth"),
+        ("GET", "/api/backend/codex/auth"),
+        ("GET", "/api/opencode/permission-status"),
+        ("GET", "/api/harness/tasks"),
+        ("GET", "/api/harness/watches"),
+        ("GET", "/api/global-prompts"),
+        ("GET", "/api/harness/runs"),
+        ("GET", "/api/harness/runs/run-1"),
+        ("GET", "/api/harness/bootstrap"),
+        ("GET", "/api/vault/pubkey"),
+        ("GET", "/api/vault/agent/pubkey"),
+        ("GET", "/api/vault/sandbox/root-metadata"),
+        ("GET", "/api/vault/vmk"),
         ("GET", "/api/doctor"),
         ("POST", "/api/doctor"),
         ("POST", "/api/logs"),
@@ -205,6 +220,8 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
         ("GET", "/api/bind-codes/future-capability"),
         ("GET", "/api/future-owner-capability"),
         ("POST", "/api/future-owner-capability"),
+        ("GET", "/api/memory/future-capability"),
+        ("POST", "/api/memory/future-capability"),
     ],
 )
 def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_only(
@@ -226,13 +243,33 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/agents/codex/chain", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/opencode/permission-status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/opencode/permission-status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/dock/pins", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/users", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/skills/check", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/api/skills/find", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/vault/requests/access", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/vault/requests/sign", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/show-pages/ses-1/visibility", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/show-pages/ses-1/rotate-share", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/show-pages/ses-1/share-id", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/sessions/ses-1/draft", REMOTE_HTTP_LOCAL_ONLY),
+        ("PUT", "/api/sessions/ses-1/draft", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/sessions/ses-1/mark-read", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/status", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/status", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/show-pages/ses-1/ensure", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
+        ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_ALLOWED),
+        ("PATCH", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/search", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/clear", REMOTE_HTTP_ALLOWED),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),

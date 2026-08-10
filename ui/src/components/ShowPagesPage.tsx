@@ -23,6 +23,7 @@ import clsx from 'clsx';
 import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
+import { internalPwaLinkTarget, openLinkInNewContext } from '../lib/pwaNavigation';
 import { copyHref, displayLink } from '../lib/showPageLinks';
 import type { ShowPageVisibilityResult } from '../lib/showPageAccess';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
@@ -110,6 +111,7 @@ function ShowPageRow({
 
   const href = copyHref(page);
   const shown = displayLink(page);
+  const tabHref = appTabHref({ appId: 'showpage', sessionId: page.session_id });
 
   return (
     <div className={clsx('border-b border-border last:border-b-0', expanded && 'border-y border-mint/30')}>
@@ -135,7 +137,7 @@ function ShowPageRow({
             // when this page really resolves to a tab surface (§7.1m).
             title={[
               t('showPages.openApp'),
-              appTabHref({ appId: 'showpage', sessionId: page.session_id })
+              tabHref
                 ? t('apps.dock.newTabChord', { key: tabModifierLabel() })
                 : null,
             ]
@@ -250,7 +252,17 @@ function ShowPageRow({
                       variant="secondary"
                       size="sm"
                       disabled={!href}
-                      onClick={() => href && window.open(href, '_blank', 'noopener')}
+                      onClick={() => {
+                        if (!href) return;
+                        const internalTarget = internalPwaLinkTarget(href, window.location.href);
+                        if (tabHref || !internalTarget) {
+                          openLinkInNewContext(href, 'noopener');
+                        } else if (internalTarget.navigation === 'spa') {
+                          onOpen();
+                        } else {
+                          window.location.assign(internalTarget.path);
+                        }
+                      }}
                     >
                       <ExternalLink size={14} />
                       {t('showPages.open')}

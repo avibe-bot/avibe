@@ -30,6 +30,9 @@ from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
 
 
+ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
+
+
 @dataclass
 class _StubConfig(BaseIMConfig):
     def validate(self) -> None:
@@ -821,7 +824,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 platform_specific={
                     "agent_session_id": "ses_test",
                     "turn_token": "logical-turn",
-                    "delivery_start_attempt_id": "atm_initial_start",
+                    "delivery_start_attempt_id": ATTEMPT_ID,
                 },
             ),
             message="hello",
@@ -839,7 +842,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
-    assert calls[0]["message_id"] == "msg_initial_start"
+    assert calls[0]["attempt_id"] == ATTEMPT_ID
+    assert "message_id" not in calls[0]
     assert recovery_order[:3] == ["poll", "prompt", "accepted"]
     assert active_poll_updates[0][0] == "oc-session"
     assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+import urllib.parse
+
+import httpx
 
 from config.v2_config import (
     AgentsConfig,
@@ -11,8 +16,8 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from tests.ui_server_test_helpers import csrf_headers
-from vibe import api, internal_client, ui_memory_routes, ui_server
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
+from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
 
 
@@ -24,6 +29,46 @@ def _save_config(tmp_path) -> None:
         runtime=RuntimeConfig(default_cwd="."),
         agents=AgentsConfig(),
     ).save()
+
+
+def _save_remote_config(tmp_path) -> V2Config:
+    _save_config(tmp_path)
+    config = V2Config.load()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.client_id = "vr_client_123"
+    cloud.instance_id = "inst_123"
+    cloud.session_secret = "session-secret"
+    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
+    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
+    config.save()
+    return config
+
+
+def _renewable_remote_session_cookie(
+    config: V2Config,
+    email: str,
+    subject: str,
+) -> str:
+    expires_at = int(time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    payload = {
+        "email": email,
+        "sub": subject,
+        "instance_id": config.remote_access.vibe_cloud.instance_id,
+        "iat": expires_at - remote_access.SESSION_TTL_SECONDS,
+        "exp": expires_at,
+        "claims_issued_at": int(time.time()),
+        "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+        "vibe_instance_role": "owner",
+        "vibe_instance_access_source": "owner",
+    }
+    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
+    signature = remote_access._session_signature(
+        config.remote_access.vibe_cloud.session_secret,
+        payload_text,
+    )
+    return f"{payload_text}.{signature}"
 
 
 def _local_headers() -> dict[str, str]:
@@ -46,6 +91,7 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert response.headers["cache-control"] == "no-store"
     assert response.get_json()["processing"]["llm"]["api_key"] is None
     assert response.get_json()["processing"]["llm"]["has_api_key"] is False
+    assert "diagnostics" not in response.get_json()
 
 
 def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:
@@ -74,6 +120,145 @@ def test_memory_direct_loopback_predicate_rejects_forwarding(monkeypatch) -> Non
         },
     ):
         assert ui_server.is_direct_loopback_memory_request() is False
+
+
+def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    async def profile(*, user_key: str):
+        calls.append(("profile", user_key))
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
+
+    async def clear(*, user_key: str):
+        calls.append(("clear", user_key))
+        return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
+
+    monkeypatch.setattr(internal_client, "memory_profile", profile)
+    monkeypatch.setattr(internal_client, "memory_clear", clear)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+    remote_headers = {"Origin": "https://alex.avibe.bot"}
+
+    settings_response = client.get(
+        "/api/memory/settings",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    profile_response = client.get(
+        "/api/memory/profile",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    clear_response = client.post(
+        "/api/memory/clear",
+        json={"confirm": True},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert settings_response.status_code == 200
+    assert "diagnostics" not in settings_response.get_json()
+    assert profile_response.status_code == 200
+    assert clear_response.status_code == 200
+    assert calls == [
+        ("profile", "avibe:remote:user-1"),
+        ("clear", "avibe:remote:user-1"),
+    ]
+
+
+def test_memory_diagnostics_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False, "diagnostics": {"log_provider_calls": True}},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+    assert calls == []
+    assert V2Config.load().memory.diagnostics.log_provider_calls is True
+
+
+def test_memory_diagnostics_patch_is_rejected_for_local_ui(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"diagnostics": {"log_provider_calls": True}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+    assert calls == []
+    assert V2Config.load().memory.diagnostics.log_provider_calls is True
+
+
+def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    missing_origin = client.get(
+        "/api/memory/settings",
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    cross_origin = client.get(
+        "/api/memory/settings",
+        headers={"Origin": "https://attacker.example"},
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert missing_origin.status_code == 403
+    assert missing_origin.get_json() == {"status": "failed", "error": "memory_disabled"}
+    assert cross_origin.status_code == 403
+    assert cross_origin.get_json() == {"status": "failed", "error": "memory_disabled"}
 
 
 def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> None:
@@ -163,6 +348,52 @@ def test_memory_search_requires_csrf_and_only_forwards_query_and_limit(monkeypat
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    async def memory_log(*, cursor: str | None, limit: int, user_key: str):
+        calls.append(("list", cursor, limit, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "entries": [], "next_cursor": None},
+        }
+
+    async def memory_log_entry(memcell_id: str, *, user_key: str):
+        calls.append(("detail", memcell_id, user_key))
+        return {
+            "status_code": 200,
+            "body": {"status": "ok", "entry": {"memcell_id": memcell_id}},
+        }
+
+    monkeypatch.setattr(internal_client, "memory_log", memory_log)
+    monkeypatch.setattr(internal_client, "memory_log_entry", memory_log_entry)
+    client = app.test_client()
+    request_options = {
+        "headers": _local_headers(),
+        "base_url": "http://127.0.0.1:15131",
+        "environ_base": {"REMOTE_ADDR": "127.0.0.1"},
+    }
+
+    listed = client.get("/api/memory/log?cursor=opaque_cursor&limit=17", **request_options)
+    detail = client.get("/api/memory/log/entry?memcell_id=mc_1", **request_options)
+    duplicate = client.get("/api/memory/log?limit=1&limit=2", **request_options)
+    invalid_id = client.get("/api/memory/log/entry?memcell_id=../secret", **request_options)
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    assert listed.headers["cache-control"] == "no-store"
+    assert detail.headers["cache-control"] == "no-store"
+    assert calls == [
+        ("list", "opaque_cursor", 17, "avibe:local"),
+        ("detail", "mc_1", "avibe:local"),
+    ]
+    for response in (duplicate, invalid_id):
+        assert response.status_code == 400
+        assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+
+
 def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -205,6 +436,29 @@ def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_p
     assert body["processing"]["llm"]["api_key"] is None
     assert body["processing"]["llm"]["has_api_key"] is True
     assert body["runtime"] == {"ok": True, "state": "ready"}
+
+
+def test_memory_settings_patch_rejects_the_retired_proactive_capture_field(monkeypatch, tmp_path) -> None:
+    """The opt-in flag is gone; a stale client sending it must fail loudly."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    def reconcile_must_not_run(*_args, **_kwargs):
+        raise AssertionError("an invalid patch must be rejected before it is persisted")
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_must_not_run)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"proactive_capture": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
 
 
 def test_memory_enable_rolls_back_when_live_sidecar_reconciliation_fails(monkeypatch, tmp_path) -> None:
@@ -416,23 +670,16 @@ def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> N
     assert calls == []
 
 
-def test_memory_runtime_restart_reconciles_the_live_sidecar(monkeypatch, tmp_path) -> None:
-    """An engine fault leaves the sidecar running, so the repair is a restart.
-
-    ``MemoryRuntime.install_artifact`` refuses while the supervisor is up
-    (``memory_runtime_install_requires_disabled_memory``), which is exactly the
-    state an ``engine`` fault describes. Reconciliation replaces the child.
-    """
-
+def test_memory_runtime_restart_calls_the_dedicated_transport(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     calls: list[bool] = []
 
-    async def reconcile():
+    async def restart():
         calls.append(True)
         return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
 
-    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
     client = app.test_client()
     response = client.post(
         "/api/memory/runtime/restart",
@@ -452,11 +699,11 @@ def test_memory_runtime_restart_rejects_cross_origin_callers(monkeypatch, tmp_pa
     _save_config(tmp_path)
     calls: list[bool] = []
 
-    async def reconcile():
+    async def restart():
         calls.append(True)
         return {"status_code": 200, "body": {"ok": True}}
 
-    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
     response = app.test_client().post(
         "/api/memory/runtime/restart",
         json={},
@@ -467,3 +714,238 @@ def test_memory_runtime_restart_rejects_cross_origin_callers(monkeypatch, tmp_pa
 
     assert response.status_code == 403
     assert calls == []
+
+
+def test_memory_runtime_restart_maps_internal_unavailability(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def restart():
+        raise internal_client.InternalServerUnavailable("controller offline")
+
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/restart",
+        json={},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
+    }
+
+
+def test_memory_restart_route_shares_retained_request_and_blocks_settings_after_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    restart_started = asyncio.Event()
+    release_restart = asyncio.Event()
+    patch_entered = asyncio.Event()
+    restart_calls: list[bool] = []
+    reconcile_calls: list[bool] = []
+
+    async def restart():
+        restart_calls.append(True)
+        restart_started.set()
+        await release_restart.wait()
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    apply_settings_patch = ui_memory_routes._apply_memory_settings_patch
+
+    async def tracked_settings_patch(*args, **kwargs):
+        patch_entered.set()
+        return await apply_settings_patch(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ui_memory_routes,
+        "_apply_memory_settings_patch",
+        tracked_settings_patch,
+    )
+
+    async def _go() -> None:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        headers = {
+            "Origin": "http://127.0.0.1:15131",
+            "X-Vibe-CSRF-Token": "restart-csrf",
+        }
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:15131",
+            cookies={"vibe_csrf_token": "restart-csrf"},
+        ) as client:
+            first = asyncio.create_task(
+                client.post("/api/memory/runtime/restart", json={}, headers=headers)
+            )
+            await restart_started.wait()
+            second = asyncio.create_task(
+                client.post("/api/memory/runtime/restart", json={}, headers=headers)
+            )
+            await asyncio.sleep(0)
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+            patch = asyncio.create_task(
+                client.patch(
+                    "/api/memory/settings",
+                    json={"enabled": False},
+                    headers=headers,
+                )
+            )
+            await patch_entered.wait()
+            await asyncio.sleep(0)
+            assert restart_calls == [True]
+            assert reconcile_calls == []
+            assert not second.done()
+            assert not patch.done()
+
+            release_restart.set()
+            second_response = await second
+            patch_response = await patch
+
+        assert second_response.status_code == 200
+        assert second_response.json() == {"ok": True, "state": "ready"}
+        assert patch_response.status_code == 200
+        assert reconcile_calls == [True]
+
+    asyncio.run(_go())
+
+
+def test_memory_restart_route_isolates_remote_session_cookie_renewal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_config(tmp_path)
+    restart_started = asyncio.Event()
+    release_restart = asyncio.Event()
+    second_waiter_joined = asyncio.Event()
+    restart_calls: list[bool] = []
+    restart_waiters = 0
+
+    async def restart():
+        restart_calls.append(True)
+        restart_started.set()
+        await release_restart.wait()
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    monkeypatch.setattr(internal_client, "memory_restart", restart)
+    restart_request_task = ui_memory_routes._memory_restart_request_task
+
+    def tracked_restart_request_task():
+        nonlocal restart_waiters
+        restart_waiters += 1
+        if restart_waiters == 2:
+            second_waiter_joined.set()
+        return restart_request_task()
+
+    monkeypatch.setattr(
+        ui_memory_routes,
+        "_memory_restart_request_task",
+        tracked_restart_request_task,
+    )
+
+    async def _go() -> tuple[httpx.Response, httpx.Response]:
+        completed_after_hooks = 0
+        after_hooks_released = asyncio.Event()
+
+        async def hold_after_hooks(response):
+            nonlocal completed_after_hooks
+            completed_after_hooks += 1
+            if completed_after_hooks == 2:
+                after_hooks_released.set()
+            await after_hooks_released.wait()
+            return response
+
+        # Run this after the normal hooks so both renewal mutations are present
+        # before either response is sent. Sharing a Response then fails
+        # deterministically instead of depending on ASGI scheduling.
+        app._after_request_handlers.insert(0, hold_after_hooks)
+        try:
+            origin = "https://alex.avibe.bot"
+            first_transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
+            second_transport = httpx.ASGITransport(app=app, client=("203.0.113.11", 12346))
+            first_cookies = {
+                remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
+                    config,
+                    "one@example.com",
+                    "user-1",
+                ),
+                "vibe_csrf_token": "csrf-one",
+            }
+            second_cookies = {
+                remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
+                    config,
+                    "two@example.com",
+                    "user-2",
+                ),
+                "vibe_csrf_token": "csrf-two",
+            }
+            async with (
+                httpx.AsyncClient(
+                    transport=first_transport,
+                    base_url=origin,
+                    cookies=first_cookies,
+                ) as first_client,
+                httpx.AsyncClient(
+                    transport=second_transport,
+                    base_url=origin,
+                    cookies=second_cookies,
+                ) as second_client,
+            ):
+                first = asyncio.create_task(
+                    first_client.post(
+                        "/api/memory/runtime/restart",
+                        json={},
+                        headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-one"},
+                    )
+                )
+                await restart_started.wait()
+                second = asyncio.create_task(
+                    second_client.post(
+                        "/api/memory/runtime/restart",
+                        json={},
+                        headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-two"},
+                    )
+                )
+                await second_waiter_joined.wait()
+                release_restart.set()
+                return await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
+        finally:
+            app._after_request_handlers.remove(hold_after_hooks)
+
+    first_response, second_response = asyncio.run(_go())
+
+    def renewed_subject(response: httpx.Response) -> str:
+        session_headers = [
+            value
+            for value in response.headers.get_list("set-cookie")
+            if value.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
+        ]
+        assert len(session_headers) == 1
+        cookie_value = session_headers[0].split(";", 1)[0].split("=", 1)[1]
+        payload = remote_access.parse_session_cookie(config, cookie_value)
+        assert payload is not None
+        return str(payload["sub"])
+
+    assert restart_calls == [True]
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert renewed_subject(first_response) == "user-1"
+    assert renewed_subject(second_response) == "user-2"

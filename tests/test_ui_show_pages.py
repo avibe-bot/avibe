@@ -90,8 +90,11 @@ class _FakeShowRuntimeManager:
 
 
 @pytest.fixture(autouse=True)
-def _show_runtime_node_version(monkeypatch):
+def _hermetic_show_runtime(monkeypatch):
     monkeypatch.setattr("core.show_runtime._node_version", lambda node: (22, 16, 0))
+    set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
+    yield
+    set_show_runtime_manager_for_tests(None)
 
 
 def test_set_show_runtime_manager_stops_previous_manager():
@@ -324,11 +327,12 @@ def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
         "/show/ses123/",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.headers["Location"] == "/auth/login?next=%2Fshow%2Fses123%2F"
 
 
 def test_private_show_page_serves_locally(monkeypatch, tmp_path):
@@ -367,11 +371,12 @@ def test_public_show_page_still_requires_remote_login(monkeypatch, tmp_path):
         "/show/ses123/",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert response.headers["Location"] == "/auth/login?next=%2Fshow%2Fses123%2F"
 
 
 def test_offline_show_page_not_served_by_authed_route(monkeypatch, tmp_path):
@@ -643,6 +648,61 @@ def test_show_page_icon_endpoint_serves_static_with_hardened_headers(monkeypatch
     assert response.headers["Cache-Control"] == "private, max-age=604800, immutable"
     # Serving the icon never contacted the Show Runtime.
     assert manager.calls == []
+
+
+def test_remote_show_page_icon_is_not_persistently_cached(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    page_dir = ensure_show_page_dir("ses123")
+    (page_dir / "index.html").write_text('<link rel="icon" href="favicon.svg">', encoding="utf-8")
+    (page_dir / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        f"/api/show-pages/ses123/icon?v={_icon_token('ses123')}",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"<svg/>"
+    assert response.headers["Cache-Control"] == "private, no-store"
+
+
+def test_remote_show_page_ensure_redacts_local_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    monkeypatch.setattr(
+        "vibe.api.ensure_show_page",
+        lambda session_id: {
+            "ok": True,
+            "existed": False,
+            "session_id": session_id,
+            "path": "/Users/alex/.avibe/show-pages/ses123",
+        },
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.post(
+        "/api/show-pages/ses123/ensure",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "existed": False, "session_id": "ses123"}
 
 
 def test_show_page_icon_endpoint_enforces_token_without_selecting_the_file(monkeypatch, tmp_path):
@@ -1055,6 +1115,9 @@ def test_private_show_page_injects_runtime_event_config(monkeypatch, tmp_path):
     assert '"streamPath":"/show/ses123/__show/events?stream=1"' in body
     assert '"writeToken":"token-ses123"' in body
     assert '"annotation":{"authenticated":true,"mePath":"__show/me"}' in body
+    assert "__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__" in body
+    assert "anchor.hasAttribute('download')" in body
+    assert "target.origin!==window.location.origin" in body
     assert '<script type="module" src="/show/ses123/__show/annotation.js"></script>' in body
     assert body.index("globalThis.__AVIBE_SHOW__") < body.index('/src/main.tsx')
     assert body.index('/src/main.tsx') < body.index('/show/ses123/__show/annotation.js')
@@ -1100,6 +1163,7 @@ def test_public_show_page_injects_auth_aware_annotation_config(monkeypatch, tmp_
     assert f'"streamPath":"{base_path}__show/events?stream=1"' in body
     expected_auth = "true" if authenticated else "false"
     assert f'"annotation":{{"authenticated":{expected_auth},"mePath":"__show/me"}}' in body
+    assert "__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__" in body
     assert f'<script type="module" src="{base_path}__show/annotation.js"></script>' in body
     assert '"writeToken"' not in body
     assert body.index('/src/main.tsx') < body.index(f'{base_path}__show/annotation.js')

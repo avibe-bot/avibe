@@ -11,6 +11,12 @@ export type VoiceInsertionSnapshot = {
   rightBoundary?: string;
 };
 
+export type VoiceInsertionResult = {
+  text: string;
+  insertion: string;
+  snapshot: VoiceInsertionSnapshot;
+};
+
 type VoiceInsertionBoundaries = {
   left?: string;
   right?: string;
@@ -131,12 +137,37 @@ export const voiceInsertionText = (
   }`;
 };
 
+export const applyVoiceInsertionWithSnapshot = (
+  currentText: string,
+  replacement: VoiceInsertionSnapshot,
+  transcript: string,
+  insertion: VoiceInsertionSnapshot = replacement,
+): VoiceInsertionResult | null => {
+  if (currentText !== replacement.text) return null;
+  const insertedText = voiceInsertionText(insertion.text, insertion, transcript);
+  if (insertedText === null) return null;
+  const text = `${currentText.slice(0, replacement.start)}${insertedText}${
+    currentText.slice(replacement.end)
+  }`;
+  return {
+    text,
+    insertion: insertedText,
+    snapshot: voiceInsertionSnapshot(
+      text,
+      replacement.start,
+      replacement.start + insertedText.length,
+      {
+        left: insertion.leftBoundary,
+        right: insertion.rightBoundary,
+      },
+    ),
+  };
+};
+
 export const applyVoiceInsertion = (
   currentText: string,
   snapshot: VoiceInsertionSnapshot,
   transcript: string,
 ): string | null => {
-  const insertion = voiceInsertionText(currentText, snapshot, transcript);
-  if (insertion === null) return null;
-  return `${currentText.slice(0, snapshot.start)}${insertion}${currentText.slice(snapshot.end)}`;
+  return applyVoiceInsertionWithSnapshot(currentText, snapshot, transcript)?.text ?? null;
 };

@@ -25,6 +25,7 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -256,8 +257,9 @@ const MobileSessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
   canChat: boolean;
+  canManageMetadata: boolean;
   onOpen: () => void;
-}> = ({ projectId, session, unread, canChat, onOpen }) => {
+}> = ({ projectId, session, unread, canChat, canManageMetadata, onOpen }) => {
   const { t } = useTranslation();
   const { renameSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
@@ -269,7 +271,8 @@ const MobileSessionRow: React.FC<{
 
   const { actions, archiveDialog } = useSessionActions({
     session,
-    writable: canChat,
+    writable: canManageMetadata,
+    lifecycleWritable: canChat,
     projectId,
     onRenameStart: () => {
       setDraft(session.title ?? '');
@@ -343,7 +346,7 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      {canChat && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      {canManageMetadata && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <SessionActionsTrigger
             label={t('workbench.sessionActions')}
@@ -373,6 +376,7 @@ export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { capabilities } = useInstanceAuthorization();
+  const canCreateProject = canCreateLocalProject(capabilities);
   const { unreadBySession } = useWorkbenchInbox();
   const {
     projects,
@@ -407,7 +411,7 @@ export const ProjectsPage: React.FC = () => {
     <div className="mx-auto flex max-w-xl flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">{t('projects.title')}</h1>
-        {capabilities.can_manage_projects && <Button
+        {canCreateProject && <Button
           type="button"
           variant="outline"
           size="icon"
@@ -483,6 +487,7 @@ export const ProjectsPage: React.FC = () => {
                     session={session}
                     unread={unreadBySession[session.id] ?? 0}
                     canChat={capabilities.can_chat && project.capabilities.can_chat}
+                    canManageMetadata={project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
                   />
                 ))}
@@ -503,7 +508,7 @@ export const ProjectsPage: React.FC = () => {
         );
       })}
 
-      {showNewProject && capabilities.can_manage_projects && (
+      {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={(project) => {

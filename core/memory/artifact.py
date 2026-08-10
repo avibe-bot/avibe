@@ -32,9 +32,9 @@ from core.managed_runtime import (
 from core.process_isolation import isolated_subprocess_kwargs
 
 
-EVEROS_VERSION = "1.1.3"
+EVEROS_VERSION = "1.2.1"
 EMBEDDED_PYTHON_VERSION = "3.12.12"
-PACKAGE_LOCK_SHA256 = "62b00f1a9ca04cc4ea4c5af51f389ba49acdea8786e5f7044d52823244502c57"
+PACKAGE_LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
 RUNTIME_BUILDER_UV_VERSION = "0.9.18"
 _DEV_RUNTIME_ENV = "AVIBE_MEMORY_DEV_RUNTIME"
 _DEV_RUNTIME_FAILURE_REASON = "memory_runtime_install_failed"
@@ -46,7 +46,7 @@ ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
 #: Files Avibe itself generates inside the provider root, so none of them proves
 #: that the root holds provider data. The sentinel is written when the root is
 #: created, and ``everos.toml`` / ``ome.toml`` are regenerated on every sidecar
-#: start because EverOS 1.1.3 discovers those fixed names under ``EVEROS_ROOT``.
+#: start because EverOS discovers those fixed names under ``EVEROS_ROOT``.
 #: Counting them as data made an owned-but-empty root look occupied once Memory
 #: had started once, which then rejected an incompatible-format runtime before
 #: activation could rewrite the verified-empty sentinel.
@@ -63,7 +63,7 @@ _SMOKE_SCRIPT = (
     "import everos\n"
     "import uvicorn\n"
     "from everos.entrypoints.api.app import create_app\n"
-    "assert version('everos') == '1.1.3'\n"
+    f"assert version('everos') == '{EVEROS_VERSION}'\n"
     "assert platform.python_version() == '3.12.12'\n"
     "assert everos is not None and uvicorn is not None\n"
     "assert callable(create_app)\n"

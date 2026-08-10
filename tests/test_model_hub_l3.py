@@ -460,9 +460,8 @@ def test_authenticated_gateway_validation_failure_is_correlated(
         assert record["outcome"] == "failed_terminal"
         assert record["terminal_error"] == {
             "source_id": "src_primary01",
-            "resolved_model_id": "shared-model",
+            "configured_model_id": "shared-model",
             "channel": "hub",
-            "via_mapping": False,
             "reason": reason,
             "stream_started": False,
         }
@@ -513,9 +512,8 @@ def test_gateway_terminalizer_records_pre_observer_engine_down_before_return(
             assert trace.pending_attempt is None
             assert trace.terminal_error == {
                 "source_id": "src_primary01",
-                "resolved_model_id": "shared-model",
+                "configured_model_id": "shared-model",
                 "channel": "hub",
-                "via_mapping": False,
                 "reason": "protocol_error",
                 "stream_started": False,
             }
@@ -579,9 +577,8 @@ def test_gateway_provenance_retains_pre_mapping_model_identity(
     assert record["requested_model_id"] == "gpt-5"
     assert record["served"] == {
         "source_id": "src_primary01",
-        "resolved_model_id": "custom-gpt-5",
+        "configured_model_id": "custom-gpt-5",
         "channel": "hub",
-        "via_mapping": True,
     }
     _assert_valid("turn-provenance.schema.json", record)
 
@@ -672,7 +669,7 @@ def test_gateway_preserves_native_alias_for_per_source_failover(
         assert record is not None
         assert record["requested_model_id"] == requested_model
         assert record["served"]["source_id"] == backup.id
-        assert record["served"]["resolved_model_id"] == backup_model
+        assert record["served"]["configured_model_id"] == backup_model
         _assert_valid("turn-provenance.schema.json", record)
 
     asyncio.run(exercise())
@@ -741,9 +738,8 @@ def test_native_terminal_failure_is_not_recorded_as_served(
     assert record["failed_attempts"] == [
         {
             "source_id": "src_primary01",
-            "resolved_model_id": "shared-model",
+            "configured_model_id": "shared-model",
             "channel": "native_cli",
-            "via_mapping": False,
             "reason": "quota_exhausted",
         }
     ]
@@ -1322,7 +1318,7 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             "anthropic",
             "openai_responses",
             "openai_chat",
-            "openai_compatible",
+            "openai_chat",
         )
     ]
     + [
@@ -1336,7 +1332,7 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             "anthropic",
             "openai_responses",
             "openai_chat",
-            "openai_compatible",
+            "openai_chat",
         )
     ]
     + [
@@ -1354,7 +1350,7 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             "anthropic",
             "openai_responses",
             "openai_chat",
-            "openai_compatible",
+            "openai_chat",
         )
     ],
 )
@@ -1410,7 +1406,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 4,
+        "contract_version": 5,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,

@@ -39,9 +39,8 @@ class AttemptIdentity:
     def payload(self) -> dict:
         return {
             "source_id": self.source_id,
-            "resolved_model_id": self.resolved_model_id,
+            "configured_model_id": self.resolved_model_id,
             "channel": self.channel,
-            "via_mapping": self.via_mapping,
         }
 
 
@@ -798,7 +797,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 4,
+                    "contract_version": 5,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,
@@ -809,5 +808,6 @@ class TurnCorrelationRegistry:
                     "terminal_error": terminal_error,
                     "canceled_attempt": canceled_attempt,
                     "model_supply_state": supply_state,
+                    "blockers": [],
                 }
             )

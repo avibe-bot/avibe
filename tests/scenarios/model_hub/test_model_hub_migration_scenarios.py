@@ -793,7 +793,7 @@ def test_opencode_builtin_provider_is_importable_without_catalog_cache(
     )
 
     assert item.vendor == "openrouter"
-    assert item.protocol == "openai_compatible"
+    assert item.protocol == "openai_chat"
     assert item.base_url == "https://openrouter.example/v1"
 
 

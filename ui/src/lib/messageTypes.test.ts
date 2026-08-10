@@ -41,9 +41,12 @@ const RETIRED_PSEUDO_MESSAGE_TYPES = [
 const CANONICAL_MESSAGE_TYPES = [
   'user',
   'harness',
+  'agent_initiated',
   'annotation',
+  'output',
   'result',
   'notify',
+  'vault',
   'error',
   'assistant',
 ] as const;
@@ -60,7 +63,9 @@ const wasTranscript = (type: string): boolean =>
   type === 'user' ||
   type === 'harness' ||
   type === 'annotation' ||
+  type === 'output' ||
   type === 'result' ||
+  type === 'vault' ||
   type === 'error' ||
   type === 'notify';
 
@@ -68,7 +73,8 @@ const wasNotify = (type: string): boolean => type === 'notify' || type === 'erro
 
 const wasActivity = (type: string): boolean => type === 'assistant';
 
-const wasHarnessInputType = (type: string): boolean => type === 'harness' || type === 'annotation';
+const wasHarnessInputType = (type: string): boolean =>
+  type === 'harness' || type === 'agent_initiated' || type === 'annotation';
 
 type TerminalCandidate = { author: string; type: string; metadata?: Record<string, unknown> | null };
 

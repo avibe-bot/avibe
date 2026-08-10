@@ -17,6 +17,7 @@ import {
 } from './showPageWindowState';
 import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 
 const ShowPageWindow: React.FC<{
   archived: boolean;
@@ -161,7 +162,7 @@ export const WindowLayer: React.FC = () => {
       // The window layer is desktop-only (`hidden md:block`); on a narrowed
       // viewport the windows are hidden, so a stale non-minimized window must not
       // prompt on tab-close. Gate on the same md breakpoint, checked at unload time.
-      if (!window.matchMedia?.('(min-width: 768px)').matches) return;
+      if (!isDesktopViewport()) return;
       e.preventDefault();
       e.returnValue = '';
     };
@@ -175,7 +176,7 @@ export const WindowLayer: React.FC = () => {
   // for character entry; the Windows layer is desktop-only.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!window.matchMedia?.('(min-width: 768px)').matches) return;
+      if (!isDesktopViewport()) return;
       const index = dockIndexFromShortcut(e);
       const target = e.target instanceof Element ? e.target : document.activeElement;
       if (index === null || inTextEntrySurface(target)) return;

@@ -143,7 +143,7 @@ def test_dispatch_async_read_timeout_reports_acceptance_unknown(socket_path):
             )
 
 
-def test_reconcile_platforms_round_trip(socket_path):
+def test_reconcile_platforms_round_trip(tmp_path, socket_path):
     app = FastAPI()
     calls: list[bool] = []
 
@@ -212,6 +212,44 @@ def test_reconcile_agent_backends_missing_socket_raises_unavailable(tmp_path):
             internal_client.reconcile_agent_backends(
                 ["codex"],
                 socket_path=sock,
+            )
+        )
+
+
+def test_backend_auth_round_trip(socket_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/backend-auth/test")
+    async def _test(payload: dict):
+        captured["payload"] = payload
+        return {"ok": True, "excerpt": "hello"}
+
+    sock = socket_path
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.test_backend_auth(
+                "codex",
+                model="gpt-5.4-mini",
+                socket_path=sock,
+            )
+
+    result = asyncio.run(_go())
+    assert captured["payload"] == {"backend": "codex", "model": "gpt-5.4-mini"}
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "excerpt": "hello"},
+    }
+
+
+def test_backend_auth_missing_socket_raises_unavailable(tmp_path):
+    with pytest.raises(internal_client.InternalServerUnavailable):
+        asyncio.run(
+            internal_client.test_backend_auth(
+                "claude",
+                socket_path=tmp_path / "missing.sock",
             )
         )
 
@@ -335,7 +373,7 @@ def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_p
     )
 
 
-def test_memory_clear_signs_the_fixed_local_owner(monkeypatch, socket_path):
+def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
     from core.memory import ui_access
 
     captured: dict[str, object] = {}
@@ -352,7 +390,10 @@ def test_memory_clear_signs_the_fixed_local_owner(monkeypatch, socket_path):
             "vibe.internal_client.httpx.AsyncHTTPTransport",
             return_value=httpx.MockTransport(handler),
         ):
-            return await internal_client.memory_clear(socket_path=socket_path)
+            return await internal_client.memory_clear(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
 
     result = asyncio.run(_go())
     headers = captured["headers"]
@@ -360,13 +401,117 @@ def test_memory_clear_signs_the_fixed_local_owner(monkeypatch, socket_path):
     assert result["status_code"] == 200
     assert captured["path"] == "/internal/memory/clear"
     assert captured["payload"] == {"confirm": True}
-    assert headers["x-avibe-memory-user-key"] == "avibe:local"
+    assert headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
     assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
         "test-ui-controller-secret",
         method="POST",
         path="/internal/memory/clear",
-        user_key="avibe:local",
+        user_key="avibe:remote:user-1",
     )
+
+
+def test_memory_restart_posts_and_passes_through_the_runtime_result(socket_path):
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"ok": True, "state": "ready"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_restart(socket_path=socket_path)
+
+    result = asyncio.run(_go())
+
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "state": "ready"},
+    }
+    assert captured == {
+        "method": "POST",
+        "path": "/internal/memory/restart",
+        "timeout": {
+            "connect": 5.0,
+            "read": None,
+            "write": None,
+            "pool": None,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ReadError("controller closed the response stream"),
+        httpx.RemoteProtocolError("controller disconnected without a response"),
+    ],
+)
+def test_memory_restart_maps_read_transport_errors_to_unavailable(
+    socket_path,
+    transport_error: httpx.TransportError,
+):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise transport_error
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            await internal_client.memory_restart(socket_path=socket_path)
+
+    with pytest.raises(internal_client.InternalServerUnavailable) as raised:
+        asyncio.run(_go())
+
+    assert raised.value.__cause__ is transport_error
+
+
+def test_memory_log_helpers_forward_structured_query_and_sign_owner(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: list[httpx.Request] = []
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            await internal_client.memory_log(
+                cursor="opaque_cursor",
+                limit=17,
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            await internal_client.memory_log_entry(
+                "mc_1",
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+
+    asyncio.run(_go())
+
+    assert [(request.url.path, dict(request.url.params)) for request in captured] == [
+        ("/internal/memory/log", {"cursor": "opaque_cursor", "limit": "17"}),
+        ("/internal/memory/log/entry", {"memcell_id": "mc_1"}),
+    ]
+    for request in captured:
+        assert request.headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+        assert request.headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+            "test-ui-controller-secret",
+            method="GET",
+            path=request.url.path,
+            user_key="avibe:remote:user-1",
+        )
 
 
 def test_memory_sync_read_helper_sends_agent_session_header(socket_path):
@@ -384,45 +529,6 @@ def test_memory_sync_read_helper_sends_agent_session_header(socket_path):
 
     assert result["body"] == {"state": "ready"}
     assert captured["x-avibe-caller-session"] == "ses-admin"
-
-
-def test_backend_auth_round_trip(socket_path):
-    app = FastAPI()
-    captured: dict = {}
-
-    @app.post("/internal/backend-auth/test")
-    async def _test(payload: dict):
-        captured["payload"] = payload
-        return {"ok": True, "excerpt": "hello"}
-
-    sock = socket_path
-
-    async def _go():
-        fake_transport = httpx.ASGITransport(app=app)
-        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
-            return await internal_client.test_backend_auth(
-                "codex",
-                model="gpt-5.4-mini",
-                socket_path=sock,
-            )
-
-    result = asyncio.run(_go())
-
-    assert captured["payload"] == {"backend": "codex", "model": "gpt-5.4-mini"}
-    assert result == {
-        "status_code": 200,
-        "body": {"ok": True, "excerpt": "hello"},
-    }
-
-
-def test_backend_auth_missing_socket_raises_unavailable(tmp_path):
-    with pytest.raises(internal_client.InternalServerUnavailable):
-        asyncio.run(
-            internal_client.test_backend_auth(
-                "claude",
-                socket_path=tmp_path / "missing.sock",
-            )
-        )
 
 
 def test_notify_vault_request_created_round_trip(tmp_path, socket_path):
