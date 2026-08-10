@@ -11872,12 +11872,33 @@ async def _show_event_response_from_payload(
     allow_dispatch: bool = True,
 ):
     context = getattr(g, "authorization_context", None)
-    if (
-        context is not None
-        and context.is_remote
-        and show_event_request_requests_dispatch(payload)
-    ):
+    is_remote_caller = context is not None and context.is_remote
+    if is_remote_caller and show_event_request_requests_dispatch(payload):
         return _remote_execution_disabled_response()
+    if is_remote_caller or public:
+        # A remote caller — whether an authenticated editor on the HTML route or
+        # a public share visitor — may only author human input: a typed intent or
+        # an annotation lifecycle event, plus resolving a mark the Agent drew.
+        # Every other supported type (`assistant.mark.*`, `system.*`,
+        # `assistant.page.*`) is Agent/system provenance: `ShowSessionEventStore`
+        # derives the actor from the type and would persist it as `author="agent"`,
+        # so accepting one from across the tunnel lets a collaborator forge Agent
+        # or system activity and corrupt the shared transcript. This is the same
+        # human-event / mark-resolution allowlist the public route enforces; the
+        # local CLI route (`_is_cli_show_event_request`) and trusted-local HTML
+        # callers keep the full supported set.
+        event_type = str(payload.get("type") or "").strip()
+        if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "code": "unsupported_event_type",
+                        "error": "Remote Show Page writes require a supported human event or mark resolution type.",
+                    }
+                ),
+                400,
+            )
     # The echo of the stored event goes back to whoever posted it, so a remote
     # author must not learn the local screenshot path from its own response.
     remote = not public and _is_remote_show_page_request()

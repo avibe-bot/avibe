@@ -17,6 +17,7 @@ from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api
 from vibe import remote_access
 from vibe import ui_server
+from vibe.ui_compat import g
 from vibe.ui_server import app
 from starlette.websockets import WebSocketDisconnect
 
@@ -2408,6 +2409,148 @@ def test_remote_show_dispatch_is_rejected_before_event_reservation(
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def _show_event_response_json(response_tuple) -> dict:
+    """Read the JSON body of a `_show_event_response_from_payload` return value.
+
+    The compat `jsonify()` yields a Starlette `JSONResponse` inside a test
+    request context, so read its raw body rather than the Flask `get_json()`.
+    """
+
+    response = response_tuple[0]
+    if hasattr(response, "get_json"):
+        return response.get_json()
+    return json.loads(response.body)
+
+
+async def test_remote_show_write_rejects_agent_provenance_event_types(
+    monkeypatch,
+    tmp_path,
+):
+    """A remote editor may only author human Show events, not Agent/system ones.
+
+    The shared `_show_event_response_from_payload` already blocks events that
+    request Agent dispatch, but a non-dispatching event such as
+    `assistant.mark.created` or `system.runtime.status` still reaches
+    `ShowSessionEventStore.append()`, which derives the actor from the type and
+    would persist it as `author="agent"`. A collaborator could therefore forge
+    Agent or system activity in the shared transcript, so the remote path is
+    restricted to the same human-event / mark-resolution allowlist the public
+    route enforces. This is exercised through the HTML route
+    (`POST /show/<id>/__show/events`, remote-allowed for editors), the surface a
+    remote collaborator with page access actually reaches; the store is stubbed
+    so reaching it would raise, proving rejection happens at the boundary.
+    """
+
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True)
+
+    def unexpected_store():
+        raise AssertionError("an unsupported remote event must not be stored")
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", unexpected_store)
+
+    async def unexpected_dispatch(event_payload):
+        raise AssertionError("an unsupported remote event must not dispatch")
+
+    monkeypatch.setattr(ui_server, "_run_show_event_dispatch", unexpected_dispatch)
+
+    for event_type in ("assistant.mark.created", "system.runtime.status"):
+        with app.test_request_context(
+            "/show/ses-remote/__show/events",
+            method="POST",
+            base_url="https://alex.avibe.bot",
+        ):
+            g.authorization_context = remote_context
+            response = await ui_server._show_event_response_from_payload(
+                "ses-remote",
+                {"type": event_type, "actor": "agent", "payload": {}},
+            )
+        assert response[1] == 400, event_type
+        assert _show_event_response_json(response)["code"] == "unsupported_event_type"
+
+
+async def test_remote_show_write_accepts_human_event_and_mark_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    """A remote editor may still post the human events and resolve a mark.
+
+    The human-event / mark-resolution allowlist is the surface a collaborator
+    actually needs: typing an intent, annotating, and resolving an Agent-drawn
+    mark. These must still be accepted across the tunnel. A trusted-local caller
+    keeps the full supported set, so `assistant.mark.created` (Agent
+    provenance) is allowed locally.
+    """
+
+    from vibe.authorization import AuthorizationContext, trusted_local_context
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True)
+
+    accepted: list[tuple[str, str]] = []
+
+    class _StubStore:
+        def __init__(self):
+            self.closed = False
+
+        def append(self, session_id, payload, *, author=None, reserve_dispatch=True):
+            accepted.append(("append", payload["type"]))
+            return {
+                "id": "evt-1",
+                "sessionId": session_id,
+                "type": payload["type"],
+                "actor": "human",
+                "payload": payload.get("payload", {}),
+                "ts": "2026-08-10T10:00:00Z",
+            }
+
+        def close(self):
+            accepted.append(("close", "store"))
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", _StubStore)
+    monkeypatch.setattr(
+        ui_server, "_publish_show_session_event", lambda event_payload: None
+    )
+
+    # Remote: human intent and mark resolution are accepted.
+    for event_type in ("human.intent.submitted", "assistant.mark.resolved"):
+        with app.test_request_context(
+            "/show/ses-remote/__show/events",
+            method="POST",
+            base_url="https://alex.avibe.bot",
+        ):
+            g.authorization_context = remote_context
+            response = await ui_server._show_event_response_from_payload(
+                "ses-remote",
+                {"type": event_type, "actor": "human", "payload": {}},
+            )
+        assert response[1] == 201, event_type
+        assert _show_event_response_json(response)["ok"] is True
+
+    # Local: Agent provenance is allowed, so the store sees it.
+    with app.test_request_context(
+        "/show/ses-local/__show/events",
+        method="POST",
+        base_url="http://127.0.0.1:5123",
+    ):
+        g.authorization_context = trusted_local_context()
+        response = await ui_server._show_event_response_from_payload(
+            "ses-local",
+            {"type": "assistant.mark.created", "actor": "agent", "payload": {}},
+        )
+    assert response[1] == 201
+    appended_types = [t for op, t in accepted if op == "append"]
+    assert appended_types == [
+        "human.intent.submitted",
+        "assistant.mark.resolved",
+        "assistant.mark.created",
+    ]
 
 
 def test_remote_show_runtime_write_is_rejected_before_runtime_invocation(
