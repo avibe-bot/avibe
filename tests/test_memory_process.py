@@ -4423,6 +4423,54 @@ async def test_cancelled_rebuild_reap_before_signal_revokes_planned_lease(
     assert sidecar._restart_task is None
 
 
+async def test_sidecar_start_refuses_live_cross_home_peer_on_shared_root(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    provider_root = tmp_path / "shared" / "everos-root"
+    provider_root.parent.mkdir(mode=0o700)
+    peer_socket = tmp_path / "peer" / "everos.sock"
+    host = _FakeProcessHost(
+        root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        identities={
+            _ORPHAN_PID: _ProcessIdentity(
+                create_time=_ORPHAN_CREATE_TIME,
+                cmdline=(
+                    sys.executable,
+                    "-m",
+                    _SIDECAR_ENTRYPOINT_MODULE,
+                    "--uds",
+                    str(peer_socket),
+                ),
+                uid=os.getuid() if hasattr(os, "getuid") else None,
+            )
+        },
+        live_processes={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "local-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.start() is False
+    assert process.consecutive_failures == 0
+    assert process.last_error == "memory_provider_root_busy"
+    assert host.signal_calls == []
+    assert host.spawn_calls == []
+    retry = process._restart_task
+    process._desired_running = False
+    if retry is not None:
+        retry.cancel()
+        try:
+            await retry
+        except asyncio.CancelledError:
+            pass
+
+
 async def test_rebuild_boot_fails_closed_on_ambiguous_discovery(tmp_path: Path) -> None:
     host = _FakeProcessHost(
         rebuilds={

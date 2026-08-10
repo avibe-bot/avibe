@@ -745,6 +745,15 @@ class EverOSProcess:
             self._starting = False
             await _finish_cleanup_despite_cancellation(self._notify_reaped())
             raise
+        except _ProviderRootBusy:
+            self._starting = False
+            self._last_error = "memory_provider_root_busy"
+            if self._desired_running:
+                self._restart_task = asyncio.create_task(
+                    self._restart_after(_PROVIDER_LOCK_RETRY_INTERVAL_SECONDS),
+                    name="memory-everos-root-busy-retry",
+                )
+            return False
         except Exception:
             # Every start failure collapses into `memory_sidecar_unavailable`, and
             # some of them are permanent: a recorded orphan that cannot be
@@ -800,7 +809,6 @@ class EverOSProcess:
             await self._notify_reaped()
             self._record_start_failure_locked()
             return False
-
     async def _start_with_provider_lock(self) -> bool:
         """Serialize sidecar admission with every rebuild of this provider root."""
 
@@ -2013,9 +2021,11 @@ class SidecarOwnership:
         """
 
         sidecar_anchors = self._host.find_sidecars(socket_path=self._socket_path)
-        sidecar_anchors.update(
-            self._host.find_sidecars_by_root(provider_root=self._provider_root)
+        root_sidecar_anchors = self._host.find_sidecars_by_root(
+            provider_root=self._provider_root
         )
+        root_only_sidecars = set(root_sidecar_anchors).difference(sidecar_anchors)
+        sidecar_anchors.update(root_sidecar_anchors)
         sidecars = [
             (_MemoryChildRole.SIDECAR, pid, created_at)
             for pid, created_at in sidecar_anchors.items()
@@ -2036,6 +2046,25 @@ class SidecarOwnership:
                 f"(pids {sorted(pid for _role, pid, _created_at in rebuilds + sidecars)})"
             )
         for role, pid, created_at in sorted(candidates, key=lambda candidate: candidate[1]):
+            if (
+                self._role is _MemoryChildRole.SIDECAR
+                and role is _MemoryChildRole.SIDECAR
+                and pid in root_only_sidecars
+            ):
+                identity = self._host.inspect_identity(pid)
+                if (
+                    identity is None
+                    or identity.create_time != created_at
+                    or identity.cmdline is None
+                    or not _cmdline_matches_role(
+                        identity.cmdline,
+                        role=role,
+                        socket_path=self._socket_path,
+                    )
+                ):
+                    raise _ProviderRootBusy(
+                        "a live sidecar already owns this provider root"
+                    )
             logger.warning(
                 "Reaping an EverOS %s an unusable ownership record could not identify (pid %s)",
                 role.value,
