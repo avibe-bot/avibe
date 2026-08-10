@@ -48,23 +48,23 @@ def config_write_transaction(
     transaction_key = path.resolve(strict=False)
     lock_path = transaction_key.with_name(f".{transaction_key.name}.lock")
 
-    with CONFIG_LOCK:
-        active_key = getattr(_CONFIG_WRITE_TRANSACTION, "key", None)
-        if active_key is not None:
-            if active_key != transaction_key:
-                raise RuntimeError(
-                    "Cannot nest config write transactions for different paths: "
-                    f"{active_key} and {transaction_key}"
-                )
-            yield path
-            return
+    active_key = getattr(_CONFIG_WRITE_TRANSACTION, "key", None)
+    if active_key is not None:
+        if active_key != transaction_key:
+            raise RuntimeError(
+                "Cannot nest config write transactions for different paths: "
+                f"{active_key} and {transaction_key}"
+            )
+        yield path
+        return
 
-        from storage.lock import MigrationFileLock
+    from storage.lock import MigrationFileLock
 
-        with MigrationFileLock(
-            lock_path,
-            timeout_seconds=CONFIG_WRITE_LOCK_TIMEOUT_SECONDS,
-        ):
+    with MigrationFileLock(
+        lock_path,
+        timeout_seconds=CONFIG_WRITE_LOCK_TIMEOUT_SECONDS,
+    ):
+        with CONFIG_LOCK:
             _CONFIG_WRITE_TRANSACTION.key = transaction_key
             try:
                 yield path

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import threading
 
 import pytest
 
@@ -17,6 +18,19 @@ from config.v2_config import (
 )
 from vibe import api
 from vibe.api import config_to_payload
+
+
+def _hold_config_file_lock(avibe_home: str, acquired, release) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    from config import paths
+    from storage.lock import MigrationFileLock
+
+    config_path = paths.get_config_path().resolve(strict=False)
+    lock_path = config_path.with_name(f".{config_path.name}.lock")
+    with MigrationFileLock(lock_path):
+        acquired.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test did not release config file lock")
 
 
 def _save_stale_general_config(
@@ -331,6 +345,67 @@ def test_config_write_transaction_rejects_nested_different_path(tmp_path) -> Non
         with pytest.raises(RuntimeError, match="different paths"):
             with config_write_transaction(second_path):
                 pass
+
+
+def test_config_writer_waiting_for_file_lock_does_not_block_config_reads(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from storage.lock import MigrationFileLock
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.from_payload(_payload({"enabled": False, "processing": {}})).save()
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    release = context.Event()
+    lock_owner = context.Process(
+        target=_hold_config_file_lock,
+        args=(str(tmp_path), acquired, release),
+    )
+    writer_attempting = threading.Event()
+    writer_finished = threading.Event()
+    reader_finished = threading.Event()
+    original_acquire = MigrationFileLock.acquire
+
+    def signal_writer_attempt(lock) -> None:
+        writer_attempting.set()
+        original_acquire(lock)
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", signal_writer_attempt)
+
+    def writer() -> None:
+        with config_write_transaction():
+            pass
+        writer_finished.set()
+
+    def reader() -> None:
+        V2Config.load()
+        reader_finished.set()
+
+    lock_owner.start()
+    writer_thread = threading.Thread(target=writer)
+    reader_thread = threading.Thread(target=reader)
+    try:
+        assert acquired.wait(timeout=5)
+        writer_thread.start()
+        assert writer_attempting.wait(timeout=5)
+        reader_thread.start()
+        assert reader_finished.wait(timeout=0.5)
+        assert not writer_finished.is_set()
+        release.set()
+        writer_thread.join(timeout=5)
+        lock_owner.join(timeout=5)
+    finally:
+        release.set()
+        for thread in (reader_thread, writer_thread):
+            if thread.ident is not None:
+                thread.join(timeout=5)
+        if lock_owner.is_alive():
+            lock_owner.terminate()
+        lock_owner.join(timeout=5)
+
+    assert writer_finished.is_set()
+    assert lock_owner.exitcode == 0
 
 
 def test_stale_general_writer_cannot_overwrite_memory_candidate_across_processes(
