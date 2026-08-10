@@ -24,6 +24,7 @@ from core.agent_auth_service import (
     AgentAuthFlow,
     AgentAuthService,
     BackendAuthConfigSaveError,
+    BackendAuthCredentialCleanupError,
 )
 from core.handlers.model_hub.service import ModelHubError
 from modules.agents.codex.agent import CodexAgent
@@ -908,17 +909,16 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
         harness.service._send_claude_control_request = AsyncMock()
         harness.service._verify_login = AsyncMock(return_value=(True, "Logged in"))
-        harness.service._clear_claude_settings_env_for_oauth = AsyncMock(
-            side_effect=RuntimeError("credential cleanup failed")
+        harness.service._save_backend_auth_fields = AsyncMock(
+            side_effect=BackendAuthCredentialCleanupError("credential cleanup failed")
         )
-        harness.service._save_backend_auth_fields = AsyncMock()
         harness.service._finish_claude_oauth_attempt = AsyncMock()
         harness.service._refresh_backend_runtime = AsyncMock()
         harness.service._disconnect_claude_client = AsyncMock()
 
         await harness.service._wait_for_claude_completion(flow)
 
-        harness.service._save_backend_auth_fields.assert_not_awaited()
+        harness.service._save_backend_auth_fields.assert_awaited_once()
         harness.service._finish_claude_oauth_attempt.assert_any_await(
             None,
             succeeded=True,

@@ -24,6 +24,7 @@ import pytest
 from core.agent_auth_service import (
     AgentAuthService,
     BackendAuthConfigSaveError,
+    BackendAuthCredentialCleanupError,
     ClaudeOAuthAttempt,
     ClaudeOAuthBatch,
     WebAuthFlow,
@@ -314,10 +315,9 @@ def test_web_codex_cleanup_failure_still_runs_hook_and_runtime(
         process=SimpleNamespace(wait=AsyncMock(return_value=0)),
     )
     service._verify_web_login = AsyncMock(return_value=(True, None))
-    service._clear_codex_api_key_for_oauth = AsyncMock(
-        side_effect=RuntimeError("credential cleanup failed")
+    service._save_backend_auth_fields = AsyncMock(
+        side_effect=BackendAuthCredentialCleanupError("credential cleanup failed")
     )
-    service._save_backend_auth_fields = AsyncMock()
     service._refresh_backend_runtime = AsyncMock()
     service._post_web_success_hook = hook_calls.append
 
@@ -326,7 +326,7 @@ def test_web_codex_cleanup_failure_still_runs_hook_and_runtime(
     assert flow.state == "failed"
     assert flow.error == "credential cleanup failed"
     assert hook_calls == ["codex"]
-    service._save_backend_auth_fields.assert_not_awaited()
+    service._save_backend_auth_fields.assert_awaited_once()
     service._refresh_backend_runtime.assert_awaited_once_with("codex")
 
 
@@ -1686,21 +1686,27 @@ def test_remove_web_auth_surfaces_logout_failure(
 def test_persist_auth_cancel_precedes_cleanup_failure_and_skips_config_save(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
     cleanup_entered = threading.Event()
     release_cleanup = threading.Event()
-    save_fields = AsyncMock()
 
-    def failing_cleanup() -> None:
+    def failing_cleanup(backend: str) -> None:
+        assert backend == "codex"
         cleanup_entered.set()
         assert release_cleanup.wait(timeout=5)
-        raise RuntimeError("credential cleanup failed")
+        raise BackendAuthCredentialCleanupError("credential cleanup failed")
 
-    async def clear_codex() -> None:
-        await asyncio.to_thread(failing_cleanup)
-
-    monkeypatch.setattr(service, "_clear_codex_api_key_for_oauth", clear_codex)
-    monkeypatch.setattr(service, "_save_backend_auth_fields", save_fields)
+    monkeypatch.setattr(service, "_clear_backend_api_key_for_oauth", failing_cleanup)
 
     async def exercise() -> None:
         task = asyncio.create_task(
@@ -1717,7 +1723,52 @@ def test_persist_auth_cancel_precedes_cleanup_failure_and_skips_config_save(
         assert str(raised.value.__cause__) == "credential cleanup failed"
 
     _run(exercise())
-    save_fields.assert_not_awaited()
+    persisted = V2Config.load().agents.codex
+    assert persisted.auth_mode == "api_key"
+    assert persisted.api_key == "sk-stale"
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_oauth_cleanup_runs_inside_backend_config_transaction(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    import config.v2_config as config_module
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    target = getattr(config.agents, backend)
+    target.auth_mode = "api_key"
+    target.api_key = "sk-stale"
+    config.save()
+    service.controller.config = config_module.V2Config.load()
+
+    transaction_depth = threading.local()
+    cleanup_depths: list[int] = []
+    original_transaction = config_module.config_write_transaction
+
+    @contextlib.contextmanager
+    def tracked_transaction(*args, **kwargs):
+        with original_transaction(*args, **kwargs):
+            transaction_depth.value = getattr(transaction_depth, "value", 0) + 1
+            try:
+                yield
+            finally:
+                transaction_depth.value -= 1
+
+    def record_cleanup(**_kwargs) -> None:
+        cleanup_depths.append(getattr(transaction_depth, "value", 0))
+
+    monkeypatch.setattr(config_module, "config_write_transaction", tracked_transaction)
+    monkeypatch.setattr(f"vibe.{backend}_config.apply_{backend}_auth", record_cleanup)
+
+    _run(service._persist_backend_auth_mode(backend, "oauth"))
+
+    assert cleanup_depths == [1]
+    assert getattr(config_module.V2Config.load().agents, backend).auth_mode == "oauth"
 
 
 def test_persist_backend_auth_mode_propagates_config_save_failure(

@@ -301,6 +301,10 @@ class BackendAuthConfigSaveError(RuntimeError):
     """V2 auth persistence failed after external auth cleanup succeeded."""
 
 
+class BackendAuthCredentialCleanupError(RuntimeError):
+    """OAuth activation could not clear conflicting API-key state."""
+
+
 @dataclass
 class AgentAuthFlow:
     flow_id: str
@@ -3375,36 +3379,44 @@ class AgentAuthService:
             raise primary_error
 
     async def _clear_claude_settings_env_for_oauth(self) -> None:
-        try:
-            from vibe.claude_config import apply_claude_auth
-
-            await asyncio.to_thread(
-                apply_claude_auth,
-                auth_mode="oauth",
-                api_key=None,
-                base_url=None,
-            )
-        except Exception as err:  # noqa: BLE001
-            raise RuntimeError(
-                "Failed to clear Claude Code settings env after OAuth flow; "
-                "stale ANTHROPIC_* values may still override OAuth."
-            ) from err
+        await asyncio.to_thread(self._clear_backend_api_key_for_oauth, "claude")
 
     async def _clear_codex_api_key_for_oauth(self) -> None:
-        try:
-            from vibe.codex_config import apply_codex_auth
+        await asyncio.to_thread(self._clear_backend_api_key_for_oauth, "codex")
 
-            await asyncio.to_thread(
-                apply_codex_auth,
-                auth_mode="oauth",
-                api_key=None,
-                base_url=None,
-            )
+    def _clear_backend_api_key_for_oauth(self, backend: str) -> None:
+        try:
+            if backend == "claude":
+                from vibe.claude_config import apply_claude_auth
+
+                apply_claude_auth(
+                    auth_mode="oauth",
+                    api_key=None,
+                    base_url=None,
+                )
+                return
+            if backend == "codex":
+                from vibe.codex_config import apply_codex_auth
+
+                apply_codex_auth(
+                    auth_mode="oauth",
+                    api_key=None,
+                    base_url=None,
+                )
+                return
+            raise ValueError(f"Unsupported backend for OAuth cleanup: {backend}")
         except Exception as err:  # noqa: BLE001
-            raise RuntimeError(
-                "Failed to clear Codex API-key state after OAuth flow; "
-                "stale OPENAI_API_KEY or base_url values may still override OAuth."
-            ) from err
+            if backend == "claude":
+                message = (
+                    "Failed to clear Claude Code settings env after OAuth flow; "
+                    "stale ANTHROPIC_* values may still override OAuth."
+                )
+            else:
+                message = (
+                    "Failed to clear Codex API-key state after OAuth flow; "
+                    "stale OPENAI_API_KEY or base_url values may still override OAuth."
+                )
+            raise BackendAuthCredentialCleanupError(message) from err
 
     async def _read_pending_claude_oauth_settings_backup(
         self,
@@ -3686,21 +3698,20 @@ class AgentAuthService:
         owns_settlement = settlement is None
         settlement = settlement or CancellationSettlement()
         try:
-            if backend == "claude" and auth_mode == "oauth":
-                await settlement.wait(self._clear_claude_settings_env_for_oauth())
-            if backend == "codex" and auth_mode == "oauth":
-                await settlement.wait(self._clear_codex_api_key_for_oauth())
-        except (Exception, asyncio.CancelledError) as error:
-            settlement.raise_if_cancelled(error)
-            raise
-        try:
             await self._save_backend_auth_fields(
                 backend,
                 auth_mode,
                 clear_credentials=backend == "codex" and auth_mode == "oauth",
                 mark_mode_explicit=backend == "claude",
+                cleanup_oauth_credentials=(
+                    auth_mode == "oauth" and backend in {"claude", "codex"}
+                ),
                 settlement=settlement,
             )
+        except BackendAuthCredentialCleanupError as err:
+            if owns_settlement:
+                settlement.raise_if_cancelled(err)
+            raise
         except asyncio.CancelledError as err:
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
@@ -3730,6 +3741,7 @@ class AgentAuthService:
         *,
         clear_credentials: bool,
         mark_mode_explicit: bool,
+        cleanup_oauth_credentials: bool = False,
         settlement: CancellationSettlement | None = None,
     ) -> None:
         """Fresh-load and persist backend auth fields without blocking the loop."""
@@ -3757,6 +3769,8 @@ class AgentAuthService:
             from config.v2_config import V2Config, config_write_transaction
 
             with config_write_transaction():
+                if cleanup_oauth_credentials:
+                    self._clear_backend_api_key_for_oauth(backend)
                 try:
                     config = V2Config.load()
                 except FileNotFoundError:

@@ -1,6 +1,10 @@
+import contextlib
+import json
 from types import SimpleNamespace
 
+from config import paths
 from config.v2_config import DiscordConfig, TelegramConfig, V2Config
+import core.controller as controller_module
 from core.controller import Controller
 
 
@@ -164,3 +168,47 @@ def test_progress_style_getter_self_refreshes_from_disk(tmp_path, monkeypatch) -
     # No prior _refresh_config_from_disk call; the getter itself must pick it up.
     assert controller.get_progress_style_for_context(None) == "concise"
     assert controller.get_heartbeat_interval_ms_for_context(None) == 8000
+
+
+def test_language_migration_preserves_concurrent_global_choice(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.from_payload(_config_payload({"bot_token": "discord-token"}))
+    config.save()
+    config_path = paths.get_config_path()
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload.pop("language")
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    settings_path = paths.get_settings_path()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({"channels": {"legacy": {"language": "zh"}}}),
+        encoding="utf-8",
+    )
+
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.load()
+    original_transaction = controller_module.config_write_transaction
+    injected = False
+
+    @contextlib.contextmanager
+    def transaction_with_concurrent_choice(*args, **kwargs):
+        nonlocal injected
+        with original_transaction(*args, **kwargs):
+            if not injected:
+                injected = True
+                latest = json.loads(config_path.read_text(encoding="utf-8"))
+                latest["language"] = "en"
+                config_path.write_text(json.dumps(latest), encoding="utf-8")
+            yield
+
+    monkeypatch.setattr(
+        controller_module,
+        "config_write_transaction",
+        transaction_with_concurrent_choice,
+    )
+
+    controller._migrate_language_from_settings()
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["language"] == "en"
+    assert controller.config.language == "en"

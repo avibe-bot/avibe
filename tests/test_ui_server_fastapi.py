@@ -2054,6 +2054,82 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
     assert "agent_backend_runtime" not in response.get_json()
 
 
+def test_config_post_settles_runtime_reconciliation_after_cancelled_save(
+    monkeypatch,
+    tmp_path,
+):
+    from config.v2_config import V2Config
+    from vibe import internal_client, remote_access, runtime
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.from_payload(_full_config_payload())
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    settled: list[str] = []
+
+    def blocking_save(_payload):
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        config.show_duration = True
+        config.save()
+        settled.append("save")
+        return config, True, True, ["codex"]
+
+    def reconcile_remote_access():
+        settled.append("remote")
+        return {"ok": True}
+
+    async def reconcile_platforms():
+        settled.append("platform")
+        return {"status_code": 500, "body": {"ok": False}}
+
+    async def reconcile_agent_backends(backends):
+        assert backends == ["codex"]
+        settled.append("agent")
+        return {"status_code": 500, "body": {"ok": False}}
+
+    def schedule_restart():
+        settled.append("restart")
+        return {"ok": True, "restart": {"job_id": "fallback-1"}}
+
+    monkeypatch.setattr(ui_server, "_save_config_and_runtime_decisions", blocking_save)
+    monkeypatch.setattr(remote_access, "reconcile", reconcile_remote_access)
+    monkeypatch.setattr(
+        ui_server,
+        "_ensure_remote_access_monitoring",
+        lambda _config: settled.append("monitor"),
+    )
+    monkeypatch.setattr(internal_client, "reconcile_platforms", reconcile_platforms)
+    monkeypatch.setattr(
+        internal_client,
+        "reconcile_agent_backends",
+        reconcile_agent_backends,
+    )
+    monkeypatch.setattr(runtime, "service_process_running", lambda: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        schedule_restart,
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(ui_server.config_post())
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel("config request cancelled")
+        await asyncio.sleep(0)
+        task.cancel("repeated cancellation")
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("config request cancelled",)
+
+    with app.test_request_context("/api/config", method="POST", json={"agents": {}}):
+        asyncio.run(exercise())
+
+    assert V2Config.load().show_duration is True
+    assert settled == ["save", "remote", "monitor", "platform", "restart", "agent"]
+
+
 def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
@@ -2516,6 +2592,96 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
     ]
     assert bound_users == ["wx-user"]
     assert restart_calls == [True]
+
+
+def test_wechat_qr_poll_persists_credentials_off_event_loop(monkeypatch):
+    from vibe import runtime
+
+    loop_threads: list[int] = []
+    persist_threads: list[int] = []
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            loop_threads.append(threading.get_ident())
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "base_url": "https://wechat.example.com",
+                "user_id": "wx-user",
+            }
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(
+        ui_server,
+        "_persist_wechat_qr_credentials",
+        lambda _result: persist_threads.append(threading.get_ident()),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: {"job_id": "restart-1"},
+    )
+    monkeypatch.setattr("vibe.api.auto_bind_wechat_user", lambda _user_id: {"ok": True})
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert loop_threads and persist_threads
+    assert persist_threads[0] != loop_threads[0]
+
+
+def test_wechat_qr_poll_settles_persistence_before_cancellation(monkeypatch):
+    from vibe import runtime
+
+    persist_entered = threading.Event()
+    release_persist = threading.Event()
+    persist_finished = threading.Event()
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "base_url": "https://wechat.example.com",
+                "user_id": "wx-user",
+            }
+
+    def blocking_persist(_result):
+        persist_entered.set()
+        assert release_persist.wait(timeout=5)
+        persist_finished.set()
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", blocking_persist)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(ui_server.wechat_qr_login_poll())
+        assert await asyncio.to_thread(persist_entered.wait, 5)
+        task.cancel("wechat request cancelled")
+        await asyncio.sleep(0)
+        task.cancel("repeated cancellation")
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_persist.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("wechat request cancelled",)
+
+    with app.test_request_context(
+        "/api/wechat/qr_login/poll",
+        method="POST",
+        json={"session_key": "qr-session"},
+    ):
+        asyncio.run(exercise())
+
+    assert persist_finished.is_set()
 
 
 def test_wechat_qr_poll_passes_verify_code(monkeypatch):

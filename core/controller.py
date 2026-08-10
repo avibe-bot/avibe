@@ -779,12 +779,19 @@ class Controller:
 
             from config.v2_config import V2Config
 
+            migrated = False
             with config_write_transaction():
+                latest_payload = json.loads(config_path.read_text(encoding="utf-8"))
                 v2_config = V2Config.load()
-                v2_config.language = chosen
-                v2_config.save()
+                if isinstance(latest_payload, dict) and "language" in latest_payload:
+                    chosen = v2_config.language
+                else:
+                    v2_config.language = chosen
+                    v2_config.save()
+                    migrated = True
             self.config.language = chosen
-            logger.info("Migrated legacy per-channel language to global config: %s", chosen)
+            if migrated:
+                logger.info("Migrated legacy per-channel language to global config: %s", chosen)
         except Exception as err:
             logger.warning("Failed to migrate legacy language setting: %s", err)
 

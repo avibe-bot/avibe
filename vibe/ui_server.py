@@ -38,6 +38,7 @@ from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, json
 
 from config import paths
 from config.v2_config import V2Config, config_write_transaction
+from core.blocking import CancellationSettlement, run_blocking
 from core.show_pages import (
     SHOW_CLI_EVENT_TOKEN_HEADER,
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
@@ -4688,80 +4689,98 @@ async def config_post():
 
     payload = request.json or {}
     remote_access_runtime = None
+    settlement = CancellationSettlement()
     try:
         (
             config,
             should_reconcile_remote_access,
             should_reconcile_platforms,
             changed_agent_backends,
-        ) = await asyncio.to_thread(
+        ) = await settlement.run_blocking(
             _save_config_and_runtime_decisions,
             payload,
         )
     except ValueError as exc:
+        settlement.raise_if_cancelled(exc)
         message = str(exc)
         return jsonify({"ok": False, "error": message, "message": message}), 400
-    if should_reconcile_remote_access:
-        remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
-    await asyncio.to_thread(_ensure_remote_access_monitoring, config)
-    platform_runtime = None
-    if should_reconcile_platforms:
-        try:
-            result = await internal_client.reconcile_platforms()
-            platform_runtime = {
-                "ok": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
-                "hot_reconciled": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
-                "body": result.get("body") or {},
-            }
-        except internal_client.InternalServerUnavailable as exc:
-            platform_runtime = {"ok": False, "hot_reconciled": False, "error": str(exc)}
-        if not platform_runtime.get("ok"):
-            restart_result = await asyncio.to_thread(_schedule_service_restart_for_config_fallback)
-            platform_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
-            if restart_result.get("ok"):
-                platform_runtime["restart"] = restart_result.get("restart")
-            else:
-                platform_runtime["restart_error"] = restart_result.get("error")
-                platform_runtime["restart_code"] = restart_result.get("code")
-    agent_backend_runtime = None
-    if changed_agent_backends:
-        try:
-            result = await internal_client.reconcile_agent_backends(changed_agent_backends)
-            body = result.get("body") or {}
-            hot_reconciled = result.get("status_code") == 200 and bool(body.get("ok"))
-            agent_backend_runtime = {
-                "ok": hot_reconciled,
-                "hot_reconciled": hot_reconciled,
-                "backends": changed_agent_backends,
-                "body": body,
-            }
-        except internal_client.InternalServerUnavailable as exc:
-            agent_backend_runtime = {
-                "ok": False,
-                "hot_reconciled": False,
-                "backends": changed_agent_backends,
-                "error": str(exc),
-            }
+    except (Exception, asyncio.CancelledError) as exc:
+        settlement.raise_if_cancelled(exc)
+        raise
 
-        if not agent_backend_runtime.get("ok"):
-            from vibe import runtime
-
-            service_running = await asyncio.to_thread(runtime.service_process_running)
-            if service_running:
-                if platform_runtime and platform_runtime.get("restart_scheduled"):
-                    agent_backend_runtime["restart_scheduled"] = True
-                    if platform_runtime.get("restart"):
-                        agent_backend_runtime["restart"] = platform_runtime["restart"]
+    try:
+        if should_reconcile_remote_access:
+            remote_access_runtime = await settlement.run_blocking(remote_access.reconcile)
+        await settlement.run_blocking(_ensure_remote_access_monitoring, config)
+        platform_runtime = None
+        if should_reconcile_platforms:
+            try:
+                result = await settlement.wait(internal_client.reconcile_platforms())
+                platform_runtime = {
+                    "ok": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
+                    "hot_reconciled": result.get("status_code") == 200
+                    and bool((result.get("body") or {}).get("ok")),
+                    "body": result.get("body") or {},
+                }
+            except internal_client.InternalServerUnavailable as exc:
+                platform_runtime = {"ok": False, "hot_reconciled": False, "error": str(exc)}
+            if not platform_runtime.get("ok"):
+                restart_result = await settlement.run_blocking(
+                    _schedule_service_restart_for_config_fallback
+                )
+                platform_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
+                if restart_result.get("ok"):
+                    platform_runtime["restart"] = restart_result.get("restart")
                 else:
-                    restart_result = await asyncio.to_thread(_schedule_service_restart_for_config_fallback)
-                    agent_backend_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
-                    if restart_result.get("ok"):
-                        agent_backend_runtime["restart"] = restart_result.get("restart")
+                    platform_runtime["restart_error"] = restart_result.get("error")
+                    platform_runtime["restart_code"] = restart_result.get("code")
+        agent_backend_runtime = None
+        if changed_agent_backends:
+            try:
+                result = await settlement.wait(
+                    internal_client.reconcile_agent_backends(changed_agent_backends)
+                )
+                body = result.get("body") or {}
+                hot_reconciled = result.get("status_code") == 200 and bool(body.get("ok"))
+                agent_backend_runtime = {
+                    "ok": hot_reconciled,
+                    "hot_reconciled": hot_reconciled,
+                    "backends": changed_agent_backends,
+                    "body": body,
+                }
+            except internal_client.InternalServerUnavailable as exc:
+                agent_backend_runtime = {
+                    "ok": False,
+                    "hot_reconciled": False,
+                    "backends": changed_agent_backends,
+                    "error": str(exc),
+                }
+
+            if not agent_backend_runtime.get("ok"):
+                from vibe import runtime
+
+                service_running = await settlement.run_blocking(runtime.service_process_running)
+                if service_running:
+                    if platform_runtime and platform_runtime.get("restart_scheduled"):
+                        agent_backend_runtime["restart_scheduled"] = True
+                        if platform_runtime.get("restart"):
+                            agent_backend_runtime["restart"] = platform_runtime["restart"]
                     else:
-                        agent_backend_runtime["restart_error"] = restart_result.get("error")
-                        agent_backend_runtime["restart_code"] = restart_result.get("code")
-            else:
-                agent_backend_runtime["apply_on_next_start"] = True
+                        restart_result = await settlement.run_blocking(
+                            _schedule_service_restart_for_config_fallback
+                        )
+                        agent_backend_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
+                        if restart_result.get("ok"):
+                            agent_backend_runtime["restart"] = restart_result.get("restart")
+                        else:
+                            agent_backend_runtime["restart_error"] = restart_result.get("error")
+                            agent_backend_runtime["restart_code"] = restart_result.get("code")
+                else:
+                    agent_backend_runtime["apply_on_next_start"] = True
+    except (Exception, asyncio.CancelledError) as exc:
+        settlement.raise_if_cancelled(exc)
+        raise
+    settlement.raise_if_cancelled()
     response_payload = api.client_config_payload(config)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
@@ -5404,7 +5423,7 @@ async def wechat_qr_login_poll():
         user_id = result["user_id"]
 
         try:
-            _persist_wechat_qr_credentials(result)
+            await run_blocking(_persist_wechat_qr_credentials, result)
         except Exception as exc:
             logger.error("Failed to persist WeChat QR credentials: %s", exc)
             return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
