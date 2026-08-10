@@ -3397,6 +3397,53 @@ async def test_runtime_restart_preserves_admitted_recorder_health(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_runtime_discards_recorder_health_from_prior_launch_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = memory_runtime_factory(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
+    supervised = factory.supervised[0]
+    assert supervised.before_start is not None
+    health = ProviderHealthSnapshot(
+        status="ok",
+        version="1.2.3",
+        capabilities={},
+        disabled_features=(),
+        cascade=None,
+        recorder={"state": "disabled", "reason": "writer_failures"},
+    )
+
+    async def stale_health() -> ProviderHealthSnapshot:
+        entered.set()
+        await release.wait()
+        return health
+
+    monkeypatch.setattr(runtime._provider, "health_snapshot", stale_health)
+    observation = asyncio.create_task(runtime._processing_record_health(None))
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    await supervised.before_start()
+    release.set()
+    result = await observation
+
+    assert result.snapshot is None
+    assert result.unavailable_reason == "memory_sidecar_unavailable"
+    assert runtime._process_records_calls is True
+    assert runtime._call_log_retention_task is None
+    await memory_runtime_factory.close(runtime)
+
+
 @pytest.mark.parametrize("force_pending_assertion_failure", [False, True])
 async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(
     tmp_path: Path,

@@ -20,6 +20,7 @@ class SidecarSnapshot:
     """The current sidecar ownership projection for its Runtime caller."""
 
     generation: int
+    launch_token: int
     process: EverOSProcessPort | None
     records_calls: bool
 
@@ -100,7 +101,12 @@ class MemorySidecarLifecycle:
         self._processing_probe_healthy = False
 
     def snapshot(self) -> SidecarSnapshot:
-        return SidecarSnapshot(self._generation, self._process, self._records_calls)
+        return SidecarSnapshot(
+            self._generation,
+            self._launch_token,
+            self._process,
+            self._records_calls,
+        )
 
     def _replace_for_runtime(self, process: EverOSProcessPort | None) -> None:
         """Temporary Runtime compatibility for lifecycle paths not yet migrated."""
@@ -156,23 +162,23 @@ class MemorySidecarLifecycle:
             if self._is_current(sidecar, generation):
                 self._records_calls = False
                 self._ensure_retention()
-            self._ready_admission_open = True
+            self._reopen_ready_admission()
             raise
         if not started:
             if self._is_current(sidecar, generation):
                 self._records_calls = False
                 self._ensure_retention()
-            self._ready_admission_open = True
+            self._reopen_ready_admission()
             return False
         launch_token = self._launch_token
         try:
             await self._admit_recorder_health(sidecar, generation, launch_token)
         except BaseException:
-            self._ready_admission_open = True
+            self._reopen_ready_admission()
             if self._ready_launch is not None and not self._closed:
                 self._ensure_ready_task()
             raise
-        self._ready_admission_open = True
+        self._reopen_ready_admission()
         launch_is_current = self._launch_is_current(
             sidecar,
             generation,
@@ -293,6 +299,10 @@ class MemorySidecarLifecycle:
 
     def _is_current(self, process: EverOSProcessPort | None, generation: int) -> bool:
         return process is not None and process is self._process and generation == self._generation
+
+    def _reopen_ready_admission(self) -> None:
+        if not self._closed:
+            self._ready_admission_open = True
 
     def _launch_is_current(
         self,

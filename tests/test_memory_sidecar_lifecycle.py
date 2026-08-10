@@ -251,6 +251,46 @@ async def test_cancelled_initial_admission_schedules_queued_ready(
         await lifecycle.close()
 
 
+async def test_close_during_initial_admission_never_reopens_ready_admission(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    health_entered = asyncio.Event()
+    release_health = asyncio.Event()
+    ready = asyncio.Event()
+    health_reads = 0
+
+    async def recorder_health() -> dict[str, str | None]:
+        nonlocal health_reads
+        health_reads += 1
+        if health_reads == 1:
+            health_entered.set()
+            await release_health.wait()
+        return {"state": "active", "reason": None}
+
+    lifecycle = _lifecycle(
+        tmp_path,
+        factory,
+        lambda _generation: ready.set(),
+        recorder_health,
+    )
+    initial_start = asyncio.create_task(
+        lifecycle.start(Path(sys.executable), _settings())
+    )
+    await asyncio.wait_for(health_entered.wait(), timeout=1.0)
+    supervised = factory.supervised[0]
+
+    lifecycle.close_ready_admission()
+    await supervised.ready()
+    release_health.set()
+    assert await initial_start is True
+
+    assert health_reads == 1
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(ready.wait(), timeout=0.05)
+    await lifecycle.close()
+
+
 async def test_runtime_disabled_recorder_hands_call_log_to_host_retention(
     tmp_path: Path,
 ) -> None:

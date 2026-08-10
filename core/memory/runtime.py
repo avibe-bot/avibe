@@ -109,6 +109,7 @@ class _ProcessingRuntimeSnapshot:
     maintenance_active: bool
     closing: bool
     process: EverOSProcessPort | None
+    launch_token: int
     process_running: bool
     runtime_error: str | None
 
@@ -148,6 +149,7 @@ class _ProcessingRuntimeSnapshot:
             and self.maintenance_active == other.maintenance_active
             and self.closing == other.closing
             and self.process is other.process
+            and self.launch_token == other.launch_token
             and self.process_running == other.process_running
             and self.runtime_error == other.runtime_error
         )
@@ -512,7 +514,8 @@ class MemoryRuntime:
         self._processing_lifecycle_generation += 1
 
     def _processing_runtime_snapshot(self) -> _ProcessingRuntimeSnapshot:
-        process = self._process
+        sidecar = self._sidecar.snapshot()
+        process = sidecar.process
         module = self._module
         return _ProcessingRuntimeSnapshot(
             generation=self._processing_lifecycle_generation,
@@ -522,6 +525,7 @@ class MemoryRuntime:
             maintenance_active=bool(module and module.maintenance_active),
             closing=self._closing,
             process=process,
+            launch_token=sidecar.launch_token,
             process_running=bool(process and process.running),
             runtime_error=self._runtime_error,
         )
