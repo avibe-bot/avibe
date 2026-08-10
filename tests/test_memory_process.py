@@ -2184,6 +2184,8 @@ async def test_rebuild_cancellation_returns_interrupted_after_reaping(tmp_path: 
 async def test_rebuild_cancellation_waits_for_spawn_handoff_then_reaps(tmp_path: Path) -> None:
     child = _RebuildChild(None)
     identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
 
     class _BlockingSpawnHost(_FakeProcessHost):
         def __init__(self, **kwargs) -> None:
@@ -2211,6 +2213,7 @@ async def test_rebuild_cancellation_waits_for_spawn_handoff_then_reaps(tmp_path:
     host.release_spawn.set()
 
     assert await task is RebuildProcessResult.INTERRUPTED
+    assert releases == [signal.SIGCONT]
     assert not host.live_processes
     assert host.signal_calls
     assert not (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
@@ -2326,6 +2329,18 @@ def test_rebuild_child_installs_scrubbers_before_delegating(monkeypatch) -> None
     calls: list[object] = []
     monkeypatch.setattr(
         rebuild_child,
+        "_set_private_umask",
+        lambda: calls.append("private-umask"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rebuild_child,
+        "_await_parent_ownership",
+        lambda: calls.append("ownership-established"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rebuild_child,
         "install_error_scrubbers",
         lambda: calls.append("scrubbers"),
     )
@@ -2337,6 +2352,8 @@ def test_rebuild_child_installs_scrubbers_before_delegating(monkeypatch) -> None
 
     assert rebuild_child.main() == 0
     assert calls == [
+        "private-umask",
+        "ownership-established",
         "scrubbers",
         (("everos.entrypoints.cli.main",), {"run_name": "__main__", "alter_sys": True}),
     ]
@@ -2379,12 +2396,17 @@ def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
     (artifact_site / "everos/entrypoints/cli/main.py").write_text(
         "import os\n"
         "import sys\n"
+        "from pathlib import Path\n"
         "from everos.infra.ome._stores.run_record import RunRecordStore\n"
         "from everos.infra.persistence.sqlite.repos.md_change_state import md_change_state_repo\n"
         "assert getattr(RunRecordStore._update_status, '__avibe_memory_call_patch__', False)\n"
         "assert getattr(type(md_change_state_repo).mark_failed, '__avibe_memory_call_patch__', False)\n"
         "assert sys.argv[1:] == ['cascade', 'rebuild', '--yes']\n"
         "assert os.environ['AVIBE_MEMORY_CHILD_ROLE'] == 'cascade_rebuild'\n"
+        "root = Path(os.environ['EVEROS_ROOT'])\n"
+        "probe_dir = root / 'mode-probe'\n"
+        "probe_dir.mkdir(parents=True)\n"
+        "(probe_dir / 'created.txt').write_text('private', encoding='utf-8')\n"
         "raise SystemExit(int(os.environ['TEST_REBUILD_EXIT']))\n",
         encoding="utf-8",
     )
@@ -2403,7 +2425,7 @@ def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
     environment["PYTHONPATH"] = os.pathsep.join((str(source_root), str(artifact_site)))
     environment["TEST_REBUILD_EXIT"] = str(exit_code)
 
-    completed = subprocess.run(
+    child = subprocess.Popen(
         [
             sys.executable,
             "-m",
@@ -2414,13 +2436,45 @@ def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
         ],
         cwd=memory_dir,
         env=environment,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
-        timeout=10,
     )
+    child_process = psutil.Process(child.pid)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and child.poll() is None:
+        if child_process.status() == psutil.STATUS_STOPPED:
+            break
+        time.sleep(0.01)
+    assert child.poll() is None
+    assert child_process.status() == psutil.STATUS_STOPPED
+    child.send_signal(signal.SIGCONT)
+    _stdout, stderr = child.communicate(timeout=10)
 
-    assert completed.returncode == exit_code, completed.stderr
+    assert child.returncode == exit_code, stderr
+    assert stat.S_IMODE((provider_root / "mode-probe").stat().st_mode) == 0o700
+    assert stat.S_IMODE((provider_root / "mode-probe/created.txt").stat().st_mode) == 0o600
+
+
+async def test_rebuild_releases_child_only_after_persisting_ownership(tmp_path: Path) -> None:
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    releases: list[int] = []
+
+    def release(signum: int) -> None:
+        assert process._ownership.record_path.exists()
+        releases.append(signum)
+
+    child.send_signal = release
+
+    assert await process.run() is RebuildProcessResult.COMPLETED
+    assert releases == [signal.SIGCONT]
 
 
 async def test_rebuild_refuses_a_provider_root_locked_by_another_process(tmp_path: Path) -> None:

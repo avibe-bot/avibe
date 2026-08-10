@@ -939,6 +939,7 @@ class EverOSRebuildProcess:
         process: asyncio.subprocess.Process | None = None
         process_group: int | None = None
         identities: dict[int, float] = {}
+        child_released = False
         try:
             await self._reconcile_orphan_exclusive()
             _write_memory_child_config(
@@ -971,6 +972,8 @@ class EverOSRebuildProcess:
                 identities[process.pid],
                 process_group,
             )
+            _release_rebuild_child(process)
+            child_released = True
             if spawn_interrupted:
                 result = RebuildProcessResult.INTERRUPTED
             else:
@@ -990,6 +993,11 @@ class EverOSRebuildProcess:
 
         if process is None:
             return result
+        if not child_released:
+            try:
+                _release_rebuild_child(process)
+            except OSError:
+                logger.warning("EverOS cascade rebuild handshake release failed", exc_info=True)
         try:
             cleanup_interrupted = await _finish_cleanup_despite_cancellation(
                 _terminate_owned_process_tree(
@@ -1022,6 +1030,15 @@ def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult
     if exit_code == 130:
         return RebuildProcessResult.INTERRUPTED
     return RebuildProcessResult.FAILED
+
+
+def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:
+    """Release a bootstrap only after this parent has persisted ownership."""
+
+    try:
+        process.send_signal(signal.SIGCONT)
+    except ProcessLookupError:
+        pass
 
 
 def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
