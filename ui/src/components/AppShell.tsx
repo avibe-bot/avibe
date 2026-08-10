@@ -291,8 +291,13 @@ export const AppShell: React.FC = () => {
   // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
   // and hands the whole viewport to the app. Both halves matter: the flag alone would
   // strip the chrome off any page such a tab later navigates to, and the route alone
-  // would strip it inside the normal workbench. The app pages render their full-bleed
-  // body off the same signal (StandaloneAppTabContext).
+  // would strip it inside the normal workbench.
+  //
+  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
+  // publishes is the mount-frozen document flag instead, because the window controls
+  // that read it must stay decided for the tab's whole life (see the context doc). The
+  // app pages read the same context and mount only on these routes, so for them the two
+  // agree anyway.
   const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
 
   // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
@@ -448,7 +453,7 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
-    <StandaloneAppTabContext.Provider value={chromeless}>
+    <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider>
     <ShowPageDragProvider>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
