@@ -23,6 +23,7 @@ import pytest
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest
 import core.memory.artifact as memory_artifact
 import core.memory.confined_filesystem as confined_filesystem
+import core.memory.module as memory_module
 from core.memory.artifact import (
     FakeMemoryArtifactManager,
     MemoryArtifactCandidate,
@@ -1364,19 +1365,59 @@ async def test_final_flush_fences_capture_before_queue_visibility(
         attachments=(),
     )
 
-    pin_entered = threading.Event()
-    release_pin = threading.Event()
+    pin_entered = asyncio.Event()
+    release_pin = asyncio.Event()
     original_pin = runtime.module._attachment_store.pin
 
-    def blocking_pin(attachments):
-        pin_entered.set()
-        assert release_pin.wait(timeout=2.0)
-        return original_pin(attachments)
+    async def gate_attachment_pin(operation, /, *args, **kwargs):
+        if operation == original_pin:
+            pin_entered.set()
+            await release_pin.wait()
+        return await original_run_blocking(operation, *args, **kwargs)
 
-    monkeypatch.setattr(runtime.module._attachment_store, "pin", blocking_pin)
+    original_run_blocking = memory_module.run_blocking
+    monkeypatch.setattr(memory_module, "run_blocking", gate_attachment_pin)
+
+    class ObservedAdmissionLock:
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+            self._acquisitions = 0
+            self.final_flush_waiting = asyncio.Event()
+            self.later_capture_waiting = asyncio.Event()
+
+        async def acquire(self) -> bool:
+            self._acquisitions += 1
+            if self._acquisitions == 2:
+                self.final_flush_waiting.set()
+            elif self._acquisitions == 3:
+                self.later_capture_waiting.set()
+            return await self._lock.acquire()
+
+        def locked(self) -> bool:
+            return self._lock.locked()
+
+        def release(self) -> None:
+            self._lock.release()
+
+        async def __aenter__(self):
+            await self.acquire()
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+            del exc_type, exc_value, traceback
+            self.release()
+
+    admission_lock = ObservedAdmissionLock()
+    runtime.module._capture_admission_locks[
+        (
+            old_request.principal_id,
+            old_request.project_id,
+            old_request.session_id,
+        )
+    ] = admission_lock
 
     old_capture = asyncio.create_task(runtime.module.capture(old_request))
-    assert await asyncio.to_thread(pin_entered.wait, 1.0)
+    await pin_entered.wait()
 
     final_flush = asyncio.create_task(
         runtime.final_flush(
@@ -1386,17 +1427,18 @@ async def test_final_flush_fences_capture_before_queue_visibility(
             deadline_seconds=2.0,
         )
     )
-    await asyncio.sleep(0)
+    await admission_lock.final_flush_waiting.wait()
     later_capture = asyncio.create_task(runtime.module.capture(later_request))
-    await asyncio.sleep(0)
+    await admission_lock.later_capture_waiting.wait()
+    assert admission_lock.locked()
     assert not final_flush.done()
     assert not later_capture.done()
 
     release_pin.set()
     assert isinstance(await old_capture, CaptureAccepted)
-    drain = asyncio.create_task(runtime.module.drain())
+    drain = asyncio.create_task(runtime.module._worker.drain(max_rows=1))
 
-    await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
+    await flush_entered.wait()
     assert [capture.text for capture in provider.captures] == [
         "old session message"
     ]
