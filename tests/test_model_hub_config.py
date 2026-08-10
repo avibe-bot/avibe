@@ -1073,8 +1073,13 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "E", "gaps", "duplicate",
         "a second row answers one gap number differently",
         "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
+        # Four cells, which is what §0.5's header declares. Written with five
+        # until this round, when the malformed rule arrived and reported the
+        # decoy for its cell count instead of registering it — a case that had
+        # been proving the duplicate rule against a row the reader now declines
+        # to read at all.
         "| G-19 | 05 add-by-key, an unrelated surface | a different missing behaviour "
-        "| Contradicting evidence. | pending |\n"
+        "| Contradicting evidence. |\n"
         "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
         "is defined twice in gaps with different content",
         within="0.5",
@@ -1458,6 +1463,129 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "sends `cooldown` to 「Needs action」, and §1.6 keys 「Cooling」",
         within="0.8",
     ),
+    # --- the fourth rule: a row this reader cannot read ----------------------
+    # Every case below deletes a cell, and every one of them used to pass. Six
+    # review rounds found them one reader at a time — 「the register drops a
+    # row」, 「the copy table drops a row」, 「the slot row drops its consumers」
+    # — which is the shape of a defect that is not six defects: a reader met
+    # input it could not parse and declined to say so, and whatever the reader
+    # was supposed to declare simply never entered the comparison. The rule is
+    # here so the tiling test asks every reader the same question in advance.
+    GateCase(
+        "A", "states", "malformed",
+        "a register row loses a cell",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting |",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` |",
+        "has 5 cells where the register's header declares 6",
+        within="0.8",
+    ),
+    GateCase(
+        "A", "treatments", "malformed",
+        "a §0.8 treatment row loses its meaning cell",
+        "| F5 | No request | The state issues nothing",
+        "| F5 | The state issues nothing",
+        "has 2 cells where the table declares 3",
+        within="0.8",
+    ),
+    GateCase(
+        "B", "copy", "malformed",
+        "a copy row loses its English cell",
+        "| `pill_one` | {{count}} 处接管中 | {{count}} takeover active |",
+        "| `pill_one` | {{count}} 处接管中 |",
+        "has 2 cells where a copy table declares 3",
+        within="1.7",
+    ),
+    GateCase(
+        "B", "slots", "malformed",
+        "a §0.9 slot row loses its consumer cell",
+        "| `{{vendor}}` | The upstream vendor's product name, as the user chose it. "
+        "| Always present |",
+        "| `{{vendor}}` | The upstream vendor's product name, as the user chose it. |",
+        "has 3 cells where the table declares 4",
+        within="0.9",
+    ),
+    GateCase(
+        "E", "gaps", "malformed",
+        "a §0.5 gap row loses its 「what is missing」 cell",
+        "| G-11 | 09 direct-only home, zero backends | an installation flag per agent "
+        "backend, and the payload that carries it |",
+        "| G-11 | 09 direct-only home, zero backends |",
+        "has 3 cells where the registry declares 4",
+        within="0.5",
+    ),
+    # --- the arms the same round hardened ------------------------------------
+    # Each of these is a reader that used to drop its input quietly rather than
+    # hand it to the comparator: an extraction pattern narrow enough to be an
+    # admissibility test, and a name it declined to match was a name nobody
+    # checked. The rule is `arm` rather than `token` because what regressed is
+    # the extraction, not the comparison — the comparator was never asked.
+    GateCase(
+        "E", "gaps", "arm",
+        "a gap marker whose number is misspelt with a letter",
+        "An install confirm was accepted `[contract-gap]` G-10",
+        "An install confirm was accepted `[contract-gap]` G-1O",
+        "`[contract-gap] G-1O` names no §0.5 row",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "repo symbols", "arm",
+        "a symbol cited by its qualified name, misspelt",
+        "core/handlers/model_hub/service.py:set_agent_mode",
+        "core/handlers/model_hub/service.py:ModelHubService.set_agent_moed",
+        "defines no `ModelHubService.set_agent_moed`",
+        within="0.5",
+    ),
+    GateCase(
+        "B", "copy", "arm",
+        "a frame cites a key of its own table, misspelt, without the namespace",
+        "`legend.unavailable` **lost a 暂 to make that true.**",
+        "`legend.unavailabl` **lost a 暂 to make that true.**",
+        "key `legend.unavailabl` is cited and never defined",
+        within="1.7",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "a body member spelt with a hyphen",
+        "and answers `{source, added_to, adopted_by}`",
+        "and answers `{source, added-to, adopted_by}`",
+        "names added-to — not contracted for POST /api/models/sources",
+        within="1.5",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "a body that omits a member its route requires",
+        "`POST /api/models/oauth/submit` as `{flow_id, value}`",
+        "`POST /api/models/oauth/submit` as `{flow_id}`",
+        "omits value — required for POST /api/models/oauth/submit",
+        within="1.4",
+    ),
+    # The exit column, resolved. Every other cell of a register row has been
+    # compared against something for twenty rounds; the cell that says where the
+    # state *goes* was read as prose. Both cases are the same sentence with one
+    # letter moved, and the pair is the point: a name that overshoots and a name
+    # that stops short fail differently under any matcher that is not exact.
+    GateCase(
+        "C", "states", "empty",
+        "a named success exit that lands on no state its frame files",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting |",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Startingg |",
+        "exits to 「Startingg」, which opens with no state §1.0 files",
+        within="0.8",
+    ),
+    GateCase(
+        "C", "states", "token",
+        "a success exit truncated to a prefix of the state it means",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting |",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Start |",
+        "exits to 「Start」, which opens with no state §1.0 files",
+        within="0.8",
+    ),
 )
 
 
@@ -1468,6 +1596,11 @@ UNREACHABLE_BY_CLASS: dict[tuple[str, str], str] = {
         "class D defines nothing. It reads the copy universe class B fills, and a "
         "copy key declared twice is reported once, by B — the (B, copy, duplicate) case."
     ),
+    ("D", "malformed"): (
+        "same reason, one rule over: D reads no file and parses no row. A copy row it "
+        "cannot read is B's to report — the (B, copy, malformed) case — and D asks its "
+        "question about whatever B managed to declare."
+    ),
 }
 
 UNREACHABLE_BY_UNIVERSE: dict[tuple[str, str], str] = {
@@ -1477,6 +1610,28 @@ UNREACHABLE_BY_UNIVERSE: dict[tuple[str, str], str] = {
         "test_authority_side_universes_report_a_duplicate_definition."
     )
     for name in ("routes", "schema files", "schema fields", "repo symbols")
+} | {
+    (name, "malformed"): (
+        f"`{name}` is built from the frozen contract files, which this harness must not "
+        "edit, so the mutation this rule needs — a contract row or file the reader "
+        "cannot parse — cannot be written as a spec mutation. Proved directly instead, "
+        "by test_authority_side_universes_report_input_they_cannot_read."
+    )
+    for name in ("routes", "schema files", "repo symbols")
+} | {
+    ("schema fields", "malformed"): (
+        "a schema file that stops parsing is one defect and is reported once, by the "
+        "universe whose family the file is — `schema files`. `schema fields` is filled "
+        "from files that parsed; there is no separate row of it to break. Its owner's "
+        "case covers both."
+    ),
+    ("frames", "malformed"): (
+        "a frame is declared by a §1 heading, not by a table row. A heading either "
+        "matches `#{2,3} <number> ` and declares a frame or does not and declares "
+        "nothing — there is no half-read heading for this rule to be about. What a "
+        "heading can get wrong is its number, which is the (C, frames, empty) and "
+        "(C, frames, token) cases."
+    ),
 }
 
 # The finest grain: one class's use of one universe. Two projections can both be
@@ -1512,6 +1667,25 @@ UNREACHABLE_BY_ARM: dict[tuple[str, str, str], str] = {
         "the universe's owner — C, in the (C, frames, duplicate) case. A resolves "
         "against the same object and would report the second copy of a finding the "
         "reader has already been given."
+    ),
+    ("C", "states", "duplicate"): (
+        "one canonical token declared twice is reported once, by the universe's owner. "
+        "The register's owner is A — a state is declared by a §0.8 row — so the case is "
+        "(A, states, duplicate), reached through the same universe object C resolves "
+        "its exits against."
+    ),
+    ("C", "states", "malformed"): (
+        "same object, same owner: a §0.8 row C cannot read is reported by A, in the "
+        "(A, states, malformed) case. What C does with such a row is resolve exits "
+        "*against* it — the row's identity survives its broken cells precisely so this "
+        "arm keeps working — and reporting here would hand the reader the same broken "
+        "row a second time."
+    ),
+    ("A", "gaps", "malformed"): (
+        "the registry is read once, by `registered_gaps`, and a row it cannot read is "
+        "reported by the universe's owner — E, in the (E, gaps, malformed) case. A "
+        "resolves against the same object; reporting there too would give the reader "
+        "the same broken row twice."
     ),
 }
 
@@ -1792,6 +1966,59 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "the `create` terminal answers with `{flow, source, added_to, adopted_by}`",
         within="0.8",
     ),
+    # The three green halves of class C's newly-resolved exit column. The column
+    # names where a state goes, and for thirty rounds nothing resolved it — so
+    # the first thing to prove about resolving it is what it must *not* claim.
+    # An exit cell is written for a person: it names a state, but it also names
+    # gestures, consequences and alternatives, and a rule that reads every word
+    # after the arrow as a citation buys `Startingg` at the price of reporting
+    # the document's own prose.
+    InnocentCase(
+        "an exit that continues into a lower-case consequence",
+        "class C reads a state name after the arrow, not every word after the arrow",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting |",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting; dismiss → the pill is gone |",
+        within="0.8",
+    ),
+    InnocentCase(
+        "an exit offering two states as alternatives",
+        "class C resolves each side of a slash, rather than the pair as one name",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting |",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting / Impaired |",
+        within="0.8",
+    ),
+    InnocentCase(
+        "an exit landing on a different state of the same frame",
+        "class C resolves an exit against the register, not against one row's neighbours",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Starting |",
+        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
+        "`shell.notStarted` | Run pill → Impaired |",
+        within="0.8",
+    ),
+    # The green halves of the two widened citation readings. A qualified symbol
+    # citation is now resolved rather than believed, and a bare local copy key is
+    # now sent through resolution rather than admitted on sight — both of which
+    # only pay if the correct spelling of each still passes. Otherwise the rule
+    # has bought a misspelling by forbidding the notation the document uses.
+    InnocentCase(
+        "a symbol citation qualified by its own class, spelled right",
+        "class E resolves a qualified name against the file, rather than trusting the dot",
+        "core/handlers/model_hub/service.py:set_agent_mode",
+        "core/handlers/model_hub/service.py:ModelHubService.set_agent_mode",
+        within="0.5",
+    ),
+    InnocentCase(
+        "a bare local copy key, spelled right",
+        "class B resolves a frame-local key against that frame's table, and finds it",
+        "`legend.unavailable` **lost a 暂 to make that true.**",
+        "`legend.unavailable` **lost one 暂 to make that true.**",
+        within="1.7",
+    ),
 )
 
 
@@ -1971,6 +2198,69 @@ def test_authority_side_universes_report_a_duplicate_definition():
     )
 
 
+def test_authority_side_universes_report_input_they_cannot_read(tmp_path):
+    """The fourth rule, on the side no spec mutation can reach.
+
+    Three readers on the authority side had the door the spec side had, and two
+    of them were worse than silent: an `api.md` row whose shape cell is gone
+    dropped a route from the contracted-mutation inventory — so class A stopped
+    asking whether anything reaches it and every spec claim about it reported as
+    uncontracted — while a `.schema.json` or a cited `.py` that stopped parsing
+    ended the whole run in a traceback, which is loud but is not a verdict and
+    takes the other thirteen universes down with it.
+
+    Proved on a fixture checkout rather than by mutating the frozen contract
+    files, and each assertion is two-sided: the reader reports the row it cannot
+    read, *and* the run survives to produce the findings it can.
+    """
+    from scripts.check_model_hub_ui_states import Origin, check, load_authorities
+
+    root = _fixture_checkout(tmp_path)
+    api = root / "docs/plans/model-hub-contracts/api.md"
+    broken_route = "| POST `/api/models/decoy` |\n"
+    api.write_text(api.read_text(encoding="utf-8") + broken_route, encoding="utf-8")
+
+    schema = root / "docs/plans/model-hub-contracts/source.schema.json"
+    schema.write_text('{"type": "object",,}', encoding="utf-8")
+
+    auth = load_authorities(Origin.tree_at(root))
+    said = [text for _where, text in auth["routes"].unreadable]
+    assert any("names a route and carries no shape cell" in t for t in said), said
+    said = [text for _where, text in auth["schema files"].unreadable]
+    assert any("is a schema file this run cannot parse" in t for t in said), said
+
+    # The whole run, not just the loader: a file it cannot read is a finding
+    # among findings, and every other universe still answers.
+    result = check(root)
+    messages = [f["message"] for f in result["findings"]]
+    assert any("carries no shape cell" in m for m in messages), messages[:10]
+    assert any("cannot parse" in m for m in messages), messages[:10]
+    assert result["input_scale"]["register rows"] > 50, "the run stopped instead of reporting"
+
+
+def test_the_gate_reads_no_file_outside_the_checkout_it_was_given(tmp_path):
+    """Reviewer's finding, round 3 of #1276: a citation is not a path grant.
+
+    Every tree read goes through `Origin`, which exists so a run against an
+    authority checkout cannot answer out of the working tree. A citation still
+    names its own path, and `../` in one reached back out — so a document could
+    quote a file the selected checkout does not contain and be told it agrees
+    with it. Containment is asserted where the read happens, and the refusal is
+    a report rather than an exception: what the citation names is not readable
+    *here*, which is exactly the sentence a wrong checkout should produce.
+    """
+    from scripts.check_model_hub_ui_states import Origin
+
+    root = _fixture_checkout(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("def escaped():\n    return 1\n", encoding="utf-8")
+
+    here = Origin.tree_at(root)
+    assert here.read("core/handlers/model_hub/service.py") is not None
+    for escape in ("../outside.py", "../../outside.py", str(outside)):
+        assert here.read(escape) is None, escape
+
+
 def test_a_citation_resolves_to_everything_answering_to_it():
     """Reviewer's finding, round 2 of #1276, proved on the comparator itself.
 
@@ -2101,9 +2391,17 @@ _SCOPE_NOTE_ANCHOR = "| `POST /api/models/migration/scan` |"
 _GAP_REGISTRY_ANCHOR = "| G-12 |"
 
 SCOPE_TRAPS: tuple[ScopeTrap, ...] = (
+    # The decoy carries its own header, the way the treatments and copy decoys
+    # below do. §0.8 holds two tables, and a reader that reports rows it cannot
+    # read has to be sure a row is its own — so the register is bounded by its
+    # own `| Frame | State |` header, and a loose six-cell row in §0.8 is no
+    # longer a register row. Handing this arm a headerless row would test the
+    # bound rather than the range.
     ScopeTrap(
         "register", "collect", "a state row",
         ("", ""),
+        "| Frame | State | Entry | Failure | Copy | Exit |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
         "| §1.0 | Decoy state | 无 | F1 | `shell.title` | — |",
         "「Decoy state」 has no exit",
     ),

@@ -174,7 +174,22 @@ class Origin:
     def _read(self, rel: str) -> str | None:
         if self.kind == "tree":
             assert self.tree is not None
+            # `self.tree / rel` with `rel` coming out of the document under
+            # review: the spec chose which bytes the gate validates it against.
+            # `../outside.py:list_agents` read a file that is not in the
+            # checkout at all, and the answer — five citations, no gaps — was a
+            # statement about a repository nobody selected. The `git show` half
+            # never had the hole, because a rev has no way to name a path
+            # outside its own tree; the filesystem half is the one that needed
+            # telling. One origin means one origin, including when the sentence
+            # being checked is the thing proposing otherwise.
             path = self.tree / rel
+            try:
+                inside = path.resolve().is_relative_to(self.tree.resolve())
+            except OSError:
+                return None
+            if not inside:
+                return None
             return path.read_text(encoding="utf-8") if path.is_file() else None
         # `cwd=ROOT` is the object store the revision is named in, not an input:
         # a rev is only meaningful inside a repository, and this is the one whose
@@ -326,13 +341,34 @@ def normalize_route(method: str, path: str) -> str:
 #   duplicate  one canonical token defined twice with different content is a
 #              finding: two answers to one question, and no way for a reader to
 #              know which one ships.
+#   malformed  a row this universe's own reader recognises as its family and
+#              cannot read is a finding, reported against the row. The other
+#              three rules judge what got in; this one judges the door.
 #
 # The rules are properties of the comparison, so they arrive with it. A class
 # added later cannot opt out of `duplicate` by forgetting to write it, and
 # cannot weaken `token` for its own convenience, because it has no comparison of
 # its own to weaken.
+#
+# `malformed` is the fourth because three review heads in a row found the same
+# thing, six sites at a time: a pattern that both *finds* an input and *validates*
+# it answers a shape it does not know by producing nothing, so a row the document
+# plainly wrote is dropped before any rule can be applied to it — and dropping it
+# from the reading drops it from the gate without dropping it from the table. Two
+# outcomes follow, and both were live here. Where the dropped row is a definition
+# something cites, the citations report `empty` and the finding names eleven
+# innocent rows instead of the one broken one. Where the row still registers with
+# a truncated field — §0.5's did — nothing reports at all.
+#
+# Widening the six patterns was the previous head's answer and is why there was a
+# next round: it fixes the sites a reviewer read. Stating the rule here puts the
+# question 「what does this reader do with its own family, malformed?」 on the
+# grid, where a cell with neither a case nor a written reason fails the suite.
+# The answer may legitimately be 「the shape cannot be wrong」 — a universe read
+# out of an AST or a JSON schema has no rows to break — and that is what the
+# exemptions say. What it may no longer be is unasked.
 
-RULES = ("token", "empty", "duplicate")
+RULES = ("token", "empty", "duplicate", "malformed")
 SIDES = ("spec", "authority")
 
 
@@ -421,6 +457,17 @@ class Universe:
         self._where: dict[str, Any] = {}
         self._alias: dict[str, set[str]] = {}
         self.duplicates: list[tuple[str, Any, Any]] = []
+        self.unreadable: list[tuple[Any, str]] = []
+
+    def malformed(self, where: Any, said: str) -> None:
+        """This universe's reader met a row of its own family and could not read it.
+
+        Recorded here rather than reported at the call site so that the finding
+        carries the universe's own class without every reader having to know
+        which class that is — the same reason `duplicates` lives here. The
+        reader's job is to notice; attribution is the universe's.
+        """
+        self.unreadable.append((where, said))
 
     def define(
         self,
@@ -550,7 +597,13 @@ def names_spoken(text: str, names: set[str]) -> set[str]:
 CLASS_UNIVERSES: dict[str, tuple[str, ...]] = {
     "A": ("routes", "states", "treatments", "frames", "gaps"),
     "B": ("copy", "slots"),
-    "C": ("frames",),
+    # C reads `states` for the same reason A reads `frames`, from the other end:
+    # an exit cell names where the state goes, and a named landing is a citation
+    # of the register — the universe A owns. Declared here rather than left off
+    # because a class that resolves against a universe it does not declare gets
+    # no cells in the tiled suite, which is the arrangement that let the exit
+    # column go unresolved for thirty rounds.
+    "C": ("frames", "states"),
     "D": ("copy",),
     "E": ("routes", "schema files", "schema fields", "repo symbols", "gaps"),
 }
@@ -602,6 +655,12 @@ KEY_REF_RE = re.compile(r"`([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_*]+)+)`")
 _KEY_REF = KEY_REF_RE.pattern.replace("(", "(?:", 1)
 KEY_LIST_RE = re.compile(rf"{_KEY_REF}(?:\s*(?:[,、]|and)\s*{_KEY_REF}){{2,}}")
 KEY_DEF_RE = re.compile(r"^\|\s*`([a-z][A-Za-z0-9._*]*)`([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
+# The same row shape with the cell count taken out: what a copy row *claims to
+# be*, so that a row claiming it and failing it can be told from a row that was
+# never a copy definition. `KEY_DEF_RE` cannot answer this question, because
+# being unable to answer it is the whole of what it means for that pattern not
+# to match.
+KEY_ROW_OPEN_RE = re.compile(r"^\|\s*`([a-z][A-Za-z0-9._*]*)`[^|]*\|")
 SLOT_RE = re.compile(r"\{\{(\w+)\}\}")
 # Two or more slots joined by the segment separator — a rendered line quoted
 # whole. `·` is the one character this document uses to join the parts of a
@@ -614,6 +673,21 @@ SHAPE_RE = re.compile(r"\{\{\w+\}\}(?:[^|`\n]*?·[^|`\n]*?\{\{\w+\}\})+")
 LIST_COMMA_RE = re.compile(r"[,、]")
 TREAT_RE = re.compile(r"\bF([1-5])\b")
 GOTO_RE = re.compile(r"→\s*([^,;.]+)")
+# What an exit cell says after an arrow, up to the next arrow or the end of the
+# cell. Not a destination — a segment, handed whole to a lookup, because this
+# document's exit cells are sentences and the destination inside one cannot be
+# carved out by a pattern without getting it wrong on the rows that are right.
+ARROW_SEGMENT_RE = re.compile(r"→([^→]*)")
+# 「A or B」, 「A / B」 — one segment naming two landings.
+ALTERNATIVE_RE = re.compile(r"\s+or\s+|\s*/\s*")
+PHRASE_END_RE = re.compile(r"[,.:;—]")
+
+
+def phrase(text: str) -> tuple[str, str]:
+    """The opening phrase of `text`, and the punctuation that ended it."""
+    body = text.strip().strip("*").strip()
+    m = PHRASE_END_RE.search(body)
+    return (body[: m.start()].strip() if m else body).strip("*").strip(), (m.group(0) if m else "")
 
 # A key whose name declares a condition. Deliberately narrow: every member is a
 # word the document uses to mean "something is wrong, missing, or pending", and
@@ -680,7 +754,13 @@ GUARD_ENVELOPE_RE = re.compile(r"every guarded [^\n]*envelope", re.I)
 SCHEMA_FILE = r"[A-Za-z0-9][A-Za-z0-9._-]*\.schema\.json"
 SCHEMA_CITE_RE = re.compile(rf"`({SCHEMA_FILE})`")
 DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
-PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([A-Za-z_][A-Za-z0-9_]*))?`")
+# The symbol half accepts a dotted name because `defined_symbols` produces one:
+# a method is registered as `ConfigStore.load` with `load` as its alias, and a
+# citation that spells the qualified name — the precise form, the one that
+# resolves where the bare name is ambiguous — matched nothing and was read as a
+# bare file citation with no symbol at all. The document's most careful way of
+# pointing at a method was the one form the reader skipped.
+PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([A-Za-z_][A-Za-z0-9_.]*))?`")
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
 COUNT_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -807,33 +887,57 @@ def json_keys(text: str) -> set[str]:
     return found
 
 
-def literal_keys(text: str) -> set[str]:
-    """The key names a `{...}` literal declares, types and values discarded."""
-    keys: set[str] = set()
+def literal_members(text: str) -> dict[str, bool]:
+    """The key names a `{...}` literal declares, each to whether it is required.
+
+    The name test is deliberately wider than any name the contract actually has.
+    It used to be `[a-z_][A-Za-z0-9_]*` — the shape of a *correct* key — which
+    made it an admissibility test as well as an extractor, so `{order-id: ...}`
+    declared no key at all and the body passed for naming nothing. The judge
+    downstream is `keys - allowed`: it reports every key the contract does not
+    have, and `order-id` is exactly such a key. Handing it a wrong name is how
+    the wrong name gets reported; withholding it is how the wrong name ships.
+
+    The trailing `?` is the contract's own optionality marker, and it was
+    stripped and discarded — which made every member look alike and left the
+    downstream comparison one-sided: a body may name nothing the route lacks and
+    still omit something the route demands. Kept here, so the direction the
+    comparison was missing has something to compare against.
+    """
+    members: dict[str, bool] = {}
     for block in JSONISH_RE.findall(text):
         for part in block.strip("{}").split(","):
-            name = part.split(":")[0].strip().strip('"').rstrip("?").strip()
-            if re.fullmatch(r"[a-z_][A-Za-z0-9_]*", name):
-                keys.add(name)
-    return keys
+            declared = part.split(":")[0].strip().strip('"').strip()
+            name = declared.rstrip("?").strip()
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name):
+                members[name] = members.get(name, True) and not declared.endswith("?")
+    return members
 
 
-def spelled_shapes(api_text: str) -> dict[str, dict[str, set[str]]]:
+def literal_keys(text: str) -> set[str]:
+    """Just the names, for every reader that does not care which are required."""
+    return set(literal_members(text))
+
+
+def spelled_shapes(api_text: str) -> dict[str, dict[str, dict[str, bool]]]:
     """Every shape this file names in a cell and spells in a section, by heading.
 
     A route row can spell only what fits in a cell; what does not fit is named
     there — "→ OAuth result" — and written out below. The writing-out is also
     where a shape that has more than one reading says which reading carries
     what, so each section is returned as its readings: the selecting value to
-    that reading's keys, plus `""` for the section's whole vocabulary.
+    that reading's members, plus `""` for the section's whole vocabulary.
     """
-    shapes: dict[str, dict[str, set[str]]] = {}
+    shapes: dict[str, dict[str, dict[str, bool]]] = {}
     for block in re.split(r"^## ", api_text, flags=re.M)[1:]:
         heading, _, body = block.partition("\n")
-        readings: dict[str, set[str]] = {"": literal_keys(body)}
+        readings: dict[str, dict[str, bool]] = {"": literal_members(body)}
         for selector, literal in SHAPE_VARIANT_RE.findall(body):
             for name in VARIANT_NAME_RE.findall(selector):
-                readings[name] = readings.get(name, set()) | literal_keys(literal)
+                merged = dict(readings.get(name, {}))
+                for member, req in literal_members(literal).items():
+                    merged[member] = merged.get(member, True) and req
+                readings[name] = merged
         shapes[heading.strip()] = readings
     return shapes
 
@@ -980,14 +1084,25 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
     if api_text is None:
         raise SystemExit(f"{origin.label} holds no {API_CONTRACT}")
     routes = Universe("routes", "authority", "E")
-    for line in api_text.split("\n"):
+    for n, line in enumerate(api_text.split("\n"), 1):
         if not line.startswith("| "):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
-        if len(cells) < 2:
-            continue
         m = API_ROW_RE.match(cells[0])
         if not m:
+            continue
+        # The authority side has the same door the spec side has, and it was
+        # standing just as open: a row whose first cell *is* a route and whose
+        # shape cell is gone left the route undefined, which does not read as
+        # "unchecked". It shrinks the contracted-mutation inventory, so class A
+        # stops asking whether anything reaches that route, and every spec claim
+        # about it reports as uncontracted — eleven innocent findings and the
+        # broken row in none of them, the same shape §0.8's register had.
+        if len(cells) < 2:
+            routes.malformed(
+                f"{API_CONTRACT}:{n}",
+                f"{API_CONTRACT} row {cells[0]} names a route and carries no shape cell",
+            )
             continue
         # `request → response` in one cell, and only the left side is what a
         # client may send. Reading the whole cell let a response field stand in
@@ -1000,7 +1115,9 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
             normalize_route(m.group(1), m.group(2)),
             {
                 "keys": literal_keys(request),
+                "required": literal_members(request),
                 "response_keys": literal_keys(response),
+                "response_required": literal_members(response),
                 "response_readings": {},
                 "named_answer": "",
                 "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
@@ -1049,7 +1166,8 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
         ]
         if len(named) == 1:
             row["named_answer"], readings = named[0]
-            row["response_keys"] = readings[""]
+            row["response_keys"] = set(readings[""])
+            row["response_required"] = readings[""]
             row["response_readings"] = {k: v for k, v in readings.items() if k}
 
     schemas: dict[str, set[str]] = {}
@@ -1069,7 +1187,20 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
         if raw is None:  # pragma: no cover - the origin just listed it
             continue
         path = Path(name_json)
-        doc = json.loads(raw)
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError as broken:
+            # A schema file that stops parsing used to end the run in a
+            # traceback — loud, but not a verdict, and it takes the other
+            # thirteen universes down with it. Reported instead, by the
+            # universe whose family the file is, so the run still produces the
+            # findings it can and names the one thing it could not read.
+            files.malformed(
+                str(CONTRACTS / name_json),
+                f"`{path.name}` is a schema file this run cannot parse "
+                f"({broken.msg} at line {broken.lineno})",
+            )
+            continue
         schemas[path.name] = schema_vocabulary(doc)
         paths[path.name] = property_tails(doc)
         properties[path.name] = set(doc.get("properties", {}))
@@ -1306,11 +1437,42 @@ class Document:
 def parse(doc: Document) -> dict[str, Any]:
     # --- §0.8 register -------------------------------------------------------
     register: list[dict[str, Any]] = []
+    broken_rows: list[dict[str, Any]] = []
+    # Bounded by its own header, the way the copy reader is bounded by its own.
+    # §0.8 also holds the five-treatment table, and "any `|` row in this scope"
+    # took that in too — harmless while a wrong cell count was silently dropped,
+    # and six false findings the moment a wrong cell count became a finding. A
+    # reader that reports what it cannot read has to be sure the row was its own.
+    in_register = False
     for n, line in doc.scope("register"):
-        if not line.startswith("| "):
+        if line.startswith("| Frame | State |"):
+            in_register = True
+            continue
+        if in_register and not line.startswith("|"):
+            in_register = False
+        if not in_register or not line.startswith("| "):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
-        if len(cells) != 6 or cells[0] in ("Frame", "---") or cells[1] == "---":
+        if cells[0] in ("Frame", "---") or (len(cells) > 1 and cells[1] == "---"):
+            continue
+        if len(cells) != 6:
+            # The row count is this document's largest single input, and a row
+            # that loses a cell used to leave the register silently one shorter.
+            # Nothing downstream could notice: the state it declared simply was
+            # never declared, so no citation of it was wrong and no exit of it
+            # was missing. Six is what §0.8's header promises, so a row of five
+            # is not a row this reader may decline to read — it is a row whose
+            # author dropped a cell, and the only place that can be said is here.
+            broken_rows.append(
+                {
+                    "line": n,
+                    "frame": cells[0],
+                    "state": cells[1] if len(cells) > 1 else "",
+                    "text": line,
+                    "said": f"§0.8 row {cells[0]} · {cells[1] if len(cells) > 1 else ''} "
+                            f"has {len(cells)} cells where the register's header declares 6",
+                }
+            )
             continue
         register.append(
             {
@@ -1329,6 +1491,30 @@ def parse(doc: Document) -> dict[str, Any]:
     # different state in every frame that has one, and a universe keyed by the
     # bare name would call fifteen unrelated rows one contradictory definition.
     states = Universe("states", "spec", "A")
+    for broken in broken_rows:
+        states.malformed(broken["line"], broken["said"])
+        # The row still names a frame and a state — the two leading columns,
+        # which are there whichever later cell went missing — and withholding
+        # that name is what turned one broken row into four findings: every
+        # other row exiting to it reported for exiting nowhere. Only the
+        # identity is registered. Which of entry / failure / copy / exit was
+        # lost is exactly what a wrong cell count makes unknowable, so the
+        # payload says `None` rather than guessing a column alignment, and the
+        # arms that iterate the register never see this row at all.
+        if not broken["state"]:
+            continue
+        frame = broken["frame"].lstrip("§")
+        states.define(
+            f"{frame} · {broken['state']}",
+            {"line": broken["line"], "frame": frame, "state": broken["state"], "broken": True},
+            content=broken["text"],
+            where=broken["line"],
+            aliases=tuple(
+                spelling
+                for name in state_spellings(broken["state"])
+                for spelling in (name, f"{frame} · {name}")
+            ),
+        )
     for r in register:
         frame = r["frame"].lstrip("§")
         states.define(
@@ -1358,8 +1544,28 @@ def parse(doc: Document) -> dict[str, Any]:
         if not in_treat:
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) == 3 and re.fullmatch(r"F\d+", cells[0]):
-            treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=n)
+        if not re.fullmatch(r"F\d+", cells[0]):
+            continue
+        if len(cells) != 3:
+            # Not silent before this, but blamed on the wrong lines: dropping F2
+            # left eleven register rows reported for naming a treatment 「§0.8's
+            # closed set does not define」, and the one row that was actually
+            # wrong appeared in none of them. A reader that can see the break
+            # says so where the break is.
+            treatments.malformed(
+                n, f"§0.8 treatment row {cells[0]} has {len(cells)} cells where the table declares 3"
+            )
+            # Saying so is only half of it. A row this reader cannot read still
+            # names its own treatment — `F5` is in the cell the regex just
+            # matched — and dropping the name too is what pushed the blame
+            # outward: the malformed row reported once and forty-three register
+            # rows reported for citing a treatment 「§0.8's closed set does not
+            # define」. Registering the name keeps those citations resolvable;
+            # the malformed line is the statement that the rest is unknown.
+            padded = (cells + ["", ""])[1:3]
+            treatments.define(cells[0], padded[0], content=tuple(padded), where=n)
+            continue
+        treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=n)
 
     frames = Universe("frames", "spec", "C")
     for name, line_no, heading in doc.sections("1."):
@@ -1382,6 +1588,23 @@ def parse(doc: Document) -> dict[str, Any]:
     for n, line in doc.scope("slots"):
         if line.startswith("| `{{"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) != 4:
+                # A slot row is a slot, its meaning, its presence rule and its
+                # consumers. Losing the last cell made the row declare 「no key
+                # interpolates me」, which is not a shape this reader can tell
+                # apart from a slot that genuinely has no consumers — so the
+                # consumer comparison fired on the keys instead, and named the
+                # two keys that were right.
+                slots.malformed(
+                    n, f"§0.9 slot row {cells[0]} has {len(cells)} cells where the table declares 4"
+                )
+                # Same reason as §0.8's treatments: the row still names its
+                # slot, and a slot left unnamed is reported again at every key
+                # that interpolates it.
+                for slot in SLOT_RE.findall(cells[0]):
+                    padded = tuple((cells + [None, None, None])[1:4])
+                    slots.define(slot, {"line": n, "cells": padded}, content=padded, where=n)
+                continue
             for slot in SLOT_RE.findall(cells[0]):
                 slots.define(
                     slot,
@@ -1403,6 +1626,7 @@ def parse(doc: Document) -> dict[str, Any]:
     ns = ""
     pending_ns = ""
     in_table = False
+    broken_copy: list[tuple[int, str]] = []
     for n, line in doc.scope("copy"):
         if line.startswith("**Copy**"):
             m = re.search(r"`models\.hub\.([a-zA-Z]+)\.\*`", line)
@@ -1424,6 +1648,34 @@ def parse(doc: Document) -> dict[str, Any]:
             continue
         m = KEY_DEF_RE.match(line)
         if not m:
+            # `KEY_DEF_RE` is a key *and* three cells, so a row that opens with a
+            # key and carries two answered exactly like a row that is not a key
+            # definition at all — and the copy table is where 「the English is
+            # missing」 is supposed to be reported. Class B's whole first rule
+            # was unreachable for the one row shape that breaks it.
+            #
+            # Which rows are the family: a table row whose first cell is a
+            # backticked token. Everything else inside a copy table — the
+            # divider, a note, a continuation — is not claiming to define a key.
+            opener = KEY_ROW_OPEN_RE.match(line)
+            if opener:
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                broken_copy.append(
+                    (n, f"copy row `{opener.group(1)}` has {len(cells)} cells where a copy "
+                        f"table declares 3 (key, 中文, English)")
+                )
+                # The key is the one cell a broken row still has, and it is
+                # collected like any other so citations of it resolve and its
+                # plural sibling can still see it — dropping `pill_one`'s
+                # English cell otherwise reported `takeover.pill` for 「declares
+                # no `_one` row」, on the sibling's line. `None`, not `""`: the
+                # texts were not read, which is a different claim from a row
+                # whose English cell is empty, and every rule that reads a text
+                # declines on `None` rather than judging one nobody read.
+                collected.append(
+                    {"key": opener.group(1), "zh": None, "en": None, "line": n, "ns": ns,
+                     "qualified": f"{ns}.{opener.group(1)}" if ns else opener.group(1)}
+                )
             continue
         key, zh, en = m.group(1), m.group(3).strip(), m.group(4).strip()
         rows += 1
@@ -1442,6 +1694,8 @@ def parse(doc: Document) -> dict[str, Any]:
     # exception; assembling first means the duplicate rule needs no exception and
     # still catches the case it exists for, two rows giving one key two texts.
     copy = Universe("copy", "spec", "B")
+    for n, said in broken_copy:
+        copy.malformed(n, said)
     families: dict[str, list[dict[str, Any]]] = {}
     for row in collected:
         stem = re.sub(r"_(?:one|other)$", "", row["qualified"])
@@ -1469,7 +1723,7 @@ def parse(doc: Document) -> dict[str, Any]:
             copy.define(
                 canonical,
                 sorted(group, key=lambda r: r["line"]),
-                content=sorted((r["zh"], r["en"]) for r in group),
+                content=sorted((r["zh"] or "", r["en"] or "") for r in group),
                 where=min(r["line"] for r in group),
                 aliases=tuple(sorted(aliases)),
             )
@@ -1483,6 +1737,19 @@ def parse(doc: Document) -> dict[str, Any]:
     # keeps such a citation from going stale unnoticed.
 
     # --- prose key references + routes, per section --------------------------
+    # The heads each section defines keys under, in its own copy table — the
+    # vocabulary a frame's prose may cite bare.
+    #
+    # Only a *dotted* key contributes a head. A leaf key is its own whole name,
+    # not a namespace anything hangs under, and treating it as one turns every
+    # sentence that dots it into a copy citation: §1.6 defines a key literally
+    # named `empty` and its prose says the nested spelling `empty.neverFetched`
+    # 「does not exist」, which is the document being explicit, not stale.
+    local_heads: dict[str, set[str]] = {}
+    for row in collected:
+        if "." in row["key"]:
+            local_heads.setdefault(doc.section_of(row["line"]), set()).add(row["key"].split(".")[0])
+
     refs: list[tuple[str, int, str]] = []
     routes: list[tuple[str, int, str]] = []
     inventories: set[str] = set()
@@ -1530,6 +1797,23 @@ def parse(doc: Document) -> dict[str, Any]:
             tail = k.split(".", 1)[1] if "." in k else ""
             if any(not copy.resolve(f"{cand}.{tail}").empty for cand in namespaces):
                 refs.append((sec, n, k))
+                continue
+            # Both clauses above admit on the strength of something *resolving*,
+            # which is the ε shape: a citation that is wrong in the one way the
+            # gate exists to catch — the key does not exist — resolves under no
+            # reading and is therefore admitted by neither, so `fail.titl` in a
+            # frame that defines `fail.title` reached no arm at all. What says
+            # this is a copy citation is not that it resolves; it is that the
+            # frame writing it defines keys under that head, in its own table,
+            # eighty lines further down. So the head is asked of the section's
+            # own vocabulary, and a citation the section is plainly making goes
+            # to the universe whether or not it is spelt right.
+            #
+            # Scoped to the section, not to the document, because that is what
+            # keeps the contract field paths out: §1.0 backticks `status.health`
+            # in prose, and `status` is a head no copy table in §1.0 declares.
+            if head in local_heads.get(sec, frozenset()):
+                refs.append((sec, n, k))
         for meth, path in ROUTE_RE.findall(line):
             # Normalized on the way in, because class A compares this against a
             # register side that is normalized too, and two sides normalized by
@@ -1542,6 +1826,7 @@ def parse(doc: Document) -> dict[str, Any]:
     # and neither could see the other's copy.
     return {
         "register": register,
+        "broken register rows": broken_rows,
         "universes": {u.name: u for u in (copy, slots, states, treatments, frames, registered_gaps(doc))},
         "tables": tables,
         "rows": rows,
@@ -1774,7 +2059,13 @@ def dispersal(cell: str, own: str) -> list[tuple[str, str]] | None:
 # fail in opposite directions and only one of them fails loudly. See
 # `registered_gaps`.
 GAP_END = r"(?=$|[\s,;:*'\"`)\]}，、。；:）」』】]|\.(?!\w))"
-GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-\d+)" + GAP_END)
+# The number is read as far as the token runs, not as far as it parses. `G-\d+`
+# followed by an end test made `G-10x` match nothing at all, so a marker with a
+# typo in it excused nothing and was reported as nothing: the sentence carrying
+# it kept whatever `[contract-gap]` buys and no arm ever asked which row it
+# named. Reading the whole token hands `G-10x` to the registry, which answers
+# `empty`, which is the finding.
+GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-[A-Za-z0-9-]+)" + GAP_END)
 GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 # Strikethrough is how this document retracts text it keeps for the record, and
 # a register that keeps withdrawn rows has to say which ones they are in a way a
@@ -1934,6 +2225,32 @@ def registered_gaps(doc: Document) -> Universe:
     for n, line in registry:
         if m := GAP_ROW_RE.match(line):
             cells = line.split("|")
+            if len(cells) != 6:
+                # This one was fully silent. A §0.5 row that loses a cell still
+                # matched the row pattern and still registered its number, so
+                # every citation of it resolved — while `cells[2:4]` quietly
+                # took a slice of a shorter row and the 「what is missing」
+                # column, which is the whole content of a gap registration and
+                # what every exemption is measured against, went missing itself.
+                # A gap that excuses on the strength of an unread cell is worse
+                # than no gap at all.
+                #
+                # The one reader that does *not* also register its row's name.
+                # §0.8's register, §0.8's treatments, §0.9's slots and the copy
+                # tables all keep the identity of a row they cannot read, so the
+                # loss reports once instead of at every line that cites it. A
+                # §0.5 row is not that kind of name: it is a silencer, and
+                # keeping its number alive would let the marker excuse claims on
+                # the strength of the cell that went missing. Here the citations
+                # reporting is the *point* — every one of them is a claim now
+                # checked as though the marker were not there, which is the
+                # direction to fail in when what was lost is the excuse itself.
+                gaps.malformed(
+                    n,
+                    f"§0.5 row {m.group(1)} has {len(cells) - 2} cells where the registry "
+                    f"declares 4",
+                )
+                continue
             claim = "".join(cells[2:4])
             standing = STRUCK_RE.sub(" ", declared.get(n, ""))
             gaps.define(
@@ -2161,10 +2478,12 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             # server rejects.
             answer = bool(ANSWER_CUE_RE.search(scope[: m_body.start()])) or bound.startswith("GET ")
             allowed: set[str] = set()
+            demanded: dict[str, bool] = {}
             hit = auth["routes"].resolve(bound)
             if not hit.empty:
                 row = hit.one
                 allowed |= row["response_keys"] if answer else row["keys"]
+                demanded = row["response_required"] if answer else row["required"]
                 # A shape with more than one reading is not a vocabulary to pick
                 # from. `added_to` is contracted for the create terminal and
                 # contracted *away* from the reauth one — that partition is the
@@ -2181,6 +2500,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 ]
                 if answer and len(reading) == 1:
                     allowed = set(row["response_readings"][reading[0]])
+                    demanded = row["response_readings"][reading[0]]
                 # The shared envelopes are *answers*: a refusal body, a
                 # confirmation body. A guarded route's request side needs
                 # nothing from them — `api.md` spells the one field a client
@@ -2202,6 +2522,34 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 add(
                     f"L{line_no}",
                     f"`{literal}` names {', '.join(stray)} — not contracted for {bound}",
+                )
+            # The other direction, which this arm did not have: `keys - allowed`
+            # asks only whether the body names something the route lacks, so any
+            # subset passed, the empty-of-required subset included. A spec that
+            # posts `{flow_id}` where the contract demands `{flow_id, value}` is
+            # a request the server rejects, written down as though it were the
+            # request.
+            #
+            # Required-ness comes from the contract's own `?`, which every
+            # reader had been stripping, so "which members may be left out" was
+            # not a fact the checker held at all. Measured before the rule was
+            # narrowed: fifteen bodies in this document bind to a route with a
+            # required member, and all fifteen spell every one of them. There
+            # was no partial-body case to carve an exception for, and carving
+            # one anyway — 「only bodies naming two or more members」 was the
+            # first draft — would have excused the reviewer's own example,
+            # `{flow_id}` for `{flow_id, value}`, which names one.
+            #
+            # A registered gap is not excused here, and that matches what the
+            # stray branch actually forgives: a field *nothing* contracts. A
+            # field this route demands is contracted, so a gap row omitting it
+            # is not describing missing behaviour — it is misdescribing the
+            # behaviour that exists.
+            missing = sorted(k for k, required in demanded.items() if required and k not in keys)
+            if missing:
+                add(
+                    f"L{line_no}",
+                    f"`{literal}` omits {', '.join(missing)} — required for {bound}",
                 )
 
         # A 409 claim is about one route, so the excuse for it has to be about
@@ -2340,7 +2688,22 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 continue
             if rel not in read_files:
                 read_files.add(rel)
-                for qualified, bare, line in defined_symbols(source):
+                try:
+                    defined = defined_symbols(source)
+                except SyntaxError as broken:
+                    # Same door again, on the last reader that had it open: a
+                    # cited file this Python cannot parse ended the run in a
+                    # traceback. Every symbol it defines then resolves to
+                    # nothing, so the alternative to reporting the file is
+                    # reporting each of its citations for naming a symbol that
+                    # is in fact right there.
+                    symbols.malformed(
+                        f"L{line_no}",
+                        f"`{rel}` is cited as Python and does not parse "
+                        f"({broken.msg} at line {broken.lineno})",
+                    )
+                    continue
+                for qualified, bare, line in defined:
                     symbols.define(
                         f"{rel}:{qualified}",
                         rel,
@@ -2736,7 +3099,14 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             cited.add((k, f"§0.8 L{r['line']}"))
     for key, where in sorted(cited):
         hit = copy_u.resolve(key)
-        if hit.empty:
+        # A citation naming a family without writing the `*` is still naming
+        # something the document defines: §1.5 writes `inventory.reason` where
+        # the table declares `inventory.reason.transport` / `.rateLimited` /
+        # `.unknown`. Asked here, in the judge, rather than by dropping the
+        # citation upstream — the extractor's job is to hand every copy citation
+        # to the universe, and a citation excused before it arrives is exactly
+        # the silence this round exists to remove.
+        if hit.empty and copy_u.resolve(f"{key}.*").empty:
             add("B", where, f"key `{key}` is cited and never defined")
         elif hit.ambiguous:
             add(
@@ -2766,6 +3136,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 f"`_{missing[0]}` row, so that cardinality renders nothing",
             )
         for row in rows_:
+            if row["zh"] is None:
+                continue  # unread, and said so once already on its own line
             if not row["en"]:
                 add("B", f"L{row['line']}", f"key `{row['key']}` has no English column")
             for slot in sorted(set(SLOT_RE.findall(row["zh"] + row["en"]))):
@@ -2797,7 +3169,14 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # whose meaning nobody checked against the row it borrowed.
     for slot, row in slot_u.items():
         cells = row["cells"]
-        declared = set(KEY_REF_RE.findall(cells[2])) if len(cells) > 2 else set()
+        if len(cells) < 3 or cells[2] is None:
+            # The consumer cell is the one a malformed row lost, and its loss is
+            # reported once, on that row. Comparing keys against a cell nobody
+            # read is how one broken row becomes a finding per key that borrows
+            # the slot — `None` here means unread, which is not the same claim
+            # as an empty cell's 「no key interpolates me」.
+            continue
+        declared = set(KEY_REF_RE.findall(cells[2]))
         actual = interpolate.get(slot, set())
         slot_consumers += len(declared)
         for key in sorted(declared - actual):
@@ -2918,7 +3297,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     shapes: set[tuple[str, ...]] = set()
     for _key, rows in copy_u.items():
         for row in rows:
-            for cell in (row["zh"], row["en"]):
+            for cell in (row["zh"] or "", row["en"] or ""):
                 seq = tuple(SLOT_RE.findall(cell))
                 if len(seq) > 1:
                     shapes.add(seq)
@@ -3045,6 +3424,49 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     for r in reg:
         if not r["exit"] or r["exit"] == "—":
             add("C", f"L{r['line']}", f"「{r['state']}」 has no exit")
+            continue
+        # And that the exit go somewhere. Class A resolves the destination of a
+        # *failure* cell and has since the round that found 「F1 → Vanished
+        # forever」; the success cell one column over was read for whether it was
+        # empty and never for what it said, so 「first source → Vanished
+        # forever」 was a complete exit. Same universe, same frame-qualified
+        # identity, same two refusals — a cell may hand off to another frame, and
+        # what follows an arrow in lower case is the sentence carrying on, not a
+        # state name.
+        #
+        # Bounded by what this column actually is. An exit cell is prose — 「→ 06;
+        # 来源顺序」, 「→ back here」, 「→ the row is gone」 — and a rule that
+        # demands a state name from every segment reports sixty-nine of seventy
+        # live rows. What the document does do consistently is write a state name
+        # at the *head* of the segment when it names one at all: 「→ Ready while
+        # any row is left」, 「→ Not installed or Unsupported host by the
+        # manifest」, 「→ Saving again」. So the citation is the opening phrase of
+        # a capitalised segment, the rest is the sentence qualifying it, and
+        # 「→ Vanished forever」 is a segment that opens like a state name and
+        # opens with none.
+        frame = r["frame"].lstrip("§")
+        known = [s.split(" · ", 1)[1] for s in state_u.tokens() if s.startswith(f"{frame} · ")]
+        for segment in ARROW_SEGMENT_RE.findall(r["exit"]):
+            for branch in ALTERNATIVE_RE.split(segment.split(";")[0]):
+                said, stop = phrase(branch)
+                if not said or not said[0].isupper() or "§" in said or stop == ":":
+                    # A colon is this document introducing an explanation of the
+                    # transition — 「Second pass: the dialog re-reads the sources」
+                    # — not naming where it goes. Nothing it files as a state is
+                    # ever written with one.
+                    continue
+                # Either spelling of the same landing: the cell may qualify the
+                # state's name (「Ready while any row is left」) or shorten it
+                # (「Dirty」 for 「Dirty (uncommitted moves)」). Both are the
+                # name plus or minus what the row says about the occasion; a
+                # landing this frame does not file is neither.
+                if any(said.startswith(f"{n} ") or said == n or n.startswith(f"{said} ") for n in known):
+                    continue
+                add(
+                    "C",
+                    f"L{r['line']}",
+                    f"「{r['state']}」 exits to 「{said}」, which opens with no state §{frame} files",
+                )
 
     # Arm N — the exit cell against the frame's own enumeration of the payload.
     #
@@ -3308,7 +3730,16 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             )
 
     # ---- D ------------------------------------------------------------------
-    reg_cited = cited_rows({t for r in reg for t in KEY_REF_RE.findall(r["copy"])}, copy_u)
+    # A row whose columns could not be read can still be read as text, and its
+    # keys are cited by §0.8 wherever in the row they sit. Class D asks 「does
+    # any register row name this key」 — a question the text answers without the
+    # column alignment the broken row lost. Withholding it reports the key's own
+    # line, which is not where the mistake is.
+    reg_cited = cited_rows(
+        {t for r in reg for t in KEY_REF_RE.findall(r["copy"])}
+        | {t for b in p["broken register rows"] for t in KEY_REF_RE.findall(b["text"])},
+        copy_u,
+    )
     conditions = [
         row
         for _token, rows_ in copy_u.items()
@@ -3324,7 +3755,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     e_findings, e_scale = authority_claims(doc, auth, origin, reg, gaps)
     findings.extend(e_findings)
 
-    # ---- the duplicate rule, for every universe at once ---------------------
+    # ---- the duplicate and malformed rules, for every universe at once ------
     # Not a class. One canonical token declared twice with different content is
     # the same defect wherever it happens, so it is reported wherever it
     # happens, attributed to the class that reads the table it lives in. Before
@@ -3343,6 +3774,11 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 where,
                 f"`{token}` is defined twice in {u.name} with different content (also {prior})",
             )
+        # And the fourth rule, drained the same way and for the same reason: the
+        # reader that met the row knows only that it could not read it, and the
+        # universe knows which class answers for the table.
+        for where, said in u.unreadable:
+            add(u.owner, f"L{where}" if isinstance(where, int) else str(where), said)
 
     scale = {
         "register rows": len(reg),
