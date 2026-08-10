@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock
@@ -424,6 +425,7 @@ def test_utility_start_callback_runs_before_subprocess_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events = []
+    callback_threads: list[int] = []
 
     class FakeProcess:
         returncode = 0
@@ -436,18 +438,27 @@ def test_utility_start_callback_runs_before_subprocess_creation(
         events.append("spawn")
         return FakeProcess()
 
+    def prepare_start():
+        events.append("callback")
+        callback_threads.append(threading.get_ident())
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
 
-    result = _run(
-        service._run_utility_command(
+    async def exercise():
+        event_loop_thread = threading.get_ident()
+        result = await service._run_utility_command(
             "codex",
             "logout",
-            prepare_start=lambda: events.append("callback"),
+            prepare_start=prepare_start,
         )
-    )
+        return result, event_loop_thread
+
+    result, event_loop_thread = _run(exercise())
 
     assert result == (True, None)
     assert events == ["callback", "spawn", "communicate"]
+    assert len(callback_threads) == 1
+    assert callback_threads[0] != event_loop_thread
 
 
 def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(

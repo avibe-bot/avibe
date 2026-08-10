@@ -38,6 +38,7 @@ from modules.agents.opencode.utils import (
     resolve_opencode_reasoning_effort,
 )
 from modules.im import InlineButton, InlineKeyboard, MessageContext
+from core.memory.blocking import run_blocking
 from core.resource_governance import governor_from_controller
 from core.message_output import MessageOutput, terminal_turn_output
 from vibe.i18n import t as i18n_t
@@ -1285,7 +1286,7 @@ class AgentAuthService:
         pre-command state and may return a spawn-failure restoration.
         """
         restore_on_spawn_failure = (
-            prepare_start()
+            await run_blocking(prepare_start)
             if prepare_start is not None
             else None
         )
@@ -1298,7 +1299,7 @@ class AgentAuthService:
             )
         except Exception as err:  # noqa: BLE001
             if restore_on_spawn_failure is not None:
-                restore_on_spawn_failure()
+                await run_blocking(restore_on_spawn_failure)
             if prepare_start is not None:
                 raise
             logger.info("Utility command raised for %s: %s", " ".join(cmd), err)

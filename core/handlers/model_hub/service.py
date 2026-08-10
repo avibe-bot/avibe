@@ -28,6 +28,7 @@ from config.v2_config import (
     config_write_transaction,
 )
 from core.services.settings import default_config
+from core.memory.blocking import run_blocking
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
 from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
@@ -513,6 +514,9 @@ class ModelHubService:
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
         return ModelHubConfig.from_payload(config.to_payload())
 
+    async def _save_store(self, config: ModelHubConfig) -> None:
+        await run_blocking(self.store.save, config)
+
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
         has_hub_sources = any(
@@ -530,11 +534,11 @@ class ModelHubService:
         self._engine_synced = False
         previous_bindings = self._bindings(previous)
         updated_bindings = self._bindings(updated)
-        self.store.save(updated)
+        await self._save_store(updated)
         try:
             await self._sync_sources(updated, force_empty=bool(previous_bindings))
         except Exception:
-            self.store.save(previous)
+            await self._save_store(previous)
             try:
                 await self._sync_sources(previous, force_empty=bool(updated_bindings))
             except ModelHubError:
@@ -759,7 +763,7 @@ class ModelHubService:
             except OSError:
                 pass
 
-    def _mark_same_handle_reauth_needs_action(self, source_id: str) -> None:
+    async def _mark_same_handle_reauth_needs_action(self, source_id: str) -> None:
         # The engine may replace OAuth material behind the same opaque ref.
         # Without an old snapshot, fail closed instead of restoring stale supply.
         config = self._clone_config(self.store.load())
@@ -771,7 +775,7 @@ class ModelHubService:
             status="needs_action",
             detail_key="models.source.needs_action.oauth_expired",
         )
-        self.store.save(config)
+        await self._save_store(config)
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
@@ -1079,7 +1083,7 @@ class ModelHubService:
                     else "models.source.error.unclassified"
                 ),
             )
-            self.store.save(config)
+            await self._save_store(config)
             return self._would_interrupt(config)
 
     async def _materialize_reauth(
@@ -1137,7 +1141,7 @@ class ModelHubService:
                         status="error",
                         detail_key="models.source.error.unclassified",
                     )
-                    self.store.save(config)
+                    await self._save_store(config)
                     interrupted_pairs = self._would_interrupt(config)
                     raise ModelHubError(
                         "discovery_failed",
@@ -1145,7 +1149,7 @@ class ModelHubService:
                         data={"interrupted_pairs": interrupted_pairs},
                     )
                 self._apply_discovered_models(source, manual, discovered)
-                self.store.save(config)
+                await self._save_store(config)
                 interrupted_pairs = self._would_interrupt(config)
                 self._complete_reauth_flow(
                     flow_id,
@@ -1209,7 +1213,7 @@ class ModelHubService:
                                 replacement_ref,
                             )
                         elif replacement_ref == old_credential_ref:
-                            self._mark_same_handle_reauth_needs_action(source.id)
+                            await self._mark_same_handle_reauth_needs_action(source.id)
                         else:
                             await self._rollback_replacement(
                                 source.id,
@@ -1276,7 +1280,7 @@ class ModelHubService:
         except OSError:
             pass
 
-    def _fail_closed_hub_reauth(
+    async def _fail_closed_hub_reauth(
         self,
         binding: OAuthFlowBinding,
         *,
@@ -1297,7 +1301,7 @@ class ModelHubService:
             status="needs_action",
             detail_key="models.source.needs_action.oauth_expired",
         )
-        self.store.save(config)
+        await self._save_store(config)
         return config
 
     async def _materialize_failed_hub_reauth(
@@ -1317,7 +1321,7 @@ class ModelHubService:
             RetainedMaterialDisposition.FLOW_SOURCE_REF,
             RetainedMaterialDisposition.UNKNOWN,
         }:
-            return self._fail_closed_hub_reauth(
+            return await self._fail_closed_hub_reauth(
                 binding,
                 config=config,
             )
@@ -1693,7 +1697,7 @@ class ModelHubService:
             if "base_url" in payload:
                 await self._commit_synced(previous, config)
             else:
-                self.store.save(config)
+                await self._save_store(config)
             return source.to_payload()
 
     @staticmethod
@@ -1829,7 +1833,7 @@ class ModelHubService:
             except ModelHubError:
                 restored = False
                 try:
-                    self.store.save(previous)
+                    await self._save_store(previous)
                     restored = True
                     self._engine_synced = False
                     await self._sync_sources(previous)
@@ -1866,7 +1870,7 @@ class ModelHubService:
                     status="error",
                     detail_key="models.source.error.unclassified",
                 )
-                self.store.save(config)
+                await self._save_store(config)
                 self._record_event(
                     agent="system",
                     kind="needs_action",
@@ -1973,7 +1977,7 @@ class ModelHubService:
                     seen.add(source_id)
                 agent.sources.policy = "custom"
                 agent.sources.order = list(order)
-            self.store.save(config)
+            await self._save_store(config)
             return self._agent_payload(config, agent)
 
     def get_agent_sources(self, backend: str) -> dict:
@@ -2189,7 +2193,7 @@ class ModelHubService:
             config = self.store.load()
             agent = self._agent(config, backend)
             agent.mode = mode
-            self.store.save(config)
+            await self._save_store(config)
             return self._agent_payload(config, agent)
 
     async def set_mappings(self, backend: str, mappings: object) -> dict:
@@ -2222,7 +2226,7 @@ class ModelHubService:
                 ],
             )
             agent.mappings = parsed
-            self.store.save(config)
+            await self._save_store(config)
             return self._agent_payload(config, agent)
 
     async def set_opencode_menu(self, menu: object) -> dict:
@@ -2251,7 +2255,7 @@ class ModelHubService:
                 ],
             )
             agent.menu = parsed
-            self.store.save(config)
+            await self._save_store(config)
             return self._agent_payload(config, agent)
 
     async def add_custom_model(self, payload: dict) -> dict:
@@ -2509,7 +2513,7 @@ class ModelHubService:
                 status=status,
                 detail_key=detail_key,
             )
-            self.store.save(config)
+            await self._save_store(config)
             if not unchanged:
                 self._record_event(
                     agent=cast(EventAgent, backend),
@@ -2922,7 +2926,7 @@ class ModelHubService:
             async with self._mutation_lock:
                 config = self.store.load()
                 config.subscription_hub_experimental = True
-                self.store.save(config)
+                await self._save_store(config)
         return {"flow": _oauth_payload(flow, channel=channel)}
 
     def _oauth_result(
@@ -3137,7 +3141,7 @@ class ModelHubService:
                     now=self.now(),
                 )
             if config_changed:
-                self.store.save(config)
+                await self._save_store(config)
 
     async def _cooldown(
         self,
@@ -3160,7 +3164,7 @@ class ModelHubService:
                 retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
                 detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
-            self.store.save(config)
+            await self._save_store(config)
             if not already_cooling:
                 self._record_event(
                     agent=agent,

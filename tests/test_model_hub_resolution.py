@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -1364,6 +1365,59 @@ def test_source_creation_persists_before_engine_sync(tmp_path):
 
     assert order == ["persist", "sync"]
     assert service.store.load().sources[-1].id == created["source"]["id"]
+
+
+def test_async_mutation_offloads_config_store_save(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    original_save = service.store.save
+    save_threads: list[int] = []
+
+    def blocking_save(config):
+        save_threads.append(threading.get_ident())
+        original_save(config)
+
+    service.store.save = blocking_save
+
+    async def exercise() -> int:
+        event_loop_thread = threading.get_ident()
+        await service.set_agent_mode("claude", "direct")
+        return event_loop_thread
+
+    event_loop_thread = asyncio.run(exercise())
+
+    assert save_threads
+    assert all(thread_id != event_loop_thread for thread_id in save_threads)
+
+
+def test_async_mutation_settles_config_save_before_propagating_cancellation(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    original_save = service.store.save
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    save_finished = threading.Event()
+
+    def blocking_save(config):
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        original_save(config)
+        save_finished.set()
+
+    service.store.save = blocking_save
+
+    async def exercise() -> None:
+        task = asyncio.create_task(service.set_agent_mode("claude", "direct"))
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert save_finished.is_set()
+    assert service.store.load().agents["claude"].mode == "direct"
 
 
 def test_source_creation_revokes_credential_when_persist_fails(tmp_path):

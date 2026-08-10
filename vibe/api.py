@@ -9245,52 +9245,42 @@ def save_codex_auth(payload: dict) -> dict:
             api_key = read_codex_api_key()
         except Exception:
             api_key = None
-        if not api_key:
-            with CONFIG_LOCK:
-                try:
-                    existing = load_config()
-                    stored = getattr(getattr(existing, "agents", None), "codex", None)
-                    api_key = getattr(stored, "api_key", None) or None
-                except Exception:
-                    api_key = None
-        if not api_key:
-            return {"ok": False, "message": "api_key is required when auth_mode='api_key'"}
-
-    # Resolve the effective base_url: explicit payload wins, otherwise
-    # preserve whatever V2Config currently has.
-    if base_url_present:
-        effective_base_url = base_url_change
-    else:
-        with CONFIG_LOCK:
-            try:
-                existing_cfg = load_config()
-                stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
-                effective_base_url = getattr(stored_codex, "base_url", None) or None
-            except Exception:
-                effective_base_url = None
-
     from vibe.codex_config import apply_codex_auth
 
     notices: list = []
-    try:
-        result = apply_codex_auth(
-            auth_mode=auth_mode, api_key=api_key, base_url=effective_base_url
-        )
-        if isinstance(result, dict):
-            raw_notices = result.get("notices")
-            if isinstance(raw_notices, list):
-                notices = raw_notices
-    except ValueError as exc:
-        return {"ok": False, "message": str(exc)}
-    except OSError as exc:
-        logger.error("Failed to write Codex auth files: %s", exc, exc_info=True)
-        return {"ok": False, "message": f"Failed to write Codex config: {exc}"}
-
     with config_write_transaction():
         try:
             config = load_config()
         except FileNotFoundError:
             config = V2Config()
+        stored_codex = getattr(getattr(config, "agents", None), "codex", None)
+        if auth_mode == "api_key" and not api_key:
+            api_key = getattr(stored_codex, "api_key", None) or None
+            if not api_key:
+                return {
+                    "ok": False,
+                    "message": "api_key is required when auth_mode='api_key'",
+                }
+        effective_base_url = (
+            base_url_change
+            if base_url_present
+            else getattr(stored_codex, "base_url", None) or None
+        )
+        try:
+            result = apply_codex_auth(
+                auth_mode=auth_mode,
+                api_key=api_key,
+                base_url=effective_base_url,
+            )
+            if isinstance(result, dict):
+                raw_notices = result.get("notices")
+                if isinstance(raw_notices, list):
+                    notices = raw_notices
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+        except OSError as exc:
+            logger.error("Failed to write Codex auth files: %s", exc, exc_info=True)
+            return {"ok": False, "message": f"Failed to write Codex config: {exc}"}
         config.agents.codex.auth_mode = auth_mode
         config.agents.codex.api_key = api_key if auth_mode == "api_key" else None
         config.agents.codex.base_url = effective_base_url

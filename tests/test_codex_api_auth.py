@@ -13,6 +13,8 @@ Pins two contracts:
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import sys
 import types
 from pathlib import Path
@@ -20,6 +22,30 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import api  # noqa: E402
+
+
+def _save_codex_base_url(
+    avibe_home: str,
+    base_url: str,
+    attempting,
+    finished,
+) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    from storage.lock import MigrationFileLock
+    from vibe import api as child_api
+    from vibe import codex_config
+
+    original_acquire = MigrationFileLock.acquire
+
+    def signal_acquire(lock) -> None:
+        attempting.set()
+        original_acquire(lock)
+
+    MigrationFileLock.acquire = signal_acquire
+    codex_config.apply_codex_auth = lambda **kwargs: {}
+    child_api.restart_backend = lambda name, **kwargs: {"ok": True}
+    child_api.save_codex_auth({"auth_mode": "oauth", "base_url": base_url})
+    finished.set()
 
 
 def _seed_disk(home: Path, *, api_key: str | None, store: str | None) -> None:
@@ -113,3 +139,65 @@ def test_save_codex_auth_falls_back_to_v2config_when_disk_empty(
 
     auth = json.loads((tmp_path / ".codex" / "auth.json").read_text(encoding="utf-8"))
     assert auth["OPENAI_API_KEY"] == "sk-from-cache"
+
+
+def test_save_codex_auth_preserved_fields_share_final_config_transaction(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from core.services.settings import default_config
+    from storage.lock import MigrationFileLock
+    from vibe import codex_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    config = default_config()
+    config.agents.codex.auth_mode = "oauth"
+    config.agents.codex.base_url = "https://old.example.test/v1"
+    config.save()
+    context = multiprocessing.get_context("spawn")
+    attempting = context.Event()
+    finished = context.Event()
+    concurrent = context.Process(
+        target=_save_codex_base_url,
+        args=(
+            str(tmp_path),
+            "https://new.example.test/v1",
+            attempting,
+            finished,
+        ),
+    )
+    apply_entered = False
+    observed_base_urls: list[str | None] = []
+
+    def apply_codex_auth(**kwargs):
+        nonlocal apply_entered
+        apply_entered = True
+        observed_base_urls.append(kwargs["base_url"])
+        concurrent.start()
+        assert attempting.wait(timeout=5)
+        return {}
+
+    original_acquire = MigrationFileLock.acquire
+
+    def wait_for_concurrent_writer(lock) -> None:
+        if apply_entered:
+            assert finished.wait(timeout=5)
+        original_acquire(lock)
+
+    monkeypatch.setattr(codex_config, "apply_codex_auth", apply_codex_auth)
+    monkeypatch.setattr(MigrationFileLock, "acquire", wait_for_concurrent_writer)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+    try:
+        result = api.save_codex_auth({"auth_mode": "oauth"})
+        assert finished.wait(timeout=5)
+    finally:
+        concurrent.join(timeout=5)
+        if concurrent.is_alive():
+            concurrent.terminate()
+            concurrent.join(timeout=5)
+
+    assert result["ok"] is True
+    assert concurrent.exitcode == 0
+    assert observed_base_urls == ["https://old.example.test/v1"]
+    assert api.load_config().agents.codex.base_url == "https://new.example.test/v1"
