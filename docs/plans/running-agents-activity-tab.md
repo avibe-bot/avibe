@@ -142,8 +142,22 @@ OpenCode 已是一等活后端（进程模型不同、无 pid）。
 - I2：显示上次已知 + 过期横幅。
 - I3：显示空。
 
-### 8-J. 子 Tab 默认落地（已定 J1）
-点 `/agents` 默认进 **`Definitions`**（保留现有肌肉记忆）；`Running` 为并列项。
+### 8-J. 子 Tab 默认落地（已定 J1；后续补充跨次记忆）
+首次进入（全新浏览器 / 存储被清空 / 存储不可用）点 `/agents` 默认进
+**`Definitions`**（保留现有肌肉记忆）；`Running` 为并列项。
+
+**后续补充**：J1 只定义"首次默认"，不再定义"每次重置"。之后再进 `/agents`
+（含侧边栏点击）会恢复上次离开时所在的子 Tab；停在 `Running` 时，其内部
+活跃/含历史 视图选择也一并恢复（详见
+`agents-run-graph-and-session-visibility.md` 的 Filters 段与
+`ui/src/lib/agentsViewMemory.ts`）。记忆是本地浏览器级的 best-effort：
+私密模式或存储被拦截时静默回落到首次默认。
+
+带明确意图的入口（如 Chat Agent 选择器的"新建 Agent"、Harness 详情的
+"Open in Agents"）用 `/agents?tab=definitions` 指定落地 Tab，优先于记忆——
+它是目的地而不是用户的选择，因此**不写回**记忆；只有用户真的点 Tab 才会改变
+下次裸进 `/agents` 的落点。该参数消失（例如从带参 URL 再点侧边栏 Agents，
+路由只改 URL 不重挂组件）即视为回到裸导航，重新按记忆落地。
 
 ### 8-K. Running 子 Tab 计数 badge 口径（已定 K2）
 Running 子 Tab 的 badge **仅计 `active`（在途轮次）**；idle 实例仍在列表中可见但不计入 badge。须与 §6 口径统一：列表含 idle（D2），但所有"在跑计数"badge 一律只数 active。

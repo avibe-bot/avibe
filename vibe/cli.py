@@ -1980,6 +1980,11 @@ _DEFINITION_FAILURE_FIELDS = (
     "health",
     "consecutive_failures",
     "recent_failures",
+    # Watches keep waiter health above and expose their downstream Agent Run
+    # history independently. Tasks omit these keys.
+    "processing_health",
+    "processing_consecutive_failures",
+    "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
 )

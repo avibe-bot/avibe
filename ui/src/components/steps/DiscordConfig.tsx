@@ -19,6 +19,7 @@ import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { hasUsableSecret, secretInputValue, withSecretDraft } from '../../lib/secretFields';
 import { copyTextToClipboard } from '../../lib/utils';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { EmbeddedConfigShell, EyebrowBadge, WizardCard } from '../visual';
 import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
@@ -129,7 +130,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
   };
 
   const openDiscordDeveloperPortal = () => {
-    window.open('https://discord.com/developers/applications', '_blank');
+    openLinkInNewContext('https://discord.com/developers/applications');
   };
 
   const copyInviteUrl = async () => {
@@ -277,7 +278,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                 <Button
                   variant="brand"
                   size="sm"
-                  onClick={() => inviteUrl && window.open(inviteUrl, '_blank')}
+                  onClick={() => inviteUrl && openLinkInNewContext(inviteUrl)}
                   disabled={!inviteUrl}
                 >
                   <ExternalLink size={14} strokeWidth={2.25} />

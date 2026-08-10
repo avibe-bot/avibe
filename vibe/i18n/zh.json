@@ -91,6 +91,9 @@
     },
     "notice": {
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
+      "watchProcessingFailed": "[Avibe Harness] Watch「{name}」已检测到事件,但 Agent 处理失败。",
+      "watchFailureReportFailed": "[Avibe Harness] Watch「{name}」因 waiter 失败而停止,但 Agent 未能报告该故障。",
+      "watchFollowUpFailed": "[Avibe Harness] Watch「{name}」的后续 Agent 处理失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
       "commandLine": "命令:{command}",
       "error": "错误:{error}",
@@ -221,6 +224,14 @@
       }
     },
     "sessionArchived": "该会话已归档，无法再修改。",
+    "workbenchAttachment": {
+      "session_not_found": "当前会话已不可用。",
+      "file_required": "请选择要上传的文件。",
+      "empty_file": "不能上传空文件。",
+      "too_large": "文件超过附件大小限制。",
+      "invalid_upload": "文件上传请求无效。",
+      "upload_failed": "文件保存失败，请重试。"
+    },
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` 是内置 Agent，无法删除。",

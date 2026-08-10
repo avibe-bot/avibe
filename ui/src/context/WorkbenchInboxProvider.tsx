@@ -5,6 +5,7 @@ import { useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
+import { syncFaviconBadge } from '../lib/faviconBadge';
 
 const PAGE_SIZE = 30;
 
@@ -299,6 +300,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     if (!unreadLoaded) return;
     const op = totalUnread > 0 ? nav.setAppBadge?.(totalUnread) : nav.clearAppBadge?.();
     void op?.catch?.(() => {});
+  }, [totalUnread, unreadLoaded]);
+
+  // Browser tabs have no Badging API. Keep their favicon useful while the
+  // Inbox map is authoritative, and restore the original icon after reading.
+  useEffect(() => {
+    if (!unreadLoaded) return;
+    syncFaviconBadge(totalUnread);
   }, [totalUnread, unreadLoaded]);
 
   const value = useMemo<InboxState>(

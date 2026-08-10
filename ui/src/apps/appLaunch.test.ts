@@ -5,6 +5,7 @@ import {
   appTabHref,
   appTabHrefForDockId,
   isAppleContextClick,
+  isStandaloneAppRoutePath,
   isStandaloneAppTab,
   tabModifierLabel,
 } from './appLaunch';
@@ -118,6 +119,15 @@ describe('appTabHref', () => {
     expect(appTabHref({ appId: 'showpage', sessionId: '  ' })).toBeNull();
     expect(appTabHref({ appId: '' })).toBeNull();
   });
+
+  it('keeps every internal app in the installed iOS PWA', () => {
+    const iosPwa = { iosStandalone: true };
+
+    expect(appTabHref({ appId: 'showpage', sessionId: 'abc123' }, iosPwa)).toBeNull();
+    expect(appTabHref({ appId: 'files' }, iosPwa)).toBeNull();
+    expect(appTabHref({ appId: 'terminal' }, iosPwa)).toBeNull();
+    expect(appTabHref({ appId: 'editor' }, iosPwa)).toBeNull();
+  });
 });
 
 describe('isStandaloneAppTab', () => {
@@ -137,10 +147,47 @@ describe('isStandaloneAppTab', () => {
   });
 });
 
+describe('isStandaloneAppRoutePath', () => {
+  it('matches exactly the built-ins that own a standalone route', () => {
+    expect(isStandaloneAppRoutePath('/apps/terminal')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/files')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/editor')).toBe(true);
+    // The Library opens a WINDOW (and redirects the tab), so it never goes chromeless.
+    expect(isStandaloneAppRoutePath('/apps/library')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps/show/sess42')).toBe(false);
+  });
+
+  it('accepts the route variants React Router still mounts', () => {
+    // Trailing slashes and casing are both matched loosely by the router, so the layout
+    // must agree with what mounted rather than with the literal URL.
+    expect(isStandaloneAppRoutePath('/apps/terminal/')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/files//')).toBe(true);
+    expect(isStandaloneAppRoutePath('/Apps/Files')).toBe(true);
+    expect(isStandaloneAppRoutePath('/APPS/TERMINAL/')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/library/')).toBe(false);
+    expect(isStandaloneAppRoutePath('/Apps/Library')).toBe(false);
+  });
+
+  it('is false off the app routes', () => {
+    // A standalone tab that navigates away is an ordinary page again — chrome comes back.
+    expect(isStandaloneAppRoutePath('/')).toBe(false);
+    expect(isStandaloneAppRoutePath('/chat/sess42')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps/terminal/extra')).toBe(false);
+  });
+});
+
 describe('appTabHrefForDockId', () => {
   it('resolves both Dock id kinds', () => {
     expect(appTabHrefForDockId('terminal')).toBe('/apps/terminal?standalone=1');
     expect(appTabHrefForDockId(showDockId('sess42'))).toBe('/show/sess42/');
     expect(appTabHrefForDockId('library')).toBeNull();
+  });
+
+  it('withdraws new-tab targets for every Dock app in the installed iOS PWA', () => {
+    const iosPwa = { iosStandalone: true };
+
+    expect(appTabHrefForDockId('terminal', iosPwa)).toBeNull();
+    expect(appTabHrefForDockId(showDockId('sess42'), iosPwa)).toBeNull();
   });
 });

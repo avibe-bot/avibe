@@ -18,6 +18,7 @@ import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { hasUsableSecret, secretInputValue, withSecretDraft } from '../../lib/secretFields';
 import { copyTextToClipboard } from '../../lib/utils';
+import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { EmbeddedConfigShell, EyebrowBadge, WizardCard } from '../visual';
 import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { StepHeader, StepShell } from '../shared/WizardStep';
@@ -87,7 +88,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
   };
 
   const openBotFather = () => {
-    window.open('https://t.me/BotFather', '_blank');
+    openLinkInNewContext('https://t.me/BotFather');
   };
 
   const copyCommand = async (command: string) => {

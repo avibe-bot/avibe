@@ -24,6 +24,8 @@ import {
 } from '../../lib/agentGraph';
 import { searchGraph, type GraphSearchResult } from '../../lib/graphSearch';
 import { readGraphShowDisabled, writeGraphShowDisabled } from '../../lib/graphViewPrefs';
+import { readAgentGraphMode, writeAgentGraphMode } from '../../lib/agentsViewMemory';
+import { useIsDesktop } from '../../lib/useIsDesktop';
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
 import { AgentGraphDetail } from './AgentGraphDetail';
@@ -37,21 +39,6 @@ const POLL_INTERVAL_MS = 4000;
 const LIVENESS_POLL_INTERVAL_MS = 30000;
 
 type GraphPayload = AgentGraphResult & { live_unreachable?: boolean };
-
-// Desktop ⇒ React Flow canvas; mobile ⇒ grouped list (contract §4).
-function useIsDesktop(): boolean {
-  const [desktop, setDesktop] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia?.('(min-width: 768px)').matches,
-  );
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return;
-    const mql = window.matchMedia('(min-width: 768px)');
-    const onChange = () => setDesktop(mql.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-  return !!desktop;
-}
 
 // Desktop-only fill height for the canvas + detail panel (design.pen KfgtJ —
 // fill_container). The desktop app shell is document-flow (no bounded-height
@@ -127,7 +114,16 @@ export const AgentGraphTab: React.FC = () => {
   const [projects, setProjects] = useState<{ id: string; display_name: string }[]>([]);
 
   // Filters (spec: 活跃/含历史 · time window · project incl. 独立 · 显示后台会话).
-  const [mode, setMode] = useState<'active' | 'history'>('history');
+  // The 活跃/含历史 choice is remembered across visits (含历史 by default) so
+  // re-entering the Runs tab resumes the view the user was actually watching.
+  // Only an explicit segmented-control click persists — the filter widening the
+  // search-locate path performs below is transient, same ruling as the
+  // disabled-trigger reveal.
+  const [mode, setMode] = useState<'active' | 'history'>(readAgentGraphMode);
+  const setModePersisted = useCallback((next: 'active' | 'history') => {
+    setMode(next);
+    writeAgentGraphMode(next);
+  }, []);
   const [windowSel, setWindowSel] = useState<GraphWindow>('24h');
   const [projectSel, setProjectSel] = useState<string>('all');
   const [showBackground, setShowBackground] = useState(true);
@@ -603,7 +599,7 @@ export const AgentGraphTab: React.FC = () => {
         />
         <SegmentedRadio
           value={mode}
-          onChange={setMode}
+          onChange={setModePersisted}
           ariaLabel={t('agents.graph.filters.modeLabel')}
           options={[
             { id: 'active', label: t('agents.graph.filters.active') },

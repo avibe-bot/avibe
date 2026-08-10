@@ -1,80 +1,11 @@
+import { isApplicationRouteHref } from './applicationRoutes';
+
 export type LocalFileLinkTarget = {
   path: string;
   line?: number;
   column?: number;
   endColumn?: number;
 };
-
-// Exact routes declared in App.tsx remain same-origin browser links even
-// though their leading slash also looks like a POSIX path. Do not reserve an
-// entire top-level namespace: `/projects/report.md` may be a real local file.
-const APPLICATION_ROUTES = new Set([
-  '/',
-  '/setup',
-  '/inbox',
-  '/search',
-  '/agents',
-  '/skills',
-  '/harness',
-  '/vaults',
-  '/projects',
-  '/more',
-  '/apps',
-  '/apps/files',
-  '/apps/terminal',
-  '/apps/editor',
-  '/apps/library',
-  '/admin',
-  '/admin/dashboard',
-  '/admin/remote-access',
-  '/admin/groups',
-  '/admin/users',
-  '/admin/show-pages',
-  '/admin/logs',
-  '/admin/settings/service',
-  '/admin/settings/platforms',
-  '/admin/settings/backends',
-  '/admin/settings/backends/opencode',
-  '/admin/settings/backends/claude',
-  '/admin/settings/backends/codex',
-  '/admin/settings/models',
-  '/admin/settings/dependencies',
-  '/admin/settings/messaging',
-  '/admin/settings/diagnostics',
-  '/admin/settings/logs',
-  '/dashboard',
-  '/groups',
-  '/channels',
-  '/users',
-  '/logs',
-  '/settings',
-  '/settings/service',
-  '/settings/platforms',
-  '/settings/backends',
-  '/settings/backends/opencode',
-  '/settings/backends/claude',
-  '/settings/backends/codex',
-  '/settings/models',
-  '/settings/dependencies',
-  '/settings/messaging',
-  '/settings/diagnostics',
-  '/settings/logs',
-  '/remote-access',
-  '/doctor',
-  '/doctor/logs',
-]);
-
-const APPLICATION_ROUTE_PATTERNS = [
-  /^\/apps\/show\/[^/]+$/,
-  /^\/chat\/[^/]+$/,
-];
-
-function isApplicationRouteHref(href: string): boolean {
-  const rawPathname = href.split(/[?#]/, 1)[0];
-  const pathname = rawPathname.replace(/\/+$/, '') || '/';
-  return APPLICATION_ROUTES.has(pathname)
-    || APPLICATION_ROUTE_PATTERNS.some((pattern) => pattern.test(pathname));
-}
 
 /** Windows drive and UNC paths are valid local destinations, not URL schemes.
  * Accept encoded separators because Markdown destinations commonly escape

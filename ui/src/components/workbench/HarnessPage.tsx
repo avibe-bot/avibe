@@ -64,6 +64,7 @@ import {
   definitionActiveCount,
   definitionChipLabel,
   definitionHealth,
+  definitionProcessingHealth,
   definitionRowLine,
   definitionRowTitle,
   definitionStatusCount,
@@ -1051,6 +1052,35 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
   );
 };
 
+const visibleProcessingHealth = (row: HarnessWatch) => {
+  const health = definitionProcessingHealth(row);
+  return health === 'failing' || health === 'degraded' || health === 'unknown' ? health : null;
+};
+
+export const ProcessingHealthBadge: React.FC<{ row: HarnessWatch }> = ({ row }) => {
+  const { t } = useTranslation();
+  const health = visibleProcessingHealth(row);
+  if (!health) return null;
+  const count =
+    health === 'unknown'
+      ? 0
+      : health === 'failing'
+        ? row.processing_consecutive_failures || 0
+        : row.processing_recent_failures || 0;
+  return (
+    <Badge
+      variant="secondary"
+      className={clsx(
+        'shrink-0 font-mono text-[9px] uppercase',
+        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
+      )}
+    >
+      {t(`harness.processingHealth.${health}`)}
+      {count > 1 ? ` ${count}` : ''}
+    </Badge>
+  );
+};
+
 // What a task *does*, when that is not the default. A command task runs a
 // subprocess instead of prompting an Agent, and nothing else on the row says so:
 // the schedule chip, the state dot and the second line read identically for both
@@ -1135,6 +1165,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
               </Badge>
             )}
             <HealthBadge row={row} />
+            {kind === 'watch' && <ProcessingHealthBadge row={row as HarnessWatch} />}
           </div>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
             {line.alert && <AlertTriangle className={clsx('size-3 shrink-0', ALERT_CLASS[line.alert])} />}
@@ -1598,6 +1629,11 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
           </div>
         </DetailField>
       )}
+      {visibleProcessingHealth(watch) && (
+        <DetailField label={t('harness.detail.eventProcessing')}>
+          <ProcessingHealthBadge row={watch} />
+        </DetailField>
+      )}
       <DetailField label={t('harness.detail.id')}>
         <code className="font-mono text-[11px] text-muted">{watch.id}</code>
       </DetailField>
@@ -2007,7 +2043,9 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
       {!agent?.archived && (
         <Link
-          to="/agents"
+          // This opens the agent's definition, so it asks for the Definitions tab
+          // explicitly rather than resuming whichever tab was left on.
+          to="/agents?tab=definitions"
           className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
         >
           {t('harness.detail.openInAgents')}

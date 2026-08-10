@@ -91,6 +91,9 @@
     },
     "notice": {
       "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
+      "watchProcessingFailed": "[Avibe Harness] Watch \"{name}\" detected an event, but Agent processing failed.",
+      "watchFailureReportFailed": "[Avibe Harness] Watch \"{name}\" stopped because its waiter failed, but the Agent could not report that failure.",
+      "watchFollowUpFailed": "[Avibe Harness] Watch \"{name}\" follow-up Agent processing failed.",
       "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
       "commandLine": "Command: {command}",
       "error": "Error: {error}",
@@ -221,6 +224,14 @@
       }
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
+    "workbenchAttachment": {
+      "session_not_found": "This session is no longer available.",
+      "file_required": "Choose a file to upload.",
+      "empty_file": "Empty files cannot be uploaded.",
+      "too_large": "The file exceeds the attachment size limit.",
+      "invalid_upload": "The file upload is invalid.",
+      "upload_failed": "The file could not be saved. Please try again."
+    },
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` is built in and cannot be deleted.",

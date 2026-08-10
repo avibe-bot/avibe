@@ -35,7 +35,9 @@ from core.session_turns import (
     DeliveryRequest,
     SessionTurnManager,
     Turn,
+    _scheduled_merge_key,
 )
+from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
 from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -574,6 +576,112 @@ def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None
     assert bob["state"] == "queued"
 
 
+def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
+    def row(source_session_id: str) -> dict:
+        return {
+            "metadata": {
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": source_session_id,
+                    }
+                }
+            }
+        }
+
+    assert _scheduled_merge_key(row("source-a")) != _scheduled_merge_key(row("source-b"))
+    assert _scheduled_merge_key(row("source-a")) == _scheduled_merge_key(row("source-a"))
+
+    agent_row = row("")
+    agent_row["metadata"][SCHEDULED_PROVENANCE_KEY]["platform_specific"].update(
+        {"source_kind": "agent", "source_actor": "source-agent-a"}
+    )
+    other_agent_row = row("")
+    other_agent_row["metadata"][SCHEDULED_PROVENANCE_KEY]["platform_specific"].update(
+        {"source_kind": "agent", "source_actor": "source-agent-b"}
+    )
+    assert _scheduled_merge_key(agent_row) != _scheduled_merge_key(other_agent_row)
+
+
+def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+
+    def scheduled_request(text: str, source_session_id: str) -> DeliveryRequest:
+        return DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content=text,
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": source_session_id,
+                    }
+                }
+            },
+        )
+
+    queued = [
+        asyncio.run(manager.deliver(scheduled_request(text, source), context=_context()))
+        for text, source in (("callback A", "source-a"), ("callback B", "source-b"))
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    first_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "callback A"
+    assert _row(engine, str(queued[0].delivery_id))["turn_id"] == first_turn_id
+    assert _row(engine, str(queued[1].delivery_id))["turn_id"] is None
+
+
+@pytest.mark.anyio
+async def test_scheduled_submit_decorates_before_native_steering(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    await _activate(manager, text="active")
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": "agent_run",
+            "source_session_id": "source-session",
+        }
+    )
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p1",
+            content="callback result",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": "source-session",
+                    }
+                }
+            },
+        ),
+        context=context,
+    )
+
+    assert result.state == "accepted"
+    decorator.assert_awaited_once_with(context, "callback result", include_user_info=False)
+    manager._steer.assert_awaited_once()
+    assert manager._steer.await_args.args[1].text == "decorated: callback result"
+
+
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     captured: dict[str, object] = {}
@@ -593,6 +701,54 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
         turn = delivery_store.get_turn(conn, admitted.turn_id)
     assert turn is not None
     assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
+
+
+@pytest.mark.anyio
+async def test_persisted_scheduled_start_preserves_raw_text_for_handler_routing(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    captured: dict[str, object] = {}
+
+    async def capture_run(_session_id, context, text, **_kwargs):
+        captured["context"] = context
+        captured["text"] = text
+
+    manager._run = capture_run
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": "agent_run",
+            "source_kind": "agent",
+            "source_actor": "source-session",
+        }
+    )
+
+    admitted = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content="callback result",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_kind": "agent",
+                        "source_actor": "source-session",
+                    }
+                }
+            },
+        ),
+        context=context,
+    )
+
+    assert admitted.state == "claimed"
+    assert captured["text"] == "callback result"
+    assert captured["context"].platform_specific["source_actor"] == "source-session"
+    assert not captured["context"].platform_specific.get(
+        SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
+    )
 
 
 def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:
@@ -1100,6 +1256,55 @@ def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -
     asyncio.run(run())
 
     assert acks == [("slack", "slack-msg-99", "accepted", "steered")]
+
+
+@pytest.mark.anyio
+async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    context = _context()
+    deliveries = []
+    for index, text in enumerate(("first callback", "second callback")):
+        deliveries.append(
+            {
+                "id": f"delivery-{index}",
+                "dispatch_text": text,
+                "snapshot_json": json.dumps(
+                    delivery_store.message_snapshot(
+                        scope_id=None,
+                        session_id="ses_fsm",
+                        platform="avibe",
+                        author="harness",
+                        source="harness",
+                        message_type="harness",
+                        text=text,
+                        metadata={
+                            SCHEDULED_PROVENANCE_KEY: {
+                                "platform_specific": {
+                                    "task_trigger_kind": "agent_run",
+                                    "source_session_id": f"source-{index}",
+                                }
+                            }
+                        },
+                    )
+                ),
+            }
+        )
+
+    assert await manager.prepare_scheduled_dispatch(
+        context, "first callback", delivery=deliveries[0]
+    ) == "decorated: first callback"
+    assert await manager.prepare_scheduled_dispatch(
+        context, "second callback", delivery=deliveries[1]
+    ) == "decorated: second callback"
+    assert decorator.await_count == 2
+    assert [call.args[1] for call in decorator.await_args_list] == [
+        "first callback",
+        "second callback",
+    ]
 
 
 def test_workbench_delivery_reports_no_reaction_receipt(managers) -> None:
@@ -5933,9 +6138,11 @@ async def test_terminal_commit_publishes_replyless_inbox_settlement(
 
 
 @pytest.mark.anyio
-async def test_agent_initiated_continuation_materializes_in_configured_language(
+async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
     managers,
 ) -> None:
+    """HFR-461: backend continuation keeps a hidden lifecycle input."""
+
     manager, _other, engine, _engine_b, _starts = managers
     manager.controller.config.language = "zh"
     context = _context()
@@ -5943,8 +6150,15 @@ async def test_agent_initiated_continuation_materializes_in_configured_language(
     assert manager.register_agent_initiated_turn(context) is True
     with engine.connect() as conn:
         row = messages_service.get_message(conn, str(context.message_id))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_fsm",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
     assert row is not None
+    assert row["type"] == "agent_initiated"
     assert row["text"] == "Agent 主动发起的续接"
+    assert transcript["messages"] == []
 
     sink = manager.get_turn_sink(manager.controller._get_session_key(context))
     assert sink is not None
