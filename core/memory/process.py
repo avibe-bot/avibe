@@ -703,6 +703,17 @@ class EverOSProcess:
                 self._consecutive_failures = 0
             if not self._desired_running:
                 return
+            if _sidecar_exit_was_managed(process.returncode):
+                # Provider-root reconciliation terminates a supervised sidecar
+                # before taking over its root. That is an ownership handoff, not
+                # a child crash: restart through the shared lock without spending
+                # the bounded crash budget while the rebuild remains active.
+                self._last_error = None
+                self._restart_task = asyncio.create_task(
+                    self._restart_after(0.0),
+                    name="memory-everos-restart",
+                )
+                return
             self._record_start_failure_locked()
 
     async def _monitor_child(self, process: asyncio.subprocess.Process) -> None:
@@ -977,7 +988,11 @@ class EverOSRebuildProcess:
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         _host: _ProcessHost | None = None,
     ) -> None:
-        self._python = Path(python) if python is not None else None
+        self._python = (
+            Path(os.path.abspath(os.fspath(python)))
+            if python is not None
+            else None
+        )
         effective_home_path = (
             Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
         )
@@ -1171,6 +1186,18 @@ def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult
     if exit_code == 130:
         return RebuildProcessResult.INTERRUPTED
     return RebuildProcessResult.FAILED
+
+
+def _sidecar_exit_was_managed(exit_code: int | None) -> bool:
+    """Whether an external owner intentionally terminated the sidecar."""
+
+    if exit_code is None or exit_code >= 0:
+        return False
+    terminating_signal = -exit_code
+    return terminating_signal in {
+        signal.SIGTERM,
+        getattr(signal, "SIGKILL", signal.SIGTERM),
+    }
 
 
 def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:

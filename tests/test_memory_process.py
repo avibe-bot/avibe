@@ -1758,6 +1758,48 @@ def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
     assert events == ["tree-cleaned", "retired", "reaped"]
 
 
+@pytest.mark.parametrize(
+    "termination_signal",
+    [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)],
+)
+async def test_planned_sidecar_reaps_do_not_consume_crash_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    termination_signal: int,
+) -> None:
+    """Rebuild handoffs keep restart supervision without charging crashes."""
+
+    restart_delays: list[float] = []
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    async def restart_after(delay_seconds: float) -> None:
+        restart_delays.append(delay_seconds)
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    monkeypatch.setattr(process, "_restart_after", restart_after)
+
+    for _ in range(5):
+        child = _ExitedChild()
+        child.returncode = -termination_signal
+        _supervising(process, child)
+        process._desired_running = True
+
+        await process._watch_child(child)
+        assert process._restart_task is not None
+        await process._restart_task
+
+    assert process.consecutive_failures == 0
+    assert process.down is False
+    assert restart_delays == [0.0] * 5
+
+
 def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
     """A pre-spawn launch failure leaves the host free to reclaim the call log."""
 
@@ -2027,6 +2069,33 @@ async def test_rebuild_normalizes_relative_provider_root_before_launch(
     assert memory_process._provider_rebuild_lock_path(
         provider_root=process._provider_root
     ).parent.parent == provider_parent
+
+
+async def test_rebuild_normalizes_relative_interpreter_before_child_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    interpreter = tmp_path / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"")
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSRebuildProcess(
+        Path(".venv/bin/python"),
+        effective_home=tmp_path / "home",
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.COMPLETED
+    assert process._python == interpreter
+    assert host.spawn_calls[0][1] == interpreter
 
 
 @pytest.mark.parametrize(
