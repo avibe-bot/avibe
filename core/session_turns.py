@@ -49,6 +49,7 @@ from core.services.agent_steering import (
     SteerOutcome,
     SteerReconcileRequest,
     SteerRequest,
+    SteerResult,
     active_steer_identity,
     reconcile_steer_attempt,
     result as steer_result,
@@ -83,6 +84,29 @@ logger = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _accepted_steer_receipt(delivery: dict[str, Any]) -> SteerResult:
+    """Rebuild a typed accepted receipt from durable evidence."""
+
+    try:
+        payload = json.loads(str(delivery.get("current_receipt_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    return steer_result(
+        SteerOutcome.ACCEPTED,
+        reason=(
+            str(payload.get("reason"))
+            if payload.get("reason") is not None
+            else None
+        ),
+        **details,
+    )
 
 
 def _turn_event_payload(session_id: str, turn_id: str | None = None) -> dict[str, str]:
@@ -2828,17 +2852,12 @@ class SessionTurnManager:
                     ):
                         terminal_target = target_turn
                 if outcome_value == SteerOutcome.UNKNOWN.value:
-                    unknown_rows = [
-                        row
-                        if row["state"] == "reconciling_steer"
-                        else delivery_store.mark_attempt_unknown(
-                            conn,
-                            str(row["id"]),
-                            expected_version=int(row["version"]),
-                            receipt=body,
-                        )
-                        for row in attempt_rows
-                    ]
+                    unknown_rows = delivery_store.mark_attempt_receipt_batch(
+                        conn,
+                        leader_delivery_id=delivery_id,
+                        outcome="unknown",
+                        receipt=body,
+                    )
                     saved = unknown_rows[0] if unknown_rows else None
                     return DeliveryResult(
                         delivery_id,
@@ -2882,19 +2901,26 @@ class SessionTurnManager:
             try:
                 with self._sqlite_engine().begin() as conn:
                     reserve_write_lock(conn)
-                    leader = delivery_store.get_delivery(conn, delivery_id)
-                    lost_attempt_id = str((leader or {}).get("current_attempt_id") or "")
-                    for row in delivery_store.attempt_deliveries(conn, lost_attempt_id):
-                        if row["state"] == "steering":
-                            delivery_store.mark_attempt_unknown(
-                                conn,
-                                str(row["id"]),
-                                expected_version=int(row["version"]),
-                                receipt={"reason": "receipt_persistence_lost"},
-                            )
+                    persisted_outcome = (
+                        "accepted"
+                        if outcome_value == SteerOutcome.ACCEPTED.value
+                        else "unknown"
+                    )
+                    persisted_rows = delivery_store.mark_attempt_receipt_batch(
+                        conn,
+                        leader_delivery_id=delivery_id,
+                        outcome=persisted_outcome,
+                        receipt=(
+                            body
+                            if persisted_outcome == "accepted"
+                            else {"reason": "receipt_persistence_lost"}
+                        ),
+                    )
+                    if not persisted_rows:
+                        raise RuntimeError("steer receipt batch is no longer recoverable")
             except Exception:
                 logger.exception(
-                    "failed to persist unknown steer fence for delivery=%s",
+                    "failed to persist steer receipt recovery fence for delivery=%s",
                     delivery_id,
                 )
             return DeliveryResult(
@@ -5398,6 +5424,16 @@ class SessionTurnManager:
             )
             return True
         if delivery["state"] in {"steering", "reconciling_steer"}:
+            if (
+                delivery["state"] == "reconciling_steer"
+                and delivery.get("current_receipt_outcome") == "accepted"
+            ):
+                result = await self._finish_steer(
+                    str(delivery["id"]),
+                    _accepted_steer_receipt(delivery),
+                    context=None,
+                )
+                return result.state != "reconciling_steer"
             attempt_id = str(delivery.get("current_attempt_id") or "")
             expected_native = str(
                 delivery.get("current_expected_native_turn_id") or ""
@@ -5640,6 +5676,7 @@ class SessionTurnManager:
 
         with self._sqlite_engine().connect() as conn:
             unresolved = delivery_store.unresolved_deliveries(conn, session_id)
+            accepted_steer_attempts: list[dict[str, Any]] = []
             steer_attempts: list[tuple[dict[str, Any], str]] = []
             seen_attempt_ids: set[str] = set()
             for attempt in unresolved:
@@ -5654,14 +5691,30 @@ class SessionTurnManager:
                     not attempt_id
                     or attempt_id in seen_attempt_ids
                     or not target_turn_id
-                    or not expected_native_id
                 ):
                     continue
                 target_turn = delivery_store.get_turn(conn, target_turn_id)
                 if target_turn is None:
                     continue
                 seen_attempt_ids.add(attempt_id)
+                if (
+                    attempt["state"] == "reconciling_steer"
+                    and attempt.get("current_receipt_outcome") == "accepted"
+                ):
+                    accepted_steer_attempts.append(attempt)
+                    continue
+                if not expected_native_id:
+                    continue
                 steer_attempts.append((attempt, str(target_turn["backend"])))
+
+        for attempt in accepted_steer_attempts:
+            result = await self._finish_steer(
+                str(attempt["id"]),
+                _accepted_steer_receipt(attempt),
+                context=None,
+            )
+            if result.state != "reconciling_steer":
+                recovered.append(str(attempt["session_id"]))
 
         for attempt, backend in steer_attempts:
             attempt_id = str(attempt["current_attempt_id"])

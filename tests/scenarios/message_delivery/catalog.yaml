@@ -75,7 +75,7 @@ scenarios:
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_two_empty_p1_requests_claim_exact_same_head_only
   - id: MESSAGE-DELIVERY-011
-    name: Lost accepted steering receipt enters reconciliation without a second adapter call
+    name: Lost accepted steering receipt is retained as positive evidence and materialized without reconciliation
     status: covered
     kind: recovery
     layer: contract
@@ -224,5 +224,23 @@ scenarios:
     kind: regression
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_steer_acceptance_materializes_message_before_show_event_link
+  - id: MESSAGE-DELIVERY-311
+    name: Observation recovery materializes accepted steer evidence without another adapter call
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_observation_recovery_materializes_persisted_accepted_receipt_without_reconcile
+  - id: MESSAGE-DELIVERY-312
+    name: Unknown steer evidence remains unreplayed while reconciliation stays conservative
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_missing_restart_evidence_keeps_unknown_without_resteer
+  - id: MESSAGE-DELIVERY-313
+    name: Accepted attempt-batch recovery preserves merged materialization and Agent Run attachment
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment
 next_priority:
-  - MESSAGE-DELIVERY-311
+  - MESSAGE-DELIVERY-314
