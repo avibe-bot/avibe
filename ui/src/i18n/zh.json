@@ -3226,7 +3226,7 @@
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
       "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
-      "attachmentTooLarge": "文件超过 25 MB 的附件上限。",
+      "attachmentTooLarge": "文件超过 100 MB 的附件上限。",
       "attachmentEmpty": "不能上传空文件。",
       "attachmentSessionUnavailable": "当前会话已不可用。",
       "attachmentNetwork": "上传连接失败，请重试。",

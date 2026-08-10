@@ -15,6 +15,10 @@ describe('workbench attachment upload', () => {
     api.apiFetch.mockReset();
   });
 
+  it('keeps the browser boundary at 100 MiB', () => {
+    expect(MAX_WORKBENCH_ATTACHMENT_BYTES).toBe(100 * 1024 * 1024);
+  });
+
   it('uploads the original binary as multipart form data', async () => {
     api.apiFetch.mockResolvedValue(Response.json({
       token: 'media-token',

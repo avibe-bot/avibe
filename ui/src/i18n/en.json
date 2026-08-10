@@ -3226,7 +3226,7 @@
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
       "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
       "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
-      "attachmentTooLarge": "This file exceeds the 25 MB attachment limit.",
+      "attachmentTooLarge": "This file exceeds the 100 MB attachment limit.",
       "attachmentEmpty": "Empty files cannot be attached.",
       "attachmentSessionUnavailable": "This session is no longer available.",
       "attachmentNetwork": "The upload connection failed. Try again.",

@@ -2,7 +2,7 @@ import { apiFetch } from './apiFetch';
 
 // Product safety limit, enforced again by core/workbench_media.py. This is an
 // Avibe attachment policy, not an upstream proxy limit.
-export const MAX_WORKBENCH_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_WORKBENCH_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 
 export type WorkbenchUploadErrorCode =
   | 'empty_file'
