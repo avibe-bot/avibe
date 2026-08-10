@@ -607,6 +607,17 @@ SECTION_RE = re.compile(r"^### (\d+\.\d+)\b")
 
 API_ROW_RE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`$")
 BODY_RE = re.compile(r"`(\{[^`{}]*\})`")
+# A response half that spells no body names its shape instead — "→ OAuth result"
+# — and the shape gets a section of its own further down. The subject word is
+# what links the two, so it has to be a word the file capitalises: matching on
+# any word would send "Source-mutation envelope" to three unrelated sections.
+SHAPE_WORD_RE = re.compile(r"\b([A-Z][A-Za-z]{2,})\b")
+# One reading of a shape that has more than one, and the value that selects it.
+# `api.md` spells the OAuth terminal as three bullets — one per `intent` — and
+# reading them as one flat vocabulary would accept the very sentence the section
+# exists to forbid: `added_to` on a reauth terminal, which no reauth carries.
+SHAPE_VARIANT_RE = re.compile(r"^[-*]\s+(.*?)→\s*`(\{[^`{}]*\})`", re.M)
+VARIANT_NAME_RE = re.compile(r"\"([a-z_]+)\"")
 # What immediately introduces a body as the server's answer rather than the
 # client's request. `api.md` writes both sides in one cell, so a claim has to
 # say which side it is quoting, and these are the ways this document says it.
@@ -649,6 +660,26 @@ def literal_keys(text: str) -> set[str]:
             if re.fullmatch(r"[a-z_][A-Za-z0-9_]*", name):
                 keys.add(name)
     return keys
+
+
+def spelled_shapes(api_text: str) -> dict[str, dict[str, set[str]]]:
+    """Every shape this file names in a cell and spells in a section, by heading.
+
+    A route row can spell only what fits in a cell; what does not fit is named
+    there — "→ OAuth result" — and written out below. The writing-out is also
+    where a shape that has more than one reading says which reading carries
+    what, so each section is returned as its readings: the selecting value to
+    that reading's keys, plus `""` for the section's whole vocabulary.
+    """
+    shapes: dict[str, dict[str, set[str]]] = {}
+    for block in re.split(r"^## ", api_text, flags=re.M)[1:]:
+        heading, _, body = block.partition("\n")
+        readings: dict[str, set[str]] = {"": literal_keys(body)}
+        for selector, literal in SHAPE_VARIANT_RE.findall(body):
+            for name in VARIANT_NAME_RE.findall(selector):
+                readings[name] = readings.get(name, set()) | literal_keys(literal)
+        shapes[heading.strip()] = readings
+    return shapes
 
 
 def schema_vocabulary(node: Any) -> set[str]:
@@ -779,6 +810,8 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
             {
                 "keys": literal_keys(request),
                 "response_keys": literal_keys(response),
+                "response_readings": {},
+                "named_answer": "",
                 "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
                 "cell": cells[1],
             },
@@ -791,6 +824,29 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
     # route's own request shape can never leak into another route's allowance.
     outside = "\n".join(l for l in api_text.split("\n") if l not in table_spans)
     envelope = literal_keys(outside)
+
+    # A route that answers a named shape is contracted as exactly as one that
+    # spells its body — the spelling is just somewhere else. Left unread, both
+    # OAuth result rows contracted no answer at all, which does not read as "not
+    # checked": every claim about that answer fails, the true ones included, so
+    # the only way to write the terminal shape was prose the arm cannot check.
+    # Both are resolved by the subject word the cell uses, and only when it
+    # names exactly one section — a name that reaches none, or several, is not a
+    # name, and the row keeps the empty answer it already had. The guarded rows
+    # name a shared envelope instead, which the guard branch already allows.
+    shapes = spelled_shapes(api_text)
+    for _token, row in routes.items():
+        if row["response_keys"] or row["guarded"]:
+            continue
+        named = [
+            (head, readings)
+            for head, readings in shapes.items()
+            if any(word in head for word in SHAPE_WORD_RE.findall(row["cell"].partition("→")[2]))
+        ]
+        if len(named) == 1:
+            row["named_answer"], readings = named[0]
+            row["response_keys"] = readings[""]
+            row["response_readings"] = {k: v for k, v in readings.items() if k}
 
     schemas: dict[str, set[str]] = {}
     properties: dict[str, set[str]] = {}
@@ -1809,6 +1865,22 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             if not hit.empty:
                 row = hit.one
                 allowed |= row["response_keys"] if answer else row["keys"]
+                # A shape with more than one reading is not a vocabulary to pick
+                # from. `added_to` is contracted for the create terminal and
+                # contracted *away* from the reauth one — that partition is the
+                # whole content of the section, and a union of it accepts the
+                # one sentence the section exists to forbid. So a claim that
+                # names its reading is held to that reading; one that names
+                # none, or names two, still has the section entire.
+                clause = SENTENCE_RE.split(scope[: m_body.start()])[-1]
+                clause += SENTENCE_RE.split(scope[m_body.end() :])[0]
+                reading = [
+                    name
+                    for name in row["response_readings"]
+                    if f"`{name}`" in clause or f'"{name}"' in clause
+                ]
+                if answer and len(reading) == 1:
+                    allowed = set(row["response_readings"][reading[0]])
                 # The shared envelopes are *answers*: a refusal body, a
                 # confirmation body. A guarded route's request side needs
                 # nothing from them — `api.md` spells the one field a client
@@ -2866,6 +2938,9 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "frame sections declared": len(frame_u),
         "prose key references": len(p["refs"]),
         "authority: contracted routes read": len(auth["routes"]),
+        "authority: answers named in a cell and spelled in a section": sum(
+            1 for _t, r in auth["routes"].items() if r["named_answer"]
+        ),
         "authority: schema enum declarations": len(auth["schema fields"]),
         "authority: route claims": e_scale["routes"],
         "authority: request/response body claims": e_scale["bodies"],

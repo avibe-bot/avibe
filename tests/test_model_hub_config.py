@@ -1011,6 +1011,22 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`{display_name?, base_url?, source?}`",
         "not contracted for",
     ),
+    # Two of `api.md`'s rows spell no answer in the cell: they name it — "OAuth
+    # result" — and a section below spells it out, as three readings selected by
+    # `OAuthFlow.intent`. Left unread, those rows contracted no answer at all,
+    # and every claim about the terminal shape failed alike, the true ones
+    # included; the document wrote the shape as prose because a body could not
+    # be written. Read as one flat vocabulary it would accept exactly what the
+    # section forbids, which is this case: the reauth fields on the create
+    # terminal. `GATE_INNOCENT` holds the other half — the true body, in the
+    # same sentence, staying green.
+    GateCase(
+        "E", "routes", "arm",
+        "the create terminal is claimed to answer with the reauth reading",
+        "the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by`",
+        "the `create` terminal answers with `{flow, source, recovered, interrupted_pairs}`",
+        "not contracted for",
+    ),
     # A schema citation used to confirm the file and never the field, so a
     # misspelling sat behind a citation that looked verified. Two cues state
     # ownership — the possessive and the preposition — and a case on one proves
@@ -1335,6 +1351,17 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "`standby` or an `active` nothing adopts → Not supplying",
         "`standby` or an `active` nothing adopts → Not supplying, and once the engine "
         "resumes `standby` → Ready",
+    ),
+    # The green half of the OAuth-terminal case. The same sentence, written as
+    # the body it is describing, has to pass — otherwise the section is read as
+    # forbidding its own contents and the document is pushed back into prose,
+    # where no arm can check it. Which is what the unread section did: this text
+    # and the red case above were reported identically, four fields each.
+    InnocentCase(
+        "the create terminal's own fields, written as a body",
+        "class E reads a named answer from the section that spells it, by reading",
+        "the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by`",
+        "the `create` terminal answers with `{flow, source, added_to, adopted_by}`",
     ),
 )
 
