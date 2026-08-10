@@ -170,32 +170,6 @@ class MemoryMaintenance:
         except Exception:
             return True
 
-    def observation_block_reason(self) -> str | None:
-        """Describe why read-only provider observations are currently fenced."""
-
-        if self._backup_active:
-            return "busy"
-        restore_journal = self._backup_restore_journal
-        if restore_journal is None or self._initialization_error is not None:
-            return "memory_store_unavailable"
-        try:
-            if restore_journal.get_open_operation() is not None:
-                return "busy"
-        except Exception:
-            return "memory_store_unavailable"
-        clear_journal = self._clear_journal
-        if clear_journal is None:
-            return "memory_store_unavailable"
-        try:
-            operation = clear_journal.get_open_operation()
-        except Exception:
-            return "memory_store_unavailable"
-        if operation is None:
-            return None
-        if operation.state == "recovery_needed":
-            return operation.closed_error or "memory_clear_failed"
-        return "busy"
-
     def can_disable_without_authority(self) -> bool:
         restore_journal = self._backup_restore_journal
         clear_journal = self._clear_journal
@@ -816,10 +790,7 @@ class MemoryMaintenance:
             return None
 
     async def _finish_clear(self, operation: ClearOperation) -> ClearResult:
-        try:
-            await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
-        finally:
-            await self._runtime.resume()
+        await self._finalize_terminal_clear()
         return ClearResult(
             status="completed",
             operation_id=operation.operation_id,
@@ -827,15 +798,18 @@ class MemoryMaintenance:
         )
 
     async def _finish_aborted_clear(self, operation: ClearOperation) -> ClearResult:
-        try:
-            await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
-        finally:
-            await self._runtime.resume()
+        await self._finalize_terminal_clear()
         return ClearResult(
             status="aborted",
             operation_id=operation.operation_id,
             epoch=operation.pre_epoch,
         )
+
+    async def _finalize_terminal_clear(self) -> None:
+        try:
+            await self._run_maintenance_io(self._reconcile_terminal_clear_snapshots)
+        finally:
+            await self._runtime.resume()
 
     def _blocked(self, *, operator_ref: str | None = None) -> ClearResult:
         return ClearResult(
@@ -1006,15 +980,6 @@ class MemoryMaintenance:
 
     def _open_backup_restore_operation(self) -> BackupRestoreOperation | None:
         journal = self._backup_restore_journal
-        if journal is None:
-            return None
-        try:
-            return journal.get_open_operation()
-        except Exception:
-            return None
-
-    def _open_clear_operation(self) -> ClearOperation | None:
-        journal = self._clear_journal
         if journal is None:
             return None
         try:
