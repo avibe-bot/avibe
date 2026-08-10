@@ -2642,6 +2642,8 @@ def test_wechat_qr_poll_settles_persistence_before_cancellation(monkeypatch):
     persist_entered = threading.Event()
     release_persist = threading.Event()
     persist_finished = threading.Event()
+    bound_users: list[str] = []
+    restart_calls: list[bool] = []
 
     class _Auth:
         async def poll_status(self, session_key, verify_code=None):
@@ -2660,6 +2662,15 @@ def test_wechat_qr_poll_settles_persistence_before_cancellation(monkeypatch):
     runtime.ensure_config()
     monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
     monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", blocking_persist)
+    monkeypatch.setattr(
+        "vibe.api.auto_bind_wechat_user",
+        lambda user_id: bound_users.append(user_id) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: restart_calls.append(True) or {"job_id": "restart-1"},
+    )
 
     async def exercise() -> None:
         task = asyncio.create_task(ui_server.wechat_qr_login_poll())
@@ -2682,6 +2693,8 @@ def test_wechat_qr_poll_settles_persistence_before_cancellation(monkeypatch):
         asyncio.run(exercise())
 
     assert persist_finished.is_set()
+    assert bound_users == ["wx-user"]
+    assert restart_calls == [True]
 
 
 def test_wechat_qr_poll_passes_verify_code(monkeypatch):

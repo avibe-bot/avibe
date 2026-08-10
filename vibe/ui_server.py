@@ -5421,26 +5421,38 @@ async def wechat_qr_login_poll():
     # If confirmed, auto-bind the WeChat user
     if result.get("status") == "confirmed" and result.get("bot_token") and result.get("user_id"):
         user_id = result["user_id"]
+        settlement = CancellationSettlement()
 
         try:
-            await run_blocking(_persist_wechat_qr_credentials, result)
-        except Exception as exc:
+            await settlement.run_blocking(_persist_wechat_qr_credentials, result)
+        except (Exception, asyncio.CancelledError) as exc:
+            settlement.raise_if_cancelled(exc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             logger.error("Failed to persist WeChat QR credentials: %s", exc)
             return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
 
         # Auto-bind user
+        settlement_cause: BaseException | None = None
         try:
             from vibe import api as vibe_api
 
-            vibe_api.auto_bind_wechat_user(user_id)
-        except Exception as e:
+            await settlement.run_blocking(vibe_api.auto_bind_wechat_user, user_id)
+        except (Exception, asyncio.CancelledError) as e:
+            if isinstance(e, asyncio.CancelledError) and not settlement.cancelled:
+                raise
+            settlement_cause = e
             logger.warning("Failed to auto-bind WeChat user: %s", e)
 
         try:
-            restart = _schedule_wechat_qr_login_restart()
+            restart = await settlement.run_blocking(_schedule_wechat_qr_login_restart)
             logger.info("Scheduled service restart after WeChat QR login: %s", restart.get("job_id"))
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+                raise
+            settlement_cause = settlement_cause or exc
             logger.warning("Failed to schedule service restart after WeChat QR login: %s", exc)
+        settlement.raise_if_cancelled(settlement_cause)
 
     return jsonify(result)
 

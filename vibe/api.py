@@ -9250,25 +9250,18 @@ def save_codex_auth(payload: dict) -> dict:
         if base_url_change == "":
             base_url_change = None
 
-    if auth_mode == "api_key" and not api_key:
-        # Allow callers to PATCH base_url alone by reusing the stored key.
-        # ``auth.json`` is the live source Codex reads at launch, and it
-        # captures keys rotated outside this flow (e.g. ``codex login
-        # --with-api-key``). The V2Config cache can be stale relative to
-        # disk, so trusting it first would silently revert a freshly
-        # rotated key when we re-write ``auth.json`` below. Prefer disk;
-        # fall back to V2Config only if disk has nothing (legacy installs
-        # that never wrote ``auth.json``).
-        try:
-            from vibe.codex_config import read_codex_api_key
-
-            api_key = read_codex_api_key()
-        except Exception:
-            api_key = None
-    from vibe.codex_config import apply_codex_auth
+    from vibe.codex_config import apply_codex_auth, read_codex_api_key
 
     notices: list = []
     with config_write_transaction():
+        if auth_mode == "api_key" and not api_key:
+            # ``auth.json`` is the live source Codex reads at launch. Keep
+            # this preservation read in the same transaction as its rewrite
+            # so a concurrent key rotation cannot be replaced with stale data.
+            try:
+                api_key = read_codex_api_key()
+            except Exception:
+                api_key = None
         try:
             config = load_config()
         except FileNotFoundError:
