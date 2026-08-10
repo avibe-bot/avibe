@@ -203,6 +203,12 @@ class MemorySidecarLifecycle:
     async def stop_host_retention(self) -> None:
         await self._stop_retention()
 
+    def observe_recorder_health(self, health: dict[str, str | None]) -> None:
+        """Block host retention when the live recorder reports corruption."""
+
+        if health.get("reason") == "call_log_corrupt":
+            self._retention_blocked = True
+
     def reset_host_retention_after_clear(self) -> None:
         """Reopen retention only after Clear repaired its corrupt call-log surface."""
 

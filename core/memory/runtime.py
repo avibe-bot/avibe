@@ -488,6 +488,7 @@ class MemoryRuntime:
             quiesce=self._quiesce_for_clear,
             resume=self._resume_after_clear,
             delete_surface=self._delete_clear_surface,
+            restore_completed=self._sidecar.reset_host_retention_after_clear,
         )
 
     def _processing_record_port(self) -> MemoryProcessingRecordPort:
@@ -986,6 +987,7 @@ class MemoryRuntime:
         observed_at: str | None = None,
     ) -> None:
         self._recorder_health = dict(health)
+        self._sidecar.observe_recorder_health(self._recorder_health)
         self._processing_record.observe_recorder(
             self._recorder_health,
             observed_at=observed_at,

@@ -144,3 +144,32 @@ async def test_corrupt_host_log_stays_blocked_across_sidecar_reaps(tmp_path: Pat
     assert resumed is not None
     await resumed
     assert attempts == 2
+
+
+async def test_recorder_corruption_blocks_host_retention_after_a_reap(tmp_path: Path) -> None:
+    factory = FakeEverOSProcessFactory()
+    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
+    call_log.parent.mkdir(parents=True)
+    call_log.touch()
+    attempts = 0
+
+    async def retain() -> str | None:
+        nonlocal attempts
+        attempts += 1
+        return None
+
+    lifecycle = MemorySidecarLifecycle(
+        factory,
+        provider_root=tmp_path / "memory" / "everos-root",
+        effective_home=tmp_path,
+        socket_path=tmp_path / "memory" / ".rt" / "everos.sock",
+        call_log_db_path=call_log,
+        retain_call_log=retain,
+        on_current_sidecar_ready=lambda _generation: None,
+        on_recorder_health=lambda _health: None,
+    )
+    lifecycle.observe_recorder_health({"state": "degraded", "reason": "call_log_corrupt"})
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    await lifecycle.stop()
+    await asyncio.sleep(0)
+    assert attempts == 0

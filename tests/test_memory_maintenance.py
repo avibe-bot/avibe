@@ -2068,6 +2068,11 @@ async def test_maintenance_backup_restore_round_trips_queue_state(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "backup-source")
+    restored_call_log: list[None] = []
+    _replace_runtime_port(
+        runtime,
+        restore_completed=lambda: restored_call_log.append(None),
+    )
 
     backup = await _maintenance(runtime).create_backup("runtime-round-trip")
     meta = runtime._store.ensure_meta()
@@ -2081,6 +2086,7 @@ async def test_maintenance_backup_restore_round_trips_queue_state(
     )
 
     assert restored == backup
+    assert restored_call_log == [None]
     rows = runtime._store.list_queue_rows()
     assert len(rows) == 1
     assert rows[0].source_message_digest
