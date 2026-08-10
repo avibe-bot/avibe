@@ -118,6 +118,42 @@ MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 
 
+def normalize_model_hub_vendor_id(value: object) -> str:
+    """Return the canonical persisted vendor id used by matching-v1."""
+
+    if not isinstance(value, str):
+        raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+    vendor = value.strip().lower()
+    if (
+        not vendor
+        or re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", vendor) is None
+        or _contains_model_hub_credential_material(vendor)
+    ):
+        raise ValueError("Config 'model_hub.sources.vendor' is invalid")
+    return vendor
+
+
+def canonical_opencode_menu_identity(identifier: object) -> tuple[str, str]:
+    """Validate and split one persisted OpenCode ``provider/model`` identity."""
+
+    from core.handlers.model_hub.identifiers import (
+        STANDARD_OPENCODE_VENDOR_IDS,
+        parse_opencode_model_id,
+    )
+
+    if not isinstance(identifier, str) or identifier != identifier.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    provider_id, model_id = parse_opencode_model_id(identifier)
+    if (
+        provider_id not in STANDARD_OPENCODE_VENDOR_IDS
+        and provider_id != "custom"
+    ) or provider_id != provider_id.strip() or model_id != model_id.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    if _contains_model_hub_credential_material(identifier):
+        raise ValueError("OpenCode model identifier contains credential material")
+    return provider_id, model_id
+
+
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     """Return the bundled fixed-menu ids used by persisted Hub routes."""
 
@@ -873,8 +909,7 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.id' is invalid")
         if kind not in {"subscription", "api_key"}:
             raise ValueError("Config 'model_hub.sources.kind' is invalid")
-        if not isinstance(vendor, str) or not vendor:
-            raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+        vendor = normalize_model_hub_vendor_id(vendor)
         if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
             raise ValueError("Config 'model_hub.sources.display_name' is invalid")
         if protocol not in {"anthropic", "openai_responses", "openai_chat"}:
@@ -983,7 +1018,11 @@ class ModelHubRouteHopConfig:
         model_id = payload.get("model_id")
         if not isinstance(source_id, str) or re.fullmatch(r"src_[a-z0-9]{8,}", source_id) is None:
             raise ValueError("Config 'model_hub.agents.routes.hops.source_id' is invalid")
-        if not isinstance(model_id, str) or not model_id:
+        if (
+            not isinstance(model_id, str)
+            or not model_id
+            or _contains_model_hub_credential_material(model_id)
+        ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
         return cls(source_id=source_id, model_id=model_id)
 
@@ -1031,6 +1070,8 @@ class ModelHubMenuConfig:
             raise ValueError("Config 'model_hub.agents.menu.checked' must be an array of strings")
         if len(set(checked)) != len(checked):
             raise ValueError("Config 'model_hub.agents.menu.checked' must be unique")
+        if any(_contains_model_hub_credential_material(item) for item in checked):
+            raise ValueError("Config 'model_hub.agents.menu.checked' is invalid")
         return cls(view=view, checked=list(checked))
 
     def to_payload(self) -> dict:
@@ -1109,6 +1150,16 @@ class ModelHubAgentSupplyConfig:
             menu_payload = {"view": "featured", "checked": []}
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
+        routes = {
+            model_id: ModelHubRouteConfig.from_payload(route)
+            for model_id, route in routes_payload.items()
+        }
+        menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
+        if any(_contains_model_hub_credential_material(model_id) for model_id in routes):
+            raise ValueError("Config 'model_hub.agents.routes' contains an invalid model id")
+        if backend == "opencode":
+            for identifier in (*routes, *(menu.checked if menu else ())):
+                canonical_opencode_menu_identity(identifier)
         return cls(
             backend=backend,
             mode=mode,
@@ -1118,11 +1169,8 @@ class ModelHubAgentSupplyConfig:
                 if sources_payload is not None
                 else ModelHubAgentSourcesConfig()
             ),
-            routes={
-                model_id: ModelHubRouteConfig.from_payload(route)
-                for model_id, route in routes_payload.items()
-            },
-            menu=ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None,
+            routes=routes,
+            menu=menu,
         )
 
     def to_payload(self) -> dict:

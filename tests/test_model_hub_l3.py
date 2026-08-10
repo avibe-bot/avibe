@@ -6,7 +6,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import cast, get_args
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
@@ -1112,6 +1112,57 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     assert overlay.launches[0].target_model == "upstream-model"
 
 
+def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: Path) -> None:
+    first = _source(
+        "src_overlay11",
+        "First",
+        vendor="custom",
+        protocol="anthropic",
+        model_id="first-model",
+    )
+    second = _source(
+        "src_overlay12",
+        "Second",
+        vendor="custom",
+        protocol="openai_responses",
+        model_id="second-model",
+    )
+    config = _config([first, second])
+    agent = config.agents["opencode"]
+    agent.menu.checked = ["custom/first-model", "custom/second-model"]
+    agent.routes = {
+        "custom/first-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(first.id, "first-model"),)
+        ),
+        "custom/second-model": ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(second.id, "second-model"),)
+        ),
+    }
+    service = _service(tmp_path, sources=[first, second])
+    service.store.config = config
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000/opencode", "gateway-token")
+            ),
+        ),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+
+    assert overlay is not None
+    provider = json.loads(overlay.content)["provider"]["custom"]
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
+    assert set(provider["models"]) == {"first-model", "second-model"}
+    assert {launch.target_model for launch in overlay.launches} == {
+        "first-model",
+        "second-model",
+    }
+
+
 def test_opencode_overlay_rejects_wrong_exact_hop_identity(tmp_path: Path) -> None:
     source = _source("src_overlay02", "Overlay", model_id="upstream-model")
     config = _config([source])
@@ -1379,6 +1430,71 @@ def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None
     ]
     assert len(events) == 1
     assert events[0]["reason"] == "model_unsupported"
+
+
+@pytest.mark.parametrize(
+    ("route", "native_ready", "reason"),
+    [
+        (ModelHubRouteConfig(), True, "route_unconfigured"),
+        (
+            ModelHubRouteConfig(
+                hops=(ModelHubRouteHopConfig("src_missing01", "shared-model"),)
+            ),
+            True,
+            "source_missing",
+        ),
+    ],
+)
+def test_supply_interruption_preserves_exact_structural_reason(
+    tmp_path: Path,
+    route: ModelHubRouteConfig,
+    native_ready: bool,
+    reason: str,
+) -> None:
+    source = _source("src_present01", "Present")
+    service = _service(tmp_path, sources=[source])
+    service.store.config.agents["claude"].routes["shared-model"] = route
+    router = ModelHubRuntimeRouter(
+        service=service,
+        native_cli_ready=lambda _backend: native_ready,
+    )
+
+    with pytest.raises(ModelHubError):
+        asyncio.run(router.resolve("claude", "shared-model"))
+
+    event = next(
+        item
+        for item in service.list_events(limit=20)
+        if item["kind"] == "supply_interrupted"
+    )
+    assert event["reason"] == reason
+    _assert_valid("resolution-event.schema.json", event)
+
+
+def test_supply_interruption_preserves_native_process_reason(tmp_path: Path) -> None:
+    source = _source(
+        "src_native011",
+        "Native",
+        channel="native_cli",
+        vendor="anthropic",
+        protocol="anthropic",
+    )
+    service = _service(tmp_path, sources=[source])
+    router = ModelHubRuntimeRouter(
+        service=service,
+        native_cli_ready=lambda _backend: False,
+    )
+
+    with pytest.raises(ModelHubError):
+        asyncio.run(router.resolve("claude", "shared-model"))
+
+    event = next(
+        item
+        for item in service.list_events(limit=20)
+        if item["kind"] == "supply_interrupted"
+    )
+    assert event["reason"] == "native_cli_unavailable"
+    _assert_valid("resolution-event.schema.json", event)
 
 
 def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
@@ -1862,6 +1978,13 @@ def test_retired_mapping_event_is_rejected_and_channel_switch_retains_subject() 
 
     for text in (channel_switch.human_en, channel_switch.human_zh):
         assert "Primary source" in text
+
+
+def test_resolution_event_reason_contract_matches_runtime_vocabulary() -> None:
+    schema = json.loads(
+        (CONTRACTS / "resolution-event.schema.json").read_text(encoding="utf-8")
+    )
+    assert tuple(schema["properties"]["reason"]["enum"]) == get_args(EventReason)
 
 
 def test_shared_source_cooldown_emits_only_on_state_transition(

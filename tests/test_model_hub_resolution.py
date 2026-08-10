@@ -697,12 +697,14 @@ def test_engine_binding_excludes_empty_inventory(tmp_path):
     assert service._bindings(config) == []
 
 
-def test_opencode_normalization_has_one_resolver_consumer():
+def test_opencode_identity_computation_stays_in_validator_and_resolver():
     from ast import (
         Attribute,
         AsyncFunctionDef,
+        FunctionDef,
         Import,
         ImportFrom,
+        Module,
         Name,
         NodeVisitor,
         parse,
@@ -750,7 +752,9 @@ def test_opencode_normalization_has_one_resolver_consumer():
             self.generic_visit(node)
 
     root = Path(__file__).parents[1]
+    config_path = root / "config/v2_config.py"
     allowed = {
+        config_path,
         root / "core/handlers/model_hub/identifiers.py",
         root / "core/handlers/model_hub/resolver.py",
     }
@@ -764,6 +768,28 @@ def test_opencode_normalization_has_one_resolver_consumer():
             if visitor.calls:
                 violations[str(path.relative_to(root))] = visitor.calls
     assert violations == {}
+
+    config_tree = parse(config_path.read_text(encoding="utf-8"))
+    validator = next(
+        node
+        for node in config_tree.body
+        if isinstance(node, FunctionDef)
+        and node.name == "canonical_opencode_menu_identity"
+    )
+    validator_calls = RawIdentityCalls()
+    validator_calls.visit(validator)
+    assert set(validator_calls.calls) == {
+        "STANDARD_OPENCODE_VENDOR_IDS",
+        "parse_opencode_model_id",
+    }
+    other_config_calls = RawIdentityCalls()
+    other_config_calls.visit(
+        Module(
+            body=[node for node in config_tree.body if node is not validator],
+            type_ignores=[],
+        )
+    )
+    assert other_config_calls.calls == []
 
     shared_startup = parse(
         (root / "modules/agents/model_hub.py").read_text(encoding="utf-8")
@@ -1013,6 +1039,42 @@ def test_create_source_persists_only_the_response_proven_protocol(tmp_path):
     assert result["source"]["protocol"] == "openai_responses"
     assert store.load().sources[0].protocol == "openai_responses"
     assert adapter.revoked == ["cred_00000001"]
+
+
+def test_create_source_normalizes_vendor_before_matching_v1_placement(tmp_path):
+    config = ModelHubConfig()
+    opencode = config.agents["opencode"]
+    opencode.mode = "hub"
+    assert opencode.menu is not None
+    opencode.menu.checked = ["openai/gpt-5.6"]
+    opencode.routes["openai/gpt-5.6"] = ModelHubRouteConfig()
+    adapter = FakeAdapter(discovered=("gpt-5.6",))
+    service, store, _ = _service(tmp_path, config, adapter)
+
+    result = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "OpenAI",
+                "display_name": "Observed key",
+                "key": "sk-test-vendor-normalization",
+                "protocol_order": [
+                    "openai_responses",
+                    "openai_chat",
+                    "anthropic",
+                ],
+            }
+        )
+    )
+
+    assert result["source"]["vendor"] == "openai"
+    assert store.load().sources[0].vendor == "openai"
+    assert any(
+        position["backend"] == "opencode"
+        and position["menu_model"] == "openai/gpt-5.6"
+        and position["model_id"] == "gpt-5.6"
+        for position in result["added_to"]
+    )
 
 
 def test_ambiguous_observation_never_creates_a_source(tmp_path):

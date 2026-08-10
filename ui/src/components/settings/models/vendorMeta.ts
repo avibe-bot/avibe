@@ -95,7 +95,7 @@ export type VendorOption = {
 
 export const VENDOR_OPTIONS: VendorOption[] = [
   { value: 'custom', labelKey: 'settings.models.addKey.vendors.custom', base_url: null, probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'anthropic', labelKey: 'settings.models.addKey.vendors.anthropic', base_url: 'https://api.anthropic.com', probe_order: ['anthropic', 'openai_responses', 'openai_chat'] },
+  { value: 'anthropic', labelKey: 'settings.models.addKey.vendors.anthropic', base_url: 'https://api.anthropic.com/v1', probe_order: ['anthropic', 'openai_responses', 'openai_chat'] },
   { value: 'openai', labelKey: 'settings.models.addKey.vendors.openai', base_url: 'https://api.openai.com/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
   { value: 'zhipuai', labelKey: 'settings.models.addKey.vendors.zhipuai', base_url: 'https://open.bigmodel.cn/api/paas/v4', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
   { value: 'kimi', labelKey: 'settings.models.addKey.vendors.kimi', base_url: 'https://api.moonshot.cn/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },

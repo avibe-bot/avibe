@@ -27,7 +27,9 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
+    canonical_opencode_menu_identity,
     normalize_model_hub_base_url,
+    normalize_model_hub_vendor_id,
 )
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
@@ -79,7 +81,6 @@ from .resolver import (
     BackendName,
     ModelHubTurnResolution,
     allowed_origins,
-    canonical_opencode_menu_identity,
     inspect_exact_hop,
     matching_v1_model_id as _matching_v1_model_id,
     resolve_model_hub_turn,
@@ -832,7 +833,9 @@ class ModelHubService:
         if set(payload) - {"vendor", "base_url", "key", "protocol_order"}:
             raise ModelHubError("discovery_failed")
         vendor = payload.get("vendor")
-        if not isinstance(vendor, str) or not vendor.strip() or contains_credential_material(vendor):
+        try:
+            vendor = normalize_model_hub_vendor_id(vendor)
+        except ValueError:
             raise ModelHubError("discovery_failed")
         base_url = _validated_base_url(payload.get("base_url"))
         key = payload.get("key")
@@ -1777,12 +1780,11 @@ class ModelHubService:
         kind = payload.get("kind")
         vendor = payload.get("vendor")
         display_name = payload.get("display_name") or vendor
-        if (
-            kind not in {"subscription", "api_key"}
-            or not isinstance(vendor, str)
-            or not vendor
-            or contains_credential_material(vendor)
-        ):
+        try:
+            vendor = normalize_model_hub_vendor_id(vendor)
+        except ValueError:
+            raise ModelHubError("discovery_failed") from None
+        if kind not in {"subscription", "api_key"}:
             raise ModelHubError("discovery_failed")
         if (
             not isinstance(display_name, str)
@@ -2607,16 +2609,20 @@ class ModelHubService:
             config = self.store.load()
             agent = config.agents["opencode"]
             try:
-                parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
-                for identifier in parsed.checked:
-                    canonical_opencode_menu_identity(identifier)
-                    if contains_credential_material(identifier):
-                        raise ValueError("OpenCode menu identifier contains credential material")
+                parsed_menu = ModelHubMenuConfig.from_payload(cast(dict, menu))
+                candidate = agent.to_payload()
+                candidate["menu"] = parsed_menu.to_payload()
+                candidate_routes = cast(dict, candidate["routes"])
+                for identifier in parsed_menu.checked:
+                    candidate_routes.setdefault(identifier, ModelHubRouteConfig().to_payload())
+                parsed = ModelHubAgentSupplyConfig.from_payload(
+                    candidate,
+                    expected_backend="opencode",
+                )
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
-            agent.menu = parsed
-            for identifier in parsed.checked:
-                agent.routes.setdefault(identifier, ModelHubRouteConfig())
+            agent.menu = parsed.menu
+            agent.routes = parsed.routes
             self._save_config(config)
             return self._agent_payload(config, agent)
 

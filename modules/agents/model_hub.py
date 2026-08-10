@@ -343,16 +343,13 @@ def build_codex_hub_launch(
     return overrides + list(base_args), env
 
 
-def _provider_package(protocol: str) -> str:
-    if protocol == "anthropic":
-        return "@ai-sdk/anthropic"
-    if protocol == "openai_responses":
-        return "@ai-sdk/openai"
+def _provider_package() -> str:
+    # OpenCode speaks one stable frontend protocol to the local Gateway. The
+    # persisted exact hop selects the upstream protocol behind that boundary.
     return "@ai-sdk/openai-compatible"
 
 
-def _provider_base_url(gateway_base_url: str, protocol: str) -> str:
-    # All supported OpenCode SDK adapters expect their versioned API root.
+def _provider_base_url(gateway_base_url: str) -> str:
     return f"{gateway_base_url.rstrip('/')}/v1"
 
 
@@ -685,10 +682,14 @@ class ModelHubRuntimeRouter:
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
     ) -> EventReason:
-        if resolution.structural_blocker_reason == "model_unsupported":
-            return "model_unsupported"
-        if resolution.structural_blocker_reason is not None:
-            return "no_enabled_source"
+        structural_reason = resolution.structural_blocker_reason
+        if structural_reason in {
+            "route_unconfigured",
+            "source_missing",
+            "model_unsupported",
+            "native_cli_unavailable",
+        }:
+            return cast(EventReason, structural_reason)
         order = config.effective_source_order(resolution.backend)
         sources_by_id = {source.id: source for source in config.sources}
         enabled_sources = [
@@ -1080,8 +1081,8 @@ class ModelHubRuntimeRouter:
                 continue
             source = inspection.source
             exact_model_id = inspection.model_id
-            package = _provider_package(source.protocol)
-            base_url = _provider_base_url(gateway_base_url, source.protocol)
+            package = _provider_package()
+            base_url = _provider_base_url(gateway_base_url)
             provider = providers.setdefault(
                 provider_id,
                 {
@@ -1091,8 +1092,6 @@ class ModelHubRuntimeRouter:
                     "models": {},
                 },
             )
-            if provider["npm"] != package or provider["options"]["baseURL"] != base_url:
-                raise ModelHubError("mapping_target_unavailable", status=409)
             model = next(item for item in source.models if item.id == exact_model_id)
             runtime_model = identifier
             if self.turn_gateway is None:

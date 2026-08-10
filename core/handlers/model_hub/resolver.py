@@ -12,11 +12,10 @@ from config.v2_config import (
     ModelHubConfig,
     ModelHubRouteHopConfig,
     ModelHubSourceConfig,
+    canonical_opencode_menu_identity,
 )
 from core.handlers.model_hub.identifiers import (
-    STANDARD_OPENCODE_VENDOR_IDS,
     opencode_model_id,
-    parse_opencode_model_id,
 )
 
 
@@ -142,20 +141,6 @@ def source_runnable(
     if source.state.status in {"active", "standby"}:
         return True
     return source_retry_ready(source, now)
-
-
-def canonical_opencode_menu_identity(identifier: str) -> tuple[str, str]:
-    """Validate and split one stored OpenCode ``provider/model`` identity."""
-
-    if not isinstance(identifier, str) or identifier != identifier.strip():
-        raise ValueError("Invalid OpenCode model identifier")
-    provider_id, model_id = parse_opencode_model_id(identifier)
-    if (
-        provider_id not in STANDARD_OPENCODE_VENDOR_IDS
-        and provider_id != "custom"
-    ) or provider_id != provider_id.strip() or model_id != model_id.strip():
-        raise ValueError("Invalid OpenCode model identifier")
-    return provider_id, model_id
 
 
 def normalize_opencode_requested_model(

@@ -138,8 +138,41 @@ def test_source_validator_enforces_final_cross_field_and_inventory_rules():
 
     safe_query_url = copy.deepcopy(_schema("source.schema.json")["examples"][1])
     safe_query_url["base_url"] = "https://relay.example/v1/?api-version=2026-07-23"
+    canonical_vendor = copy.deepcopy(safe_query_url)
+    canonical_vendor["vendor"] = " OpenAI "
+    assert ModelHubSourceConfig.from_payload(canonical_vendor).vendor == "openai"
     parsed = ModelHubSourceConfig.from_payload(safe_query_url)
     assert parsed.base_url == "https://relay.example/v1?api-version=2026-07-23"
+
+
+def test_persisted_model_hub_identifiers_share_the_canonical_validation_boundary():
+    payload = ModelHubConfig().to_payload()
+    opencode = payload["agents"]["opencode"]
+    opencode["menu"]["checked"] = ["gpt-5"]
+    opencode["routes"]["gpt-5"] = {"hops": []}
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
+
+    payload = ModelHubConfig().to_payload()
+    opencode = payload["agents"]["opencode"]
+    opencode["routes"]["custom/authorization: sk-test-credential-material"] = {
+        "hops": []
+    }
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
+
+    payload = ModelHubConfig().to_payload()
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    payload["sources"] = [source]
+    codex_route = next(iter(payload["agents"]["codex"]["routes"].values()))
+    codex_route["hops"] = [
+        {
+            "source_id": source["id"],
+            "model_id": "authorization: sk-test-credential-material",
+        }
+    ]
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
 
 
 def _canonical(payload: dict) -> bytes:

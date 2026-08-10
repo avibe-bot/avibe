@@ -40,7 +40,10 @@ EventReason = Literal[
     "unclassified_error",
     "no_enabled_source",
     "no_eligible_source",
+    "route_unconfigured",
+    "source_missing",
     "model_unsupported",
+    "native_cli_unavailable",
 ]
 BillingNote = Literal["entered_metered", "left_metered"]
 EventSeverity = Literal["info", "action_required"]
@@ -62,7 +65,10 @@ _REQUEST_SCOPED_REASONS = {"permission_denied"}
 _STRUCTURAL_REASONS = {
     "no_enabled_source",
     "no_eligible_source",
+    "route_unconfigured",
+    "source_missing",
     "model_unsupported",
+    "native_cli_unavailable",
 }
 
 _CREDENTIAL_PATTERNS = (
