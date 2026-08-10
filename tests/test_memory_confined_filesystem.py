@@ -354,6 +354,32 @@ def test_remove_confined_path_refuses_to_follow_a_swapped_directory(
     assert victim.read_text(encoding="utf-8") == "outside must survive"
 
 
+def test_remove_confined_regular_file_does_not_initialize_directory_ordering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "current.json"
+    target.write_text("pointer", encoding="utf-8")
+    target.chmod(0o600)
+    connect_calls = 0
+
+    from core.memory import confined_filesystem
+
+    def fail_connect(*_args, **_kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        raise sqlite3.OperationalError("temporary ordering unavailable")
+
+    monkeypatch.setattr(confined_filesystem.sqlite3, "connect", fail_connect)
+
+    remove_confined_path(home, target)
+
+    assert connect_calls == 0
+    assert not target.exists()
+
+
 def test_confined_atomic_replace_refuses_symlink_source_and_replaces_symlink_target(
     tmp_path: Path,
 ) -> None:
@@ -457,6 +483,68 @@ def test_confined_atomic_replace_cleans_a_source_replaced_during_rename(
     assert not target.is_symlink()
     assert held.read_text(encoding="utf-8") == "original"
     assert outside.read_text(encoding="utf-8") == "outside survives"
+
+
+def test_confined_atomic_replace_removes_a_source_made_public_during_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    stage = home / "stage"
+    stage.mkdir(mode=0o700)
+    value = stage / "value.txt"
+    value.write_text("private", encoding="utf-8")
+    value.chmod(0o600)
+    target = home / "target"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside survives", encoding="utf-8")
+
+    from core.memory import confined_filesystem
+
+    real_replace = confined_filesystem.os.replace
+
+    def expose_source_before_replace(source, destination, *args, **kwargs):
+        stage.chmod(0o755)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "replace", expose_source_before_replace)
+
+    with pytest.raises(ConfinedFilesystemError):
+        replace_confined(home, stage, target)
+
+    assert not target.exists()
+    assert outside.read_text(encoding="utf-8") == "outside survives"
+
+
+def test_confined_atomic_replace_removes_a_source_hardlinked_during_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    stage = home / "stage"
+    stage.write_text("private", encoding="utf-8")
+    stage.chmod(0o600)
+    target = home / "target"
+    outside_link = tmp_path / "outside-link.txt"
+
+    from core.memory import confined_filesystem
+
+    real_replace = confined_filesystem.os.replace
+
+    def link_source_before_replace(source, destination, *args, **kwargs):
+        os.link(stage, outside_link)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "replace", link_source_before_replace)
+
+    with pytest.raises(ConfinedFilesystemError):
+        replace_confined(home, stage, target)
+
+    assert not target.exists()
+    assert outside_link.read_text(encoding="utf-8") == "private"
+    assert outside_link.stat().st_nlink == 1
 
 
 def test_confined_replace_and_cleanup_accept_owner_only_directory_modes(

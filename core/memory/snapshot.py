@@ -92,10 +92,17 @@ class _MemorySQLiteCorruptionError(MemorySnapshotError):
     """A SQLite source is readable as a file but not as a valid database."""
 
 
-def _new_directory_order() -> SpilledDirectoryOrder:
-    return SpilledDirectoryOrder(
-        insert_batch_size=_directory_order_insert_batch_size()
-    )
+def _new_directory_order(
+    *,
+    error_type: type[MemorySnapshotError],
+    message: str,
+) -> SpilledDirectoryOrder:
+    try:
+        return SpilledDirectoryOrder(
+            insert_batch_size=_directory_order_insert_batch_size()
+        )
+    except ConfinedFilesystemError as error:
+        raise error_type(message) from error
 
 
 def _scan_directory_order(
@@ -745,7 +752,10 @@ class MemorySnapshotManager:
         removed: list[str] = []
         orders: SpilledDirectoryOrder | None = None
         try:
-            orders = _new_directory_order()
+            orders = _new_directory_order(
+                error_type=MemorySnapshotUnsafePathError,
+                message="Memory backup root cannot be scanned safely",
+            )
             candidates = _scan_directory_order(
                 orders,
                 root_fd,
@@ -1230,7 +1240,10 @@ class MemorySnapshotManager:
         destination_cache = _DirectoryDescriptorCache(destination_root_fd)
         orders: SpilledDirectoryOrder | None = None
         try:
-            orders = _new_directory_order()
+            orders = _new_directory_order(
+                error_type=MemorySnapshotError,
+                message="Memory tree surface could not be read",
+            )
             root_mode = stat.S_IMODE(info.st_mode)
             stack = [
                 _tree_copy_frame(
@@ -2203,7 +2216,10 @@ def _verify_payload_paths(
     entries: _ManifestIndex,
 ) -> None:
     root_info = os.fstat(payload_root_fd)
-    orders = _new_directory_order()
+    orders = _new_directory_order(
+        error_type=MemorySnapshotVerificationError,
+        message="Memory snapshot payload cannot be read",
+    )
     try:
         stack = [
             _DirectoryWalkFrame(

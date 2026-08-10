@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import pytest
 
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest
 import core.memory.artifact as memory_artifact
+import core.memory.confined_filesystem as confined_filesystem
 from core.memory.artifact import (
     FakeMemoryArtifactManager,
     MemoryArtifactCandidate,
@@ -714,6 +716,45 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
     ]
     assert json.loads((manager.runtime_dir / "current.json").read_text(encoding="utf-8")) == previous_pointer
     assert manager.provider_root_format() == "everos-1.0"
+
+
+def test_memory_artifact_first_activation_rollback_does_not_need_temp_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_root = tmp_path / "memory" / "everos-root"
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=provider_root,
+    )
+    connect_calls = 0
+
+    def fail_connect(*_args, **_kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        raise sqlite3.OperationalError("temporary ordering unavailable")
+
+    def reject_candidate(_candidate, root_state, commit, rollback) -> None:
+        assert root_state.exists is False
+        commit()
+        assert (manager.runtime_dir / "current.json").is_file()
+        rollback()
+        raise MemoryRuntimeActivationError("candidate rejected")
+
+    monkeypatch.setattr(confined_filesystem.sqlite3, "connect", fail_connect)
+    manager.set_activation_coordinator(reject_candidate)
+
+    with pytest.raises(MemoryRuntimeActivationError, match="candidate rejected"):
+        manager._write_current_pointer(
+            manager.runtime_dir / "versions" / "candidate",
+            _artifact_manifest("everos-2.0", compatible_formats=[]),
+            _artifact_archive(),
+        )
+
+    assert connect_calls == 0
+    assert not (manager.runtime_dir / "current.json").exists()
+    assert not provider_root.exists()
 
 
 async def test_memory_artifact_rollback_resolves_old_active_binary(

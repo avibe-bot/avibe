@@ -334,7 +334,7 @@ def replace_confined(home: Path, source: Path, destination: Path) -> None:
                 dir_fd=destination_parent,
                 follow_symlinks=False,
             )
-            if (
+            source_changed = (
                 destination_info.st_dev,
                 destination_info.st_ino,
                 stat.S_IFMT(destination_info.st_mode),
@@ -342,7 +342,22 @@ def replace_confined(home: Path, source: Path, destination: Path) -> None:
                 source_info.st_dev,
                 source_info.st_ino,
                 stat.S_IFMT(source_info.st_mode),
-            ):
+            )
+            if not source_changed:
+                try:
+                    if stat.S_ISDIR(source_info.st_mode):
+                        _require_private_directory(
+                            destination_info,
+                            "atomic replacement destination",
+                        )
+                    else:
+                        _require_private_regular(
+                            destination_info,
+                            "atomic replacement destination",
+                        )
+                except ConfinedFilesystemError:
+                    source_changed = True
+            if source_changed:
                 remove_anchored_entry(
                     destination_parent,
                     destination_relative.parts[-1],
@@ -780,6 +795,21 @@ def _remove_entry_at(
     *,
     expected_identity: tuple[int, int] | None = None,
 ) -> None:
+    try:
+        initial = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if expected_identity is not None and (
+        initial.st_dev,
+        initial.st_ino,
+    ) != expected_identity:
+        raise ConfinedFilesystemError("confined entry changed during removal")
+    if stat.S_ISLNK(initial.st_mode) or stat.S_ISREG(initial.st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return
+    if not stat.S_ISDIR(initial.st_mode):
+        raise ConfinedFilesystemError("confined removal refuses special files")
+
     root_node = _RelativeNode(None, name)
     stack: list[_RemovalFrame | _RelativeNode] = [root_node]
     with (
@@ -815,7 +845,13 @@ def _remove_entry_at(
                         raise ConfinedFilesystemError(
                             "confined removal refuses special files"
                         )
-                    _require_private_directory(before, "confined removal directory")
+                    if item is root_node and expected_identity is not None:
+                        _require_directory(before, "confined removal directory")
+                    else:
+                        _require_private_directory(
+                            before,
+                            "confined removal directory",
+                        )
                     child_fd = os.open(
                         item.name,
                         strict_directory_open_flags(),

@@ -726,23 +726,74 @@ def test_snapshot_translates_temporary_directory_order_database_failure(
     home = tmp_path / "home"
     _private_file(home / "memory/everos-root/profile.json", b"profile", home)
     manager = MemorySnapshotManager(home)
-    failure = sqlite3.OperationalError("temporary ordering unavailable")
+    failure = confined_filesystem_module.ConfinedFilesystemError(
+        "temporary ordering unavailable"
+    )
 
-    def fail_connect(*_args, **_kwargs):
+    def fail_order(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr(
-        confined_filesystem_module.sqlite3,
-        "connect",
-        fail_connect,
-    )
+    monkeypatch.setattr(snapshot_module, "SpilledDirectoryOrder", fail_order)
 
     with pytest.raises(MemorySnapshotError) as raised:
         manager.create("ordering-failure")
 
-    assert isinstance(raised.value.__cause__, confined_filesystem_module.ConfinedFilesystemError)
-    assert raised.value.__cause__.__cause__ is failure
+    assert raised.value.__cause__ is failure
     assert not manager.snapshot_path("ordering-failure").exists()
+
+
+def test_snapshot_verify_translates_directory_order_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _private_file(home / "memory/everos-root/profile.json", b"profile", home)
+    manager = MemorySnapshotManager(home)
+    snapshot = manager.create("verify-ordering-failure")
+    failure = confined_filesystem_module.ConfinedFilesystemError(
+        "temporary ordering unavailable"
+    )
+
+    def fail_order(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(snapshot_module, "SpilledDirectoryOrder", fail_order)
+
+    with pytest.raises(MemorySnapshotVerificationError) as raised:
+        manager.verify(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+        )
+
+    assert raised.value.__cause__ is failure
+
+
+def test_backup_reconcile_translates_directory_order_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _private_directory(tmp_path / "home", tmp_path)
+    manager = MemorySnapshotManager(
+        home,
+        snapshot_root="state/memory/backups",
+        surfaces=(SnapshotSurface("memory/everos-root", "tree"),),
+        operation_guard=lambda: None,
+    )
+    _private_directory(manager.snapshot_root, home)
+    failure = confined_filesystem_module.ConfinedFilesystemError(
+        "temporary ordering unavailable"
+    )
+
+    def fail_order(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(snapshot_module, "SpilledDirectoryOrder", fail_order)
+
+    with pytest.raises(MemorySnapshotUnsafePathError) as raised:
+        manager.reconcile_unpublished_backup_stages()
+
+    assert raised.value.__cause__ is failure
 
 
 def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path) -> None:
