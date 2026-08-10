@@ -35,6 +35,8 @@ from core.memory.store import (
     FlushLease,
     MemoryStore,
     MessageFailure,
+    ProcessingHealthProbe,
+    ProcessingNotification,
     QueueRow,
     SystemOutage,
 )
@@ -51,6 +53,7 @@ ADD_TIMEOUT_SECONDS = 30.0
 FLUSH_TIMEOUT_SECONDS = 300.0
 MAX_CONCURRENT_PROVIDER_WRITES = 4
 SYSTEM_OUTAGE_RETRY_SECONDS = 5.0
+MAX_PROCESSING_ACTIONS_PER_PASS = 3
 
 AttachmentRelease = Callable[[str], Awaitable[None] | None]
 ProcessingFaultKind = Literal["credential", "engine"]
@@ -95,6 +98,7 @@ class SessionFlushCoordinator:
         self._write_slots = asyncio.Semaphore(max(1, int(max_concurrent_writes)))
         self._processing_event = processing_event
         self._processing_fault_lock = asyncio.Lock()
+        self._processing_notification_lock = asyncio.Lock()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -597,16 +601,17 @@ class SessionFlushCoordinator:
                 ),
             )
             return False
-        settled = await self._store_call(
-            self._store.settle_add_ack,
-            row,
-            ack,
-            lease_owner=lease_owner,
-            now=self._current_time(),
-            idle_timeout=IDLE_FLUSH_TIMEOUT,
-            max_unflushed_age=MAX_UNFLUSHED_AGE,
-            message_bound=MAX_UNFLUSHED_MESSAGES,
-        )
+        async with self._processing_notification_lock:
+            settled = await self._store_call(
+                self._store.settle_add_ack,
+                row,
+                ack,
+                lease_owner=lease_owner,
+                now=self._current_time(),
+                idle_timeout=IDLE_FLUSH_TIMEOUT,
+                max_unflushed_age=MAX_UNFLUSHED_AGE,
+                message_bound=MAX_UNFLUSHED_MESSAGES,
+            )
         if settled.attachment_release_id is not None:
             await self._release_bundle(settled.attachment_release_id)
         if settled.settled:
@@ -653,12 +658,13 @@ class SessionFlushCoordinator:
     ) -> bool:
         """Persist the exact outcome and its fault edge under the same local phase."""
 
-        settled = await self._store_call(
-            self._store.settle_flush,
-            lease,
-            result,
-            now=_iso(self._current_time()),
-        )
+        async with self._processing_notification_lock:
+            settled = await self._store_call(
+                self._store.settle_flush,
+                lease,
+                result,
+                now=_iso(self._current_time()),
+            )
         return settled.settled
 
     async def _return_unsubmitted_claim(
@@ -685,6 +691,9 @@ class SessionFlushCoordinator:
     ) -> None:
         opens_processing_fault = isinstance(outcome, AmbiguousAdd) or (
             isinstance(outcome, AddRejected) and outcome.server_fault
+        ) or (
+            isinstance(outcome, SystemOutage)
+            and outcome.error == "memory_processing_failed"
         )
         if opens_processing_fault:
             async with self._processing_fault_lock:
@@ -698,6 +707,10 @@ class SessionFlushCoordinator:
                 )
                 if settled.settled:
                     await self._reconcile_processing_events_locked()
+                    if isinstance(outcome, SystemOutage):
+                        self._add_outage_until = self._current_time() + timedelta(
+                            seconds=SYSTEM_OUTAGE_RETRY_SECONDS
+                        )
             if settled.attachment_release_id is not None:
                 await self._release_bundle(settled.attachment_release_id)
             return
@@ -715,73 +728,47 @@ class SessionFlushCoordinator:
             self._add_outage_until = self._current_time() + timedelta(
                 seconds=SYSTEM_OUTAGE_RETRY_SECONDS
             )
-            if outcome.error == "memory_processing_failed":
-                await self._open_processing_fault()
-
-    async def _open_processing_fault(self) -> None:
-        async with self._processing_fault_lock:
-            occurred_at = _iso(self._current_time())
-            await self._store_call(self._store.open_processing_fault, now=occurred_at)
-            await self._reconcile_processing_events_locked()
 
     async def _reconcile_processing_events(self) -> None:
         async with self._processing_fault_lock:
             await self._reconcile_processing_events_locked()
 
     async def _reconcile_processing_events_locked(self) -> None:
-        meta = await self._store_call(self._store.get_meta)
-        if meta is None:
-            return
-        if meta.processing_recovery_pending_at is not None:
-            recovered_at = meta.processing_recovery_pending_at
-            if not await self._emit_processing_event(
-                "recovered",
-                None,
-                recovered_at,
-            ):
+        for _ in range(MAX_PROCESSING_ACTIONS_PER_PASS):
+            action = await self._store_call(self._store.next_processing_action)
+            if action is None:
                 return
-            await self._store_call(
-                self._store.mark_processing_recovery_notified,
-                occurred_at=recovered_at,
-            )
-            meta = await self._store_call(self._store.get_meta)
-            if meta is None:
+            if isinstance(action, ProcessingHealthProbe):
+                try:
+                    healthy = bool(await self._provider.processing_healthy())
+                except Exception:
+                    return
+                committed = await self._store_call(
+                    self._store.record_processing_health,
+                    action,
+                    healthy=healthy,
+                )
+                if not committed.committed:
+                    return
+                continue
+            if not isinstance(action, ProcessingNotification):
                 return
-        if meta.processing_fault_since is not None and (
-            meta.processing_fault_kind is None or not meta.processing_alert_active
-        ):
-            await self._classify_processing_fault_locked(meta.processing_fault_since)
-
-    async def _classify_processing_fault(self, occurred_at: str) -> None:
-        async with self._processing_fault_lock:
-            await self._classify_processing_fault_locked(occurred_at)
-
-    async def _classify_processing_fault_locked(self, occurred_at: str) -> None:
-        kind: ProcessingFaultKind = (
-            "engine" if await self._provider_processing_healthy() else "credential"
-        )
-        should_alert = await self._store_call(
-            self._store.classify_processing_fault,
-            kind,
-        )
-        if should_alert and await self._emit_processing_event(
-            "fault",
-            kind,
-            occurred_at,
-        ):
-            await self._store_call(self._store.mark_processing_alert_active)
-
-    async def _close_processing_fault(self) -> None:
-        async with self._processing_fault_lock:
-            now = _iso(self._current_time())
-            if await self._store_call(self._store.close_processing_fault, now=now):
-                await self._reconcile_processing_events_locked()
-
-    async def _provider_processing_healthy(self) -> bool:
-        try:
-            return bool(await self._provider.processing_healthy())
-        except Exception:
-            return False
+            async with self._processing_notification_lock:
+                current = await self._store_call(self._store.next_processing_action)
+                if current != action:
+                    return
+                if not await self._emit_processing_event(
+                    action.event,
+                    action.kind,
+                    action.occurred_at,
+                ):
+                    return
+                acknowledged = await self._store_call(
+                    self._store.acknowledge_processing_notification,
+                    action,
+                )
+                if not acknowledged:
+                    return
 
     async def _emit_processing_event(
         self,

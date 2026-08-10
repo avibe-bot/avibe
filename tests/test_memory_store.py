@@ -20,6 +20,8 @@ from core.memory.store import (
     Delivered,
     MemoryStore,
     MessageFailure,
+    ProcessingHealthProbe,
+    ProcessingNotification,
     SettleResult,
     SystemOutage,
     TERMINAL_TOMBSTONE_RETENTION,
@@ -113,8 +115,59 @@ def _deliver(
     return result.row.provider_session_ref
 
 
+def _open_processing_fault(
+    store: MemoryStore,
+    source_message_id: str,
+    *,
+    at: str,
+):
+    result = _enqueue(store, source_message_id)
+    assert result.row is not None
+    claimed = store.claim_due(lease_owner="worker", now=at)
+    assert claimed is not None
+    settled = store.settle(
+        claimed,
+        SystemOutage(error="memory_processing_failed"),
+        lease_owner="worker",
+        now=_dt(at),
+    )
+    assert settled == SettleResult(settled=True, state="pending")
+    return claimed
+
+
+def _classify_and_ack_processing_fault(
+    store: MemoryStore,
+    *,
+    healthy: bool = True,
+) -> ProcessingNotification:
+    probe = store.next_processing_action()
+    assert isinstance(probe, ProcessingHealthProbe)
+    assert store.record_processing_health(probe, healthy=healthy).committed
+    notification = store.next_processing_action()
+    assert isinstance(notification, ProcessingNotification)
+    assert notification.event == "fault"
+    assert store.acknowledge_processing_notification(notification)
+    return notification
+
+
+def _close_processing_fault_with_add(
+    store: MemoryStore,
+    *,
+    at: str,
+) -> None:
+    claimed = store.claim_due(lease_owner="worker", now=at)
+    assert claimed is not None
+    assert store.settle(
+        claimed,
+        Delivered(add_request_id=f"success-{claimed.source_message_digest[:8]}"),
+        lease_owner="worker",
+        now=_dt(at),
+    ).settled
+
+
 def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
+    store.ensure_meta()
 
     with sqlite3.connect(store.path) as conn:
         tables = {
@@ -158,13 +211,31 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             "flush_observed_at",
         }.intersection(queue_columns)
         assert {
+            "processing_fault_generation",
             "processing_fault_kind",
             "processing_fault_since",
             "processing_alert_active",
+            "processing_recovery_generation",
             "processing_recovery_pending_at",
             "last_error_at",
         }.issubset(meta_columns)
         assert {"attempts", "recovery_origin"}.issubset(settlement_columns)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_recovery_pending_at = 'now'
+                WHERE singleton = 1
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                UPDATE memory_meta
+                SET processing_recovery_generation = 1
+                WHERE singleton = 1
+                """
+            )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
@@ -262,24 +333,27 @@ def test_store_initializes_an_empty_v0_database(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM memory_capture_queue").fetchone()[0] == 0
 
 
-def test_store_rejects_unknown_nonzero_schema_without_rebuilding(tmp_path: Path) -> None:
-    database = _store_path(tmp_path / "future-schema")
-    future_version = MEMORY_STORE_SCHEMA_VERSION + 1
+@pytest.mark.parametrize("version", [1, 3], ids=("prior-v1", "future-v3"))
+def test_store_rejects_nonzero_noncurrent_schema_without_rebuilding(
+    tmp_path: Path,
+    version: int,
+) -> None:
+    database = _store_path(tmp_path / f"schema-v{version}")
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:
-        conn.execute("CREATE TABLE future_memory_state (value TEXT NOT NULL)")
-        conn.execute("INSERT INTO future_memory_state VALUES ('preserve')")
-        conn.execute(f"PRAGMA user_version = {future_version}")
+        conn.execute("CREATE TABLE versioned_memory_state (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO versioned_memory_state VALUES ('preserve')")
+        conn.execute(f"PRAGMA user_version = {version}")
 
     with pytest.raises(
         RuntimeError,
-        match=f"Unsupported Memory store schema version: {future_version}",
+        match=f"Unsupported Memory store schema version: {version}",
     ):
         MemoryStore(database)
 
     with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == future_version
-        assert conn.execute("SELECT value FROM future_memory_state").fetchone()[0] == "preserve"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert conn.execute("SELECT value FROM versioned_memory_state").fetchone()[0] == "preserve"
 
 
 def test_session_scope_recovery_survives_store_reopen_and_separates_sessions(tmp_path: Path) -> None:
@@ -511,6 +585,165 @@ def test_server_rejected_add_and_processing_fault_are_one_transaction(
     assert store.failure_log() == ()
 
 
+def test_processing_system_outage_return_and_fault_open_are_one_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "atomic-processing-outage")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+
+    def fail_fault_open(_conn, *, now: str) -> bool:
+        del now
+        raise OSError("injected processing fault write failure")
+
+    monkeypatch.setattr(
+        store,
+        "_open_processing_fault_in_connection",
+        fail_fault_open,
+    )
+    with pytest.raises(OSError, match="injected processing fault write failure"):
+        store.settle(
+            claimed,
+            SystemOutage(error="memory_processing_failed"),
+            lease_owner="worker",
+            now=_dt("2026-01-01T00:00:01.000Z"),
+        )
+
+    queued = _row_for_source(store, "atomic-processing-outage")
+    assert queued is not None and queued.state == "processing"
+    meta = store.ensure_meta()
+    assert meta.processing_fault_generation == 0
+    assert meta.processing_fault_since is None
+
+
+def test_repeated_processing_fault_open_preserves_cycle_generation_and_time(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _open_processing_fault(
+        store,
+        "same-cycle",
+        at="2026-01-01T00:00:00.000Z",
+    )
+    _open_processing_fault(
+        store,
+        "same-cycle",
+        at="2026-01-01T00:05:00.000Z",
+    )
+
+    meta = store.ensure_meta()
+    assert meta.processing_fault_generation == 1
+    assert meta.processing_fault_since == "2026-01-01T00:00:00.000Z"
+
+
+def test_stale_processing_probe_cannot_classify_reopened_cycle(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _open_processing_fault(store, "probe-cycle-1", at="2026-01-01T00:00:00.000Z")
+    old_probe = store.next_processing_action()
+    assert isinstance(old_probe, ProcessingHealthProbe)
+    _close_processing_fault_with_add(store, at="2026-01-01T00:00:01.000Z")
+    _open_processing_fault(store, "probe-cycle-2", at="2026-01-01T00:00:02.000Z")
+
+    assert not store.record_processing_health(old_probe, healthy=True).committed
+    current = store.next_processing_action()
+    assert isinstance(current, ProcessingHealthProbe)
+    assert current.generation == 2
+    assert store.ensure_meta().processing_fault_kind is None
+
+
+def test_stale_fault_notification_cannot_acknowledge_reopened_cycle(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _open_processing_fault(store, "alert-cycle-1", at="2026-01-01T00:00:00.000Z")
+    old_probe = store.next_processing_action()
+    assert isinstance(old_probe, ProcessingHealthProbe)
+    assert store.record_processing_health(old_probe, healthy=True).committed
+    old_notification = store.next_processing_action()
+    assert isinstance(old_notification, ProcessingNotification)
+    _close_processing_fault_with_add(store, at="2026-01-01T00:00:01.000Z")
+    _open_processing_fault(store, "alert-cycle-2", at="2026-01-01T00:00:02.000Z")
+
+    assert not store.acknowledge_processing_notification(old_notification)
+    meta = store.ensure_meta()
+    assert meta.processing_fault_generation == 2
+    assert meta.processing_alert_active is False
+
+
+def test_stale_recovery_notification_cannot_clear_newer_recovery(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _open_processing_fault(store, "recovery-cycle-1", at="2026-01-01T00:00:00.000Z")
+    _classify_and_ack_processing_fault(store)
+    _close_processing_fault_with_add(store, at="2026-01-01T00:00:01.000Z")
+    old_recovery = store.next_processing_action()
+    assert isinstance(old_recovery, ProcessingNotification)
+    assert old_recovery.event == "recovered"
+    invalid_recovery = ProcessingNotification(
+        event="recovered",
+        generation=old_recovery.generation,
+        kind="engine",
+        occurred_at=old_recovery.occurred_at,
+    )
+    assert not store.acknowledge_processing_notification(invalid_recovery)
+    assert store.next_processing_action() == old_recovery
+    assert store.acknowledge_processing_notification(old_recovery)
+
+    _open_processing_fault(store, "recovery-cycle-2", at="2026-01-01T00:00:02.000Z")
+    _classify_and_ack_processing_fault(store)
+    _close_processing_fault_with_add(store, at="2026-01-01T00:00:03.000Z")
+
+    assert not store.acknowledge_processing_notification(old_recovery)
+    current = store.next_processing_action()
+    assert isinstance(current, ProcessingNotification)
+    assert (current.event, current.generation) == ("recovered", 2)
+
+
+def test_recovery_for_generation_one_coexists_with_open_generation_two(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _open_processing_fault(store, "coexist-cycle-1", at="2026-01-01T00:00:00.000Z")
+    _classify_and_ack_processing_fault(store)
+    _close_processing_fault_with_add(store, at="2026-01-01T00:00:01.000Z")
+    _open_processing_fault(store, "coexist-cycle-2", at="2026-01-01T00:00:02.000Z")
+
+    recovery = store.next_processing_action()
+    assert isinstance(recovery, ProcessingNotification)
+    assert (recovery.event, recovery.generation) == ("recovered", 1)
+    assert store.acknowledge_processing_notification(recovery)
+    current = store.next_processing_action()
+    assert isinstance(current, ProcessingHealthProbe)
+    assert current.generation == 2
+
+
+@pytest.mark.parametrize("clear_path", ["begin-finish", "reset"])
+def test_processing_fault_generation_survives_clear(
+    tmp_path: Path,
+    clear_path: str,
+) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    _open_processing_fault(store, "before-clear", at="2026-01-01T00:00:00.000Z")
+    pre_clear_probe = store.next_processing_action()
+    assert isinstance(pre_clear_probe, ProcessingHealthProbe)
+
+    epoch = store.ensure_meta().epoch
+    if clear_path == "begin-finish":
+        store.begin_clear()
+        cleared = store.finish_clear()
+    else:
+        cleared = store.reset_for_clear(target_epoch=epoch + 1)
+    assert cleared.processing_fault_generation == 1
+    _open_processing_fault(store, "after-clear", at="2026-01-01T00:00:01.000Z")
+
+    assert not store.record_processing_health(pre_clear_probe, healthy=True).committed
+    post_clear_probe = store.next_processing_action()
+    assert isinstance(post_clear_probe, ProcessingHealthProbe)
+    assert post_clear_probe.generation == 2
+
+
 def test_exhausted_flush_retry_and_processing_fault_are_one_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -618,9 +851,12 @@ def test_successful_add_and_processing_fault_close_are_one_transaction(
         now="2026-01-01T00:00:00.000Z",
     )
     assert claimed is not None
-    assert store.open_processing_fault(now="2026-01-01T00:00:00.100Z")
-    assert store.classify_processing_fault("engine")
-    assert store.mark_processing_alert_active()
+    _open_processing_fault(
+        store,
+        f"atomic-add-close-fault-{status}",
+        at="2026-01-01T00:00:00.100Z",
+    )
+    _classify_and_ack_processing_fault(store)
 
     def fail_fault_close(_conn, *, now: str) -> bool:
         del now
@@ -664,9 +900,12 @@ def test_successful_flush_and_processing_fault_close_are_one_transaction(
         lease,
         now="2026-01-01T00:00:03.000Z",
     )
-    assert store.open_processing_fault(now="2026-01-01T00:00:03.100Z")
-    assert store.classify_processing_fault("engine")
-    assert store.mark_processing_alert_active()
+    _open_processing_fault(
+        store,
+        "atomic-flush-close-fault",
+        at="2026-01-01T00:00:03.100Z",
+    )
+    _classify_and_ack_processing_fault(store)
 
     def fail_fault_close(_conn, *, now: str) -> bool:
         del now
@@ -1334,38 +1573,38 @@ def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path)
     assert observed_at == "2026-01-01T00:00:09.000Z"
 
 
-def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) -> None:
+def test_store_persists_and_closes_processing_fault_protocol(tmp_path: Path) -> None:
     database = _store_path(tmp_path)
     store = MemoryStore(database)
 
-    assert store.open_processing_fault(now="2026-01-01T00:00:00.000Z") is True
-    assert store.classify_processing_fault("credential") is True
-    assert store.mark_processing_alert_active() is True
+    _open_processing_fault(store, "persisted-fault", at="2026-01-01T00:00:00.000Z")
+    notification = _classify_and_ack_processing_fault(store, healthy=False)
     reopened = MemoryStore(database).ensure_meta()
+    assert reopened.processing_fault_generation == 1
     assert reopened.processing_fault_since == "2026-01-01T00:00:00.000Z"
     assert reopened.processing_fault_kind == "credential"
     assert reopened.processing_alert_active is True
     assert reopened.last_error == "memory_processing_failed"
 
-    assert store.open_processing_fault(now="2026-01-01T00:05:00.000Z") is False
-    assert store.classify_processing_fault("engine") is False
+    _open_processing_fault(store, "persisted-fault", at="2026-01-01T00:05:00.000Z")
     refreshed = store.ensure_meta()
-    assert refreshed.processing_fault_since == "2026-01-01T00:05:00.000Z"
-    assert refreshed.processing_fault_kind == "engine"
+    assert refreshed.processing_fault_generation == 1
+    assert refreshed.processing_fault_since == "2026-01-01T00:00:00.000Z"
+    assert refreshed.processing_fault_kind == "credential"
+    assert store.acknowledge_processing_notification(notification) is False
 
-    assert store.close_processing_fault(now="2026-01-01T00:05:01.000Z") is True
+    _close_processing_fault_with_add(store, at="2026-01-01T00:05:01.000Z")
     closed = store.ensure_meta()
     assert closed.processing_fault_since is None
     assert closed.processing_fault_kind is None
     assert closed.processing_alert_active is False
     assert closed.processing_recovery_pending_at == "2026-01-01T00:05:01.000Z"
+    assert closed.processing_recovery_generation == 1
     assert closed.last_error is None
-    assert store.mark_processing_recovery_notified(
-        occurred_at="2026-01-01T00:05:01.000Z"
-    )
-    assert not store.mark_processing_recovery_notified(
-        occurred_at="2026-01-01T00:05:01.000Z"
-    )
+    recovery = store.next_processing_action()
+    assert isinstance(recovery, ProcessingNotification)
+    assert store.acknowledge_processing_notification(recovery)
+    assert not store.acknowledge_processing_notification(recovery)
 
 
 def test_duplicate_enqueue_is_atomic_and_does_not_advance_provider_clock(tmp_path: Path) -> None:
