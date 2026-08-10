@@ -75,6 +75,9 @@ class ProcessingIndicatorHandle:
     ack_message_channel_id: Optional[str] = None
     ack_reaction_message_id: Optional[str] = None
     ack_reaction_emoji: Optional[str] = None
+    # Captured only by start(), which runs for human turns. Backend-initiated
+    # turns may reuse a context with an old message_id and must not stamp it.
+    terminal_reaction_message_id: Optional[str] = None
     typing_indicator_active: bool = False
     typing_indicator_task: Optional[asyncio.Task] = None
     # True when the reaction indicator is the selected mode for this turn. The
@@ -100,6 +103,7 @@ class ProcessingIndicatorHandle:
             "ack_message_channel_id": self.ack_message_channel_id,
             "ack_reaction_message_id": self.ack_reaction_message_id,
             "ack_reaction_emoji": self.ack_reaction_emoji,
+            "terminal_reaction_message_id": self.terminal_reaction_message_id,
             "typing_indicator_active": self.typing_indicator_active,
         }
 
@@ -128,6 +132,12 @@ class ProcessingIndicatorHandle:
             ack_message_channel_id=data.get("ack_message_channel_id") or data.get("channel_id") or None,
             ack_reaction_message_id=data.get("ack_reaction_message_id") or None,
             ack_reaction_emoji=data.get("ack_reaction_emoji") or None,
+            terminal_reaction_message_id=(
+                data.get("terminal_reaction_message_id")
+                or data.get("ack_reaction_message_id")
+                or data.get("message_id")
+                or None
+            ),
             typing_indicator_active=bool(data.get("typing_indicator_active", False)),
         )
 
@@ -427,7 +437,10 @@ class ProcessingIndicatorService:
             await self.clear_admission_ack(merged)
 
     async def start(self, context: MessageContext, agent_name: str, *, enabled: bool = True) -> ProcessingIndicatorHandle:
-        handle = ProcessingIndicatorHandle(context=context)
+        handle = ProcessingIndicatorHandle(
+            context=context,
+            terminal_reaction_message_id=self._reaction_target_message_id(context),
+        )
         # A queued input carries an admission receipt (👌) that this turn's own
         # indicator now replaces. Platforms that stack reactions would otherwise
         # show both, and the receipt would outlive the wait it described.
@@ -566,7 +579,7 @@ class ProcessingIndicatorService:
 
     async def _stamp_terminal_reaction_without_indicator(
         self,
-        context: MessageContext,
+        handle: ProcessingIndicatorHandle,
         terminal_emoji: str,
     ) -> bool:
         """Leave the terminal receipt when the turn's indicator was not a reaction.
@@ -577,9 +590,10 @@ class ProcessingIndicatorService:
         message id simply ends with no receipt, same as before.
         """
 
-        if not self._mode_supported(self._capabilities(context), "reaction", context):
+        context = handle.context
+        message_id = handle.terminal_reaction_message_id
+        if not message_id or not self._capabilities(context).supports_reaction_indicator:
             return False
-        message_id = self._reaction_target_message_id(context)
         try:
             return bool(await self._get_im_client(context).add_reaction(context, message_id, terminal_emoji))
         except Exception as err:
@@ -768,6 +782,7 @@ class ProcessingIndicatorService:
         request.ack_message_id = handle.ack_message_id
         request.ack_reaction_message_id = handle.ack_reaction_message_id
         request.ack_reaction_emoji = handle.ack_reaction_emoji
+        request.terminal_reaction_message_id = handle.terminal_reaction_message_id
         request.typing_indicator_active = handle.typing_indicator_active
         request.typing_indicator_task = handle.typing_indicator_task
 
@@ -781,6 +796,11 @@ class ProcessingIndicatorService:
                 None,
             )
             handle.ack_reaction_emoji = handle.ack_reaction_emoji or getattr(request, "ack_reaction_emoji", None)
+            handle.terminal_reaction_message_id = handle.terminal_reaction_message_id or getattr(
+                request,
+                "terminal_reaction_message_id",
+                None,
+            )
             handle.typing_indicator_active = handle.typing_indicator_active or bool(
                 getattr(request, "typing_indicator_active", False)
             )
@@ -792,6 +812,7 @@ class ProcessingIndicatorService:
             ack_message_channel_id=getattr(request.context, "channel_id", None),
             ack_reaction_message_id=getattr(request, "ack_reaction_message_id", None),
             ack_reaction_emoji=getattr(request, "ack_reaction_emoji", None),
+            terminal_reaction_message_id=getattr(request, "terminal_reaction_message_id", None),
             typing_indicator_active=bool(getattr(request, "typing_indicator_active", False)),
             typing_indicator_task=getattr(request, "typing_indicator_task", None),
         )
@@ -866,7 +887,7 @@ class ProcessingIndicatorService:
             # happened to be a reaction" would make ⏹️/⚠️ invisible for the
             # default configuration — exactly the turns that emit no result.
             # Stamp on the originating message instead, wherever reactions work.
-            await self._stamp_terminal_reaction_without_indicator(handle.context, terminal_emoji)
+            await self._stamp_terminal_reaction_without_indicator(handle, terminal_emoji)
 
         if handle.ack_reaction_message_id and handle.ack_reaction_emoji:
             reaction_message_id = handle.ack_reaction_message_id

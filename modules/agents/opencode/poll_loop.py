@@ -15,6 +15,7 @@ from config.v2_config import (
 from core.backend_failure import emit_backend_failure
 from core.message_context import build_context_session_key
 from core.message_output import terminal_output_for, terminal_turn_output
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import bind_persisted_launch
 from modules.im import MessageContext
@@ -81,6 +82,38 @@ def restored_session_key_from_poll_info(poll_info, *, context: Optional[MessageC
         restored_context,
         platform=poll_info.platform or restored_context.platform,
         settings_key=poll_info.settings_key,
+    )
+
+
+def restored_request_from_poll_info(agent, poll_info) -> AgentRequest:
+    """Rebuild the request that owns a restored poll's indicator lifecycle."""
+
+    snapshot = poll_info.processing_indicator or {
+        "platform": poll_info.platform,
+        "user_id": poll_info.user_id,
+        "channel_id": poll_info.channel_id,
+        "thread_id": poll_info.thread_id,
+        "context_token": getattr(poll_info, "context_token", ""),
+        "ack_reaction_message_id": poll_info.ack_reaction_message_id,
+        "ack_reaction_emoji": poll_info.ack_reaction_emoji,
+        "typing_indicator_active": bool(getattr(poll_info, "typing_indicator_active", False)),
+    }
+    handle = agent.controller.processing_indicator.handle_from_snapshot(snapshot)
+    context = handle.context
+    return AgentRequest(
+        context=context,
+        message="",
+        user_message="",
+        working_path=poll_info.working_path,
+        base_session_id=poll_info.base_session_id,
+        composite_session_id=f"{poll_info.base_session_id}:{poll_info.working_path}",
+        session_key=restored_session_key_from_poll_info(poll_info, context=context),
+        processing_indicator=handle,
+        ack_message_id=handle.ack_message_id,
+        ack_reaction_message_id=handle.ack_reaction_message_id,
+        ack_reaction_emoji=handle.ack_reaction_emoji,
+        terminal_reaction_message_id=handle.terminal_reaction_message_id,
+        typing_indicator_active=handle.typing_indicator_active,
     )
 
 
@@ -176,39 +209,13 @@ class OpenCodePollLoop:
         )
 
     def _build_restored_handle(self, poll_info):
-        snapshot = poll_info.processing_indicator or {
-            "platform": poll_info.platform,
-            "user_id": poll_info.user_id,
-            "channel_id": poll_info.channel_id,
-            "thread_id": poll_info.thread_id,
-            "context_token": getattr(poll_info, "context_token", ""),
-            "ack_reaction_message_id": poll_info.ack_reaction_message_id,
-            "ack_reaction_emoji": poll_info.ack_reaction_emoji,
-            "typing_indicator_active": bool(getattr(poll_info, "typing_indicator_active", False)),
-        }
-        return self._agent.controller.processing_indicator.handle_from_snapshot(snapshot)
+        return restored_request_from_poll_info(self._agent, poll_info).processing_indicator
 
     def _build_restored_context(self, poll_info):
         return self._build_restored_handle(poll_info).context
 
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
-        handle = self._build_restored_handle(poll_info)
-        context = handle.context
-        session_key = restored_session_key_from_poll_info(poll_info, context=context)
-        return AgentRequest(
-            context=context,
-            message="",
-            user_message="",
-            working_path=poll_info.working_path,
-            base_session_id=poll_info.base_session_id,
-            composite_session_id=f"{poll_info.base_session_id}:{poll_info.working_path}",
-            session_key=session_key,
-            processing_indicator=handle,
-            ack_message_id=handle.ack_message_id,
-            ack_reaction_message_id=handle.ack_reaction_message_id,
-            ack_reaction_emoji=handle.ack_reaction_emoji,
-            typing_indicator_active=handle.typing_indicator_active,
-        )
+        return restored_request_from_poll_info(self._agent, poll_info)
 
     async def remove_restored_ack(self, poll_info) -> None:
         await self._agent._remove_ack_reaction(self._build_restored_ack_request(poll_info))
@@ -512,7 +519,10 @@ class OpenCodePollLoop:
         """Continue a poll loop that was interrupted by restart."""
 
         session_id = poll_info.opencode_session_id
-        restored_request = self._build_restored_ack_request(poll_info)
+        active_ack_requests = getattr(self._agent, "_active_ack_requests", {})
+        restored_request = active_ack_requests.get(
+            poll_info.base_session_id
+        ) or self._build_restored_ack_request(poll_info)
         context = restored_request.context
         processing_snapshot = (
             poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
@@ -754,7 +764,11 @@ class OpenCodePollLoop:
 
         except asyncio.CancelledError:
             logger.info(f"Restored OpenCode poll cancelled for {poll_info.base_session_id}")
-            await self.remove_restored_ack(poll_info)
+            stopped_by_user = self._agent.consume_user_stop_intent(poll_info.base_session_id)
+            await self._agent._remove_ack_reaction(
+                restored_request,
+                terminal_emoji=STOPPED_REACTION_EMOJI if stopped_by_user else None,
+            )
             self._agent.sessions.remove_active_poll(session_id)
             raise
         except Exception as e:

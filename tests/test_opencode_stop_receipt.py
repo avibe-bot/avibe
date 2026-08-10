@@ -18,10 +18,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.processing_indicator import STOPPED_REACTION_EMOJI
+from config.v2_sessions import ActivePollInfo
+from core.processing_indicator import STOPPED_REACTION_EMOJI, ProcessingIndicatorService
 from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.poll_loop import OpenCodePollLoop, restored_request_from_poll_info
 
 
 def _agent():
@@ -223,6 +227,73 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         self.assertEqual(agent._user_stopped_sessions, set())
 
+    async def test_restored_poll_cancellation_stamps_its_retained_request(self):
+        entered = asyncio.Event()
+        cleanups: list[tuple[object, object]] = []
+
+        class _Controller:
+            def __init__(self):
+                self.config = SimpleNamespace(
+                    platform="slack",
+                    ack_mode="reaction",
+                    language="en",
+                )
+                self.processing_indicator = ProcessingIndicatorService(self)
+
+            async def emit_agent_message(self, *_args, **_kwargs):
+                return None
+
+        class _Server:
+            async def list_messages(self, **_kwargs):
+                entered.set()
+                await asyncio.Event().wait()
+
+        agent = SimpleNamespace(
+            controller=_Controller(),
+            opencode_config=SimpleNamespace(active_turn_timeout_seconds=60),
+            sessions=SimpleNamespace(remove_active_poll=Mock()),
+            _active_ack_requests={},
+            _user_stopped_sessions={"session-1"},
+        )
+
+        async def _get_server():
+            return _Server()
+
+        async def _remove_ack_reaction(request, *, terminal_emoji=None):
+            cleanups.append((request, terminal_emoji))
+
+        def _consume(session_id):
+            return OpenCodeAgent.consume_user_stop_intent(agent, session_id)
+
+        agent._get_server = _get_server
+        agent._remove_ack_reaction = _remove_ack_reaction
+        agent.consume_user_stop_intent = _consume
+        poll = ActivePollInfo(
+            opencode_session_id="oc-1",
+            base_session_id="session-1",
+            channel_id="c1",
+            thread_id="t1",
+            settings_key="c1",
+            working_path="/tmp/work",
+            processing_indicator={
+                "platform": "slack",
+                "user_id": "u1",
+                "channel_id": "c1",
+                "message_id": "m1",
+            },
+        )
+        restored_request = restored_request_from_poll_info(agent, poll)
+        agent._active_ack_requests[poll.base_session_id] = restored_request
+
+        task = asyncio.create_task(OpenCodePollLoop(agent).run_restored_poll_loop(poll))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(cleanups, [(restored_request, STOPPED_REACTION_EMOJI)])
+        self.assertEqual(agent._user_stopped_sessions, set())
+
 
 class OpenCodeStopReceiptTests(unittest.TestCase):
     """The intent is only useful if the cancellation branch actually spends it.
@@ -241,6 +312,16 @@ class OpenCodeStopReceiptTests(unittest.TestCase):
         self.assertTrue(branch, "_process_message no longer handles cancellation")
         self.assertIn("consume_user_stop_intent", branch)
         self.assertIn("STOPPED_REACTION_EMOJI", branch)
+
+    def test_restored_cancellation_branch_reads_the_intent(self):
+        source = inspect.getsource(OpenCodePollLoop.run_restored_poll_loop)
+        _, _, after = source.partition("except asyncio.CancelledError:")
+        branch = after.partition("raise")[0]
+
+        self.assertTrue(branch, "run_restored_poll_loop no longer handles cancellation")
+        self.assertIn("consume_user_stop_intent", branch)
+        self.assertIn("STOPPED_REACTION_EMOJI", branch)
+        self.assertIn("restored_request", branch)
 
 
 if __name__ == "__main__":

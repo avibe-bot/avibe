@@ -142,6 +142,7 @@ class CodexEventHandler:
                 logger.debug("Ignoring interrupted completion for unknown turn %s", turn_id)
                 return
             self._clear_generated_image_snapshot(params)
+            cleanup_request = self._agent._turn_registry.claim_indicator_cleanup(turn_id)
             self._agent._turn_registry.pop_turn(turn_id)
             # A turn is interrupted for two very different reasons: the user
             # stopped it, or a newer turn superseded it. Only the first is owed a
@@ -149,10 +150,11 @@ class CodexEventHandler:
             # be running concurrently with the ``turn/interrupt`` RPC that caused
             # the completion.
             stopped_by_user = self._agent.consume_user_stop_intent(turn_id)
-            await self._agent._remove_ack_reaction(
-                tracked_request,
-                terminal_emoji=STOPPED_REACTION_EMOJI if stopped_by_user else None,
-            )
+            if cleanup_request is not None:
+                await self._agent._remove_ack_reaction(
+                    cleanup_request,
+                    terminal_emoji=STOPPED_REACTION_EMOJI if stopped_by_user else None,
+                )
             # Turn ended without a result — release any web-Chat stream waiter
             # (token-guarded, so a superseded turn won't close a newer stream).
             self._release_stream_turn(tracked_request.context)
@@ -549,9 +551,11 @@ class CodexEventHandler:
     # ------------------------------------------------------------------
 
     def clear_pending(self, turn_id: str) -> AgentRequest | None:
-        """Hide a turn from user-facing output after interruption/replacement."""
+        """Hide a turn and claim its one allowed indicator cleanup."""
         turn_state = self._agent._turn_registry.hide_turn(turn_id)
-        return turn_state.request if turn_state else None
+        if turn_state is None:
+            return None
+        return self._agent._turn_registry.claim_indicator_cleanup(turn_id)
 
     # ------------------------------------------------------------------
     # Dispatch table

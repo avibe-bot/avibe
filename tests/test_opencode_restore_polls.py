@@ -113,9 +113,11 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _Controller:
         def __init__(self):
+            from core.processing_indicator import ProcessingIndicatorService
             from core.session_turns import SessionTurnManager
 
             self.config = SimpleNamespace(language=language)
+            self.processing_indicator = ProcessingIndicatorService(self)
             # The restore path re-marks running via the turn owner, which delegates
             # to set_agent_status — wire a real manager so the full path is exercised.
             self.session_turns = SessionTurnManager(self)
@@ -129,6 +131,8 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._poll_loop = _PollLoop()
     agent._session_manager = _SessionManager()
     agent._active_requests = {}
+    agent._active_ack_requests = {}
+    agent._user_stopped_sessions = set()
     agent._steering_states = {}
     agent._restored_poll_servers = {}
 
@@ -224,8 +228,11 @@ def test_restore_im_registration_failure_retries_before_releasing_poll() -> None
         await asyncio.wait_for(poll_started.wait(), timeout=1)
         task = agent._active_requests[poll.base_session_id]
         assert not task.done()
+        restored_request = agent._active_ack_requests[poll.base_session_id]
+        assert restored_request.base_session_id == poll.base_session_id
         release_poll.set()
         await task
+        assert agent._active_ack_requests == {}
         return restored
 
     assert asyncio.run(_run()) == 1

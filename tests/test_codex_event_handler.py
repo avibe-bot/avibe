@@ -26,6 +26,7 @@ class _TurnState:
         self.terminal_error = None
         self.terminal_error_notified = False
         self.visible_to_user = True
+        self.indicator_cleanup_claimed = False
 
 
 class _StubTurnRegistry:
@@ -51,6 +52,13 @@ class _StubTurnRegistry:
         if state and self._active_turns.get(state.request.base_session_id) == turn_id:
             self._active_turns.pop(state.request.base_session_id, None)
         return state
+
+    def claim_indicator_cleanup(self, turn_id: str):
+        state = self._turns.get(turn_id)
+        if state is None or state.indicator_cleanup_claimed:
+            return None
+        state.indicator_cleanup_claimed = True
+        return state.request
 
     def hide_turn(self, turn_id: str):
         state = self._turns.get(turn_id)
@@ -388,6 +396,22 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         # Consumed: handle_stop must not stamp a second one behind it.
         self.assertEqual(agent._user_stopped_turn_ids, set())
+
+    async def test_hidden_turn_completion_cannot_compete_with_claimed_cleanup(self):
+        agent = _StubAgent()
+        agent.controller.agent_service = SimpleNamespace(release_runtime_turn=Mock())
+        handler = CodexEventHandler(agent)
+        context = SimpleNamespace(platform_specific={})
+        request = SimpleNamespace(base_session_id="session-1", context=context, started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        claimed_request = handler.clear_pending("turn-1")
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "interrupted"}}, request
+        )
+
+        self.assertIs(claimed_request, request)
+        agent._remove_ack_reaction.assert_not_awaited()
 
     async def test_auth_recovery_message_suppresses_plain_notify(self):
         agent = _StubAgent()

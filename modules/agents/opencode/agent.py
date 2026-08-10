@@ -57,7 +57,12 @@ from vibe.i18n import t as i18n_t
 from .caller_context import bind_session as bind_caller_context_session
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
-from .poll_loop import OpenCodePollLoop, restored_platform_from_poll_info, restored_session_key_from_poll_info
+from .poll_loop import (
+    OpenCodePollLoop,
+    restored_platform_from_poll_info,
+    restored_request_from_poll_info,
+    restored_session_key_from_poll_info,
+)
 from .server import (
     OpenCodePromptRejectedError,
     OpenCodeServerManager,
@@ -539,9 +544,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # request describing the ``/stop`` message itself, so it is not a usable
         # indicator target: the 👀 sits on the message that opened the turn.
         # Only paths that end a turn from OUTSIDE its coroutine need this.
-        # A restored poll registers no entry — the process that built its request
-        # is gone, and a restored turn's cancellation never stamped a receipt
-        # anyway; it ends with the plain removal ``remove_restored_ack`` does.
+        # Restored polls reconstruct and register the same request shape before
+        # becoming stoppable, so their cancellation can stamp the original turn's
+        # message instead of the fresh /stop request.
         self._active_ack_requests: Dict[str, AgentRequest] = {}
         # Sessions whose in-flight task is being cancelled BY THE USER. The
         # cancellation lands in the request coroutine, which cannot otherwise
@@ -1976,6 +1981,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             restoration_ready = asyncio.get_running_loop().create_future()
             restoration_published = asyncio.Event()
+            restored_request = restored_request_from_poll_info(self, poll_info)
             task = asyncio.create_task(
                 self._run_restored_poll_loop_with_tracking(
                     poll_info,
@@ -1989,6 +1995,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 (restoration_ready, restoration_published, poll_info)
             )
             self._active_requests[poll_info.base_session_id] = task
+            self._active_ack_requests[poll_info.base_session_id] = restored_request
             self._session_manager.set_request_session(
                 poll_info.base_session_id,
                 poll_info.opencode_session_id,
@@ -2191,6 +2198,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     )
             if self._active_requests.get(poll_info.base_session_id) is current_task:
                 self._active_requests.pop(poll_info.base_session_id, None)
+                self._active_ack_requests.pop(poll_info.base_session_id, None)
                 self._session_manager.pop_request_session(poll_info.base_session_id)
             if restoration_ready is not None and not restoration_ready.done():
                 restoration_ready.set_result(False)

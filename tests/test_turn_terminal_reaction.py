@@ -156,16 +156,35 @@ class TerminalReceiptWithoutAReactionIndicatorTests(unittest.IsolatedAsyncioTest
     async def test_typing_turn_still_gets_the_receipt(self):
         im = _FakeIM()
         svc = _svc(im)
-        handle = ProcessingIndicatorHandle(context=_ctx(), typing_indicator_active=True)
+        handle = ProcessingIndicatorHandle(
+            context=_ctx(),
+            terminal_reaction_message_id="m1",
+            typing_indicator_active=True,
+        )
 
         await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
 
         self.assertEqual(im.calls, [("add", "m1", STOPPED_REACTION_EMOJI)])
 
+    async def test_human_turn_target_survives_the_restored_snapshot(self):
+        im = _FakeIM()
+        svc = _svc(im)
+        handle = await svc.start(_ctx(), "claude", enabled=False)
+
+        restored = svc.handle_from_snapshot(handle.to_snapshot())
+        await svc.finish(restored, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(restored.terminal_reaction_message_id, "m1")
+        self.assertEqual(im.calls, [("add", "m1", STOPPED_REACTION_EMOJI)])
+
     async def test_no_receipt_without_a_terminal_emoji(self):
         im = _FakeIM()
         svc = _svc(im)
-        handle = ProcessingIndicatorHandle(context=_ctx(), typing_indicator_active=True)
+        handle = ProcessingIndicatorHandle(
+            context=_ctx(),
+            terminal_reaction_message_id="m1",
+            typing_indicator_active=True,
+        )
 
         await svc.finish(handle)
 
@@ -185,7 +204,11 @@ class TerminalReceiptWithoutAReactionIndicatorTests(unittest.IsolatedAsyncioTest
         im = _FakeIM()
         svc = _svc(im)
         context = MessageContext(user_id="u1", channel_id="c1", message_id="m1", platform="wechat")
-        handle = ProcessingIndicatorHandle(context=context, typing_indicator_active=True)
+        handle = ProcessingIndicatorHandle(
+            context=context,
+            terminal_reaction_message_id="m1",
+            typing_indicator_active=True,
+        )
 
         await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
 
@@ -204,6 +227,24 @@ class TerminalReceiptWithoutAReactionIndicatorTests(unittest.IsolatedAsyncioTest
             [call for call in im.calls if call[0] == "add"],
             [("add", "m1", STOPPED_REACTION_EMOJI)],
         )
+
+    async def test_agent_initiated_turn_does_not_reuse_an_old_context_message(self):
+        im = _FakeIM()
+        svc = _svc(im)
+        request = SimpleNamespace(
+            context=_ctx(message_id="old-human-message"),
+            processing_indicator=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            terminal_reaction_message_id=None,
+            typing_indicator_active=False,
+            typing_indicator_task=None,
+        )
+
+        await svc.finish(request, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(im.calls, [])
 
 
 class OrphanedTerminalReactionTests(unittest.IsolatedAsyncioTestCase):

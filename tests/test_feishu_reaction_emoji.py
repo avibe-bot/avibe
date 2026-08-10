@@ -17,6 +17,8 @@ ever used as evidence *for* a key.
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -31,7 +33,7 @@ from core.processing_indicator import (  # noqa: E402
     UNCONFIRMED_REACTION_EMOJI,
 )
 from core.handlers.message_handler import SUBAGENT_REACTION_EMOJI  # noqa: E402
-from modules.im.feishu import _EMOJI_MAP, _normalize_emoji  # noqa: E402
+from modules.im.feishu import FeishuBot, _EMOJI_MAP, _normalize_emoji  # noqa: E402
 
 # unicode emoji -> the exact emoji_type Lark publishes for it.
 VERIFIED_EMOJI_TYPES = {
@@ -109,6 +111,98 @@ class FeishuReactionEmojiTests(unittest.TestCase):
         self.assertEqual(_normalize_emoji("✍️"), _normalize_emoji("✍"))
         self.assertEqual(_normalize_emoji(":writing_hand:"), "Typing")
         self.assertEqual(_normalize_emoji(":shrug:"), "Shrug")
+
+    def test_reaction_cleanup_accepts_only_this_app_operator(self):
+        bot = FeishuBot.__new__(FeishuBot)
+        bot.config = SimpleNamespace(app_id="cli_app")
+        bot._bot_open_id = "ou_bot"
+
+        self.assertTrue(bot._reaction_is_owned_by_bot({"operator": {"operator_type": "app", "operator_id": "ou_bot"}}))
+        self.assertTrue(bot._reaction_is_owned_by_bot({"operator": {"operator_type": "app", "operator_id": "cli_app"}}))
+        self.assertFalse(
+            bot._reaction_is_owned_by_bot({"operator": {"operator_type": "user", "operator_id": "ou_user"}})
+        )
+        self.assertFalse(
+            bot._reaction_is_owned_by_bot({"operator": {"operator_type": "app", "operator_id": "cli_other"}})
+        )
+
+
+class FeishuReactionCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remove_skips_human_match_and_finds_bot_on_next_page(self):
+        pages = [
+            {
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "reaction_id": "human-reaction",
+                            "operator": {"operator_type": "user", "operator_id": "ou_user"},
+                            "reaction_type": {"emoji_type": "OnIt"},
+                        }
+                    ],
+                    "has_more": True,
+                    "page_token": "next-page",
+                },
+            },
+            {
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "reaction_id": "bot-reaction",
+                            "operator": {"operator_type": "app", "operator_id": "ou_bot"},
+                            "reaction_type": {"emoji_type": "OnIt"},
+                        }
+                    ],
+                    "has_more": False,
+                },
+            },
+        ]
+        get_params = []
+        deleted = []
+
+        class _Response:
+            def __init__(self, *, payload=None, status=200):
+                self.payload = payload
+                self.status = status
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self):
+                return self.payload
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def get(self, _url, *, headers, params):
+                get_params.append(dict(params))
+                return _Response(payload=pages.pop(0))
+
+            def delete(self, url, *, headers):
+                deleted.append(url)
+                return _Response(status=200)
+
+        bot = FeishuBot.__new__(FeishuBot)
+        bot.config = SimpleNamespace(app_id="cli_app", api_base_url="https://open.feishu.cn")
+        bot._bot_open_id = "ou_bot"
+        bot._lark_client = object()
+        bot._get_tenant_token = AsyncMock(return_value="token")
+
+        with patch("modules.im.feishu.aiohttp.ClientSession", return_value=_Session()):
+            removed = await bot.remove_reaction(SimpleNamespace(), "m1", "👀")
+
+        self.assertTrue(removed)
+        self.assertNotIn("human-reaction", "".join(deleted))
+        self.assertIn("bot-reaction", deleted[0])
+        self.assertEqual(get_params[1]["page_token"], "next-page")
 
 
 if __name__ == "__main__":
