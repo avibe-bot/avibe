@@ -526,7 +526,10 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None
         revision = pointer.get("admission_revision")
         if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
-            return binary
+            if pointer.get("admission_ok") is True:
+                return binary
+            self._install_reason = "memory_runtime_install_failed"
+            return None
         try:
             file_lock = self._acquire_mutation_lock()
         except Exception:  # noqa: BLE001
@@ -543,14 +546,19 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 return None
             revision = current.get("admission_revision")
             if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
-                return binary
-            preparation = self._prepare_binary(binary)
-            if preparation.get("ok") is not True:
+                if current.get("admission_ok") is True:
+                    return binary
                 self._install_reason = "memory_runtime_install_failed"
                 return None
+            preparation = self._prepare_binary(binary)
+            admission_ok = preparation.get("ok") is True
             admitted_pointer = dict(current)
             admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
+            admitted_pointer["admission_ok"] = admission_ok
             self._restore_current_pointer(admitted_pointer)
+            if not admission_ok:
+                self._install_reason = "memory_runtime_install_failed"
+                return None
         except Exception:  # noqa: BLE001
             self._install_reason = "memory_runtime_install_failed"
             return None
@@ -579,6 +587,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 "archive_sha256": archive.sha256,
                 "bin_path": archive.bin_path,
                 "admission_revision": ARTIFACT_ADMISSION_REVISION,
+                "admission_ok": True,
                 "provider_root_format": candidate.provider_root_format,
                 "compatible_provider_root_formats": sorted(candidate.compatible_provider_root_formats - {candidate.provider_root_format}),
                 "artifact_fingerprint": candidate.artifact_fingerprint,

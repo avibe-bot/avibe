@@ -824,11 +824,15 @@ def test_memory_artifact_readmits_active_pointer_after_contract_revision(
     assert active is not None
     if admitted:
         assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is True
         assert manager.resolve_python() == binary
         assert admissions == [binary]
     else:
-        assert "admission_revision" not in active
+        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is False
+        assert manager.resolve_python() is None
         assert manager.status()["reason"] == "memory_runtime_install_failed"
+        assert admissions == [binary]
 
 
 def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Path) -> None:
@@ -866,6 +870,7 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         "archive_sha256": "b" * 64,
         "bin_path": "bin/python",
         "admission_revision": memory_artifact.ARTIFACT_ADMISSION_REVISION,
+        "admission_ok": True,
         "provider_root_format": "everos-1.0",
         "compatible_provider_root_formats": [],
         "artifact_fingerprint": "old-artifact",
@@ -883,6 +888,7 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
             manager._active_pointer()["admission_revision"]
             == memory_artifact.ARTIFACT_ADMISSION_REVISION
         )
+        assert manager._active_pointer()["admission_ok"] is True
         calls.append(("active", manager.provider_root_format()))
         rollback()
 
@@ -967,6 +973,7 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(
         "archive_sha256": "b" * 64,
         "bin_path": "bin/python",
         "admission_revision": memory_artifact.ARTIFACT_ADMISSION_REVISION,
+        "admission_ok": True,
         "provider_root_format": "everos-1.0",
         "compatible_provider_root_formats": [],
         "artifact_fingerprint": "old-artifact",
