@@ -277,12 +277,14 @@ class MemoryMaintenance:
                 restore_unavailable = True
 
         clear_journal = self._clear_journal
-        clear_unavailable = clear_journal is None or initialization_unavailable
+        clear_unavailable = clear_journal is None
         if not clear_unavailable:
             assert clear_journal is not None
             try:
                 clear_observation = clear_journal.observe_open_operation(
-                    operator_ref=operator_ref
+                    operator_ref=(
+                        None if initialization_unavailable else operator_ref
+                    )
                 )
                 clear_operation = clear_observation.operation
                 clear_can_resume = clear_observation.can_resume

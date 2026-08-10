@@ -941,10 +941,12 @@ class MemoryRuntime:
         self,
         maintenance_reason: str | None,
     ) -> ProcessingSourceObservations:
-        if maintenance_reason is not None:
+        before = self._processing_runtime_snapshot()
+        reason = before.unavailable_reason(maintenance_reason)
+        if reason is not None:
             unavailable = SourceObservation(
                 "unavailable",
-                reason=maintenance_reason,
+                reason=reason,
             )
             return ProcessingSourceObservations(
                 everos=unavailable,
@@ -952,9 +954,22 @@ class MemoryRuntime:
                 calls=unavailable,
             )
         reader = self._insight_reader
-        if not self.available or reader is None:
+        if reader is None:
             raise self._unavailable()
-        return await self._run_insight_read(reader.source_observation)
+        observation = await run_blocking(reader.source_observation)
+        after = self._processing_runtime_snapshot()
+        current_reason = after.unavailable_reason(maintenance_reason)
+        if not after.same_lifecycle(before) or current_reason is not None:
+            unavailable = SourceObservation(
+                "unavailable",
+                reason=current_reason or "memory_sidecar_unavailable",
+            )
+            return ProcessingSourceObservations(
+                everos=unavailable,
+                capture=unavailable,
+                calls=unavailable,
+            )
+        return observation
 
     async def _processing_record_maintenance(
         self,

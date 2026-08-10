@@ -653,6 +653,111 @@ async def test_health_probe_discards_result_after_same_process_lifecycle_transit
 
 
 @pytest.mark.asyncio
+async def test_processing_sources_return_busy_without_waiting_for_lifecycle_locks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source_reads = 0
+
+    class Reader:
+        def source_observation(self) -> ProcessingSourceObservations:
+            nonlocal source_reads
+            source_reads += 1
+            return _sources()
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+        insight_reader=Reader(),
+    )
+    runtime._process = SimpleNamespace(running=True)
+
+    async with runtime._reconcile_lock, runtime.module._lifecycle_lock:
+        sources = await asyncio.wait_for(
+            runtime._processing_record_sources(None),
+            timeout=0.1,
+        )
+
+    assert source_reads == 0
+    assert {source.status for source in (
+        sources.everos,
+        sources.capture,
+        sources.calls,
+    )} == {"unavailable"}
+    assert {source.reason for source in (
+        sources.everos,
+        sources.capture,
+        sources.calls,
+    )} == {"busy"}
+    runtime._process = None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transition", "expected_reason"),
+    [
+        ("generation", "memory_sidecar_unavailable"),
+        ("process", "memory_sidecar_unavailable"),
+        ("maintenance", "busy"),
+    ],
+)
+async def test_processing_sources_discard_stale_lifecycle_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transition: str,
+    expected_reason: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source_read_started = threading.Event()
+    release_source_read = threading.Event()
+
+    class Reader:
+        def source_observation(self) -> ProcessingSourceObservations:
+            source_read_started.set()
+            assert release_source_read.wait(2)
+            return _sources()
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True),
+        effective_home=tmp_path,
+        insight_reader=Reader(),
+    )
+    original_process = SimpleNamespace(running=True)
+    runtime._process = original_process
+    reading = asyncio.create_task(runtime._processing_record_sources(None))
+    try:
+        assert await asyncio.to_thread(source_read_started.wait, 1)
+        if transition == "generation":
+            runtime._advance_processing_lifecycle()
+        elif transition == "process":
+            runtime._process = SimpleNamespace(running=True)
+        else:
+            runtime._enter_maintenance()
+        release_source_read.set()
+        sources = await asyncio.wait_for(reading, timeout=1)
+    finally:
+        release_source_read.set()
+        await asyncio.gather(reading, return_exceptions=True)
+        if transition == "maintenance":
+            runtime._leave_maintenance()
+
+    assert {source.status for source in (
+        sources.everos,
+        sources.capture,
+        sources.calls,
+    )} == {"unavailable"}
+    assert {source.reason for source in (
+        sources.everos,
+        sources.capture,
+        sources.calls,
+    )} == {expected_reason}
+    runtime._process = None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_status_projection_never_reads_maintenance_journals(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

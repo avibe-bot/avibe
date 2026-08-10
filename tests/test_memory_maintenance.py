@@ -234,6 +234,67 @@ async def test_maintenance_observes_clear_recovery_with_one_journal_snapshot(
     await runtime.close()
 
 
+@pytest.mark.parametrize("failure_point", ("snapshot_manager", "boot_marker"))
+async def test_partial_maintenance_initialization_still_projects_clear_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    journal = MemoryClearJournal(tmp_path)
+    operation = journal.start(
+        operation_id=f"clear-before-{failure_point}-failure",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    recovery = journal.mark_boot_recovery_needed()
+    assert recovery is not None
+
+    def fail_initialization(*_args, **_kwargs):
+        raise OSError(f"injected {failure_point} initialization failure")
+
+    if failure_point == "snapshot_manager":
+        monkeypatch.setattr(
+            "core.memory.maintenance.MemorySnapshotManager",
+            fail_initialization,
+        )
+    else:
+        monkeypatch.setattr(
+            "core.memory.maintenance.MemoryBackupRestoreJournal."
+            "mark_boot_recovery_needed",
+            fail_initialization,
+        )
+
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    maintenance = _maintenance(runtime)
+    assert maintenance.ready is False
+
+    observation = await maintenance.observe(operator_ref="user:owner")
+    assert observation.block_reason == "memory_store_unavailable"
+    assert observation.can_clear is False
+    assert observation.clear_recovery == ClearRecoveryResult(
+        state="recovery_needed",
+        operation_id=operation.operation_id,
+        occurred_at=recovery.updated_at,
+        error_code="memory_clear_failed",
+        can_resume=False,
+        can_abort=False,
+    )
+
+    payload = await runtime.maintenance_payload(operator_ref="user:owner")
+    assert payload["can_clear"] is False
+    assert payload["clear_recovery"] == {
+        "state": "recovery_needed",
+        "operation_id": operation.operation_id,
+        "occurred_at": recovery.updated_at,
+        "error_code": "memory_clear_failed",
+        "can_resume": False,
+        "can_abort": False,
+    }
+    await runtime.close()
+
+
 async def test_maintenance_revalidates_journals_after_store_metadata_reads(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
