@@ -8,6 +8,7 @@ import { showAppRoutePath } from '../../apps/mobileDock';
 import { useShowPageInventory } from '../../useShowPages';
 import { useWindowManager } from '../../../context/WindowManagerContext';
 import { openLinkInNewContext } from '../../../lib/pwaNavigation';
+import { isDesktopViewport } from '../../../lib/useIsDesktop';
 import { filterAppSearchResults, type AppSearchResult } from './appSearch';
 
 export function useAppSearchResults(query: string, enabled = true) {
@@ -61,7 +62,7 @@ export function useOpenSearchApp() {
           return;
         }
       }
-      const desktop = typeof window !== 'undefined' && !!window.matchMedia?.('(min-width: 768px)').matches;
+      const desktop = isDesktopViewport();
       if (desktop) {
         wm.openApp(result.appId, {
           title: result.kind === 'showpage' ? result.title : undefined,

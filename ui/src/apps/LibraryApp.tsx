@@ -26,6 +26,7 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { SearchField } from '../components/settings/SettingsPrimitives';
 import { openLinkInNewContext } from '../lib/pwaNavigation';
+import { isDesktopViewport } from '../lib/useIsDesktop';
 
 // The App Library: the app manager, itself a built-in app (§7.1). Two views over
 // the two-layer state (§7.1c): the INSTALLED set (Apps) and the full Show Pages
@@ -67,7 +68,7 @@ function useOpenApp() {
           return;
         }
       }
-      const desktop = typeof window !== 'undefined' && !!window.matchMedia?.('(min-width: 768px)').matches;
+      const desktop = isDesktopViewport();
       if (desktop) {
         wm.openApp(appId, {
           title: opts?.title,

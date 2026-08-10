@@ -7,16 +7,12 @@ import { Button } from '../ui/button';
 import { useUnsavedChanges } from '../../context/useUnsavedChanges';
 import { FileEditorPane } from './FileEditorPane';
 import { EditorFontSizePopover } from './EditorFontSizePopover';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). On desktop it
 // mounts the same full Editor IDE the Dock window uses; on phones — where there is no window layer —
 // it renders a slim single-file editor. Design: `dnYPx` (IDE) + `w0qoC` (welcome).
 const EditorApp = lazy(() => import('./EditorApp').then((m) => ({ default: m.EditorApp })));
-
-// The desktop IDE (dnYPx) is designed dark and forces Monaco dark; below this the phone gets the
-// slim editor instead. Matches the File Browser's window-vs-page breakpoint so a tablet (≥768) gets
-// the same full IDE it gets a resizable window for.
-const DESKTOP_QUERY = '(min-width: 768px)';
 
 // A file handed to the editor when navigating in from the File Browser (mobile) or a direct link.
 // Carried in router state — like the window params `wm.openApp` passes — so absolute paths stay out
@@ -51,7 +47,7 @@ function readLaunch(state: unknown): LaunchFile | null {
 // desktop IDE on a mid-edit resize/rotate would unmount whichever holds the buffer and silently drop
 // unsaved edits. A phone that rotates keeps the surface it opened with.
 function useDesktopAtMount(): boolean {
-  return useState(() => window.matchMedia(DESKTOP_QUERY).matches)[0];
+  return useState(isDesktopViewport)[0];
 }
 
 // Warn before a hard unload (refresh / tab close / leaving the SPA) while there are unsaved edits.

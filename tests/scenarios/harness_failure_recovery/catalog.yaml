@@ -4144,6 +4144,15 @@ scenarios:
     # The durable input keeps Turn ownership, Stop, and audit history intact but
     # is not a human instruction and therefore never renders in the transcript.
     test: tests/test_session_delivery_fsm.py::test_agent_initiated_continuation_materializes_as_hidden_turn_input
+  - id: HFR-462
+    name: inherited Workbench routes materialize through the runtime session facade
+    status: covered
+    kind: routing
+    layer: contract
+    backend: shared
+    # The handler-to-facade contract forwards the resolved route at Turn start;
+    # the refreshed chat header remains a residual manual UI check.
+    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_workbench_inherited_route_materializes_at_turn_start
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

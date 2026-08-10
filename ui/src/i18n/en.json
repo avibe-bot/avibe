@@ -3611,6 +3611,8 @@
       "help": "Provide the value — it goes to the vault, never to the chat or model.",
       "notSetYet": "not set yet",
       "dismiss": "Dismiss",
+      "denyTitle": "Reject this secret request?",
+      "denyDescription": "The agent will be notified that this request was rejected and stop waiting. This can't be undone.",
       "saveAndWake": "Save & let the agent continue",
       "ambiguousProvision": "Multiple pending requests need this secret. Open the request-specific Provide secret row in Vaults so the requested details are preserved.",
       "saveFailed": "Couldn't save the secret. Please try again."

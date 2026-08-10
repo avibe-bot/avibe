@@ -19,6 +19,7 @@ import {
   showPageWindowOrigin,
   type ViewportPoint,
 } from '../../lib/showPageLaunch';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 import { Button } from '../ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 
@@ -222,7 +223,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
             }}
             draggable={canLaunch}
             onDragStart={(event) => {
-              if (!canLaunch || !window.matchMedia?.('(min-width: 768px)').matches) {
+              if (!canLaunch || !isDesktopViewport()) {
                 event.preventDefault();
                 return;
               }
