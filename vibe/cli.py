@@ -1366,7 +1366,8 @@ def _watch_add_examples_text() -> str:
           Exit 0 must mean one new reportable event, not a condition that merely remains true. Repeated rapid successes automatically pause the Watch and send the Agent a repair message.
           Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and is terminal unless explicitly allowed for retry;
           64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
-          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          so a once Watch ends and a forever Watch re-arms WITHOUT an Agent turn. A once waiter that is still waiting must use a retry exit code.
+          Any other non-zero is a failure.
           The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
           Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.

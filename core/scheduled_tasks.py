@@ -6722,7 +6722,15 @@ class ScheduledTaskService:
         elif is_watch and str(
             ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
         ).strip() == WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR:
-            headline = self._t("harness.notice.watchCircuitRepairFailed", name=name)
+            if watch is not None and not watch.get("enabled") and not watch.get(
+                "retired_at"
+            ):
+                headline = self._t(
+                    "harness.notice.watchCircuitRepairFailed",
+                    name=name,
+                )
+            else:
+                headline = self._t("harness.notice.watchFollowUpFailed", name=name)
         elif is_watch and str(
             ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
         ).strip() == WATCH_HOOK_OUTCOME_EVENT:

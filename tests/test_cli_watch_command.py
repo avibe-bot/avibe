@@ -111,6 +111,8 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "A once Watch stops after its first event" in captured.out
     assert "five-second safety delay" in captured.out
     assert "automatically pause the Watch" in captured.out
+    assert "a once Watch ends and a forever Watch re-arms" in captured.out
+    assert "A once waiter that is still waiting must use a retry exit code" in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out

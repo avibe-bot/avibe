@@ -1621,6 +1621,8 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
         self.assertIn("exit `0` only for one NEW reportable event", prompt)
         self.assertIn("default `75`) keeps either a once or forever Watch waiting", prompt)
+        self.assertIn("it retires a once Watch and re-arms a forever Watch", prompt)
+        self.assertIn("must therefore return an allowed retry code, not `64`", prompt)
         self.assertIn("waits five seconds after a follow-up settles before re-arming", prompt)
         self.assertIn("six successful events within 60 seconds", prompt)
         delegate_guidance = (

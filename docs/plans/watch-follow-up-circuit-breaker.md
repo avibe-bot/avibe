@@ -24,6 +24,9 @@ event. The runtime currently loses both facts between cycles.
   explicitly listed.
 - `--lifetime-timeout` bounds the whole Watch lifetime in either mode. This matters
   for a `once` Watch that can now have multiple retry cycles.
+- The lifetime deadline also bounds time spent behind the follow-up fence. If an
+  earlier Agent Run is still queued or running at the deadline, the Watch retires
+  immediately and records why, but does not create a second concurrent Run.
 
 ## Runtime Invariants
 
@@ -66,6 +69,9 @@ runtime also queries queued/running Watch Runs by definition before starting a w
 so legacy backlog drains without admitting another event. File-backed stores retain
 the same behavior for tests and legacy operation, without pretending to provide a
 cross-file transaction.
+
+Changing the waiter command, shell command, mode, or cwd starts a new waiter lifecycle
+and clears the old burst window. Session routing and follow-up copy changes do not.
 
 ## Observability
 
