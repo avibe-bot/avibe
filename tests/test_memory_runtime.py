@@ -3586,10 +3586,12 @@ async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_proces
     await memory_runtime_factory.close(runtime)
 
 
+@pytest.mark.parametrize("unexpected_activation", [False, True])
 async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     memory_runtime_factory,
+    unexpected_activation: bool,
 ) -> None:
     stop_entered = asyncio.Event()
     release_stop = asyncio.Event()
@@ -3615,15 +3617,27 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     runtime._activation_loop = asyncio.get_running_loop()
     process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
     closing = asyncio.create_task(memory_runtime_factory.close(runtime))
-    await stop_entered.wait()
 
-    await process.ready()
-    await asyncio.sleep(0.01)
-    assert activations == []
+    async def verify_readiness_stays_closed() -> None:
+        try:
+            await stop_entered.wait()
+            await process.ready()
+            await asyncio.sleep(0.01)
+            if unexpected_activation:
+                activations.append(None)
+            assert activations == []
+        finally:
+            release_stop.set()
+            await closing
 
-    release_stop.set()
-    await closing
-    assert activations == []
+    if unexpected_activation:
+        with pytest.raises(AssertionError):
+            await verify_readiness_stays_closed()
+    else:
+        await verify_readiness_stays_closed()
+        assert activations == []
+    assert closing.done()
+    assert process.stops == 1
 
 
 async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
