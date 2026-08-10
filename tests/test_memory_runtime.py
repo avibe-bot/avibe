@@ -172,15 +172,17 @@ async def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
     flush_finished = threading.Event()
     release_flush = asyncio.Event()
 
-    class BlockingProvider(FakeMemoryProvider):
-        async def flush(self, session_ref: ProviderSessionRef):
-            self.flushes.append(session_ref)
-            flush_entered.set()
-            await release_flush.wait()
-            flush_finished.set()
-            return FlushSucceeded(request_id="exact-flush", status="extracted")
+    async def block_flush(_session_ref: ProviderSessionRef) -> None:
+        flush_entered.set()
+        await release_flush.wait()
+        flush_finished.set()
 
-    provider = BlockingProvider()
+    provider = FakeMemoryProvider(
+        flush_results=deque(
+            (FlushSucceeded(request_id="exact-flush", status="extracted"),)
+        ),
+        flush_hook=block_flush,
+    )
     runtime._provider = provider
     runtime.module._replace_provider(provider)
     worker = runtime.module._worker
@@ -1197,17 +1199,19 @@ async def test_final_flush_fences_capture_before_queue_visibility(
         artifact_manager=_installed_artifact(),
         effective_home=runtime_home,
     )
-    flush_entered = threading.Event()
-    release_flush = threading.Event()
+    flush_entered = asyncio.Event()
+    release_flush = asyncio.Event()
 
-    class BlockingFlushProvider(FakeMemoryProvider):
-        async def flush(self, session_ref: ProviderSessionRef):
-            self.flushes.append(session_ref)
-            flush_entered.set()
-            assert await asyncio.to_thread(release_flush.wait, 2.0)
-            return FlushSucceeded(request_id="old-session-flush", status="extracted")
+    async def block_flush(_session_ref: ProviderSessionRef) -> None:
+        flush_entered.set()
+        await release_flush.wait()
 
-    provider = BlockingFlushProvider()
+    provider = FakeMemoryProvider(
+        flush_results=deque(
+            (FlushSucceeded(request_id="old-session-flush", status="extracted"),)
+        ),
+        flush_hook=block_flush,
+    )
     runtime._provider = provider
     runtime.module._replace_provider(provider)
 
@@ -1273,7 +1277,7 @@ async def test_final_flush_fences_capture_before_queue_visibility(
     assert isinstance(await old_capture, CaptureAccepted)
     drain = asyncio.create_task(runtime.module._worker.drain_once())
 
-    assert await asyncio.to_thread(flush_entered.wait, 1.0)
+    await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
     assert [capture.text for capture in provider.captures] == [
         "old session message"
     ]
@@ -3050,11 +3054,9 @@ async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     release_add = asyncio.Event()
     pause_timeouts: list[float] = []
 
-    class BlockingProvider(FakeMemoryProvider):
-        async def add(self, capture):
-            add_entered.set()
-            await release_add.wait()
-            return await super().add(capture)
+    async def block_add(_capture: ProviderCapture) -> None:
+        add_entered.set()
+        await release_add.wait()
 
     factory = FakeEverOSProcessFactory()
     runtime = MemoryRuntime(
@@ -3065,7 +3067,7 @@ async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     )
     old = FakeEverOSProcess()
     runtime._process = old
-    provider = BlockingProvider()
+    provider = FakeMemoryProvider(add_hook=block_add)
     runtime._provider = provider
     runtime.module._replace_provider(provider)
     store = runtime._store
