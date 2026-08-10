@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -818,7 +818,11 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake_process.finish(0)
         await flow.waiter_task
 
-        harness.service._persist_backend_auth_mode.assert_awaited_once_with("codex", "oauth")
+        harness.service._persist_backend_auth_mode.assert_awaited_once_with(
+            "codex",
+            "oauth",
+            settlement=ANY,
+        )
         harness.service._refresh_backend_runtime.assert_awaited_once_with("codex")
         ScenarioExpect.step_history(runner, ["start_setup", "emit_device_url", "emit_device_code"])
         ScenarioExpect.text_contains(harness, "starting codex", index=0)

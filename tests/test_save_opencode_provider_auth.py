@@ -168,7 +168,7 @@ def _delete_custom(provider_id: str) -> dict:
     return asyncio.run(api.delete_opencode_custom_provider_async(provider_id))
 
 
-def test_delete_provider_auth_settles_default_clear_on_cancellation(
+def test_delete_provider_auth_settles_main_delete_and_live_state_on_cancellation(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -181,18 +181,27 @@ def test_delete_provider_auth_settles_default_clear_on_cancellation(
     async def no_config_keys():
         return set()
 
-    clear_entered = threading.Event()
-    release_clear = threading.Event()
+    delete_entered = threading.Event()
+    release_delete = threading.Event()
     clear_finished = threading.Event()
     restart_calls: list[str] = []
 
+    async def blocking_remove(provider_id: str) -> None:
+        def remove_after_release() -> None:
+            delete_entered.set()
+            assert release_delete.wait(timeout=5)
+            server.remove_calls.append(provider_id)
+            server._write_auth({})
+
+        await asyncio.to_thread(remove_after_release)
+
     def blocking_clear(provider_id: str) -> None:
         assert provider_id == "deepseek"
-        clear_entered.set()
-        assert release_clear.wait(timeout=5)
         clear_finished.set()
+        raise RuntimeError("default clear failed")
 
     monkeypatch.setattr(api, "_opencode_get_server", get_server)
+    monkeypatch.setattr(server, "remove_provider_auth", blocking_remove)
     monkeypatch.setattr(
         "vibe.opencode_config.read_opencode_provider_auth_entries",
         lambda **_kwargs: {"deepseek": {"type": "api", "key": "sk-old"}},
@@ -208,35 +217,44 @@ def test_delete_provider_auth_settles_default_clear_on_cancellation(
 
     async def exercise() -> None:
         task = asyncio.create_task(api.delete_opencode_provider_auth_async("deepseek"))
-        assert await asyncio.to_thread(clear_entered.wait, 5)
-        task.cancel()
+        assert await asyncio.to_thread(delete_entered.wait, 5)
+        task.cancel("delete cancelled")
         await asyncio.sleep(0)
-        assert not task.done()
-        task.cancel()
+        task.cancel("repeated cancellation")
         await asyncio.sleep(0)
-        assert not task.done()
-        release_clear.set()
-        with pytest.raises(asyncio.CancelledError):
+        release_delete.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
             await task
+        assert raised.value.args == ("delete cancelled",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "default clear failed"
 
     asyncio.run(exercise())
 
     assert clear_finished.is_set()
     assert restart_calls == ["opencode"]
     assert api._OPENCODE_OPTIONS_CACHE == {}
+    assert server._read_auth() == {}
 
 
-def test_delete_custom_provider_settles_live_restart_on_cancellation(
+def test_delete_custom_provider_settles_main_delete_and_live_state_on_cancellation(
     monkeypatch,
 ) -> None:
-    clear_entered = threading.Event()
-    release_clear = threading.Event()
+    delete_entered = threading.Event()
+    release_delete = threading.Event()
+    delete_finished = threading.Event()
     restart_calls: list[str] = []
 
-    def blocking_clear(provider_id: str) -> None:
+    def blocking_delete(provider_id: str, *_args, **_kwargs) -> None:
         assert provider_id == "custom"
-        clear_entered.set()
-        assert release_clear.wait(timeout=5)
+        delete_entered.set()
+        assert release_delete.wait(timeout=5)
+        delete_finished.set()
+
+    clear_calls: list[str] = []
+
+    def clear_default(provider_id: str) -> None:
+        clear_calls.append(provider_id)
 
     monkeypatch.setattr(
         "vibe.opencode_config.is_opencode_custom_provider",
@@ -248,9 +266,9 @@ def test_delete_custom_provider_settles_live_restart_on_cancellation(
     )
     monkeypatch.setattr(
         "vibe.opencode_config.remove_opencode_custom_provider",
-        lambda *_args, **_kwargs: None,
+        blocking_delete,
     )
-    monkeypatch.setattr(api, "_clear_opencode_default_provider_if", blocking_clear)
+    monkeypatch.setattr(api, "_clear_opencode_default_provider_if", clear_default)
     monkeypatch.setattr(
         api,
         "restart_backend",
@@ -262,18 +280,20 @@ def test_delete_custom_provider_settles_live_restart_on_cancellation(
         task = asyncio.create_task(
             api.delete_opencode_custom_provider_async("custom")
         )
-        assert await asyncio.to_thread(clear_entered.wait, 5)
-        task.cancel()
+        assert await asyncio.to_thread(delete_entered.wait, 5)
+        task.cancel("delete cancelled")
         await asyncio.sleep(0)
-        task.cancel()
+        task.cancel("repeated cancellation")
         await asyncio.sleep(0)
-        assert not task.done()
-        release_clear.set()
-        with pytest.raises(asyncio.CancelledError):
+        release_delete.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
             await task
+        assert raised.value.args == ("delete cancelled",)
 
     asyncio.run(exercise())
 
+    assert delete_finished.wait(timeout=5)
+    assert clear_calls == ["custom"]
     assert restart_calls == ["opencode"]
     assert api._OPENCODE_OPTIONS_CACHE == {}
 

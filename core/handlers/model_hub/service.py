@@ -545,25 +545,38 @@ class ModelHubService:
         settlement = CancellationSettlement()
         try:
             await self._save_store(updated, settlement=settlement)
-        except Exception:
-            settlement.raise_if_cancelled()
+        except (Exception, asyncio.CancelledError) as error:
+            settlement.raise_if_cancelled(error)
             raise
         try:
             await settlement.wait(
                 self._sync_sources(updated, force_empty=bool(previous_bindings))
             )
-        except (Exception, asyncio.CancelledError):
-            await self._save_store(previous, settlement=settlement)
+        except (Exception, asyncio.CancelledError) as sync_error:
+            try:
+                await self._save_store(previous, settlement=settlement)
+            except (Exception, asyncio.CancelledError) as rollback_error:
+                self._engine_synced = False
+                failure = rollback_error.__cause__ or rollback_error
+                logger.error("Model Hub rollback save failed: %s", failure)
+                settlement.raise_if_cancelled(rollback_error)
+                raise rollback_error from sync_error
             try:
                 await settlement.wait(
-                    self._sync_sources(previous, force_empty=bool(updated_bindings))
+                    self._sync_sources(
+                        previous,
+                        force_empty=bool(updated_bindings),
+                    )
                 )
-            except ModelHubError:
+            except (Exception, asyncio.CancelledError) as rollback_error:
                 self._engine_synced = False
+                failure = rollback_error.__cause__ or rollback_error
+                logger.error("Model Hub rollback sync failed: %s", failure)
+                settlement.raise_if_cancelled(rollback_error)
             else:
                 self._engine_synced = True
-            settlement.raise_if_cancelled()
-            raise
+            settlement.raise_if_cancelled(sync_error)
+            raise sync_error
         self._engine_synced = True
         settlement.raise_if_cancelled()
 

@@ -174,3 +174,70 @@ def test_cancellation_settlement_propagates_child_cancellation_without_retaining
         assert not settlement.cancelled
 
     asyncio.run(run())
+
+
+def test_cancellation_settlement_caller_cancel_precedes_later_stage_failure() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    dependent_ran = False
+
+    def failing_cleanup() -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise RuntimeError("cleanup failed")
+
+    async def run() -> None:
+        nonlocal dependent_ran
+
+        async def operation() -> None:
+            settlement = CancellationSettlement()
+            try:
+                await settlement.run_blocking(failing_cleanup)
+            except RuntimeError as error:
+                settlement.raise_if_cancelled(error)
+                raise
+            dependent_ran = True
+
+        call = asyncio.create_task(operation())
+        assert await asyncio.to_thread(entered.wait, 1)
+        call.cancel("caller stopped")
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await call
+        assert raised.value.args == ("caller stopped",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "cleanup failed"
+
+    asyncio.run(run())
+    assert not dependent_ran
+
+
+def test_cancellation_settlement_wait_preserves_failure_until_boundary() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def failing_operation() -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise RuntimeError("underlying failure")
+
+    async def run() -> None:
+        async def operation() -> tuple[RuntimeError, bool]:
+            settlement = CancellationSettlement()
+            try:
+                await settlement.run_blocking(failing_operation)
+            except RuntimeError as error:
+                return error, settlement.cancelled
+            raise AssertionError("expected the underlying failure")
+
+        call = asyncio.create_task(operation())
+        assert await asyncio.to_thread(entered.wait, 1)
+        call.cancel("caller stopped")
+        await asyncio.sleep(0)
+        release.set()
+        error, cancellation_retained = await call
+        assert str(error) == "underlying failure"
+        assert cancellation_retained
+
+    asyncio.run(run())

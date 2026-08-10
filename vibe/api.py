@@ -10522,6 +10522,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
     pid = provider_id.strip().lower()
+    settlement: CancellationSettlement | None = None
     try:
         from vibe.opencode_config import (
             is_opencode_custom_provider,
@@ -10540,24 +10541,37 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
             read_opencode_provider_auth_entries,
             logger_instance=logger,
         )
+        settlement = CancellationSettlement()
         if pid in auth_entries:
-            auth_result = await _delete_opencode_provider_auth_async(pid)
+            auth_result = await settlement.wait(
+                _delete_opencode_provider_auth_async(pid)
+            )
             if not auth_result.get("ok"):
+                settlement.raise_if_cancelled()
                 return {
                     "ok": False,
                     "provider_id": pid,
                     "message": auth_result.get("message") or "Provider auth removal failed",
                 }
-        await asyncio.to_thread(
+        await settlement.run_blocking(
             remove_opencode_custom_provider,
             pid,
             logger_instance=logger,
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
+        if settlement is not None:
+            settlement.raise_if_cancelled(exc)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         logger.warning("OpenCode custom provider delete failed for %s: %s", pid, exc, exc_info=True)
         return {"ok": False, "message": str(exc)}
 
-    restart = await _settle_opencode_delete_runtime(pid, clear_default=True)
+    restart = await _settle_opencode_delete_runtime(
+        pid,
+        clear_default=True,
+        settlement=settlement,
+    )
+    settlement.raise_if_cancelled()
     return {"ok": True, "provider_id": pid, "restart": restart}
 
 
@@ -10969,17 +10983,22 @@ async def _settle_opencode_delete_runtime(
     provider_id: str,
     *,
     clear_default: bool,
+    settlement: CancellationSettlement | None = None,
 ) -> dict:
     """Settle persisted delete state into the live OpenCode projection."""
 
-    settlement = CancellationSettlement()
+    settlement = settlement or CancellationSettlement()
+    cancellation_cause: BaseException | None = None
     if clear_default:
         try:
             await settlement.run_blocking(
                 _clear_opencode_default_provider_if,
                 provider_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+                raise
+            cancellation_cause = exc
             logger.warning(
                 "Failed to revalidate opencode.default_provider after delete for %s: %s",
                 provider_id,
@@ -10989,10 +11008,13 @@ async def _settle_opencode_delete_runtime(
     _OPENCODE_OPTIONS_CACHE.clear()
     try:
         restart = await settlement.run_blocking(restart_backend, "opencode")
-    except Exception as exc:  # noqa: BLE001
+    except (Exception, asyncio.CancelledError) as exc:
+        if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+            raise
+        cancellation_cause = exc
         restart = {"ok": False, "message": str(exc)}
     _OPENCODE_OPTIONS_CACHE.clear()
-    settlement.raise_if_cancelled()
+    settlement.raise_if_cancelled(cancellation_cause)
     return restart
 
 
@@ -11021,6 +11043,7 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
     pid = provider_id.strip()
+    settlement: CancellationSettlement | None = None
     try:
         from vibe.opencode_config import (
             read_opencode_provider_auth_entries,
@@ -11034,17 +11057,24 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         config_api_key_provider_ids = await _read_opencode_config_api_key_provider_ids()
         result = {"ok": True}
         removed_auth = False
+        settlement = CancellationSettlement()
         if pid in auth_entries:
-            result = await _delete_opencode_provider_auth_async(pid)
+            result = await settlement.wait(
+                _delete_opencode_provider_auth_async(pid)
+            )
             removed_auth = bool(result.get("ok"))
         if pid in config_api_key_provider_ids:
-            await asyncio.to_thread(
+            await settlement.run_blocking(
                 remove_opencode_provider_api_key,
                 pid,
                 logger_instance=logger,
             )
             removed_auth = True
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
+        if settlement is not None:
+            settlement.raise_if_cancelled(exc)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         logger.warning("OpenCode delete-auth failed for %s: %s", provider_id, exc, exc_info=True)
         return {"ok": False, "message": str(exc)}
 
@@ -11056,12 +11086,15 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         result["restart"] = await _settle_opencode_delete_runtime(
             pid,
             clear_default=True,
+            settlement=settlement,
         )
     else:
         result["restart"] = await _settle_opencode_delete_runtime(
             pid,
             clear_default=False,
+            settlement=settlement,
         )
+    settlement.raise_if_cancelled()
     return result
 
 

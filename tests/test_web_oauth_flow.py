@@ -1340,6 +1340,104 @@ def test_remove_web_auth_settles_live_state_and_hook_before_cancellation(
     assert hook_calls == ["codex"]
 
 
+def test_remove_web_auth_settles_logout_before_config_and_live_state(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
+    logout_entered = threading.Event()
+    release_logout = threading.Event()
+    logout_finished = threading.Event()
+    hook_calls: list[str] = []
+
+    def blocking_logout() -> None:
+        logout_entered.set()
+        assert release_logout.wait(timeout=5)
+        logout_finished.set()
+
+    async def run_utility(*_args, **_kwargs):
+        await asyncio.to_thread(blocking_logout)
+        return True, None
+
+    monkeypatch.setattr(service, "_run_utility_command", run_utility)
+    service._post_web_success_hook = hook_calls.append
+
+    async def exercise() -> None:
+        task = asyncio.create_task(service.remove_web_auth("codex"))
+        assert await asyncio.to_thread(logout_entered.wait, 5)
+        task.cancel("remove cancelled")
+        await asyncio.sleep(0)
+        task.cancel("repeated cancellation")
+        await asyncio.sleep(0)
+        release_logout.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("remove cancelled",)
+
+    _run(exercise())
+
+    assert logout_finished.wait(timeout=5)
+    persisted = V2Config.load().agents.codex
+    live = service.controller.config.agents.codex
+    assert persisted.auth_mode == "oauth"
+    assert persisted.api_key is None
+    assert live.auth_mode == "oauth"
+    assert live.api_key is None
+    assert hook_calls == ["codex"]
+
+
+def test_remove_web_auth_reconciles_hook_before_cancel_after_save_failure(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
+    service._run_utility_command = AsyncMock(return_value=(True, None))
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    hook_calls: list[str] = []
+
+    def failing_save(*_args, **_kwargs) -> None:
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        raise RuntimeError("config save failed")
+
+    monkeypatch.setattr(V2Config, "save", failing_save)
+    service._post_web_success_hook = hook_calls.append
+
+    async def exercise() -> None:
+        task = asyncio.create_task(service.remove_web_auth("codex"))
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel("remove cancelled")
+        await asyncio.sleep(0)
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("remove cancelled",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "config save failed"
+
+    _run(exercise())
+    assert hook_calls == ["codex"]
+
+
 def test_remove_web_auth_surfaces_logout_failure(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1357,6 +1455,89 @@ def test_remove_web_auth_surfaces_logout_failure(
     assert result["partial"] is True
     assert result["warning"] == "logout_failed"
     assert "exit 1" in result["detail"]
+
+
+def test_persist_auth_cancel_precedes_cleanup_failure_and_skips_config_save(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_entered = threading.Event()
+    release_cleanup = threading.Event()
+    save_fields = AsyncMock()
+
+    def failing_cleanup() -> None:
+        cleanup_entered.set()
+        assert release_cleanup.wait(timeout=5)
+        raise RuntimeError("credential cleanup failed")
+
+    async def clear_codex() -> None:
+        await asyncio.to_thread(failing_cleanup)
+
+    monkeypatch.setattr(service, "_clear_codex_api_key_for_oauth", clear_codex)
+    monkeypatch.setattr(service, "_save_backend_auth_fields", save_fields)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            service._persist_backend_auth_mode("codex", "oauth")
+        )
+        assert await asyncio.to_thread(cleanup_entered.wait, 5)
+        task.cancel("auth cancelled")
+        await asyncio.sleep(0)
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("auth cancelled",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "credential cleanup failed"
+
+    _run(exercise())
+    save_fields.assert_not_awaited()
+
+
+def test_save_backend_auth_fields_owned_cancel_precedes_save_failure(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
+    save_entered = threading.Event()
+    release_save = threading.Event()
+
+    def failing_save(*_args, **_kwargs) -> None:
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        raise RuntimeError("config save failed")
+
+    monkeypatch.setattr(V2Config, "save", failing_save)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            service._save_backend_auth_fields(
+                "codex",
+                "oauth",
+                clear_credentials=True,
+                mark_mode_explicit=False,
+            )
+        )
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel("save cancelled")
+        await asyncio.sleep(0)
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("save cancelled",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "config save failed"
+
+    _run(exercise())
 
 
 def test_remove_web_auth_surfaces_claude_settings_cleanup_failure(

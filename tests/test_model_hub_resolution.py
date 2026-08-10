@@ -1487,6 +1487,122 @@ def test_synced_mutation_rolls_back_when_engine_awaitable_cancels_itself(tmp_pat
     assert len(adapter.synced) == 2
 
 
+def test_synced_mutation_caller_cancel_precedes_rollback_save_failure(tmp_path):
+    adapter = FakeAdapter([])
+    adapter.fail_sync = True
+    service = _service(tmp_path, adapter)
+    original_save = service.store.save
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    save_count = 0
+
+    def fail_rollback_save(config):
+        nonlocal save_count
+        save_count += 1
+        if save_count == 1:
+            save_entered.set()
+            assert release_save.wait(timeout=5)
+            original_save(config)
+            return
+        raise OSError("rollback save failed")
+
+    service.store.save = fail_rollback_save
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            service.patch_source(
+                "src_primary01",
+                {"base_url": "https://new.example.test"},
+            )
+        )
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel("mutation cancelled")
+        await asyncio.sleep(0)
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("mutation cancelled",)
+        assert isinstance(raised.value.__cause__, OSError)
+        assert str(raised.value.__cause__) == "rollback save failed"
+
+    asyncio.run(exercise())
+
+    assert service._engine_synced is False
+
+
+def test_synced_mutation_rollback_save_failure_chains_sync_failure(tmp_path):
+    adapter = FakeAdapter([])
+    adapter.fail_sync = True
+    service = _service(tmp_path, adapter)
+    original_save = service.store.save
+    save_count = 0
+
+    def fail_rollback_save(config):
+        nonlocal save_count
+        save_count += 1
+        if save_count == 1:
+            original_save(config)
+            return
+        raise OSError("rollback save failed")
+
+    service.store.save = fail_rollback_save
+
+    with pytest.raises(OSError, match="rollback save failed") as raised:
+        asyncio.run(
+            service.patch_source(
+                "src_primary01",
+                {"base_url": "https://new.example.test"},
+            )
+        )
+
+    assert isinstance(raised.value.__cause__, ModelHubError)
+    assert service._engine_synced is False
+
+
+def test_synced_mutation_rollback_self_cancel_preserves_sync_failure(tmp_path):
+    class FailingThenCancellingAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            self.synced.append(tuple(bindings))
+            if len(self.synced) == 1:
+                raise RuntimeError("updated sync failed")
+            raise asyncio.CancelledError("rollback sync stopped")
+
+    adapter = FailingThenCancellingAdapter([])
+    service = _service(tmp_path, adapter)
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.patch_source(
+                "src_primary01",
+                {"base_url": "https://new.example.test"},
+            )
+        )
+
+    assert raised.value.code == "engine_down"
+    assert raised.value.__cause__ is None
+    assert service.store.load().sources[0].base_url is None
+    assert service._engine_synced is False
+
+
+def test_synced_mutation_double_sync_failure_preserves_original(tmp_path):
+    adapter = FakeAdapter([])
+    adapter.fail_sync = True
+    service = _service(tmp_path, adapter)
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.patch_source(
+                "src_primary01",
+                {"base_url": "https://new.example.test"},
+            )
+        )
+
+    assert raised.value.code == "engine_down"
+    assert raised.value.__cause__ is None
+    assert service.store.load().sources[0].base_url is None
+    assert service._engine_synced is False
+
+
 def test_source_creation_revokes_credential_when_persist_fails(tmp_path):
     adapter = FakeAdapter([])
     service = _service(tmp_path, adapter)

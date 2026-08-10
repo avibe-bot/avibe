@@ -1479,7 +1479,11 @@ class AgentAuthService:
                         "oauth",
                         settlement=settlement,
                     )
-                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                try:
+                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                except (Exception, asyncio.CancelledError) as error:
+                    settlement.raise_if_cancelled(error)
+                    raise
                 settlement.raise_if_cancelled()
                 await self._send_message(
                     flow.context,
@@ -1536,13 +1540,17 @@ class AgentAuthService:
                     "oauth",
                     settlement=settlement,
                 )
-                await settlement.wait(
-                    self._finish_claude_oauth_attempt(
-                        flow.claude_oauth_attempt,
-                        succeeded=True,
+                try:
+                    await settlement.wait(
+                        self._finish_claude_oauth_attempt(
+                            flow.claude_oauth_attempt,
+                            succeeded=True,
+                        )
                     )
-                )
-                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                except (Exception, asyncio.CancelledError) as error:
+                    settlement.raise_if_cancelled(error)
+                    raise
                 settlement.raise_if_cancelled()
                 await self._send_message(
                     flow.context,
@@ -2181,23 +2189,34 @@ class AgentAuthService:
             return {"ok": False, "error": "unsupported_backend"}
 
         binary = self._get_cli_binary(backend)
-        settings_cleanup_error: str | None = None
-        if backend == "codex":
-            logout_ok, logout_error = await self._run_utility_command(binary, "logout")
-        else:
-            settings_cleanup_error = await self._clear_claude_settings_env_for_logout()
-            if settings_cleanup_error:
-                logout_ok = False
-                logout_error = settings_cleanup_error
-            else:
-                logout_ok, logout_error = await self._run_utility_command(
-                    binary,
-                    "auth",
-                    "logout",
-                    env=self._build_claude_full_subprocess_env(force_oauth=True),
-                )
-
         settlement = CancellationSettlement()
+        settings_cleanup_error: str | None = None
+        try:
+            if backend == "codex":
+                logout_ok, logout_error = await settlement.wait(
+                    self._run_utility_command(binary, "logout")
+                )
+            else:
+                settings_cleanup_error = await settlement.wait(
+                    self._clear_claude_settings_env_for_logout()
+                )
+                if settings_cleanup_error:
+                    logout_ok = False
+                    logout_error = settings_cleanup_error
+                else:
+                    logout_ok, logout_error = await settlement.wait(
+                        self._run_utility_command(
+                            binary,
+                            "auth",
+                            "logout",
+                            env=self._build_claude_full_subprocess_env(force_oauth=True),
+                        )
+                    )
+        except (Exception, asyncio.CancelledError) as error:
+            settlement.raise_if_cancelled(error)
+            raise
+
+        settlement_cause: BaseException | None = None
         try:
             await self._save_backend_auth_fields(
                 backend,
@@ -2207,6 +2226,7 @@ class AgentAuthService:
                 settlement=settlement,
             )
         except Exception as err:  # noqa: BLE001
+            settlement_cause = err
             # Disk state has already been cleared; surface the V2Config
             # write failure but report partial success so the UI shows
             # the auth as removed (which is the user-visible truth).
@@ -2219,9 +2239,13 @@ class AgentAuthService:
         if callable(hook):
             try:
                 await settlement.run_blocking(hook, backend)
+            except asyncio.CancelledError as error:
+                settlement.raise_if_cancelled(error)
+                raise
             except Exception as err:  # noqa: BLE001
+                settlement_cause = settlement_cause or err
                 logger.warning("post_web_success_hook failed after remove for %s: %s", backend, err)
-        settlement.raise_if_cancelled()
+        settlement.raise_if_cancelled(settlement_cause)
         # Surface logout failures even though V2Config was cleared. The
         # on-disk credentials may still be intact (e.g. ``codex logout``
         # missing, exited non-zero, or timed out), and the user needs
@@ -3142,7 +3166,11 @@ class AgentAuthService:
                     flow.backend,
                     settlement=settlement,
                 )
-                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                try:
+                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                except (Exception, asyncio.CancelledError) as error:
+                    settlement.raise_if_cancelled(error)
+                    raise
                 settlement.raise_if_cancelled()
                 flow.state = "success"
             else:
@@ -3181,13 +3209,17 @@ class AgentAuthService:
                     flow.backend,
                     settlement=settlement,
                 )
-                await settlement.wait(
-                    self._finish_claude_oauth_attempt(
-                        flow.claude_oauth_attempt,
-                        succeeded=True,
+                try:
+                    await settlement.wait(
+                        self._finish_claude_oauth_attempt(
+                            flow.claude_oauth_attempt,
+                            succeeded=True,
+                        )
                     )
-                )
-                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                except (Exception, asyncio.CancelledError) as error:
+                    settlement.raise_if_cancelled(error)
+                    raise
                 settlement.raise_if_cancelled()
                 flow.state = "success"
             else:
@@ -3277,6 +3309,9 @@ class AgentAuthService:
             return
         try:
             await settlement.run_blocking(hook, backend)
+        except asyncio.CancelledError as error:
+            settlement.raise_if_cancelled(error)
+            raise
         except Exception as err:  # noqa: BLE001
             logger.warning("post_web_success_hook failed for %s: %s", backend, err)
         if owns_settlement:
@@ -3593,10 +3628,14 @@ class AgentAuthService:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         owns_settlement = settlement is None
         settlement = settlement or CancellationSettlement()
-        if backend == "claude" and auth_mode == "oauth":
-            await settlement.wait(self._clear_claude_settings_env_for_oauth())
-        if backend == "codex" and auth_mode == "oauth":
-            await settlement.wait(self._clear_codex_api_key_for_oauth())
+        try:
+            if backend == "claude" and auth_mode == "oauth":
+                await settlement.wait(self._clear_claude_settings_env_for_oauth())
+            if backend == "codex" and auth_mode == "oauth":
+                await settlement.wait(self._clear_codex_api_key_for_oauth())
+        except (Exception, asyncio.CancelledError) as error:
+            settlement.raise_if_cancelled(error)
+            raise
         try:
             await self._save_backend_auth_fields(
                 backend,
@@ -3681,9 +3720,9 @@ class AgentAuthService:
         settlement = settlement or CancellationSettlement()
         try:
             persisted = await settlement.run_blocking(persist)
-        except Exception:
+        except (Exception, asyncio.CancelledError) as error:
             if owns_settlement:
-                settlement.raise_if_cancelled()
+                settlement.raise_if_cancelled(error)
             raise
         live_target = getattr(
             getattr(controller_config, "agents", None),
