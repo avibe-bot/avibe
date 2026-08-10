@@ -450,6 +450,12 @@ class MessageHandler(BaseHandler):
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            materialized_agent_identity = bool(
+                vibe_agent
+                and isinstance(session_target, dict)
+                and not session_target.get("agent_id")
+                and not session_target.get("agent_name")
+            )
             # A session may pin a setting to NOTHING on purpose. The cascade above
             # cannot express that: every `or` reads NULL as "inherit", which is the
             # correct reading for the whole existing table and the WRONG one for a
@@ -460,38 +466,48 @@ class MessageHandler(BaseHandler):
             # silently re-route every session that is merely inheriting.
             explicit_overrides: set[str] = set()
             if isinstance(session_target, dict):
-                session_meta = session_target.get("metadata")
-                if isinstance(session_meta, dict):
-                    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+                from storage.session_reclaim import explicit_override_names
 
-                    marked = session_meta.get(SESSION_SETTINGS_OVERRIDE_KEY)
-                    if isinstance(marked, (list, tuple, set)):
-                        explicit_overrides = {str(name) for name in marked}
+                explicit_overrides = explicit_override_names(session_target.get("metadata"))
             if "model" in explicit_overrides:
                 effective_model = session_target.get("model")
             if "reasoning_effort" in explicit_overrides:
                 effective_reasoning_effort = session_target.get("reasoning_effort")
-            # Materialize the resolved route into EMPTY workbench session
-            # columns NOW, at turn start. A session created on an inherited
-            # default carries NULLs (dispatch resolves the live Agent default);
-            # without pinning, the chat header shows an agent with no model /
-            # effort after the first message. Pinning at turn START — not at
-            # native bind — means any later explicit header pick in this turn
-            # (including an explicit clear to NULL) lands after this write and
-            # is never undone by it. IM (scope/anchor) rows never carry
-            # ``agent_session_target`` and are untouched: their model semantics
-            # stay with channel routing.
-            if isinstance(session_target, dict) and session_target.get("id") and (
-                (effective_model and not session_target.get("model"))
-                or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+            # Materialize the resolved route into EMPTY Workbench session
+            # columns at turn start. A session created on an inherited default
+            # carries NULLs (dispatch resolves the live Agent default); without
+            # pinning, the chat header shows an Agent with no model / effort
+            # after the first message. Scheduled IM turns can carry the same
+            # target projection, so the platform gate is essential: their model
+            # semantics remain owned by channel routing.
+            if (
+                context.platform == "avibe"
+                and isinstance(session_target, dict)
+                and session_target.get("id")
+                and (
+                    materialized_agent_identity
+                    or (effective_model and not session_target.get("model"))
+                    or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+                )
             ):
                 materialize = getattr(self.sessions, "materialize_agent_session_route", None)
                 if callable(materialize):
                     try:
                         materialize(
                             str(session_target["id"]),
+                            agent_id=vibe_agent.id if materialized_agent_identity else None,
+                            agent_name=vibe_agent.name if materialized_agent_identity else None,
                             model=effective_model,
                             reasoning_effort=effective_reasoning_effort,
+                            expected_route={
+                                "agent_id": session_target.get("agent_id"),
+                                "agent_name": session_target.get("agent_name"),
+                                "agent_backend": session_target.get("agent_backend"),
+                                "agent_variant": session_target.get("agent_variant"),
+                                "model": session_target.get("model"),
+                                "reasoning_effort": session_target.get("reasoning_effort"),
+                                "explicit_overrides": sorted(explicit_overrides),
+                            },
                         )
                     except Exception:
                         logger.debug("Session route materialization failed; dispatch continues", exc_info=True)
