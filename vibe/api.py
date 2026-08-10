@@ -10495,6 +10495,9 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
         if not auth_result.get("ok"):
             return {
                 "ok": False,
+                "partial": True,
+                "saved": True,
+                "mutation_attempted": True,
                 "provider_id": provider_id.strip().lower(),
                 "message": auth_result.get("message") or "Provider saved, but API key save failed",
                 "restart": restart,
@@ -11101,6 +11104,7 @@ def _opencode_delete_failure_result(
     restart: dict | None,
     *,
     mutation_attempted: bool,
+    removed: bool | None = None,
 ) -> dict:
     """Return one closed response shape for an uncertain delete outcome."""
 
@@ -11109,7 +11113,7 @@ def _opencode_delete_failure_result(
         "partial": mutation_attempted,
         "mutation_attempted": mutation_attempted,
         "provider_id": provider_id,
-        "removed": None if mutation_attempted else False,
+        "removed": removed if removed is not None else (None if mutation_attempted else False),
     }
     if message:
         result["message"] = message
@@ -11210,6 +11214,14 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
             settlement=settlement,
         )
     settlement.raise_if_cancelled()
+    if not result.get("ok"):
+        return _opencode_delete_failure_result(
+            pid,
+            str(result.get("message") or "Provider auth removal failed"),
+            result["restart"],
+            mutation_attempted=mutation_started,
+            removed=True if removed_auth else None,
+        )
     partial = _opencode_delete_partial_result(
         pid,
         result["restart"],

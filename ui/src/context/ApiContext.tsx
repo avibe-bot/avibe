@@ -2272,6 +2272,7 @@ export type OpencodeMutationResult = {
   ok: boolean;
   partial?: boolean;
   removed?: boolean | null;
+  saved?: boolean;
   mutation_attempted?: boolean;
   message?: string;
   default_provider?: string;

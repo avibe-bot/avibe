@@ -45,6 +45,7 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { reconcileOpencodePartialMutation } from './opencodePartialMutation';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -270,6 +271,26 @@ export const OpencodeProviderConfig: React.FC<{
     [applyProvidersResult, showToast, t],
   );
 
+  const settlePartialMutation = useCallback(
+    async (
+      result: OpencodeMutationResult,
+      providerId: string,
+      message: string,
+      clearExpanded: boolean,
+    ): Promise<boolean> =>
+      reconcileOpencodePartialMutation(result, {
+        message,
+        warn: (warning) => showToast(warning, 'warning'),
+        notify: notifyOpenCodeModelOptionsChanged,
+        reload: loadProviders,
+        clearExpanded:
+          clearExpanded && expandedId === providerId
+            ? () => setExpandedId(null)
+            : undefined,
+      }),
+    [expandedId, loadProviders, showToast],
+  );
+
   useEffect(() => {
     loadProvidersRef.current = loadProviders;
   }, [loadProviders]);
@@ -455,12 +476,7 @@ export const OpencodeProviderConfig: React.FC<{
           deletingProvider: false,
           error: message,
         });
-        if (result.partial) {
-          showToast(message, 'warning');
-          notifyOpenCodeModelOptionsChanged();
-          if (expandedId === provider.id) setExpandedId(null);
-          await loadProviders();
-        }
+        await settlePartialMutation(result, provider.id, message, true);
         return;
       }
       updateEdit(provider.id, { deletingProvider: false, error: null });
@@ -509,10 +525,12 @@ export const OpencodeProviderConfig: React.FC<{
     try {
       const result = await api.setOpencodeProviderAuth(provider.id, key, baseUrl);
       if (!result.ok) {
+        const message = result.message || (t('settings.backends.opencodeProviderSaveFailed') as string);
         updateEdit(provider.id, {
           saving: false,
-          error: result.message || (t('settings.backends.opencodeProviderSaveFailed') as string),
+          error: message,
         });
+        await settlePartialMutation(result, provider.id, message, false);
         return;
       }
       updateEdit(provider.id, {
@@ -553,12 +571,7 @@ export const OpencodeProviderConfig: React.FC<{
           removing: false,
           error: message,
         });
-        if (result.partial) {
-          showToast(message, 'warning');
-          notifyOpenCodeModelOptionsChanged();
-          if (expandedId === provider.id) setExpandedId(null);
-          await loadProviders();
-        }
+        await settlePartialMutation(result, provider.id, message, true);
         return;
       }
       updateEdit(provider.id, { removing: false, error: null });

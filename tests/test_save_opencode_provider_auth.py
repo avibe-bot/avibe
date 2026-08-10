@@ -414,6 +414,44 @@ def test_delete_custom_provider_settles_after_auth_delete_then_custom_failure(
     assert api._OPENCODE_OPTIONS_CACHE == {}
 
 
+def test_delete_provider_normalizes_daemon_failure_after_local_key_removed(
+    monkeypatch,
+) -> None:
+    removed_keys: list[str] = []
+
+    async def daemon_delete_failed(_provider_id: str) -> dict:
+        return {"ok": False, "message": "daemon auth delete failed"}
+
+    async def config_key_ids() -> set[str]:
+        return {"deepseek"}
+
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {"deepseek": {"type": "api", "key": "sk-old"}},
+    )
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", config_key_ids)
+    monkeypatch.setattr(api, "_delete_opencode_provider_auth_async", daemon_delete_failed)
+    monkeypatch.setattr(
+        "vibe.opencode_config.remove_opencode_provider_api_key",
+        lambda provider_id, **_kwargs: removed_keys.append(provider_id),
+    )
+    monkeypatch.setattr(api, "_clear_opencode_default_provider_if", lambda _pid: None)
+    monkeypatch.setattr(api, "restart_backend", lambda _backend: {"ok": True})
+
+    result = asyncio.run(api.delete_opencode_provider_auth_async("deepseek"))
+
+    assert result == {
+        "ok": False,
+        "partial": True,
+        "mutation_attempted": True,
+        "removed": True,
+        "provider_id": "deepseek",
+        "message": "daemon auth delete failed",
+        "restart": {"ok": True},
+    }
+    assert removed_keys == ["deepseek"]
+
+
 @pytest.mark.parametrize("custom", [False, True])
 def test_delete_provider_settles_when_auth_delete_commits_then_close_fails(
     monkeypatch,
@@ -1005,6 +1043,56 @@ def test_save_custom_provider_persists_config_and_key(fake_save_env) -> None:
     assert "my-relay" in read_opencode_custom_providers(home=home)
     config = _read_opencode_config(home)
     assert config["provider"]["my-relay"]["options"]["apiKey"] == "sk-relay"
+
+
+def test_save_custom_provider_exposes_partial_auth_write_after_config_saved(
+    monkeypatch,
+) -> None:
+    saved_providers: list[str] = []
+
+    async def provider_catalog() -> dict:
+        return {"ok": True, "providers": []}
+
+    async def partial_auth_save(*_args, **_kwargs) -> dict:
+        return {
+            "ok": False,
+            "partial": True,
+            "mutation_attempted": True,
+            "message": "API key write failed after commit",
+        }
+
+    monkeypatch.setattr(api, "_get_opencode_providers_async", provider_catalog)
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_reserved_opencode_provider_id",
+        lambda _provider_id: False,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.upsert_opencode_custom_provider",
+        lambda provider_id, *_args, **_kwargs: saved_providers.append(provider_id),
+    )
+    monkeypatch.setattr(api, "_save_opencode_provider_auth_async", partial_auth_save)
+    monkeypatch.setattr(api, "restart_backend", lambda _backend: {"ok": True})
+
+    result = _save_custom(
+        {
+            "provider_id": "my-relay",
+            "name": "My Relay",
+            "adapter": "openai-compatible",
+            "base_url": "https://relay.example/v1",
+            "api_key": "sk-relay",
+        }
+    )
+
+    assert result == {
+        "ok": False,
+        "partial": True,
+        "saved": True,
+        "mutation_attempted": True,
+        "provider_id": "my-relay",
+        "message": "API key write failed after commit",
+        "restart": {"ok": True},
+    }
+    assert saved_providers == ["my-relay"]
 
 
 def test_save_custom_provider_rejects_clearing_base_url(fake_save_env) -> None:
