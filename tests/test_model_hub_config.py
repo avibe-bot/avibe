@@ -458,6 +458,32 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "| gap 12 |",
         "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
     ),
+    # The same row, with its route left in place and moved one column right. A
+    # register accounts for what it declares missing; the column beside it is
+    # where the row argues the absence is real, and argument names whatever it
+    # needs to name. Reading the whole row made those two the same act, which is
+    # how §0.5's G-13 — a row about a bulk re-apply that does not exist, citing
+    # the chain `PUT` only to say nothing bulk-rewrites stored chains — excused
+    # the one contracted mutation this document reached from nowhere. The defect
+    # survived twenty-nine review rounds and was found by hand, not here.
+    GateCase(
+        "A", "gaps", "arm",
+        "a gap row's route moves from what it registers into why it is true",
+        "by sending the contracted `DELETE /api/models/sources/<id>` | the only 移除",
+        " | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除",
+        "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
+    ),
+    # And the register whose declared column cannot be found at all. A column is
+    # located by its header, so renaming one is the one edit that could quietly
+    # turn the whole arm off — and the failure has to be that every route §0.5
+    # was covering comes back, never that §0.5 goes on covering them by position.
+    GateCase(
+        "A", "gaps", "arm",
+        "the gap register renames the column that says what is missing",
+        "| # | Surface | Missing | Verified absent at `ceace07f` |",
+        "| # | Surface | What is absent | Verified absent at `ceace07f` |",
+        "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
+    ),
     # The same marker pointed at a *prefix* of a registered number. Set
     # intersection got this right by accident and would have gone on getting it
     # right; the case is here because the cell is, and because the silencer is
@@ -1494,6 +1520,7 @@ class ScopeTrap(NamedTuple):
     decoy: str  # lines placed at the declared range, then at OUTSIDE_SECTION
     says: str
     line_anchor: str = ""  # if set, `{line}` in setup/decoy resolves to the spec line carrying it
+    table_anchor: str = ""  # if set, the decoy is prefixed with that row's table header
 
 
 # A section no scope declares, so "outside every range" has somewhere to be. The
@@ -1505,6 +1532,13 @@ OUTSIDE_SECTION = "0.7"
 # never the sentence explaining it: the trap is aimed at the row, and a row whose
 # prose is edited has not moved.
 _SCOPE_NOTE_ANCHOR = "| `POST /api/models/migration/scan` |"
+
+# Any §0.5 row, used only to find that table's header. Both excusing registers
+# declare their object in a named column, so a row cut loose from its header
+# declares nothing — a trap that moves a registration has to move enough of the
+# table for it to still be one, or it proves the arm ignores §0.7 by handing it
+# something no section would have read either.
+_GAP_REGISTRY_ANCHOR = "| G-12 |"
 
 SCOPE_TRAPS: tuple[ScopeTrap, ...] = (
     ScopeTrap(
@@ -1552,12 +1586,14 @@ SCOPE_TRAPS: tuple[ScopeTrap, ...] = (
         ),
         "| G-99 | A decoy registration | `POST /api/models/decoy` | none |",
         "POST /api/models/decoy is named by no §0.8 row",
+        table_anchor=_GAP_REGISTRY_ANCHOR,
     ),
     ScopeTrap(
         "scope note", "excuse", "the row putting a contracted route on another surface",
         ("{line}\n", ""),
         "{line}",
         "POST /api/models/migration/scan is contracted and reached by no §0.8 row",
+        _SCOPE_NOTE_ANCHOR,
         _SCOPE_NOTE_ANCHOR,
     ),
 )
@@ -1612,6 +1648,20 @@ def _spec_line(text: str, anchor: str) -> str:
     return found[0]
 
 
+def _table_head(text: str, anchor: str) -> str:
+    """The header and separator of the table whose row carries `anchor`.
+
+    Read out of the document for the same reason `_spec_line` reads the row out
+    of it: a column that is renamed moves the trap with it, instead of leaving
+    it aimed at a header nobody writes any more.
+    """
+    lines = text.splitlines()
+    row = _spec_line(text, anchor)
+    at = lines.index(row)
+    rule = max(i for i in range(at) if re.fullmatch(r"\|[\s:|-]+\|", lines[i].strip()))
+    return "\n".join(lines[rule - 1 : rule + 1])
+
+
 def _place(text: str, section: str, decoy: str) -> str:
     heading = _spec_heading(text, section)
     assert text.count(heading) == 1, f"§{section}'s heading is not unique"
@@ -1634,6 +1684,8 @@ def test_gate_arm_reads_only_its_declared_range(tmp_path, trap: ScopeTrap):
     if trap.line_anchor:
         line = _spec_line(spec, trap.line_anchor)
         before, after, decoy = (part.format(line=line) for part in (before, after, decoy))
+    if trap.table_anchor:
+        decoy = f"{_table_head(spec, trap.table_anchor)}\n{decoy}"
     if before:
         assert spec.count(before) == 1, f"{trap.label}: setup anchor is not unique"
         spec = spec.replace(before, after, 1)

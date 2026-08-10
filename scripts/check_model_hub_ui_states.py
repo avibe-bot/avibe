@@ -1426,6 +1426,53 @@ GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 # reader *and* a checker can both see. See `GapRow`.
 STRUCK_RE = re.compile(r"~~.+?~~", re.S)
 
+# The column each register declares its object in. §0.5 says what is missing;
+# §0.4 says which contracted route lives elsewhere. Both tables argue in their
+# remaining columns, and argument names whatever it needs to name.
+MISSING_COLUMN_RE = re.compile(r"^missing$", re.I)
+SCOPED_ROUTE_COLUMN_RE = re.compile(r"contracted route", re.I)
+
+
+def declared_column(numbered: list[tuple[int, str]], header: re.Pattern[str]) -> dict[int, str]:
+    """Each body row of the table whose header matches, as {line -> that cell}.
+
+    A register accounts for what it *declares*, never for what it happens to
+    mention. Reading whole rows made that distinction disappear, and the cost
+    was the one defect twenty-nine review rounds never surfaced: §0.5's G-13
+    registers a bulk re-apply action that does not exist, and cites
+    `PUT /api/models/agents/<backend>/chain` only to say that nothing bulk
+    rewrites stored chains — a sentence about the route's *presence*. Harvesting
+    it excused the chain `PUT` everywhere, so the one contracted mutation this
+    document accounted for nowhere looked accounted for, until #1232's review
+    found it by hand. `GapRow` already said the rule out loud — a marker excuses
+    「the behaviour its row registers, not whatever else the paragraph around it
+    happens to mention」 — while the code read the paragraph. This is the code
+    agreeing with it.
+
+    The column is found by its header rather than its position, and per table
+    rather than once per section, so renaming a column does not silently
+    re-point the arm at prose and a second table in the same section is read
+    against its own header instead of the first one's. A header that matches
+    nothing yields no rows and excuses nothing: a register that cannot be read
+    has to fail loudly rather than pass everything, and every route it was
+    covering is reported on the next run.
+    """
+    col: int | None = None
+    cells_by_line: dict[int, str] = {}
+    for pos, (line_no, line) in enumerate(numbered):
+        if not line.startswith("|"):
+            col = None  # a table is its own rows: where they stop, so does its header
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if pos + 1 < len(numbered) and SEPARATOR_RE.match(numbered[pos + 1][1].strip()):
+            col = next((i for i, cell in enumerate(cells) if header.search(cell)), None)
+            continue
+        if SEPARATOR_RE.match(line.strip()):
+            continue
+        if col is not None and col < len(cells):
+            cells_by_line[line_no] = cells[col]
+    return cells_by_line
+
 
 class GapRow(NamedTuple):
     """One §0.5 row: where it is written, and whether it still registers anything.
@@ -1517,11 +1564,13 @@ def registered_gaps(doc: Document) -> Universe:
     contract and that is the class that checks those.
     """
     gaps = Universe("gaps", "spec", "E")
-    for n, line in doc.scope("gap registry"):
+    registry = doc.scope("gap registry")
+    declared = declared_column(registry, MISSING_COLUMN_RE)
+    for n, line in registry:
         if m := GAP_ROW_RE.match(line):
             cells = line.split("|")
             claim = "".join(cells[2:4])
-            standing = STRUCK_RE.sub(" ", line)
+            standing = STRUCK_RE.sub(" ", declared.get(n, ""))
             gaps.define(
                 m.group(1),
                 GapRow(
@@ -2102,12 +2151,21 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # merely shaped like a gap registration went on excusing its own: an excuse
     # has to be written where the document says excuses are written, or it is
     # not an excuse.
+    #
+    # And in each register, only the column that names its object excuses — §0.5
+    # what is missing, §0.4 which contracted route lives elsewhere. See
+    # `declared_column` for what reading whole rows cost. A gap row's object is
+    # the same set the marker arm reads, so both come from the one universe: a
+    # row cannot register a route for the accounting arm while registering
+    # something else for the paragraph citing it. A withdrawn row excuses
+    # nothing either way: it says the absence is over, and an absence that is
+    # over is not a reason for a contracted call to reach no state.
     accounted: set[str] = set(covered_routes)
-    excusing = doc.scope("scope note") + [
-        (n, line) for n, line in doc.scope("gap registry") if GAP_ROW_RE.match(line)
-    ]
-    for _n, line in excusing:
-        accounted.update(normalize_route(m, path) for m, path in ANY_ROUTE_RE.findall(line))
+    for _number, row in gaps.items():
+        if row.registers:
+            accounted.update(row.routes)
+    for _n, cell in declared_column(doc.scope("scope note"), SCOPED_ROUTE_COLUMN_RE).items():
+        accounted.update(normalize_route(m, path) for m, path in ANY_ROUTE_RE.findall(cell))
     contracted_mutations = sorted(
         r for r in auth["routes"].tokens() if r.startswith(("POST ", "PUT ", "PATCH ", "DELETE "))
     )
