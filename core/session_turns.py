@@ -3631,6 +3631,13 @@ class SessionTurnManager:
                     else str(delivery["id"])
                 )
             text = str(turn.get("dispatch_text") or "")
+            if source == SOURCE_SCHEDULED:
+                text = await self.prepare_scheduled_dispatch(
+                    resolved,
+                    text,
+                    delivery=delivery,
+                )
+                resolved.platform_specific[SCHEDULED_DISPATCH_METADATA_APPLIED_KEY] = True
         except Exception:
             logger.exception(
                 "durable native start failed during pre-dispatch preparation for Turn=%s",

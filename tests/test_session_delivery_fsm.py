@@ -37,6 +37,7 @@ from core.session_turns import (
     Turn,
     _scheduled_merge_key,
 )
+from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
 from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -700,6 +701,59 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
         turn = delivery_store.get_turn(conn, admitted.turn_id)
     assert turn is not None
     assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
+
+
+@pytest.mark.anyio
+async def test_persisted_scheduled_start_decorates_before_native_dispatch(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    captured: dict[str, object] = {}
+
+    async def capture_run(_session_id, context, text, **_kwargs):
+        captured["context"] = context
+        captured["text"] = text
+
+    manager._run = capture_run
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": "agent_run",
+            "source_kind": "agent",
+            "source_actor": "source-session",
+        }
+    )
+
+    admitted = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content="callback result",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_kind": "agent",
+                        "source_actor": "source-session",
+                    }
+                }
+            },
+        ),
+        context=context,
+    )
+
+    assert admitted.state == "claimed"
+    assert captured["text"] == "decorated: callback result"
+    assert decorator.await_args.args[0] is captured["context"]
+    assert (
+        captured["context"].platform_specific[SCHEDULED_DISPATCH_METADATA_APPLIED_KEY]
+        is True
+    )
 
 
 def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:
