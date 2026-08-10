@@ -571,8 +571,6 @@ class ModelHubService:
                 self._engine_synced = False
                 failure = rollback_error.__cause__ or rollback_error
                 logger.error("Model Hub rollback sync failed: %s", failure)
-                if rollback_save_error is None:
-                    settlement.raise_if_cancelled(rollback_error)
             else:
                 self._engine_synced = rollback_save_error is None
             if rollback_save_error is not None:

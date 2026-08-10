@@ -1477,7 +1477,7 @@ class AgentAuthService:
             ok, detail = await self._verify_login(flow)
             if ok:
                 settlement = CancellationSettlement()
-                persist_error: Exception | None = None
+                persist_error: BaseException | None = None
                 if flow.backend == "codex":
                     try:
                         await self._persist_backend_auth_mode(
@@ -1485,7 +1485,7 @@ class AgentAuthService:
                             "oauth",
                             settlement=settlement,
                         )
-                    except BackendAuthConfigSaveError as error:
+                    except (Exception, asyncio.CancelledError) as error:
                         persist_error = error
                 await self._settle_auth_completion(
                     flow.backend,
@@ -1542,14 +1542,14 @@ class AgentAuthService:
             ok, detail = await self._verify_login(flow)
             if ok:
                 settlement = CancellationSettlement()
-                persist_error: Exception | None = None
+                persist_error: BaseException | None = None
                 try:
                     await self._persist_backend_auth_mode(
                         flow.backend,
                         "oauth",
                         settlement=settlement,
                     )
-                except BackendAuthConfigSaveError as error:
+                except (Exception, asyncio.CancelledError) as error:
                     persist_error = error
                 await self._settle_auth_completion(
                     flow.backend,
@@ -3294,7 +3294,7 @@ class AgentAuthService:
         backend: str,
         *,
         settlement: CancellationSettlement | None = None,
-    ) -> Exception | None:
+    ) -> BaseException | None:
         # OAuth completed via the web UI implies the user wants
         # ``auth_mode = "oauth"``. Persist it before the controller-refresh
         # hook fires so the live agent reloads with the right mode rather
@@ -3309,7 +3309,7 @@ class AgentAuthService:
         # would add a stray attribute and could mislead future readers.
         owns_settlement = settlement is None
         settlement = settlement or CancellationSettlement()
-        persist_error: Exception | None = None
+        persist_error: BaseException | None = None
         if backend != "opencode":
             try:
                 await self._persist_backend_auth_mode(
@@ -3317,7 +3317,7 @@ class AgentAuthService:
                     "oauth",
                     settlement=settlement,
                 )
-            except BackendAuthConfigSaveError as error:
+            except (Exception, asyncio.CancelledError) as error:
                 persist_error = error
         hook = self._post_web_success_hook
         if not callable(hook):

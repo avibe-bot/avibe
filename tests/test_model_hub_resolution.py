@@ -1596,6 +1596,49 @@ def test_synced_mutation_rollback_self_cancel_preserves_sync_failure(tmp_path):
     assert service._engine_synced is False
 
 
+def test_synced_mutation_caller_cancel_chains_primary_not_rollback_sync_failure(
+    tmp_path,
+    caplog,
+):
+    rollback_entered = asyncio.Event()
+    release_rollback = asyncio.Event()
+
+    class FailingRollbackAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            self.synced.append(tuple(bindings))
+            if len(self.synced) == 1:
+                raise ModelHubError("updated_primary", status=503)
+            rollback_entered.set()
+            await release_rollback.wait()
+            raise ModelHubError("rollback_secondary", status=503)
+
+    adapter = FailingRollbackAdapter([])
+    service = _service(tmp_path, adapter)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            service.patch_source(
+                "src_primary01",
+                {"base_url": "https://new.example.test"},
+            )
+        )
+        await rollback_entered.wait()
+        task.cancel("mutation cancelled")
+        await asyncio.sleep(0)
+        release_rollback.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("mutation cancelled",)
+        assert isinstance(raised.value.__cause__, ModelHubError)
+        assert raised.value.__cause__.code == "updated_primary"
+
+    asyncio.run(exercise())
+
+    assert "modelHub.errors.rollback_secondary" in caplog.text
+    assert service.store.load().sources[0].base_url is None
+    assert service._engine_synced is False
+
+
 def test_synced_mutation_double_sync_failure_preserves_original(tmp_path):
     adapter = FakeAdapter([])
     adapter.fail_sync = True

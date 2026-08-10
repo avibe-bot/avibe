@@ -197,5 +197,12 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_finish_failure_refreshes_runtime_before_reporting_failure
+  - id: AUTH-SETUP-909
+    name: Claude cleanup failure still finalizes and refreshes live runtime
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_cleanup_failure_still_finalizes_and_refreshes_runtime
 next_priority:
   - AUTH-SETUP-301

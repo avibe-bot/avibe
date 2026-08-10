@@ -303,6 +303,33 @@ def test_web_codex_persist_failure_reconciles_hook_and_runtime_before_failure(
     service._refresh_backend_runtime.assert_awaited_once_with("codex")
 
 
+def test_web_codex_cleanup_failure_still_runs_hook_and_runtime(
+    service: AgentAuthService,
+) -> None:
+    hook_calls: list[str] = []
+    flow = WebAuthFlow(
+        flow_id="codex-cleanup-failure",
+        backend="codex",
+        state="verifying",
+        process=SimpleNamespace(wait=AsyncMock(return_value=0)),
+    )
+    service._verify_web_login = AsyncMock(return_value=(True, None))
+    service._clear_codex_api_key_for_oauth = AsyncMock(
+        side_effect=RuntimeError("credential cleanup failed")
+    )
+    service._save_backend_auth_fields = AsyncMock()
+    service._refresh_backend_runtime = AsyncMock()
+    service._post_web_success_hook = hook_calls.append
+
+    _run(service._wait_for_codex_completion_web(flow))
+
+    assert flow.state == "failed"
+    assert flow.error == "credential cleanup failed"
+    assert hook_calls == ["codex"]
+    service._save_backend_auth_fields.assert_not_awaited()
+    service._refresh_backend_runtime.assert_awaited_once_with("codex")
+
+
 def test_web_codex_persist_failure_logs_secondary_refresh_failure(
     service: AgentAuthService,
     caplog: pytest.LogCaptureFixture,

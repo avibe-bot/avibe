@@ -892,6 +892,40 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.service._refresh_backend_runtime.assert_awaited_once_with("claude")
         ScenarioExpect.text_contains(harness, "attempt finish failed")
 
+    async def test_claude_cleanup_failure_still_finalizes_and_refreshes_runtime(self):
+        """Scenario: AUTH-SETUP-909"""
+        harness = AuthSetupScenarioHarness()
+        flow = AgentAuthFlow(
+            flow_id="claude-cleanup-failure",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=harness.context,
+            process=None,
+            reader_task=None,
+            waiter_task=None,
+            claude_client=SimpleNamespace(),
+        )
+        harness.service._send_claude_control_request = AsyncMock()
+        harness.service._verify_login = AsyncMock(return_value=(True, "Logged in"))
+        harness.service._clear_claude_settings_env_for_oauth = AsyncMock(
+            side_effect=RuntimeError("credential cleanup failed")
+        )
+        harness.service._save_backend_auth_fields = AsyncMock()
+        harness.service._finish_claude_oauth_attempt = AsyncMock()
+        harness.service._refresh_backend_runtime = AsyncMock()
+        harness.service._disconnect_claude_client = AsyncMock()
+
+        await harness.service._wait_for_claude_completion(flow)
+
+        harness.service._save_backend_auth_fields.assert_not_awaited()
+        harness.service._finish_claude_oauth_attempt.assert_any_await(
+            None,
+            succeeded=True,
+        )
+        harness.service._refresh_backend_runtime.assert_awaited_once_with("claude")
+        ScenarioExpect.text_contains(harness, "credential cleanup failed")
+
     async def test_codex_successful_setup_refreshes_runtime_before_the_next_turn(self):
         """Scenario: AUTH-SETUP-901"""
         harness = AuthSetupScenarioHarness()

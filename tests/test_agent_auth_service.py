@@ -1251,7 +1251,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         ):
             await service._wait_for_claude_completion(flow)
 
-        service._refresh_backend_runtime.assert_not_awaited()
+        service._refresh_backend_runtime.assert_awaited_once_with("claude")
         service._disconnect_claude_client.assert_awaited_once_with(fake_client)
         self.assertIn("failed", controller.im_client.sent_button_messages[0][1].lower())
         self.assertIn("Failed to clear Claude Code settings env", controller.im_client.sent_button_messages[0][1])

@@ -2270,6 +2270,8 @@ export type OpencodeProviderListResult = {
 
 export type OpencodeMutationResult = {
   ok: boolean;
+  partial?: boolean;
+  removed?: boolean;
   message?: string;
   default_provider?: string;
   provider_id?: string;
@@ -2278,6 +2280,11 @@ export type OpencodeMutationResult = {
     ok: boolean;
     message?: string;
     catalog?: OpencodeProviderListResult | null;
+  };
+  restart?: {
+    ok: boolean;
+    message?: string;
+    runtime_refresh?: { ok: boolean; message?: string };
   };
 };
 

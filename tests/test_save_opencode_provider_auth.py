@@ -471,12 +471,15 @@ def test_delete_provider_settles_when_auth_delete_commits_then_close_fails(
     assert api._OPENCODE_OPTIONS_CACHE == {}
 
 
+@pytest.mark.parametrize("custom", [False, True])
 def test_delete_provider_reports_default_clear_failure_after_restart(
     monkeypatch,
     tmp_path,
+    custom: bool,
 ) -> None:
+    provider_id = "custom" if custom else "deepseek"
     server = _FakeServer(tmp_path)
-    server._write_auth({"deepseek": {"type": "api", "key": "sk-old"}})
+    server._write_auth({provider_id: {"type": "api", "key": "sk-old"}})
     restart_calls: list[str] = []
 
     async def get_server():
@@ -488,12 +491,20 @@ def test_delete_provider_reports_default_clear_failure_after_restart(
     monkeypatch.setattr(api, "_opencode_get_server", get_server)
     monkeypatch.setattr(
         "vibe.opencode_config.read_opencode_provider_auth_entries",
-        lambda **_kwargs: {"deepseek": {"type": "api", "key": "sk-old"}},
+        lambda **_kwargs: {provider_id: {"type": "api", "key": "sk-old"}},
     )
     monkeypatch.setattr(
         api,
         "_read_opencode_config_api_key_provider_ids",
         no_config_keys,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_opencode_custom_provider",
+        lambda *_args, **_kwargs: custom,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.remove_opencode_custom_provider",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         api,
@@ -506,15 +517,74 @@ def test_delete_provider_reports_default_clear_failure_after_restart(
         lambda backend: restart_calls.append(backend) or {"ok": True},
     )
 
-    result = asyncio.run(api.delete_opencode_provider_auth_async("deepseek"))
+    if custom:
+        result = asyncio.run(api.delete_opencode_custom_provider_async(provider_id))
+    else:
+        result = asyncio.run(api.delete_opencode_provider_auth_async(provider_id))
 
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert result["partial"] is True
+    assert result["removed"] is True
+    assert result["provider_id"] == provider_id
+    assert result["message"] == "default clear failed"
     assert result["restart"] == {
         "ok": False,
         "message": "default clear failed",
         "runtime_refresh": {"ok": True},
     }
     assert restart_calls == ["opencode"]
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_delete_provider_reports_restart_failure_at_top_level(
+    monkeypatch,
+    tmp_path,
+    custom: bool,
+) -> None:
+    provider_id = "custom" if custom else "deepseek"
+    server = _FakeServer(tmp_path)
+    server._write_auth({provider_id: {"type": "api", "key": "sk-old"}})
+
+    async def get_server():
+        return server
+
+    async def no_config_keys():
+        return set()
+
+    monkeypatch.setattr(api, "_opencode_get_server", get_server)
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {provider_id: {"type": "api", "key": "sk-old"}},
+    )
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", no_config_keys)
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_opencode_custom_provider",
+        lambda *_args, **_kwargs: custom,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.remove_opencode_custom_provider",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(api, "_clear_opencode_default_provider_if", lambda _pid: None)
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda _backend: {"ok": False, "message": "restart failed"},
+    )
+
+    if custom:
+        result = asyncio.run(api.delete_opencode_custom_provider_async(provider_id))
+    else:
+        result = asyncio.run(api.delete_opencode_provider_auth_async(provider_id))
+
+    assert result == {
+        "ok": False,
+        "partial": True,
+        "removed": True,
+        "provider_id": provider_id,
+        "message": "restart failed",
+        "restart": {"ok": False, "message": "restart failed"},
+    }
 
 
 def test_base_url_absent_leaves_existing_value_untouched(fake_save_env) -> None:

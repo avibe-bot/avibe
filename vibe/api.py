@@ -10584,6 +10584,9 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         settlement=settlement,
     )
     settlement.raise_if_cancelled()
+    partial = _opencode_delete_partial_result(pid, restart, removed=True)
+    if partial is not None:
+        return partial
     return {"ok": True, "provider_id": pid, "restart": restart}
 
 
@@ -11039,6 +11042,29 @@ async def _settle_opencode_delete_runtime(
     return restart
 
 
+def _opencode_delete_partial_result(
+    provider_id: str,
+    restart: dict,
+    *,
+    removed: bool,
+) -> dict | None:
+    """Expose a committed delete whose required runtime settlement failed."""
+
+    if restart.get("ok") is not False:
+        return None
+    result = {
+        "ok": False,
+        "partial": True,
+        "removed": removed,
+        "provider_id": provider_id,
+        "restart": restart,
+    }
+    message = restart.get("message")
+    if isinstance(message, str) and message:
+        result["message"] = message
+    return result
+
+
 def delete_opencode_provider_auth(provider_id: str) -> dict:
     from vibe.async_bridge import run_coroutine_blocking
 
@@ -11111,10 +11137,9 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         logger.warning("OpenCode delete-auth failed for %s: %s", provider_id, exc, exc_info=True)
         return {"ok": False, "message": str(exc), "restart": restart}
 
-    # Revalidate the saved default. Best-effort: a V2Config write
-    # failure here is non-fatal because the daemon already dropped the
-    # credential, but log it so the user can investigate if the
-    # default sticks around after a "Remove key" click.
+    # Revalidate the saved default after the credential mutation. A
+    # failure is partial because the credential is already gone, but it
+    # must remain visible to the caller instead of looking fully successful.
     if removed_auth:
         result["restart"] = await _settle_opencode_delete_runtime(
             pid,
@@ -11128,6 +11153,13 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
             settlement=settlement,
         )
     settlement.raise_if_cancelled()
+    partial = _opencode_delete_partial_result(
+        pid,
+        result["restart"],
+        removed=removed_auth,
+    )
+    if partial is not None:
+        return partial
     return result
 
 
