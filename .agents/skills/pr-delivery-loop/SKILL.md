@@ -314,6 +314,13 @@ turn ends because you armed a watch and are waiting, say exactly that.
 - Resolve every thread you address (reply, then resolve). For intentional
   non-changes the bot keeps re-flagging: keep a **Known-by-design ledger** in
   the PR body and answer re-flags by linking the entry.
+- If GitHub refuses your thread reply because another user (often the repo
+  owner) has a **PENDING review** on the PR, never delete or dismiss that
+  pending review to unblock yourself — it may hold unsubmitted draft comments,
+  and deletion destroys them unverifiably. Stop, report the block to the
+  orchestrator/owner, and continue the round without the reply (push, re-arm
+  the watch, note the unreplied threads in your report); reply only after the
+  owner submits or discards the draft themselves.
 - Same-theme findings = stop patching. The trigger is not a round count, it is
   whether you can **name the class**: the moment you can enumerate the members
   the reviewer has not reached yet ("it flagged the projected definition name,
