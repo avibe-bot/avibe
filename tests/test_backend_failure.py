@@ -4,7 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, call
 
-from core.backend_failure import emit_backend_failure
+from core.backend_failure import emit_backend_failure, terminal_backend_failure_output
+from core.delivery_evidence import DeliveryEvidence
+from core.message_output import MessageOutput
 from modules.agents.base import AgentRequest
 from modules.im import MessageContext
 
@@ -28,6 +30,40 @@ def _request() -> AgentRequest:
 
 
 class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_contract_never_downgrades_existing_delivery_evidence(
+        self,
+    ) -> None:
+        request = _request()
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-1",
+                    "ack_evidence": "receipt",
+                    "delivered": True,
+                    "fallback_run_id": "run-owner",
+                }
+            },
+        )
+
+        merged = terminal_backend_failure_output(
+            request.context,
+            request=request,
+            output=output,
+            delivery=DeliveryEvidence(),
+        )
+
+        self.assertEqual(
+            merged.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+                "fallback_run_id": "run-owner",
+            },
+        )
+
     async def test_turn_without_current_runs_preserves_primary_delivery_for_late_runs(
         self,
     ) -> None:

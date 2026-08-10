@@ -178,7 +178,8 @@ does not claim that an event was detected.
   contract before its immutable snapshot, even before the first participant is
   attached, so every accepted Run shares one fallback owner instead of emitting
   one notice per Run. A primary error already delivered through the shared
-  backend-failure path carries its acknowledgement into the same contract.
+  backend-failure path, the message-handler exception path, or auth recovery
+  carries its acknowledgement into the same monotonic contract.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

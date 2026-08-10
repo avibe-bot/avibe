@@ -164,6 +164,84 @@ def backend_failure_notification_output(
     )
 
 
+def _target_delivery_platform(context: Any) -> str:
+    platform_specific = getattr(context, "platform_specific", None) or {}
+    delivery_override = (
+        platform_specific.get("delivery_override")
+        if isinstance(platform_specific, dict)
+        else None
+    )
+    return str(
+        (
+            delivery_override.get("platform")
+            if isinstance(delivery_override, dict)
+            else None
+        )
+        or getattr(context, "platform", "")
+        or ""
+    ).strip()
+
+
+def _acknowledges_target(
+    context: Any,
+    evidence: str | None,
+) -> bool:
+    if evidence == ACK_EVIDENCE_RECEIPT:
+        return True
+    return (
+        evidence == ACK_EVIDENCE_DELIVERY_ONLY
+        and _target_delivery_platform(context) != "avibe"
+    )
+
+
+def terminal_backend_failure_output(
+    context: Any,
+    *,
+    request: Any = None,
+    output: MessageOutput | None = None,
+    failure_id: str | None = None,
+    delivery: DeliveryEvidence | None = None,
+) -> MessageOutput:
+    """Attach one monotonic Turn failure-delivery contract to a terminal output.
+
+    Some failures use the ordinary ``notify`` dispatcher while others need a
+    specialized visible path, such as an OAuth recovery button. Both must settle
+    with the same evidence contract or a later Harness Run cannot distinguish an
+    error the user already saw from an error that still needs a fallback notice.
+    """
+
+    terminal = _terminal_output(request, output)
+    if not (_turn_failure_identity(context, request) or _harness_run_identity(context, request)):
+        return terminal
+
+    metadata = dict(terminal.metadata)
+    existing = metadata.get("turn_failure_notification")
+    existing_notification = dict(existing) if isinstance(existing, dict) else {}
+    identity = str(existing_notification.get("failure_id") or "").strip()
+    if not identity:
+        identity = _failure_identity(context, request, failure_id)
+
+    incoming_ack = delivery.ack_evidence if delivery is not None else None
+    existing_ack = str(existing_notification.get("ack_evidence") or "").strip() or None
+    ack_priority = {None: 0, ACK_EVIDENCE_DELIVERY_ONLY: 1, ACK_EVIDENCE_RECEIPT: 2}
+    ack_evidence = (
+        incoming_ack
+        if ack_priority.get(incoming_ack, 1 if incoming_ack else 0)
+        > ack_priority.get(existing_ack, 1 if existing_ack else 0)
+        else existing_ack
+    )
+    existing_notification.update(
+        {
+            "failure_id": identity,
+            "ack_evidence": ack_evidence,
+            "delivered": bool(existing_notification.get("delivered"))
+            or _acknowledges_target(context, ack_evidence),
+        }
+    )
+    metadata["turn_failure_notification"] = existing_notification
+    return replace(terminal, metadata=metadata)
+
+
 async def emit_replayed_backend_failure(
     controller: Any,
     context: Any,
@@ -282,43 +360,14 @@ async def emit_backend_failure(
     if owns_failure_contract and live_delivery is None:
         live_delivery = DeliveryEvidence()
 
-    platform_specific = getattr(context, "platform_specific", None) or {}
-    delivery_override = (
-        platform_specific.get("delivery_override")
-        if isinstance(platform_specific, dict)
-        else None
-    )
-    target_platform = str(
-        (
-            delivery_override.get("platform")
-            if isinstance(delivery_override, dict)
-            else None
-        )
-        or getattr(context, "platform", "")
-        or ""
-    ).strip()
-
-    def notification_acknowledged() -> bool:
-        if live_delivery is None:
-            return False
-        evidence = live_delivery.ack_evidence
-        if evidence == ACK_EVIDENCE_RECEIPT:
-            return True
-        return (
-            evidence == ACK_EVIDENCE_DELIVERY_ONLY
-            and target_platform != "avibe"
-        )
-
     async def settle_terminal_failure() -> None:
-        terminal_output = terminal
-        if owns_failure_contract:
-            metadata = dict(terminal.metadata)
-            metadata["turn_failure_notification"] = {
-                "failure_id": notification_identity,
-                "ack_evidence": live_delivery.ack_evidence if live_delivery else None,
-                "delivered": notification_acknowledged(),
-            }
-            terminal_output = replace(terminal, metadata=metadata)
+        terminal_output = terminal_backend_failure_output(
+            context,
+            request=request,
+            output=terminal,
+            failure_id=notification_identity,
+            delivery=live_delivery,
+        )
         await controller.emit_agent_message(
             context,
             "result",

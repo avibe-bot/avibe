@@ -240,6 +240,40 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             terminal_error="❌ Codex error: 401 Unauthorized",
         )
 
+    async def test_auth_recovery_carries_primary_receipt_into_turn_settlement(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth",
+                "task_execution_id": "run-auth",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth"},
+        ):
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
     async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
         from config.v2_compat import to_app_config
         from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config

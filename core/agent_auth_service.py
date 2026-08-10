@@ -14,6 +14,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from core.backend_failure import terminal_backend_failure_output
+from core.delivery_evidence import DeliveryEvidence, STAGE_PERSIST, STAGE_SEND
+from core.message_output import MessageOutput, terminal_turn_output
+from core.resource_governance import governor_from_controller
 from modules.claude_sdk_compat import (
     CLAUDE_SDK_AVAILABLE,
     CLAUDE_SDK_MAX_BUFFER_SIZE,
@@ -38,8 +42,6 @@ from modules.agents.opencode.utils import (
     resolve_opencode_reasoning_effort,
 )
 from modules.im import InlineButton, InlineKeyboard, MessageContext
-from core.resource_governance import governor_from_controller
-from core.message_output import MessageOutput, terminal_turn_output
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
@@ -938,17 +940,25 @@ class AgentAuthService:
             backend == "codex"
             and getattr(backend_config, "auth_mode", None) == "api_key"
         )
-        if uses_codex_api_key:
-            recovery_text = f"{error_text}\n\n{self._t('command.setup.apiKeyRecoveryPrompt', backend=backend)}"
-            await self._send_message(context, recovery_text)
-        else:
-            recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
-            await self._send_message_with_button(
-                context,
-                recovery_text,
-                button_text=self._t("button.resetOAuth"),
-                callback_data=f"auth_setup:{backend}",
-            )
+        delivery = DeliveryEvidence()
+        try:
+            if uses_codex_api_key:
+                recovery_text = f"{error_text}\n\n{self._t('command.setup.apiKeyRecoveryPrompt', backend=backend)}"
+                delivered_id = await self._send_message(context, recovery_text)
+            else:
+                recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
+                delivered_id = await self._send_message_with_button(
+                    context,
+                    recovery_text,
+                    button_text=self._t("button.resetOAuth"),
+                    callback_data=f"auth_setup:{backend}",
+                )
+        except Exception as err:
+            delivery.error = err
+            delivery.error_stage = STAGE_SEND
+            raise
+        delivery.send_returned = True
+        delivery.delivered_id = str(delivered_id) if delivered_id is not None else None
         # Transport sends are not durable ``messages`` rows, and the web Chat
         # renders only durable rows. Persist the recovery text here, the single
         # home for it, rather than letting each backend store an error-only copy
@@ -966,12 +976,23 @@ class AgentAuthService:
             else self._t("command.setup.resetPromptPlain", backend=backend)
         )
         durable_text = f"{error_text}\n\n{durable_prompt}"
+        persist_errors: list[BaseException] = []
         try:
             from core.message_mirror import persist_agent_message
 
-            persist_agent_message(context, "notify", durable_text)
-        except Exception:
+            delivery.persisted_row = persist_agent_message(
+                context,
+                "notify",
+                durable_text,
+                error_sink=persist_errors,
+            )
+        except Exception as err:
+            delivery.error = err
+            delivery.error_stage = STAGE_PERSIST
             logger.debug("auth recovery: failed to persist durable notify", exc_info=True)
+        if delivery.persisted_row is None and persist_errors:
+            delivery.error = persist_errors[0]
+            delivery.error_stage = STAGE_PERSIST
         # Settle the failed turn through the outbound status chokepoint: a silent
         # terminal failure turns the dot red and releases the SSE waiter
         # without adding a second visible message (the recovery button above is the
@@ -983,7 +1004,11 @@ class AgentAuthService:
                 "",
                 is_error=True,
                 level="silent",
-                output=output or terminal_turn_output(),
+                output=terminal_backend_failure_output(
+                    context,
+                    output=output or terminal_turn_output(),
+                    delivery=delivery,
+                ),
                 terminal_error=terminal_error or error_text,
             )
         except Exception:

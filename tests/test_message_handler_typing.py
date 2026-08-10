@@ -1512,6 +1512,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduled_turn_returns_error_string_after_notifying_im(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.agent_service.error = RuntimeError("boom")
+        controller.emit_agent_message = AsyncMock(return_value=None)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -1519,12 +1520,25 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="scheduled:task-1:abc",
             platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-error",
+                "task_execution_id": "run-scheduled-error",
+            },
         )
 
         result = await handler.handle_scheduled_message(context, "hello")
 
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-scheduled-error",
+                "ack_evidence": "delivery_only",
+                "delivered": True,
+            },
+        )
 
     async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
