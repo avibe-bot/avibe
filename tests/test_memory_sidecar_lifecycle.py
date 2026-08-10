@@ -89,3 +89,17 @@ async def test_processing_health_is_single_flight_without_waiting(tmp_path: Path
     assert await asyncio.wait_for(lifecycle.processing_healthy(), timeout=1) is False
     release.set()
     assert await first is True
+
+
+async def test_close_never_restarts_host_retention_after_stopping_sidecar(tmp_path: Path) -> None:
+    factory = FakeEverOSProcessFactory()
+    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
+    call_log.parent.mkdir(parents=True)
+    call_log.touch()
+    lifecycle = _lifecycle(tmp_path, factory, lambda _generation: None)
+
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    await lifecycle.close()
+
+    assert lifecycle.snapshot().process is None
+    assert lifecycle.retention_task is None

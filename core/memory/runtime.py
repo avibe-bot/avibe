@@ -338,6 +338,7 @@ class MemoryRuntime:
         )
         self._restart_task: asyncio.Task[dict[str, Any]] | None = None
         self._ready_activation_task: asyncio.Task[None] | None = None
+        self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
@@ -1629,6 +1630,7 @@ class MemoryRuntime:
     async def close(self) -> None:
         self._closing = True
         self._sidecar.close_ready_admission()
+        self._activation_loop = None
         self._advance_processing_lifecycle()
         if self._maintenance is not None:
             await self._maintenance.close()
@@ -1636,6 +1638,15 @@ class MemoryRuntime:
         if restart_task is not None and restart_task is not asyncio.current_task():
             try:
                 await asyncio.shield(restart_task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        for task in (self._artifact_activation_task, self._ready_activation_task):
+            if task is None or task is asyncio.current_task():
+                continue
+            try:
+                await asyncio.shield(task)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1689,6 +1700,8 @@ class MemoryRuntime:
         task_result: ThreadFuture[None] = ThreadFuture()
 
         def settle_task(task: asyncio.Task[None]) -> None:
+            if self._artifact_activation_task is task:
+                self._artifact_activation_task = None
             if task.cancelled():
                 task_result.cancel()
                 return
@@ -1706,6 +1719,7 @@ class MemoryRuntime:
             except BaseException as exc:
                 task_ready.set_exception(exc)
                 return
+            self._artifact_activation_task = task
             task.add_done_callback(settle_task)
             task_ready.set_result(task)
 
@@ -1749,6 +1763,8 @@ class MemoryRuntime:
 
         async with self._reconcile_lock:
             async with self.module.lifecycle():
+                if self._closing:
+                    raise MemoryRuntimeActivationError("memory controller lifecycle is unavailable")
                 if self._maintenance_open():
                     self.module.pause_claims()
                     raise MemoryRuntimeActivationError("memory clear recovery is required")
@@ -1854,6 +1870,7 @@ class MemoryRuntime:
             and self._restart_config.enabled
             and not self._restart_config.embedding_change_pending
             and not self._artifact_installing
+            and not self._closing
         )
 
     async def _processing_healthy(self) -> bool:

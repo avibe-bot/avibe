@@ -62,6 +62,7 @@ class MemorySidecarLifecycle:
         self._ready_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
         self._ready_admission_open = True
+        self._closed = False
         self._processing_probe_active = False
         self._processing_probe_healthy = False
 
@@ -185,12 +186,14 @@ class MemorySidecarLifecycle:
         """Synchronously reject late supervisor readiness before shutdown awaits."""
 
         self._ready_admission_open = False
+        self._closed = True
         self._ready_generation = None
 
     def handoff_to_host_retention(self) -> None:
         """Start host maintenance after an external orphan handoff proved safe."""
 
-        self._ensure_retention()
+        if not self._closed:
+            self._ensure_retention()
 
     @property
     def retention_task(self) -> asyncio.Task[None] | None:
@@ -223,7 +226,7 @@ class MemorySidecarLifecycle:
                     await result
 
     def _ensure_retention(self) -> None:
-        if self._records_calls or not self._call_log_exists():
+        if self._closed or self._records_calls or not self._call_log_exists():
             return
         if self._retention_task is None or self._retention_task.done():
             self._retention_task = asyncio.create_task(
