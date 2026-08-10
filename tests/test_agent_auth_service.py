@@ -240,6 +240,164 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             terminal_error="❌ Codex error: 401 Unauthorized",
         )
 
+    async def test_auth_recovery_carries_primary_receipt_into_turn_settlement(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth",
+                "task_execution_id": "run-auth",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth"},
+        ):
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_auth_recovery_does_not_persist_an_undelivered_external_message(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        service._send_message_with_button = AsyncMock(return_value=None)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth-undelivered",
+                "task_execution_id": "run-auth-undelivered",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-undelivered"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        persist.assert_not_called()
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth-undelivered",
+                "ack_evidence": None,
+                "delivered": False,
+            },
+        )
+
+    async def test_auth_recovery_keeps_local_persistence_without_a_send_id(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        service._send_message_with_button = AsyncMock(return_value=None)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-local",
+            platform="avibe",
+            platform_specific={
+                "turn_token": "turn-auth-local",
+                "task_execution_id": "run-auth-local",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-local"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        persist.assert_called_once()
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth-local",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_auth_recovery_sends_and_persists_to_delivery_override(self):
+        controller = _StubController()
+        source_client = controller.im_client
+        target_client = _StubIMClient()
+        controller.get_im_client_for_context = lambda context: (
+            target_client if context.platform == "telegram" else source_client
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="U-source",
+            channel_id="C-source",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth-routed",
+                "task_execution_id": "run-auth-routed",
+                "delivery_override": {
+                    "user_id": "U-target",
+                    "channel_id": "C-target",
+                    "platform": "telegram",
+                    "thread_id": "topic-target",
+                },
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-routed"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(source_client.sent_button_messages, [])
+        self.assertEqual(target_client.sent_button_messages[0][0], "C-target")
+        persisted_context = persist.call_args.args[0]
+        self.assertEqual(
+            (
+                persisted_context.platform,
+                persisted_context.channel_id,
+                persisted_context.thread_id,
+            ),
+            ("telegram", "C-target", "topic-target"),
+        )
+        terminal_call = controller.emit_agent_message.await_args
+        self.assertIs(terminal_call.args[0], context)
+        self.assertTrue(
+            terminal_call.kwargs["output"].metadata["turn_failure_notification"]["delivered"]
+        )
+
     async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
         from config.v2_compat import to_app_config
         from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config

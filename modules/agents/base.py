@@ -55,6 +55,11 @@ class AgentRequest:
     ack_reaction_emoji: Optional[str] = None
     typing_indicator_active: bool = False
     typing_indicator_task: Optional[Any] = None
+    # The caller that owns user-facing failure copy can provide its reporter here.
+    # AgentService invokes it before releasing the runtime Turn, so notification
+    # delivery evidence and terminal settlement remain one ordered operation.
+    failure_handler: Optional[Callable[[BaseException], Any]] = None
+    failure_handled: bool = False
     # File attachments (downloaded or with URLs for download)
     files: Optional[List[FileAttachment]] = None
     # Internal stop diagnostics. Backend adapters set this when ``handle_stop``

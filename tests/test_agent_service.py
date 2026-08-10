@@ -1425,6 +1425,68 @@ def test_agent_service_releases_gate_when_exception_terminal_emit_fails() -> Non
     asyncio.run(_run())
 
 
+def test_agent_service_reports_backend_failure_before_releasing_runtime_turn() -> None:
+    """A caller-owned failure receipt must reach settlement before Turn release."""
+
+    async def _run() -> None:
+        from core.backend_failure import emit_backend_failure
+
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RaisingRuntimeAgent())
+        request = _request("boom")
+        request.context.platform = "slack"
+        request.context.platform_specific = {
+            "turn_token": "turn-backend-failure",
+            "task_execution_id": "run-backend-failure",
+            "task_trigger_kind": "watch",
+        }
+        emitted: list[tuple[str, object, str]] = []
+
+        async def _emit(_context, message_type, _text, **kwargs):
+            gate = service._turn_gates["session:/repo"]
+            emitted.append((message_type, kwargs.get("output"), gate.token))
+            delivery = kwargs.get("delivery")
+            if message_type == "notify" and delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = "slack-message-1"
+                return delivery.delivered_id
+            return None
+
+        async def _report(error: BaseException) -> None:
+            await emit_backend_failure(
+                controller,
+                request.context,
+                "claude",
+                str(error),
+                display_text=f"Error: {error}",
+                request=request,
+            )
+
+        controller.emit_agent_message = _emit
+        request.failure_handler = _report
+
+        with pytest.raises(RuntimeError, match="backend failed"):
+            await service.handle_message("claude", request)
+
+        assert [message_type for message_type, _output, _token in emitted] == [
+            "notify",
+            "result",
+        ]
+        terminal = emitted[-1][1]
+        assert terminal.metadata["turn_failure_notification"] == {
+            "failure_id": "turn:turn-backend-failure",
+            "ack_evidence": "delivery_only",
+            "delivered": True,
+        }
+        assert all(token for _message_type, _output, token in emitted)
+        assert request.failure_handled is True
+        assert not service._turn_gates["session:/repo"].lock.locked()
+
+    asyncio.run(_run())
+
+
 def test_agent_service_recovers_accepted_turn_when_owned_backend_dies() -> None:
     """A dead accepted backend must release the runtime FIFO without a timeout."""
 

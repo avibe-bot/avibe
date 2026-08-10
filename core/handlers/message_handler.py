@@ -13,11 +13,8 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.message_output import (
-    HARNESS_PROMPT_ECHO_SPEC_KEY,
-    terminal_output_for,
-    terminal_turn_output,
-)
+from core.backend_failure import emit_backend_failure
+from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
@@ -818,6 +815,11 @@ class MessageHandler(BaseHandler):
                 processing_indicator=processing_indicator,
                 files=processed_files,
             )
+            request.failure_handler = lambda error: self._emit_agent_dispatch_failure(
+                context,
+                request,
+                error,
+            )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
             try:
@@ -845,17 +847,12 @@ class MessageHandler(BaseHandler):
                             session_id=str(bound_session_id),
                         )
             except KeyError:
-                await self._handle_missing_agent(context, agent_name)
-                # Synchronous terminal failure (no agent dispatched). Settle the
-                # turn through the OUTBOUND status chokepoint: an empty terminal
-                # error result turns the dot red + releases the SSE waiter (the
-                # missing-agent message was already shown above). No separate latch.
-                await self.controller.emit_agent_message(
+                if request.failure_handled:
+                    raise
+                await self._handle_missing_agent(
                     context,
-                    "result",
-                    "",
-                    is_error=True,
-                    output=terminal_output_for(request),
+                    agent_name,
+                    request=request,
                 )
                 # Clean up reaction on error
                 await self._remove_ack_reaction(context, request)
@@ -878,24 +875,8 @@ class MessageHandler(BaseHandler):
                     )
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
-            error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
-            await self._get_im_client(context).send_message(context, error_text)
-            # Surface the failure into the live web-Chat SSE stream first...
-            await self._stream_terminal_error(context, error_text)
-            # ...then settle the failed turn through the OUTBOUND status chokepoint:
-            # an empty terminal error result turns the dot red + releases the SSE
-            # waiter (the visible error was sent + streamed above). No separate latch.
-            await self.controller.emit_agent_message(
-                context,
-                "result",
-                "",
-                is_error=True,
-                output=(
-                    terminal_output_for(request)
-                    if request is not None
-                    else terminal_turn_output()
-                ),
-            )
+            if not bool(getattr(request, "failure_handled", False)):
+                await self._emit_agent_dispatch_failure(context, request, e)
             return str(e)
         finally:
             if not agent_dispatched:
@@ -906,6 +887,26 @@ class MessageHandler(BaseHandler):
                 mark_complete = getattr(self.controller, "mark_turn_complete", None)
                 if callable(mark_complete):
                     mark_complete(context)
+
+    async def _emit_agent_dispatch_failure(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        error: BaseException,
+    ) -> None:
+        """Report one backend dispatch failure through the shared live boundary."""
+
+        error_text = self.formatter.format_error(
+            self._t("error.processMessageFailed", error=str(error))
+        )
+        await emit_backend_failure(
+            self.controller,
+            context,
+            str(getattr(request, "vibe_agent_backend", None) or "agent"),
+            error_text,
+            display_text=error_text,
+            request=request,
+        )
 
     async def _admit_human_delivery(
         self,
@@ -1612,14 +1613,30 @@ class MessageHandler(BaseHandler):
             logger.error(f"Error handling inline stop: {e}", exc_info=True)
             return False
 
-    async def _handle_missing_agent(self, context: MessageContext, agent_name: str):
-        """Notify user when a requested agent backend is unavailable."""
+    async def _handle_missing_agent(
+        self,
+        context: MessageContext,
+        agent_name: str,
+        *,
+        request: AgentRequest | None = None,
+    ) -> None:
+        """Notify and, for a dispatched Turn, settle a missing Agent failure."""
         target = agent_name or self.controller.agent_service.default_agent
         backend = self._missing_agent_backend(context, target)
         display_backend = display_name_for_backend(backend) if backend else str(target)
         hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
         hint = self._t(hint_key)
         msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
+        if request is not None:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                backend or str(target),
+                msg,
+                display_text=msg,
+                request=request,
+            )
+            return
         await self._get_im_client(context).send_message(context, msg)
         await self._stream_terminal_error(context, msg)
 
@@ -1640,7 +1657,11 @@ class MessageHandler(BaseHandler):
         backend = getattr(agent, "backend", None)
         return str(backend) if is_agent_backend(str(backend)) else None
 
-    async def _stream_terminal_error(self, context: MessageContext, text: str) -> None:
+    async def _stream_terminal_error(
+        self,
+        context: MessageContext,
+        text: str,
+    ) -> None:
         """Surface a synchronous, no-agent-dispatched failure (missing backend,
         a pre-dispatch exception) into the web Chat so the browser shows it
         instead of silently ending the turn with only the user's prompt visible.
