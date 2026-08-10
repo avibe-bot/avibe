@@ -1642,11 +1642,11 @@ def test_sidecar_launch_proceeds_when_an_unusable_record_names_nothing_running(
     assert not record_path.exists()
 
 
-def test_sidecar_launch_scans_for_processes_only_when_a_record_exists(
+def test_sidecar_launch_scans_for_recordless_managed_children(
     tmp_path: Path,
     short_socket_path: Path,
 ) -> None:
-    """The ordinary first boot must not pay for a machine-wide process scan."""
+    """Every launch checks for a rebuild that died before recording ownership."""
 
     host = _FakeProcessHost()
     process = _orphan_process(
@@ -1659,7 +1659,7 @@ def test_sidecar_launch_scans_for_processes_only_when_a_record_exists(
     assert not process._ownership.record_path.exists()
     assert asyncio.run(process.start()) is False
 
-    assert host.sidecar_scans == []
+    assert host.sidecar_scans == [short_socket_path]
     assert host.spawn_calls
 
 
@@ -2841,7 +2841,8 @@ async def test_sidecar_start_and_restart_wait_for_shared_rebuild_lock(
         lock_attempted.set()
         original_acquire(root_lock)
 
-    async def observe_reap() -> None:
+    async def observe_reap(*, discover_missing: bool = False) -> None:
+        assert discover_missing is True
         ownership_scan.set()
 
     async def ready(_child) -> None:
@@ -3091,6 +3092,114 @@ async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
         host.release_cleanup.set()
         if process._process is not None:
             await process.stop()
+
+
+async def test_sidecar_start_discovers_recordless_rebuild_before_spawn(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o700)
+    foreign_home = tmp_path / "rebuild-home"
+    sidecar_child = _RebuildChild(None, pid=_ORPHAN_DESCENDANT_PID)
+    rebuild = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 0.5,
+    }
+    sidecar = {sidecar_child.pid: _ORPHAN_CREATE_TIME + 1}
+    events: list[str] = []
+
+    class _OrderedDiscoveryHost(_FakeProcessHost):
+        def find_rebuilds(self, **kwargs) -> dict[int, float]:
+            events.append("discover-rebuilds")
+            return super().find_rebuilds(**kwargs)
+
+        async def spawn(self, *args, **kwargs):
+            events.append("spawn-sidecar")
+            return await super().spawn(*args, **kwargs)
+
+    host = _OrderedDiscoveryHost(
+        spawns=deque([sidecar_child]),
+        process_groups={
+            _ORPHAN_PID: _ORPHAN_PID,
+            sidecar_child.pid: sidecar_child.pid,
+        },
+        trees={(sidecar_child.pid, sidecar_child.pid): sidecar},
+        groups={_ORPHAN_PID: (rebuild, [])},
+        rebuilds={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        live_processes={**rebuild, **sidecar},
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    host.identities[_ORPHAN_PID] = _rebuild_identity(process)
+    foreign_record = memory_process.sidecar_record_path(foreign_home / "memory")
+    foreign_record.parent.mkdir(parents=True, exist_ok=True)
+    foreign_record.write_text(
+        json.dumps(
+            {
+                "pid": _ORPHAN_PID,
+                "create_time": _ORPHAN_CREATE_TIME,
+                "process_group": _ORPHAN_PID,
+                "socket_path": str(foreign_home / "memory/.rt/everos.sock"),
+                "provider_root": str(provider_root),
+                "role": "cascade_rebuild",
+                "python": sys.executable,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def ready(_child) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_wait_for_ready", ready)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+    try:
+        assert await process.start() is True
+        assert events.index("discover-rebuilds") < events.index("spawn-sidecar")
+        assert not set(rebuild).intersection(host.live_processes)
+        assert sidecar_child.pid in host.live_processes
+        assert foreign_record.exists()
+        record = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+        assert record["pid"] == sidecar_child.pid
+        assert record["role"] == "sidecar"
+    finally:
+        await process.stop()
+
+
+async def test_sidecar_start_fails_closed_on_ambiguous_recordless_rebuilds(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    host = _FakeProcessHost(
+        rebuilds={
+            _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+        }
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    try:
+        assert await process.start() is False
+        assert host.signal_calls == []
+        assert host.spawn_calls == []
+    finally:
+        await process.stop()
 
 
 async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) -> None:

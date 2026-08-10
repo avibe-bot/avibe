@@ -464,7 +464,7 @@ class EverOSProcess:
         try:
             self._validate_launch_inputs()
             self._prepare_owned_directories()
-            await self._ownership.reap()
+            await self._ownership.reap(discover_missing=True)
             self._write_generated_config()
             self._remove_owned_socket()
             child_env = self._child_environment(role=_MemoryChildRole.SIDECAR)
