@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import sqlite3
 import stat
 from dataclasses import fields
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import quote
 import pytest
 
 import core.memory.attachments as attachment_module
+import core.memory.confined_filesystem as confined_filesystem_module
 from core.memory.attachments import (
     AttachmentPinError,
     AttachmentPinStore,
@@ -393,6 +395,40 @@ def test_reconcile_preserves_references_and_removes_releasing_orphans_and_stagin
     assert not stale.exists()
     assert unknown.read_text(encoding="utf-8") == "keep"
     assert store.reconcile({referenced.bundle_id}, {releasing.bundle_id}) == ()
+
+
+@pytest.mark.parametrize("operation", ["provider", "reconcile"])
+def test_attachment_reads_translate_temporary_ordering_database_failure(
+    attachment_roots,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    _home, source_root = attachment_roots
+    store = AttachmentPinStore()
+    bundle = store.pin((_attachment(_source_file(source_root, "referenced.txt")),))
+    failure = sqlite3.OperationalError("temporary ordering unavailable")
+
+    def fail_connect(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(
+        confined_filesystem_module.sqlite3,
+        "connect",
+        fail_connect,
+    )
+
+    with pytest.raises(AttachmentPinError) as raised:
+        if operation == "provider":
+            store.provider_attachments(bundle)
+        else:
+            store.reconcile({bundle.bundle_id}, set())
+
+    _assert_pin_error(raised, "memory_store_unavailable")
+    assert isinstance(
+        raised.value.__cause__,
+        confined_filesystem_module.ConfinedFilesystemError,
+    )
+    assert raised.value.__cause__.__cause__ is failure
 
 
 def test_reconcile_reports_missing_reference(attachment_roots) -> None:

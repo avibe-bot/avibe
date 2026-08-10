@@ -12,7 +12,16 @@ from typing import Protocol
 
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    SpilledDirectoryOrder,
+    create_confined_file,
+    ensure_private_directory,
+    fsync_directory,
+    open_confined_directory,
+    open_confined_regular_file,
+    remove_anchored_entry,
     remove_confined_path,
+    replace_confined,
+    required_no_follow_flag,
 )
 
 
@@ -157,6 +166,7 @@ class ProviderRoot:
     ) -> ProviderRootRollback | None:
         """Rewrite an owned empty root for a candidate and return its rollback."""
 
+        self._require_no_follow()
         try:
             self.path.lstat()
         except FileNotFoundError:
@@ -195,22 +205,23 @@ class ProviderRoot:
         """Remove provider children safely while preserving the owned root itself."""
 
         self._verify(meta, active_metadata, require_empty=False)
+        root_fd: int | None = None
         try:
-            with os.scandir(self.path) as entries:
-                children = [
-                    Path(entry.path)
-                    for entry in entries
-                    if entry.name != ROOT_SENTINEL_FILENAME
-                ]
-        except OSError as error:
-            raise ProviderRootError("memory provider root cannot be read") from error
-        for child in children:
-            try:
-                remove_confined_path(self._effective_home, child)
-            except (ConfinedFilesystemError, OSError, ValueError) as error:
-                raise ProviderRootError(
-                    "memory provider root child could not be removed"
-                ) from error
+            root_fd = open_confined_directory(self._effective_home, self.path)
+            with SpilledDirectoryOrder() as orders:
+                cursor = orders.scan(
+                    root_fd,
+                    include=lambda name: name != ROOT_SENTINEL_FILENAME,
+                )
+                for child_name in orders.names(cursor):
+                    remove_anchored_entry(root_fd, child_name)
+        except (ConfinedFilesystemError, OSError, ValueError) as error:
+            raise ProviderRootError(
+                "memory provider root child could not be removed"
+            ) from error
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
         self._write_sentinel(meta, active_metadata)
         self._verify(meta, active_metadata, require_empty=True)
 
@@ -251,6 +262,7 @@ class ProviderRoot:
             raise ProviderRootError("memory provider root still contains data")
 
     def _read_sentinel(self) -> dict[str, str | int]:
+        self._require_no_follow()
         path = self.path / ROOT_SENTINEL_FILENAME
         expected = self._lstat(path, "memory provider root sentinel")
         if (
@@ -267,10 +279,7 @@ class ProviderRoot:
 
         descriptor: int | None = None
         try:
-            descriptor = os.open(
-                path,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-            )
+            descriptor = open_confined_regular_file(self._effective_home, path)
             actual = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(actual.st_mode)
@@ -284,7 +293,7 @@ class ProviderRoot:
                 )
             self._require_owner(actual, "memory provider root sentinel")
             payload = os.read(descriptor, MAX_ROOT_SENTINEL_BYTES + 1)
-        except OSError as error:
+        except (ConfinedFilesystemError, OSError) as error:
             raise ProviderRootError(
                 "memory provider root sentinel is invalid"
             ) from error
@@ -326,6 +335,7 @@ class ProviderRoot:
         meta: ProviderRootMeta,
         metadata: ProviderRootMetadata,
     ) -> None:
+        self._require_no_follow()
         if not (
             _is_metadata_value(meta.provider_root_id)
             and _is_metadata_value(metadata.provider_root_format)
@@ -348,16 +358,20 @@ class ProviderRoot:
         )
         descriptor: int | None = None
         try:
-            descriptor = os.open(
+            descriptor = create_confined_file(
+                self._effective_home,
                 temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
             )
             _write_all(descriptor, payload)
             os.fsync(descriptor)
             os.close(descriptor)
             descriptor = None
-            os.replace(temporary, self.path / ROOT_SENTINEL_FILENAME)
+            replace_confined(
+                self._effective_home,
+                temporary,
+                self.path / ROOT_SENTINEL_FILENAME,
+            )
+            fsync_directory(self.path)
             sentinel_info = self._lstat(
                 self.path / ROOT_SENTINEL_FILENAME,
                 "memory provider root sentinel",
@@ -367,7 +381,7 @@ class ProviderRoot:
                 "memory provider root sentinel",
                 private=True,
             )
-        except OSError as error:
+        except (ConfinedFilesystemError, OSError) as error:
             raise ProviderRootError(
                 "memory provider root sentinel could not be written"
             ) from error
@@ -375,27 +389,38 @@ class ProviderRoot:
             if descriptor is not None:
                 os.close(descriptor)
             try:
-                os.unlink(temporary)
-            except OSError:
+                remove_confined_path(self._effective_home, temporary)
+            except (ConfinedFilesystemError, OSError):
                 pass
 
     def _directory_is_empty(self) -> bool:
+        descriptor: int | None = None
         try:
-            with os.scandir(self.path) as entries:
+            descriptor = open_confined_directory(self._effective_home, self.path)
+            with os.scandir(descriptor) as entries:
                 return not any(True for _entry in entries)
-        except OSError as error:
+        except (ConfinedFilesystemError, OSError) as error:
             raise ProviderRootError("memory provider root cannot be read") from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _is_empty(self) -> bool:
+        descriptor: int | None = None
         try:
-            with os.scandir(self.path) as entries:
+            descriptor = open_confined_directory(self._effective_home, self.path)
+            with os.scandir(descriptor) as entries:
                 return all(
                     entry.name in PROVIDER_ROOT_CONTROL_FILES for entry in entries
                 )
-        except OSError as error:
+        except (ConfinedFilesystemError, OSError) as error:
             raise ProviderRootError("memory provider root cannot be inspected") from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _ensure_chain_safe(self) -> None:
+        self._require_no_follow()
         home = Path(os.path.abspath(os.fspath(self._effective_home)))
         current = Path(os.path.abspath(os.fspath(self.path)))
         while True:
@@ -415,6 +440,21 @@ class ProviderRoot:
             if current == current.parent or current == home:
                 break
             current = current.parent
+        try:
+            ensure_private_directory(home, home)
+        except ConfinedFilesystemError as error:
+            raise ProviderRootError(
+                "memory provider root confinement home is unsafe or has an owner mismatch"
+            ) from error
+
+    @staticmethod
+    def _require_no_follow() -> None:
+        try:
+            required_no_follow_flag()
+        except ConfinedFilesystemError as error:
+            raise ProviderRootError(
+                "memory provider root requires no-follow filesystem support"
+            ) from error
 
     @staticmethod
     def _lstat(path: Path, label: str) -> os.stat_result:

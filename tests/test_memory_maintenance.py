@@ -2141,8 +2141,10 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         nonlocal crashed, intent_visible_before_replace
         if (
             not crashed
-            and Path(destination) == target
+            and Path(destination).name == target.name
             and f".restore-{backup.snapshot_id}-" in Path(source).name
+            and kwargs.get("src_dir_fd") is not None
+            and kwargs.get("dst_dir_fd") is not None
         ):
             open_operation = _maintenance(runtime)._backup_restore_journal.get_open_operation()
             assert open_operation is not None

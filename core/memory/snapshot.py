@@ -23,8 +23,17 @@ from typing import Callable, Iterator, Literal, Mapping, Protocol, Sequence
 
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
+    DirectoryOrderCursor as _DirectoryOrderCursor,
+    SpilledDirectoryOrder,
+    ensure_private_directory as ensure_confined_private_directory,
+    fsync_directory as fsync_confined_directory,
     remove_anchored_entry,
     remove_confined_path,
+    replace_confined,
+    required_no_follow_flag,
+    strict_directory_open_flags,
+    strict_file_create_flags,
+    strict_file_read_flags,
 )
 
 
@@ -81,6 +90,46 @@ class MemorySnapshotVerificationError(MemorySnapshotError):
 
 class _MemorySQLiteCorruptionError(MemorySnapshotError):
     """A SQLite source is readable as a file but not as a valid database."""
+
+
+def _new_directory_order(
+    *,
+    error_type: type[MemorySnapshotError],
+    message: str,
+) -> SpilledDirectoryOrder:
+    try:
+        return SpilledDirectoryOrder(
+            insert_batch_size=_directory_order_insert_batch_size()
+        )
+    except ConfinedFilesystemError as error:
+        raise error_type(message) from error
+
+
+def _scan_directory_order(
+    orders: SpilledDirectoryOrder,
+    descriptor: int,
+    *,
+    error_type: type[MemorySnapshotError],
+    message: str,
+    include: Callable[[str], bool] | None = None,
+) -> _DirectoryOrderCursor:
+    try:
+        return orders.scan(descriptor, include=include)
+    except ConfinedFilesystemError as error:
+        raise error_type(message) from error
+
+
+def _next_directory_name(
+    orders: SpilledDirectoryOrder,
+    cursor: _DirectoryOrderCursor,
+    *,
+    error_type: type[MemorySnapshotError],
+    message: str,
+) -> str | None:
+    try:
+        return orders.next_name(cursor)
+    except ConfinedFilesystemError as error:
+        raise error_type(message) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,119 +256,6 @@ class _DirectoryWalkFrame:
     node: _RelativeNode | None
     before: tuple[int, int, int, int]
     child_order: _DirectoryOrderCursor
-
-
-@dataclass(slots=True)
-class _DirectoryOrderCursor:
-    order_id: int
-    last_name: bytes | None = None
-    exhausted: bool = False
-
-
-class _SpilledDirectoryOrder:
-    """Deterministically order directory names without retaining their width."""
-
-    def __init__(self) -> None:
-        # The unnamed SQLite database is disk-backed and deleted on close. One
-        # index is shared by every active DFS frame, so wide and deep trees do
-        # not multiply database handles or in-memory filename collections.
-        self._connection = sqlite3.connect("")
-        self._next_order_id = 1
-        try:
-            self._connection.execute("PRAGMA temp_store=FILE")
-            self._connection.execute("PRAGMA cache_size=-512")
-            self._connection.execute("PRAGMA journal_mode=OFF")
-            self._connection.execute(
-                """
-                CREATE TABLE directory_name (
-                    order_id INTEGER NOT NULL,
-                    name BLOB NOT NULL,
-                    PRIMARY KEY (order_id, name)
-                ) WITHOUT ROWID
-                """
-            )
-        except BaseException:
-            self._connection.close()
-            raise
-
-    def __enter__(self) -> _SpilledDirectoryOrder:
-        return self
-
-    def __exit__(self, *_exc_info: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        self._connection.close()
-
-    def scan(
-        self,
-        descriptor: int,
-        *,
-        error_type: type[MemorySnapshotError],
-        message: str,
-        include: Callable[[str], bool] | None = None,
-    ) -> _DirectoryOrderCursor:
-        order_id = self._next_order_id
-        self._next_order_id += 1
-        rows: list[tuple[int, bytes]] = []
-        try:
-            with os.scandir(descriptor) as iterator:
-                for entry in iterator:
-                    if include is not None and not include(entry.name):
-                        continue
-                    rows.append((order_id, os.fsencode(entry.name)))
-                    if len(rows) >= _directory_order_insert_batch_size():
-                        self._insert(rows)
-                        rows.clear()
-            if rows:
-                self._insert(rows)
-        except (OSError, sqlite3.Error, UnicodeError) as error:
-            raise error_type(message) from error
-        return _DirectoryOrderCursor(order_id=order_id)
-
-    def next_name(
-        self,
-        cursor: _DirectoryOrderCursor,
-        *,
-        error_type: type[MemorySnapshotError],
-        message: str,
-    ) -> str | None:
-        if cursor.exhausted:
-            return None
-        try:
-            if cursor.last_name is None:
-                row = self._connection.execute(
-                    """
-                    SELECT name FROM directory_name
-                    WHERE order_id = ? ORDER BY name LIMIT 1
-                    """,
-                    (cursor.order_id,),
-                ).fetchone()
-            else:
-                row = self._connection.execute(
-                    """
-                    SELECT name FROM directory_name
-                    WHERE order_id = ? AND name > ? ORDER BY name LIMIT 1
-                    """,
-                    (cursor.order_id, cursor.last_name),
-                ).fetchone()
-            if row is not None:
-                cursor.last_name = bytes(row[0])
-                return os.fsdecode(cursor.last_name)
-            self._connection.execute(
-                "DELETE FROM directory_name WHERE order_id = ?",
-                (cursor.order_id,),
-            )
-            cursor.exhausted = True
-            return None
-        except sqlite3.Error as error:
-            raise error_type(message) from error
-
-    def _insert(self, rows: Sequence[tuple[int, bytes]]) -> None:
-        self._connection.executemany(
-            "INSERT INTO directory_name (order_id, name) VALUES (?, ?)",
-            rows,
-        )
 
 
 class _DirectoryDescriptorCache:
@@ -467,7 +403,7 @@ class _ManifestWriter:
     """Write an authenticated manifest without retaining the full tree."""
 
     def __init__(self, path: Path) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        flags = strict_file_create_flags()
         self._descriptor = os.open(path, flags, 0o600)
         self._path = path
         self._buffer: list[bytes] = []
@@ -789,7 +725,7 @@ class MemorySnapshotManager:
             _fsync_directory(payload_root)
             _fsync_directory(stage)
             self._verify_directory(identifier, stage)
-            os.replace(stage, final)
+            _replace_safe_path(self._effective_home, stage, final)
             published = True
             _fsync_directory(self._snapshot_root)
             return self._verify_directory(identifier, final)
@@ -814,10 +750,14 @@ class MemorySnapshotManager:
         _require_directory_private(root_info, "Memory backup root")
         root_fd = _open_directory(self._snapshot_root, "Memory backup root")
         removed: list[str] = []
-        orders: _SpilledDirectoryOrder | None = None
+        orders: SpilledDirectoryOrder | None = None
         try:
-            orders = _SpilledDirectoryOrder()
-            candidates = orders.scan(
+            orders = _new_directory_order(
+                error_type=MemorySnapshotUnsafePathError,
+                message="Memory backup root cannot be scanned safely",
+            )
+            candidates = _scan_directory_order(
+                orders,
                 root_fd,
                 error_type=MemorySnapshotUnsafePathError,
                 message="Memory backup root cannot be scanned safely",
@@ -825,7 +765,8 @@ class MemorySnapshotManager:
                 is not None,
             )
             while True:
-                name = orders.next_name(
+                name = _next_directory_name(
+                    orders,
                     candidates,
                     error_type=MemorySnapshotUnsafePathError,
                     message="Memory backup root cannot be scanned safely",
@@ -866,6 +807,7 @@ class MemorySnapshotManager:
     ) -> MemorySnapshot:
         """Verify the manifest, every byte, every mode, and every tree digest."""
 
+        self._require_no_follow()
         identifier = _validated_snapshot_id(snapshot_id)
         directory = self.snapshot_path(identifier)
         with self._verified_directory(identifier, directory) as (snapshot, _index):
@@ -987,12 +929,16 @@ class MemorySnapshotManager:
                             sidecar=candidate_index > 0,
                         )
                         if backup_info is None:
-                            os.replace(candidate, backup)
+                            _replace_safe_path(self._effective_home, candidate, backup)
                             plan.backups.append(_RestoreBackup(candidate, backup, True))
                         else:
                             _remove_safe_path(self._effective_home, candidate)
                     for staged_file, installed_target in plan.installs:
-                        os.replace(staged_file, installed_target)
+                        _replace_safe_path(
+                            self._effective_home,
+                            staged_file,
+                            installed_target,
+                        )
                         plan.installed_targets.append(installed_target)
                     _fsync_directory(plan.target.parent)
             except Exception:
@@ -1008,8 +954,18 @@ class MemorySnapshotManager:
             return snapshot
 
     def _assert_operation_allowed(self) -> None:
+        self._require_no_follow()
         if self._operation_guard is not None:
             self._operation_guard()
+
+    @staticmethod
+    def _require_no_follow() -> None:
+        try:
+            required_no_follow_flag()
+        except ConfinedFilesystemError as error:
+            raise MemorySnapshotUnsafePathError(
+                "Memory snapshots require no-follow filesystem support"
+            ) from error
 
     def _remove_clear_snapshot(
         self,
@@ -1021,6 +977,7 @@ class MemorySnapshotManager:
     ) -> None:
         """Remove one journal-authorized clear snapshot."""
 
+        self._require_no_follow()
         identifier = _validated_snapshot_id(snapshot_id)
         directory = self.snapshot_path(identifier)
         tombstone = self._snapshot_root / f".{identifier}.gc"
@@ -1048,7 +1005,7 @@ class MemorySnapshotManager:
             expected_manifest_sha256=expected_manifest_sha256,
             expected_surface_digests=expected_surface_digests,
         )
-        os.replace(directory, tombstone)
+        _replace_safe_path(self._effective_home, directory, tombstone)
         _fsync_directory(self._snapshot_root)
         _remove_safe_path(self._effective_home, tombstone)
         _fsync_directory(self._snapshot_root)
@@ -1061,6 +1018,7 @@ class MemorySnapshotManager:
     ) -> None:
         """Discard one storage-authorized unrecorded clear snapshot."""
 
+        self._require_no_follow()
         identifier = _validated_snapshot_id(snapshot_id)
         expected_relative = (
             PurePosixPath(self._snapshot_root_relative) / identifier
@@ -1280,9 +1238,12 @@ class MemorySnapshotManager:
         destination_root_fd = _open_directory(destination, "Memory snapshot destination")
         source_cache = _DirectoryDescriptorCache(source_root_fd)
         destination_cache = _DirectoryDescriptorCache(destination_root_fd)
-        orders: _SpilledDirectoryOrder | None = None
+        orders: SpilledDirectoryOrder | None = None
         try:
-            orders = _SpilledDirectoryOrder()
+            orders = _new_directory_order(
+                error_type=MemorySnapshotError,
+                message="Memory tree surface could not be read",
+            )
             root_mode = stat.S_IMODE(info.st_mode)
             stack = [
                 _tree_copy_frame(
@@ -1298,7 +1259,8 @@ class MemorySnapshotManager:
             root_entry: SnapshotEntry | None = None
             while stack:
                 frame = stack[-1]
-                child_name = orders.next_name(
+                child_name = _next_directory_name(
+                    orders,
                     frame.child_order,
                     error_type=MemorySnapshotError,
                     message="Memory tree surface could not be read",
@@ -1690,7 +1652,11 @@ class MemorySnapshotManager:
                     _remove_safe_path(self._effective_home, installed_target)
                 for backup in reversed(plan.backups):
                     if backup.created_this_run and backup.backup.exists():
-                        os.replace(backup.backup, backup.target)
+                        _replace_safe_path(
+                            self._effective_home,
+                            backup.backup,
+                            backup.target,
+                        )
                 if plan.staged is not None:
                     _remove_safe_path(self._effective_home, plan.staged)
                 _fsync_directory(plan.target.parent)
@@ -1737,29 +1703,12 @@ def _managed_source_info(home: Path, source: Path) -> os.stat_result | None:
 
 
 def _ensure_private_directory(home: Path, directory: Path) -> None:
-    if directory != home:
-        relative = _relative_to_home(directory, home)
-    else:
-        relative = Path()
-    if not home.exists():
-        home.mkdir(parents=True, mode=0o700)
-        _require_directory(os.lstat(home), "effective Memory home")
-        os.chmod(home, 0o700)
-        _fsync_directory(home)
-    current = home
-    for component in relative.parts:
-        current /= component
-        try:
-            info = os.lstat(current)
-        except FileNotFoundError:
-            os.mkdir(current, mode=0o700)
-            _fsync_directory(current.parent)
-            info = os.lstat(current)
-        _require_directory(info, "Memory private directory")
-        os.chmod(current, 0o700)
-        _fsync_directory(current)
-        if stat.S_IMODE(os.lstat(current).st_mode) != 0o700:
-            raise MemorySnapshotUnsafePathError("Memory directory is not owner-only")
+    try:
+        ensure_confined_private_directory(home, directory)
+    except ConfinedFilesystemError as error:
+        raise MemorySnapshotUnsafePathError(
+            "Memory directory cannot be prepared safely"
+        ) from error
 
 
 def _mkdir_private(path: Path) -> None:
@@ -1769,7 +1718,7 @@ def _mkdir_private(path: Path) -> None:
 
 
 def _directory_open_flags() -> int:
-    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return strict_directory_open_flags()
 
 
 def _open_directory(path: Path, label: str) -> int:
@@ -1836,7 +1785,7 @@ def _directory_identity(info: os.stat_result) -> tuple[int, int, int, int]:
 
 def _tree_copy_frame(
     source_cache: _DirectoryDescriptorCache,
-    orders: _SpilledDirectoryOrder,
+    orders: SpilledDirectoryOrder,
     node: _RelativeNode | None,
     *,
     base_path: str,
@@ -1865,7 +1814,8 @@ def _tree_copy_frame(
             entry_type=entry_type,
             mode=mode,
             before=_directory_identity(opened),
-            child_order=orders.scan(
+            child_order=_scan_directory_order(
+                orders,
                 descriptor,
                 error_type=MemorySnapshotError,
                 message="Memory tree surface could not be read",
@@ -1916,13 +1866,13 @@ def _missing_entry(path: str) -> SnapshotEntry:
 
 
 def _copy_regular_file(source: Path, destination: Path, *, mode: int) -> tuple[int, str]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = strict_file_read_flags()
     source_fd = os.open(source, flags)
     destination_fd: int | None = None
     try:
         before = os.fstat(source_fd)
         _require_regular_private(before, "Memory snapshot source file")
-        destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        destination_flags = strict_file_create_flags()
         destination_fd = os.open(destination, destination_flags, 0o600)
         digest = hashlib.sha256()
         size = 0
@@ -1969,7 +1919,7 @@ def _copy_regular_file_at(
     target_name = source_name if destination_name is None else destination_name
     source_fd = os.open(
         source_name,
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        strict_file_read_flags(),
         dir_fd=source_parent_fd,
     )
     destination_fd: int | None = None
@@ -1979,10 +1929,7 @@ def _copy_regular_file_at(
         _require_regular_private(before, "Memory snapshot source file")
         destination_fd = os.open(
             target_name,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0),
+            strict_file_create_flags(),
             0o600,
             dir_fd=destination_parent_fd,
         )
@@ -2084,7 +2031,7 @@ def _indexed_manifest(path: Path) -> Iterator[tuple[_ManifestIndex, str]]:
 
 
 def _read_manifest(path: Path, entries: _ManifestIndex) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = strict_file_read_flags()
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
@@ -2269,13 +2216,17 @@ def _verify_payload_paths(
     entries: _ManifestIndex,
 ) -> None:
     root_info = os.fstat(payload_root_fd)
-    orders = _SpilledDirectoryOrder()
+    orders = _new_directory_order(
+        error_type=MemorySnapshotVerificationError,
+        message="Memory snapshot payload cannot be read",
+    )
     try:
         stack = [
             _DirectoryWalkFrame(
                 node=None,
                 before=_directory_identity(root_info),
-                child_order=orders.scan(
+                child_order=_scan_directory_order(
+                    orders,
                     payload_root_fd,
                     error_type=MemorySnapshotVerificationError,
                     message="Memory snapshot payload cannot be read",
@@ -2284,7 +2235,8 @@ def _verify_payload_paths(
         ]
         while stack:
             frame = stack[-1]
-            child_name = orders.next_name(
+            child_name = _next_directory_name(
+                orders,
                 frame.child_order,
                 error_type=MemorySnapshotVerificationError,
                 message="Memory snapshot payload cannot be read",
@@ -2358,7 +2310,8 @@ def _verify_payload_paths(
                         _DirectoryWalkFrame(
                             node=child_node,
                             before=_directory_identity(opened),
-                            child_order=orders.scan(
+                            child_order=_scan_directory_order(
+                                orders,
                                 descriptor,
                                 error_type=MemorySnapshotVerificationError,
                                 message="Memory snapshot payload cannot be read",
@@ -2390,7 +2343,7 @@ def _entry_from_row(row: Sequence[object]) -> SnapshotEntry:
 
 
 def _file_sha256(path: Path) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = strict_file_read_flags()
     descriptor = os.open(path, flags)
     digest = hashlib.sha256()
     try:
@@ -2425,7 +2378,7 @@ def _file_sha256(path: Path) -> str:
 def _file_sha256_at(parent_fd: int, name: str) -> str:
     descriptor = os.open(
         name,
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        strict_file_read_flags(),
         dir_fd=parent_fd,
     )
     digest = hashlib.sha256()
@@ -2543,7 +2496,7 @@ def _call_log_has_sqlite_header(home: Path, database: Path) -> bool:
     try:
         database_fd = os.open(
             database.name,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            strict_file_read_flags(),
             dir_fd=directory_fd,
         )
         before = os.fstat(database_fd)
@@ -2618,8 +2571,17 @@ def _remove_safe_entry(
         ) from error
 
 
+def _replace_safe_path(home: Path, source: Path, destination: Path) -> None:
+    try:
+        replace_confined(home, source, destination)
+    except ConfinedFilesystemError as error:
+        raise MemorySnapshotUnsafePathError(
+            "Memory snapshot entry could not be replaced safely"
+        ) from error
+
+
 def _fsync_file(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = strict_file_read_flags()
     descriptor = os.open(path, flags)
     try:
         os.fsync(descriptor)
@@ -2628,9 +2590,9 @@ def _fsync_file(path: Path) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        fsync_confined_directory(path)
+    except ConfinedFilesystemError as error:
+        raise MemorySnapshotUnsafePathError(
+            "Memory directory could not be synchronized safely"
+        ) from error

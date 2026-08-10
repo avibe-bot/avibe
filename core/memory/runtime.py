@@ -28,6 +28,7 @@ from core.memory.artifact import (
 )
 from core.memory.blocking import run_blocking
 from core.memory.clear_journal import ClearSurface
+from core.memory.confined_filesystem import required_no_follow_flag
 from core.memory.everos import (
     EverOSPort,
     MemoryProviderFailure,
@@ -376,6 +377,7 @@ class MemoryRuntime:
         if self._module is not None:
             return True
         try:
+            required_no_follow_flag()
             opened = store or MemoryStore()
             self._artifact_manager.set_provider_root(self._provider_root)
             module = MemoryModule(

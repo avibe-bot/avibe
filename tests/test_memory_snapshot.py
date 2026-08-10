@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import core.memory.confined_filesystem as confined_filesystem_module
 import core.memory.snapshot as snapshot_module
 from core.memory.clear_journal import (
     ClearBackupBlocked,
@@ -23,6 +24,7 @@ from core.memory.snapshot import (
     MemorySnapshotManager,
     MemorySnapshotUnsafePathError,
     MemorySnapshotVerificationError,
+    SnapshotSurface,
 )
 
 
@@ -363,6 +365,37 @@ def test_snapshot_restore_relocates_and_restores_missing_as_absent(tmp_path: Pat
     assert source_home / "state/memory/memory.sqlite" != relocated_home / "state/memory/memory.sqlite"
 
 
+def test_snapshot_restore_preserves_and_cleans_owner_only_tree_modes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    target = _private_directory(home / "memory/everos-root", home)
+    original = _private_file(target / "profile.json", b"before", home)
+    target.chmod(0o500)
+    manager = MemorySnapshotManager(
+        home,
+        surfaces=(SnapshotSurface("memory/everos-root", "tree"),),
+    )
+    snapshot = manager.create("owner-only-tree")
+
+    target.chmod(0o700)
+    original.write_bytes(b"after")
+    original.chmod(0o600)
+    target.chmod(0o500)
+
+    restored = manager.restore(
+        snapshot.snapshot_id,
+        expected_manifest_sha256=snapshot.manifest_sha256,
+        expected_surface_digests=snapshot.surface_digests(),
+    )
+
+    assert restored == snapshot
+    assert stat.S_IMODE(target.stat().st_mode) == 0o500
+    assert original.read_bytes() == b"before"
+    assert not list(home.rglob("*.before-restore-*"))
+    assert not list(home.rglob("*.restore-*"))
+
+
 def test_streaming_manifest_crosses_batches_and_restores_exact_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -655,41 +688,24 @@ def test_spilled_directory_order_is_exact_and_memory_bounded_for_wide_directorie
 
     sqlite_temp = _private_directory(tmp_path / "sqlite-temp", tmp_path)
     monkeypatch.setenv("SQLITE_TMPDIR", str(sqlite_temp))
-    monkeypatch.setattr(snapshot_module.os, "scandir", lambda _descriptor: ReverseScandir())
-    monkeypatch.setattr(snapshot_module, "_DIRECTORY_ORDER_INSERT_BATCH_SIZE", 11)
+    monkeypatch.setattr(
+        confined_filesystem_module.os,
+        "scandir",
+        lambda _descriptor: ReverseScandir(),
+    )
 
     connection: sqlite3.Connection | None = None
     tracemalloc.start()
     try:
-        with snapshot_module._SpilledDirectoryOrder() as orders:
+        with confined_filesystem_module.SpilledDirectoryOrder(
+            insert_batch_size=11
+        ) as orders:
             connection = orders._connection
-            cursor = orders.scan(
-                -1,
-                error_type=MemorySnapshotUnsafePathError,
-                message="injected wide directory cannot be scanned",
-            )
+            cursor = orders.scan(-1)
             for index in range(entry_count):
-                assert orders.next_name(
-                    cursor,
-                    error_type=MemorySnapshotUnsafePathError,
-                    message="injected wide directory cannot be scanned",
-                ) == f"entry-{index:05d}-{suffix}"
-            assert (
-                orders.next_name(
-                    cursor,
-                    error_type=MemorySnapshotUnsafePathError,
-                    message="injected wide directory cannot be scanned",
-                )
-                is None
-            )
-            assert (
-                orders.next_name(
-                    cursor,
-                    error_type=MemorySnapshotUnsafePathError,
-                    message="injected wide directory cannot be scanned",
-                )
-                is None
-            )
+                assert orders.next_name(cursor) == f"entry-{index:05d}-{suffix}"
+            assert orders.next_name(cursor) is None
+            assert orders.next_name(cursor) is None
             _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -701,6 +717,83 @@ def test_spilled_directory_order_is_exact_and_memory_bounded_for_wide_directorie
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         connection.execute("SELECT 1")
     assert list(sqlite_temp.iterdir()) == []
+
+
+def test_snapshot_translates_temporary_directory_order_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _private_file(home / "memory/everos-root/profile.json", b"profile", home)
+    manager = MemorySnapshotManager(home)
+    failure = confined_filesystem_module.ConfinedFilesystemError(
+        "temporary ordering unavailable"
+    )
+
+    def fail_order(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(snapshot_module, "SpilledDirectoryOrder", fail_order)
+
+    with pytest.raises(MemorySnapshotError) as raised:
+        manager.create("ordering-failure")
+
+    assert raised.value.__cause__ is failure
+    assert not manager.snapshot_path("ordering-failure").exists()
+
+
+def test_snapshot_verify_translates_directory_order_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _private_file(home / "memory/everos-root/profile.json", b"profile", home)
+    manager = MemorySnapshotManager(home)
+    snapshot = manager.create("verify-ordering-failure")
+    failure = confined_filesystem_module.ConfinedFilesystemError(
+        "temporary ordering unavailable"
+    )
+
+    def fail_order(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(snapshot_module, "SpilledDirectoryOrder", fail_order)
+
+    with pytest.raises(MemorySnapshotVerificationError) as raised:
+        manager.verify(
+            snapshot.snapshot_id,
+            expected_manifest_sha256=snapshot.manifest_sha256,
+            expected_surface_digests=snapshot.surface_digests(),
+        )
+
+    assert raised.value.__cause__ is failure
+
+
+def test_backup_reconcile_translates_directory_order_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _private_directory(tmp_path / "home", tmp_path)
+    manager = MemorySnapshotManager(
+        home,
+        snapshot_root="state/memory/backups",
+        surfaces=(SnapshotSurface("memory/everos-root", "tree"),),
+        operation_guard=lambda: None,
+    )
+    _private_directory(manager.snapshot_root, home)
+    failure = confined_filesystem_module.ConfinedFilesystemError(
+        "temporary ordering unavailable"
+    )
+
+    def fail_order(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(snapshot_module, "SpilledDirectoryOrder", fail_order)
+
+    with pytest.raises(MemorySnapshotUnsafePathError) as raised:
+        manager.reconcile_unpublished_backup_stages()
+
+    assert raised.value.__cause__ is failure
 
 
 def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path) -> None:
@@ -1148,7 +1241,7 @@ def test_restore_retry_converges_after_crash_between_backup_and_install(
         real_replace(source, destination, *args, **kwargs)
         if (
             not crashed
-            and Path(source) == queue
+            and Path(source).name == queue.name
             and ".before-restore-crash-retry-0-0" in Path(destination).name
         ):
             crashed = True
@@ -1197,7 +1290,7 @@ def test_create_retry_reclaims_stage_left_by_process_death(
     real_replace = snapshot_module.os.replace
 
     def crash_before_publish(source, destination, *args, **kwargs):
-        if Path(destination) == manager.snapshot_path("stage-crash"):
+        if Path(destination).name == "stage-crash":
             raise SystemExit("injected snapshot process death")
         return real_replace(source, destination, *args, **kwargs)
 
@@ -1266,9 +1359,10 @@ def test_auto_id_backup_stage_reconcile_covers_copy_and_publish_crashes(
 
     def crash_at_publish(source, destination, *args, **kwargs):
         is_publish = (
-            Path(source).parent == manager.snapshot_root
-            and Path(source).name.endswith(".tmp")
-            and Path(destination).parent == manager.snapshot_root
+            Path(source).name.endswith(".tmp")
+            and not Path(destination).name.startswith(".")
+            and kwargs.get("src_dir_fd") is not None
+            and kwargs.get("dst_dir_fd") is not None
         )
         if is_publish and crash_boundary == "before-publish":
             raise SystemExit(crash_boundary)
@@ -1348,7 +1442,7 @@ def test_explicit_id_backup_retry_still_reclaims_its_deterministic_stage(
     real_replace = snapshot_module.os.replace
 
     def crash_before_publish(source, destination, *args, **kwargs):
-        if Path(destination) == manager.snapshot_path("explicit-retry"):
+        if Path(destination).name == "explicit-retry":
             raise SystemExit("injected backup process death")
         return real_replace(source, destination, *args, **kwargs)
 
