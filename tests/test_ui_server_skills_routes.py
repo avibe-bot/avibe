@@ -118,6 +118,57 @@ def test_upload_drops_project_cwd(folderless, monkeypatch):
     assert seen["project_dir"] is None  # the project cwd was dropped, not errored
 
 
+def test_list_preserves_project_id_for_real_project(monkeypatch):
+    async def fake_list(*, scope, project_dir=None, backends=None, project_id=None):
+        assert scope == "project"
+        assert project_dir == "/tmp/project"
+        assert project_id == "proj-real"
+        return {"ok": True, "skills": [{"name": "demo", "scope": "project"}]}
+
+    def fake_resolve(project_id):
+        if project_id == "proj-real":
+            return "/tmp/project"
+        raise LookupError(project_id)
+
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", fake_resolve)
+    monkeypatch.setattr(api, "list_skills", fake_list)
+
+    res = app.test_client().get("/api/skills?scope=project&project_id=proj-real")
+    body = res.get_json()
+
+    assert res.status_code == 200
+    assert body["ok"] is True
+    assert body["skills"][0]["scope"] == "project"
+
+
+def test_upload_preserves_project_id_for_real_project(monkeypatch):
+    seen = {}
+
+    async def fake_upload(payload, *, project_dir=None, project_id=None):
+        seen["project_dir"] = project_dir
+        seen["project_id"] = project_id
+        return {"ok": True, "skills": [], "dir": "/tmp/askill-upload-x"}
+
+    def fake_resolve(project_id):
+        if project_id == "proj-real":
+            return "/tmp/project"
+        raise LookupError(project_id)
+
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", fake_resolve)
+    monkeypatch.setattr(api, "upload_skill_zip", fake_upload)
+
+    client = app.test_client()
+    res = client.post(
+        "/api/skills/upload",
+        json={"content_base64": "", "project_id": "proj-real"},
+        headers=csrf_headers(client),
+    )
+
+    assert res.status_code == 200
+    assert res.get_json()["ok"] is True
+    assert seen == {"project_dir": "/tmp/project", "project_id": "proj-real"}
+
+
 @pytest.mark.parametrize(
     "method,path,attr,payload",
     [

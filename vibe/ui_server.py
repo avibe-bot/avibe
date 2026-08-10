@@ -7711,6 +7711,14 @@ def _project_no_folder_error():
     )
 
 
+def _skills_project_id_kwargs(project_dir: str | None, project_id: str | None) -> dict[str, str]:
+    """Thread stable project ids only for real project-scoped skill requests."""
+
+    if project_dir is None or project_id is None:
+        return {}
+    return {"project_id": project_id}
+
+
 @app.route("/api/projects/<project_id>/agents-md", methods=["GET"])
 def project_agents_md_get(project_id: str):
     """Read the project's AGENTS.md (falling back to CLAUDE.md) for the editor."""
@@ -7807,8 +7815,8 @@ async def skills_list():
         # global skills (with a flag) instead of erroring the whole page.
         result = await api.list_skills(
             scope="global",
-            project_id=project_id,
             backends=backends or None,
+            **_skills_project_id_kwargs(None, project_id),
         )
         if isinstance(result, dict) and result.get("ok"):
             result = {**result, "project_no_folder": True}
@@ -7817,8 +7825,8 @@ async def skills_list():
         await api.list_skills(
             scope=scope,
             project_dir=project_dir,
-            project_id=project_id,
             backends=backends or None,
+            **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
 
@@ -7839,7 +7847,7 @@ async def skills_preview():
         await api.preview_skill_source(
             str(payload.get("source") or ""),
             project_dir=project_dir,
-            project_id=project_id,
+            **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
 
@@ -7953,7 +7961,11 @@ async def skills_upload():
         # step picks the scope. Drop the cwd like preview rather than erroring.
         project_dir = None
     return jsonify(
-        await api.upload_skill_zip(payload, project_dir=project_dir, project_id=project_id)
+        await api.upload_skill_zip(
+            payload,
+            project_dir=project_dir,
+            **_skills_project_id_kwargs(project_dir, project_id),
+        )
     )
 
 
