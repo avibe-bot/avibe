@@ -297,6 +297,10 @@ def verify_opencode_auth_list_output(text: str, provider: str | None = None) -> 
     return "credential" in normalized and "0 credentials" not in normalized and "no credentials" not in normalized
 
 
+class BackendAuthConfigSaveError(RuntimeError):
+    """V2 auth persistence failed after external auth cleanup succeeded."""
+
+
 @dataclass
 class AgentAuthFlow:
     flow_id: str
@@ -1473,18 +1477,26 @@ class AgentAuthService:
             ok, detail = await self._verify_login(flow)
             if ok:
                 settlement = CancellationSettlement()
+                persist_error: Exception | None = None
                 if flow.backend == "codex":
-                    await self._persist_backend_auth_mode(
-                        flow.backend,
-                        "oauth",
-                        settlement=settlement,
-                    )
+                    try:
+                        await self._persist_backend_auth_mode(
+                            flow.backend,
+                            "oauth",
+                            settlement=settlement,
+                        )
+                    except BackendAuthConfigSaveError as error:
+                        persist_error = error
                 try:
                     await settlement.wait(self._refresh_backend_runtime(flow.backend))
                 except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(error)
+                    settlement.raise_if_cancelled(persist_error or error)
+                    if persist_error is not None:
+                        raise persist_error
                     raise
-                settlement.raise_if_cancelled()
+                settlement.raise_if_cancelled(persist_error)
+                if persist_error is not None:
+                    raise persist_error
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
@@ -1535,11 +1547,15 @@ class AgentAuthService:
             ok, detail = await self._verify_login(flow)
             if ok:
                 settlement = CancellationSettlement()
-                await self._persist_backend_auth_mode(
-                    flow.backend,
-                    "oauth",
-                    settlement=settlement,
-                )
+                persist_error: Exception | None = None
+                try:
+                    await self._persist_backend_auth_mode(
+                        flow.backend,
+                        "oauth",
+                        settlement=settlement,
+                    )
+                except BackendAuthConfigSaveError as error:
+                    persist_error = error
                 try:
                     await settlement.wait(
                         self._finish_claude_oauth_attempt(
@@ -1549,9 +1565,13 @@ class AgentAuthService:
                     )
                     await settlement.wait(self._refresh_backend_runtime(flow.backend))
                 except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(error)
+                    settlement.raise_if_cancelled(persist_error or error)
+                    if persist_error is not None:
+                        raise persist_error
                     raise
-                settlement.raise_if_cancelled()
+                settlement.raise_if_cancelled(persist_error)
+                if persist_error is not None:
+                    raise persist_error
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
@@ -2201,8 +2221,15 @@ class AgentAuthService:
                     self._clear_claude_settings_env_for_logout()
                 )
                 if settings_cleanup_error:
-                    logout_ok = False
-                    logout_error = settings_cleanup_error
+                    settlement.raise_if_cancelled(
+                        RuntimeError(settings_cleanup_error)
+                    )
+                    return {
+                        "ok": True,
+                        "partial": True,
+                        "warning": "settings_cleanup_failed",
+                        "detail": settings_cleanup_error,
+                    }
                 else:
                     logout_ok, logout_error = await settlement.wait(
                         self._run_utility_command(
@@ -2251,13 +2278,6 @@ class AgentAuthService:
         # missing, exited non-zero, or timed out), and the user needs
         # to know about that partial sign-out rather than seeing a
         # green toast and assuming the backend is fully signed out.
-        if backend == "claude" and settings_cleanup_error:
-            return {
-                "ok": True,
-                "partial": True,
-                "warning": "settings_cleanup_failed",
-                "detail": settings_cleanup_error,
-            }
         if not logout_ok:
             return {
                 "ok": True,
@@ -3162,16 +3182,20 @@ class AgentAuthService:
             ok, detail = await self._verify_web_login(flow.backend, force_oauth=flow.backend == "claude")
             if ok:
                 settlement = CancellationSettlement()
-                await self._invoke_post_web_success_hook(
+                persist_error = await self._invoke_post_web_success_hook(
                     flow.backend,
                     settlement=settlement,
                 )
                 try:
                     await settlement.wait(self._refresh_backend_runtime(flow.backend))
                 except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(error)
+                    settlement.raise_if_cancelled(persist_error or error)
+                    if persist_error is not None:
+                        raise persist_error
                     raise
-                settlement.raise_if_cancelled()
+                settlement.raise_if_cancelled(persist_error)
+                if persist_error is not None:
+                    raise persist_error
                 flow.state = "success"
             else:
                 flow.state = "failed"
@@ -3205,7 +3229,7 @@ class AgentAuthService:
             )
             if ok:
                 settlement = CancellationSettlement()
-                await self._invoke_post_web_success_hook(
+                persist_error = await self._invoke_post_web_success_hook(
                     flow.backend,
                     settlement=settlement,
                 )
@@ -3218,9 +3242,13 @@ class AgentAuthService:
                     )
                     await settlement.wait(self._refresh_backend_runtime(flow.backend))
                 except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(error)
+                    settlement.raise_if_cancelled(persist_error or error)
+                    if persist_error is not None:
+                        raise persist_error
                     raise
-                settlement.raise_if_cancelled()
+                settlement.raise_if_cancelled(persist_error)
+                if persist_error is not None:
+                    raise persist_error
                 flow.state = "success"
             else:
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3281,7 +3309,7 @@ class AgentAuthService:
         backend: str,
         *,
         settlement: CancellationSettlement | None = None,
-    ) -> None:
+    ) -> Exception | None:
         # OAuth completed via the web UI implies the user wants
         # ``auth_mode = "oauth"``. Persist it before the controller-refresh
         # hook fires so the live agent reloads with the right mode rather
@@ -3296,17 +3324,23 @@ class AgentAuthService:
         # would add a stray attribute and could mislead future readers.
         owns_settlement = settlement is None
         settlement = settlement or CancellationSettlement()
+        persist_error: Exception | None = None
         if backend != "opencode":
-            await self._persist_backend_auth_mode(
-                backend,
-                "oauth",
-                settlement=settlement,
-            )
+            try:
+                await self._persist_backend_auth_mode(
+                    backend,
+                    "oauth",
+                    settlement=settlement,
+                )
+            except BackendAuthConfigSaveError as error:
+                persist_error = error
         hook = self._post_web_success_hook
         if not callable(hook):
             if owns_settlement:
-                settlement.raise_if_cancelled()
-            return
+                settlement.raise_if_cancelled(persist_error)
+                if persist_error is not None:
+                    raise persist_error
+            return persist_error
         try:
             await settlement.run_blocking(hook, backend)
         except asyncio.CancelledError as error:
@@ -3315,7 +3349,10 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("post_web_success_hook failed for %s: %s", backend, err)
         if owns_settlement:
-            settlement.raise_if_cancelled()
+            settlement.raise_if_cancelled(persist_error)
+            if persist_error is not None:
+                raise persist_error
+        return persist_error
 
     async def _clear_claude_settings_env_for_oauth(self) -> None:
         try:
@@ -3644,11 +3681,25 @@ class AgentAuthService:
                 mark_mode_explicit=backend == "claude",
                 settlement=settlement,
             )
-        except Exception as err:  # noqa: BLE001
+        except asyncio.CancelledError as err:
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
                 auth_mode, backend, err,
             )
+            if owns_settlement:
+                settlement.raise_if_cancelled(err)
+            raise
+        except Exception as err:  # noqa: BLE001
+            logger.warning(
+                "Failed to persist auth_mode=%s after web flow for %s: %s",
+                auth_mode,
+                backend,
+                err,
+            )
+            error = BackendAuthConfigSaveError(str(err))
+            if owns_settlement:
+                settlement.raise_if_cancelled(error)
+            raise error from err
         if owns_settlement:
             settlement.raise_if_cancelled()
 

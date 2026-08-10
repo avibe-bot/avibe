@@ -553,14 +553,13 @@ class ModelHubService:
                 self._sync_sources(updated, force_empty=bool(previous_bindings))
             )
         except (Exception, asyncio.CancelledError) as sync_error:
+            rollback_save_error: BaseException | None = None
             try:
                 await self._save_store(previous, settlement=settlement)
             except (Exception, asyncio.CancelledError) as rollback_error:
                 self._engine_synced = False
-                failure = rollback_error.__cause__ or rollback_error
-                logger.error("Model Hub rollback save failed: %s", failure)
-                settlement.raise_if_cancelled(rollback_error)
-                raise rollback_error from sync_error
+                rollback_save_error = rollback_error
+                logger.error("Model Hub rollback save failed: %s", rollback_error)
             try:
                 await settlement.wait(
                     self._sync_sources(
@@ -572,9 +571,13 @@ class ModelHubService:
                 self._engine_synced = False
                 failure = rollback_error.__cause__ or rollback_error
                 logger.error("Model Hub rollback sync failed: %s", failure)
-                settlement.raise_if_cancelled(rollback_error)
+                if rollback_save_error is None:
+                    settlement.raise_if_cancelled(rollback_error)
             else:
-                self._engine_synced = True
+                self._engine_synced = rollback_save_error is None
+            if rollback_save_error is not None:
+                settlement.raise_if_cancelled(rollback_save_error)
+                raise rollback_save_error from sync_error
             settlement.raise_if_cancelled(sync_error)
             raise sync_error
         self._engine_synced = True

@@ -139,8 +139,9 @@ def test_settings_language_save_stays_responsive_and_settles_on_cancellation(
         await asyncio.sleep(0)
         assert not task.done()
         release_lock.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as raised:
             await task
+        assert raised.value.__cause__ is None
 
     asyncio.run(exercise())
     assert V2Config.load().language == "zh"

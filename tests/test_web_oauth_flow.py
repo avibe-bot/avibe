@@ -23,6 +23,7 @@ import pytest
 
 from core.agent_auth_service import (
     AgentAuthService,
+    BackendAuthConfigSaveError,
     ClaudeOAuthAttempt,
     ClaudeOAuthBatch,
     WebAuthFlow,
@@ -274,6 +275,85 @@ def test_post_web_success_hook_invocation_when_set(
     _run(service._invoke_post_web_success_hook("codex"))
     persist.assert_awaited_once_with("codex", "oauth", settlement=ANY)
     assert calls == ["codex"]
+
+
+def test_web_codex_persist_failure_reconciles_hook_and_runtime_before_failure(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hook_calls: list[str] = []
+    flow = WebAuthFlow(
+        flow_id="codex-persist-failure",
+        backend="codex",
+        state="verifying",
+        process=SimpleNamespace(wait=AsyncMock(return_value=0)),
+    )
+    service._verify_web_login = AsyncMock(return_value=(True, None))
+    service._persist_backend_auth_mode = AsyncMock(
+        side_effect=BackendAuthConfigSaveError("config save failed")
+    )
+    service._refresh_backend_runtime = AsyncMock()
+    service._post_web_success_hook = hook_calls.append
+
+    _run(service._wait_for_codex_completion_web(flow))
+
+    assert flow.state == "failed"
+    assert flow.error == "config save failed"
+    assert hook_calls == ["codex"]
+    service._refresh_backend_runtime.assert_awaited_once_with("codex")
+
+
+def test_web_codex_persist_failure_reconciles_before_cancellation(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
+    flow = WebAuthFlow(
+        flow_id="codex-cancelled-persist-failure",
+        backend="codex",
+        state="verifying",
+        process=SimpleNamespace(wait=AsyncMock(return_value=0)),
+    )
+    service._verify_web_login = AsyncMock(return_value=(True, None))
+    service._clear_codex_api_key_for_oauth = AsyncMock()
+    service._refresh_backend_runtime = AsyncMock()
+    hook_calls: list[str] = []
+    service._post_web_success_hook = hook_calls.append
+    save_entered = threading.Event()
+    release_save = threading.Event()
+
+    def failing_save(*_args, **_kwargs) -> None:
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        raise RuntimeError("config save failed")
+
+    monkeypatch.setattr(V2Config, "save", failing_save)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(service._wait_for_codex_completion_web(flow))
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel("web auth cancelled")
+        await asyncio.sleep(0)
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("web auth cancelled",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "config save failed"
+
+    _run(exercise())
+
+    assert hook_calls == ["codex"]
+    service._refresh_backend_runtime.assert_awaited_once_with("codex")
 
 
 def test_codex_oauth_success_clears_api_key_state(
@@ -1494,6 +1574,33 @@ def test_persist_auth_cancel_precedes_cleanup_failure_and_skips_config_save(
     save_fields.assert_not_awaited()
 
 
+def test_persist_backend_auth_mode_propagates_config_save_failure(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
+    service._clear_codex_api_key_for_oauth = AsyncMock()
+
+    def failing_save(*_args, **_kwargs) -> None:
+        raise RuntimeError("config save failed")
+
+    monkeypatch.setattr(V2Config, "save", failing_save)
+
+    with pytest.raises(BackendAuthConfigSaveError, match="config save failed") as raised:
+        _run(service._persist_backend_auth_mode("codex", "oauth"))
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+
 def test_save_backend_auth_fields_owned_cancel_precedes_save_failure(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
@@ -1541,10 +1648,23 @@ def test_save_backend_auth_fields_owned_cancel_precedes_save_failure(
 
 
 def test_remove_web_auth_surfaces_claude_settings_cleanup_failure(
-    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.claude.auth_mode = "api_key"
+    config.agents.claude.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
     run_cmd = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(service, "_run_utility_command", run_cmd)
+    hook_calls: list[str] = []
+    service._post_web_success_hook = hook_calls.append
 
     def fail_cleanup(**_kwargs):
         raise OSError("settings locked")
@@ -1557,6 +1677,12 @@ def test_remove_web_auth_surfaces_claude_settings_cleanup_failure(
     assert result["partial"] is True
     assert result["warning"] == "settings_cleanup_failed"
     assert "Failed to clear Claude Code settings env" in result["detail"]
+    assert V2Config.load().agents.claude.auth_mode == "api_key"
+    assert V2Config.load().agents.claude.api_key == "sk-stale"
+    assert service.controller.config.agents.claude.auth_mode == "api_key"
+    assert service.controller.config.agents.claude.api_key == "sk-stale"
+    assert hook_calls == []
+    run_cmd.assert_not_awaited()
 
 
 def test_persist_backend_auth_mode_fresh_loads_config_and_saves_off_loop(

@@ -718,14 +718,14 @@ class SettingsHandler(BaseHandler):
 
                     await settlement.run_blocking(persist_language)
                     self.config.language = language
-                    settlement.raise_if_cancelled()
-                except asyncio.CancelledError as error:
-                    settlement.raise_if_cancelled(error)
+                except asyncio.CancelledError:
                     raise
                 except Exception as err:
                     language_saved = False
                     logger.error(f"Failed to persist language setting: {err}")
                     settlement.raise_if_cancelled(err)
+                else:
+                    settlement.raise_if_cancelled()
 
             logger.info(
                 f"Updated settings for {settings_key}: show types = {show_message_types}, "

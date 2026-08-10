@@ -1488,8 +1488,13 @@ def test_synced_mutation_rolls_back_when_engine_awaitable_cancels_itself(tmp_pat
 
 
 def test_synced_mutation_caller_cancel_precedes_rollback_save_failure(tmp_path):
-    adapter = FakeAdapter([])
-    adapter.fail_sync = True
+    class FailFirstSyncAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            self.synced.append(tuple(bindings))
+            if len(self.synced) == 1:
+                raise RuntimeError("updated sync failed")
+
+    adapter = FailFirstSyncAdapter([])
     service = _service(tmp_path, adapter)
     original_save = service.store.save
     save_entered = threading.Event()
@@ -1528,11 +1533,17 @@ def test_synced_mutation_caller_cancel_precedes_rollback_save_failure(tmp_path):
     asyncio.run(exercise())
 
     assert service._engine_synced is False
+    assert len(adapter.synced) == 2
 
 
 def test_synced_mutation_rollback_save_failure_chains_sync_failure(tmp_path):
-    adapter = FakeAdapter([])
-    adapter.fail_sync = True
+    class FailFirstSyncAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            self.synced.append(tuple(bindings))
+            if len(self.synced) == 1:
+                raise RuntimeError("updated sync failed")
+
+    adapter = FailFirstSyncAdapter([])
     service = _service(tmp_path, adapter)
     original_save = service.store.save
     save_count = 0
@@ -1557,6 +1568,7 @@ def test_synced_mutation_rollback_save_failure_chains_sync_failure(tmp_path):
 
     assert isinstance(raised.value.__cause__, ModelHubError)
     assert service._engine_synced is False
+    assert len(adapter.synced) == 2
 
 
 def test_synced_mutation_rollback_self_cancel_preserves_sync_failure(tmp_path):

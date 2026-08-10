@@ -183,5 +183,12 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_reuses_persistent_app_server
+  - id: AUTH-SETUP-907
+    name: Codex auth persistence failure refreshes runtime before reporting failure
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: codex
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_persist_failure_refreshes_runtime_before_reporting_failure
 next_priority:
   - AUTH-SETUP-301

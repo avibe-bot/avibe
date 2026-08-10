@@ -298,6 +298,118 @@ def test_delete_custom_provider_settles_main_delete_and_live_state_on_cancellati
     assert api._OPENCODE_OPTIONS_CACHE == {}
 
 
+def test_delete_provider_auth_settles_after_config_delete_failure_and_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    server = _FakeServer(tmp_path)
+    server._write_auth({"deepseek": {"type": "api", "key": "sk-old"}})
+    delete_entered = threading.Event()
+    release_delete = threading.Event()
+    clear_calls: list[str] = []
+    restart_calls: list[str] = []
+
+    async def get_server():
+        return server
+
+    async def config_keys():
+        return {"deepseek"}
+
+    def failing_config_delete(provider_id: str, *_args, **_kwargs) -> None:
+        assert provider_id == "deepseek"
+        delete_entered.set()
+        assert release_delete.wait(timeout=5)
+        raise RuntimeError("config key delete failed")
+
+    monkeypatch.setattr(api, "_opencode_get_server", get_server)
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {"deepseek": {"type": "api", "key": "sk-old"}},
+    )
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", config_keys)
+    monkeypatch.setattr(
+        "vibe.opencode_config.remove_opencode_provider_api_key",
+        failing_config_delete,
+    )
+    monkeypatch.setattr(
+        api,
+        "_clear_opencode_default_provider_if",
+        lambda provider_id: clear_calls.append(provider_id),
+    )
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
+
+    async def exercise() -> None:
+        task = asyncio.create_task(api.delete_opencode_provider_auth_async("deepseek"))
+        assert await asyncio.to_thread(delete_entered.wait, 5)
+        task.cancel("delete cancelled")
+        await asyncio.sleep(0)
+        release_delete.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("delete cancelled",)
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "config key delete failed"
+
+    asyncio.run(exercise())
+
+    assert server._read_auth() == {}
+    assert clear_calls == ["deepseek"]
+    assert restart_calls == ["opencode"]
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+
+
+def test_delete_custom_provider_settles_after_auth_delete_then_custom_failure(
+    monkeypatch,
+) -> None:
+    clear_calls: list[str] = []
+    restart_calls: list[str] = []
+
+    async def committed_auth_delete(_provider_id: str) -> dict:
+        return {"ok": True}
+
+    def failing_custom_delete(*_args, **_kwargs) -> None:
+        raise RuntimeError("custom provider delete failed")
+
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_opencode_custom_provider",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {"custom": {"type": "api", "key": "sk-old"}},
+    )
+    monkeypatch.setattr(api, "_delete_opencode_provider_auth_async", committed_auth_delete)
+    monkeypatch.setattr(
+        "vibe.opencode_config.remove_opencode_custom_provider",
+        failing_custom_delete,
+    )
+    monkeypatch.setattr(
+        api,
+        "_clear_opencode_default_provider_if",
+        lambda provider_id: clear_calls.append(provider_id),
+    )
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
+
+    result = asyncio.run(api.delete_opencode_custom_provider_async("custom"))
+
+    assert result["ok"] is False
+    assert result["message"] == "custom provider delete failed"
+    assert result["restart"] == {"ok": True}
+    assert clear_calls == ["custom"]
+    assert restart_calls == ["opencode"]
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+
+
 def test_base_url_absent_leaves_existing_value_untouched(fake_save_env) -> None:
     from vibe.opencode_config import (
         read_opencode_provider_base_url,

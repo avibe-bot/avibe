@@ -20,7 +20,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from core.agent_auth_service import AgentAuthService
+from core.agent_auth_service import AgentAuthService, BackendAuthConfigSaveError
 from core.handlers.model_hub.service import ModelHubError
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
@@ -830,6 +830,30 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.text_contains(harness, "T74L-XU61D", index=1)
         ScenarioExpect.text_contains(harness, "codex login is active again")
         ScenarioExpect.flow_missing(harness, "C1:codex")
+
+    async def test_codex_persist_failure_refreshes_runtime_before_reporting_failure(self):
+        """Scenario: AUTH-SETUP-907"""
+        harness = AuthSetupScenarioHarness()
+        fake_process = FakeProcess()
+        harness.service._start_codex_process = AsyncMock(return_value=fake_process)
+        harness.service._read_codex_output = AsyncMock(return_value=None)
+        harness.service._verify_login = AsyncMock(return_value=(True, "Logged in"))
+        harness.service._persist_backend_auth_mode = AsyncMock(
+            side_effect=BackendAuthConfigSaveError("config save failed")
+        )
+        harness.service._refresh_backend_runtime = AsyncMock()
+
+        await harness.service.start_setup(
+            harness.context,
+            backend="codex",
+            force_reset=True,
+        )
+        flow = harness.flow("codex")
+        fake_process.finish(0)
+        await flow.waiter_task
+
+        harness.service._refresh_backend_runtime.assert_awaited_once_with("codex")
+        ScenarioExpect.text_contains(harness, "config save failed")
 
     async def test_codex_successful_setup_refreshes_runtime_before_the_next_turn(self):
         """Scenario: AUTH-SETUP-901"""
