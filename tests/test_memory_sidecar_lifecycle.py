@@ -207,6 +207,50 @@ async def test_recovery_during_initial_admission_discards_stale_health_and_queue
     assert lifecycle.snapshot().records_calls is False
 
 
+async def test_cancelled_initial_admission_schedules_queued_ready(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    initial_health_entered = asyncio.Event()
+    block_initial_health = asyncio.Event()
+    ready = asyncio.Event()
+    seen: list[dict[str, str | None]] = []
+    health_reads = 0
+
+    async def recorder_health() -> dict[str, str | None]:
+        nonlocal health_reads
+        health_reads += 1
+        if health_reads == 1:
+            initial_health_entered.set()
+            await block_initial_health.wait()
+        return {"state": "disabled", "reason": "writer_failures"}
+
+    lifecycle = _lifecycle(
+        tmp_path,
+        factory,
+        lambda _generation: ready.set(),
+        recorder_health,
+        seen.append,
+    )
+    start = asyncio.create_task(lifecycle.start(Path(sys.executable), _settings()))
+    try:
+        await asyncio.wait_for(initial_health_entered.wait(), timeout=1.0)
+        start.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
+        assert health_reads == 2
+        assert seen == [{"state": "disabled", "reason": "writer_failures"}]
+        assert lifecycle.snapshot().records_calls is False
+    finally:
+        block_initial_health.set()
+        if not start.done():
+            start.cancel()
+            await asyncio.gather(start, return_exceptions=True)
+        await lifecycle.close()
+
+
 async def test_runtime_disabled_recorder_hands_call_log_to_host_retention(
     tmp_path: Path,
 ) -> None:

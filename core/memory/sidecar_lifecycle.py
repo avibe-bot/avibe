@@ -167,8 +167,12 @@ class MemorySidecarLifecycle:
         launch_token = self._launch_token
         try:
             await self._admit_recorder_health(sidecar, generation, launch_token)
-        finally:
+        except BaseException:
             self._ready_admission_open = True
+            if self._ready_launch is not None and not self._closed:
+                self._ensure_ready_task()
+            raise
+        self._ready_admission_open = True
         launch_is_current = self._launch_is_current(
             sidecar,
             generation,
