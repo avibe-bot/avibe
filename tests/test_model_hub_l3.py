@@ -67,10 +67,12 @@ from modules.agents.model_hub import (
 )
 from storage.models import agent_sessions, messages, metadata
 from vibe.model_hub_runtime.adapter import (
+    _AuthenticationEvidence,
     CLIProxyEngineAdapter,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
     _ProtocolEvidence,
+    _ProtocolProof,
 )
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore
@@ -1376,11 +1378,23 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         "unsupported protocol path",
         status_code=404,
     )
+    proven_accepted = _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
+    )
+    proven_rejected = _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+    unproven_unknown = _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
 
     hinted_order = tuple(reversed(SOURCE_PROTOCOLS))
 
     async def every_candidate_is_supported(**_kwargs) -> _ProtocolEvidence:
-        return _ProtocolEvidence.AUTHENTICATED
+        return proven_accepted
 
     with (
         patch(
@@ -1409,7 +1423,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert inventory_probe.await_args.kwargs["protocol"] == hinted_order[0]
 
     async def indistinguishable_response(**_kwargs) -> _ProtocolEvidence:
-        return _ProtocolEvidence.UNPROVEN
+        return unproven_unknown
 
     with (
         patch(
@@ -1443,7 +1457,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     async def later_protocol_probe(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] != proved_protocol:
             raise unsupported
-        return _ProtocolEvidence.AUTHENTICATED
+        return proven_accepted
 
     with (
         patch(
@@ -1478,8 +1492,8 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
 
     async def rejected_then_authenticated(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] == rejected_protocol:
-            return _ProtocolEvidence.REJECTED
-        return _ProtocolEvidence.AUTHENTICATED
+            return proven_rejected
+        return proven_accepted
 
     with (
         patch(
@@ -1510,8 +1524,20 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     ]
     assert inventory_probe.await_args.kwargs["protocol"] == accepted_protocol
 
-    async def reject_every_candidate(**_kwargs) -> _ProtocolEvidence:
-        return _ProtocolEvidence.REJECTED
+    async def reject_every_candidate(**kwargs) -> _ProtocolEvidence:
+        return _parse_protocol_authenticated_evidence(
+            kwargs["protocol"],
+            401,
+            json.dumps(
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_api_key",
+                        "param": None,
+                    }
+                }
+            ),
+        )
 
     with (
         patch(
@@ -1658,34 +1684,60 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
     success_body: dict,
     error_body: dict,
 ) -> None:
-    assert (
-        _parse_protocol_authenticated_evidence(
-            protocol,
-            200,
-            json.dumps(success_body),
-        )
-        is _ProtocolEvidence.AUTHENTICATED
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        200,
+        json.dumps(success_body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
     )
-    assert (
-        _parse_protocol_authenticated_evidence(
-            protocol,
-            400,
-            json.dumps(error_body),
-        )
-        is _ProtocolEvidence.AUTHENTICATED
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        400,
+        json.dumps(error_body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
     )
-    assert (
-        _parse_protocol_authenticated_evidence(
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        401,
+        json.dumps(error_body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.REJECTED,
+    )
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        400,
+        "{}",
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+
+def test_shared_openai_authentication_rejection_does_not_prove_a_protocol() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+                "param": None,
+            }
+        }
+    )
+
+    for protocol in ("openai_responses", "openai_chat"):
+        assert _parse_protocol_authenticated_evidence(
             protocol,
             401,
-            json.dumps(error_body),
+            body,
+        ) == _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
         )
-        is _ProtocolEvidence.REJECTED
-    )
-    assert (
-        _parse_protocol_authenticated_evidence(protocol, 400, "{}")
-        is _ProtocolEvidence.UNPROVEN
-    )
 
 
 def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:

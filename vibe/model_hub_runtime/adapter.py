@@ -48,17 +48,25 @@ _OAUTH_ENDPOINTS = {
     "anthropic": ("/anthropic-auth-url", "anthropic", "claude"),
     "openai": ("/codex-auth-url", "codex", "codex"),
     "codex": ("/codex-auth-url", "codex", "codex"),
-    "antigravity": ("/antigravity-auth-url", "antigravity", "antigravity"),
-    "kimi": ("/kimi-auth-url", "kimi", "kimi"),
-    "xai": ("/xai-auth-url", "xai", "xai"),
 }
-_WEBUI_OAUTH_VENDORS = frozenset({"anthropic", "openai", "codex", "antigravity"})
+_WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
 
 
-class _ProtocolEvidence(Enum):
-    AUTHENTICATED = "authenticated"
-    REJECTED = "rejected"
+class _ProtocolProof(Enum):
+    PROVEN = "proven"
     UNPROVEN = "unproven"
+
+
+class _AuthenticationEvidence(Enum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class _ProtocolEvidence:
+    protocol: _ProtocolProof
+    authentication: _AuthenticationEvidence
 
 
 _OPENAI_ERROR_PARAMS = {
@@ -86,6 +94,12 @@ _OPENAI_ERROR_PARAMS = {
         }
     ),
 }
+_AUTHENTICATION_ERROR_IDENTIFIERS = frozenset(
+    {
+        "authentication_error",
+        "invalid_api_key",
+    }
+)
 
 
 def _parse_protocol_authenticated_evidence(
@@ -93,26 +107,34 @@ def _parse_protocol_authenticated_evidence(
     status: int,
     body: str | bytes,
 ) -> _ProtocolEvidence:
-    """Classify only response shapes that identify the attempted protocol.
+    """Classify protocol proof and authentication as independent evidence.
 
     Observation is sequential and stops at the first authenticated proof.
     Status, vendor, URL, and probe order never prove a protocol or credential
     by themselves; a generic response therefore remains unproven even when its
     HTTP status is conventionally associated with authentication or validation.
-    The observation result exposes a non-null protocol if and only if a
-    protocol-specific response shape also proves authentication acceptance.
+    A structured authentication error may prove credential rejection without
+    distinguishing the attempted OpenAI protocol. The observation result exposes
+    a non-null protocol if and only if a protocol-specific response shape also
+    proves authentication acceptance.
     """
 
     try:
         payload = json.loads(body)
     except (TypeError, UnicodeDecodeError, ValueError):
-        return _ProtocolEvidence.UNPROVEN
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
     if not isinstance(payload, dict):
-        return _ProtocolEvidence.UNPROVEN
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
 
     shaped = _successful_response_proves_protocol(protocol, payload)
+    error = payload.get("error")
     if not shaped:
-        error = payload.get("error")
         if protocol == "anthropic":
             shaped = (
                 payload.get("type") == "error"
@@ -121,11 +143,20 @@ def _parse_protocol_authenticated_evidence(
             )
         elif protocol in _OPENAI_ERROR_PARAMS and isinstance(error, dict):
             shaped = error.get("param") in _OPENAI_ERROR_PARAMS[protocol]
-    if not shaped:
-        return _ProtocolEvidence.UNPROVEN
-    if status in {401, 403}:
-        return _ProtocolEvidence.REJECTED
-    return _ProtocolEvidence.AUTHENTICATED
+    structured_rejection = isinstance(error, dict) and any(
+        isinstance(identifier, str)
+        and identifier.strip().lower() in _AUTHENTICATION_ERROR_IDENTIFIERS
+        for identifier in (error.get("code"), error.get("type"))
+    )
+    authentication = _AuthenticationEvidence.UNKNOWN
+    if structured_rejection or (shaped and status in {401, 403}):
+        authentication = _AuthenticationEvidence.REJECTED
+    elif shaped:
+        authentication = _AuthenticationEvidence.ACCEPTED
+    return _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN if shaped else _ProtocolProof.UNPROVEN,
+        authentication=authentication,
+    )
 
 
 async def _probe_protocol_response(
@@ -622,11 +653,13 @@ class CLIProxyEngineAdapter:
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
-            if evidence is _ProtocolEvidence.UNPROVEN:
-                received_unproven_response = True
-                continue
-            if evidence is _ProtocolEvidence.REJECTED:
+            if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
+            if (
+                evidence.protocol is not _ProtocolProof.PROVEN
+                or evidence.authentication is not _AuthenticationEvidence.ACCEPTED
+            ):
+                received_unproven_response = True
                 continue
             try:
                 if credential_kind == "api_key":
@@ -707,7 +740,9 @@ class CLIProxyEngineAdapter:
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None:
-            raise EngineStateError("unsupported OAuth vendor")
+            raise EngineStateError(
+                "OAuth vendor lacks Model Hub response-backed observation"
+            )
         engine_endpoint, callback_provider, auth_provider = endpoint
         with self._oauth_lock:
             self._expire_oauth_flows_locked()
