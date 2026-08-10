@@ -833,19 +833,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         except asyncio.CancelledError:
             logger.debug(f"OpenCode task cancelled for {request.base_session_id}")
         finally:
-            if self._active_requests.get(request.base_session_id) is task:
-                self._active_requests.pop(request.base_session_id, None)
-                self._session_manager.pop_request_session(request.base_session_id)
-            # The poll loop ran to completion above (handle_message awaits the
-            # task), so the turn is fully settled here. Release any web-Chat
-            # stream waiter: a no-result failure (only a notify was emitted)
-            # ends the spinner now instead of waiting out the safety timeout.
-            # Token-guarded + no-op for IM/CLI; success already released via the
-            # result emit during the poll. Defensive: tolerate controllers
-            # without streaming completion support.
-            _mark = getattr(self.controller, "mark_turn_complete", None)
-            if callable(_mark):
-                _mark(request.context)
+            # Stop holds this same lock until the native abort has settled. Keep
+            # the old request's Turn/session ownership until then, so a queued
+            # successor cannot reuse the native session under an in-flight abort.
+            async with lock:
+                if self._active_requests.get(request.base_session_id) is task:
+                    self._active_requests.pop(request.base_session_id, None)
+                    self._session_manager.pop_request_session(request.base_session_id)
+                # The poll loop ran to completion above (handle_message awaits the
+                # task), so the turn is fully settled here. Release any web-Chat
+                # stream waiter: a no-result failure (only a notify was emitted)
+                # ends the spinner now instead of waiting out the safety timeout.
+                # Token-guarded + no-op for IM/CLI; success already released via the
+                # result emit during the poll. Defensive: tolerate controllers
+                # without streaming completion support.
+                _mark = getattr(self.controller, "mark_turn_complete", None)
+                if callable(_mark):
+                    _mark(request.context)
 
     async def _process_message(self, request: AgentRequest) -> None:
         run_registered = False
@@ -1647,71 +1651,76 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         return True
 
     async def handle_stop(self, request: AgentRequest) -> bool:
-        task = self._active_requests.get(request.base_session_id)
-        if not task or task.done():
-            request.stop_failure_reason = "not_active"
-            return False
+        lock = self._session_manager.get_session_lock(request.base_session_id)
+        async with lock:
+            # Read the task only after claiming the same ownership boundary used
+            # to start and retire requests. A result that completed while Stop
+            # waited for the lock remains authoritative.
+            task = self._active_requests.get(request.base_session_id)
+            if not task or task.done():
+                request.stop_failure_reason = "not_active"
+                return False
 
-        req_info = self._session_manager.get_request_session(request.base_session_id)
-        opencode_session_id = None
-        if req_info:
-            opencode_session_id = req_info[0]
-        # Claimed BEFORE the abort: the request coroutine is what owns the 👀,
-        # and its cancellation handler is the only place that trades it for the
-        # ⏹️ receipt. The helper waits for any already-started steering write,
-        # then cancels under that same lock before awaiting the native abort.
-        self._user_stopped_sessions.add(request.base_session_id)
-        cancellation_claimed = False
-        try:
+            req_info = self._session_manager.get_request_session(request.base_session_id)
+            opencode_session_id = None
+            if req_info:
+                opencode_session_id = req_info[0]
+            # Claimed BEFORE the abort: the request coroutine is what owns the 👀,
+            # and its cancellation handler is the only place that trades it for the
+            # ⏹️ receipt. The helper waits for any already-started steering write,
+            # then cancels under that same lock before awaiting the native abort.
+            self._user_stopped_sessions.add(request.base_session_id)
+            cancellation_claimed = False
             try:
-                cancellation_claimed = await self._abort_active_request(
-                    request.base_session_id,
-                    task,
-                    req_info,
-                    cancel_before_abort=True,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to abort OpenCode session: {e}")
-                cancellation_claimed = task.cancelling() > 0 or task.cancelled()
+                try:
+                    cancellation_claimed = await self._abort_active_request(
+                        request.base_session_id,
+                        task,
+                        req_info,
+                        cancel_before_abort=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to abort OpenCode session: {e}")
+                    cancellation_claimed = task.cancelling() > 0 or task.cancelled()
 
-            if not cancellation_claimed:
-                # The runner completed while Stop was waiting for a steering
-                # write. Its result/error is authoritative; do not append a
-                # stopped receipt or a silent cancellation settlement.
-                logger.info(
-                    "OpenCode session %s completed before /stop claimed it",
-                    request.base_session_id,
-                )
-                return True
+                if not cancellation_claimed:
+                    # The runner completed while Stop was waiting for a steering
+                    # write. Its result/error is authoritative; do not append a
+                    # stopped receipt or a silent cancellation settlement.
+                    logger.info(
+                        "OpenCode session %s completed before /stop claimed it",
+                        request.base_session_id,
+                    )
+                    return True
 
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        finally:
-            # Only reached with the intent still set if something above raised
-            # past the handlers; a claimed intent is already gone.
-            self._user_stopped_sessions.discard(request.base_session_id)
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            finally:
+                # Only reached with the intent still set if something above raised
+                # past the handlers; a claimed intent is already gone.
+                self._user_stopped_sessions.discard(request.base_session_id)
 
-        if opencode_session_id:
-            self.sessions.remove_active_poll(opencode_session_id)
+            if opencode_session_id:
+                self.sessions.remove_active_poll(opencode_session_id)
 
-        # A user-initiated stop is terminal but intentional, so it carries NO
-        # user-facing message: a single SILENT result settles the dot to idle +
-        # releases the SSE waiter through the outbound chokepoint without a bubble
-        # (``level="silent"`` makes that explicit rather than faking it via empty text).
-        # ``stop_output_for`` (not the terminal-turn default) keeps this empty body out
-        # of the run's terminal state so the stop settles it ``canceled`` instead of
-        # ``succeeded`` — see its docstring.
-        await self.controller.emit_agent_message(
-            request.context,
-            "result",
-            "",
-            level="silent",
-            output=stop_output_for(request),
-        )
-        logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
-        return True
+            # A user-initiated stop is terminal but intentional, so it carries NO
+            # user-facing message: a single SILENT result settles the dot to idle +
+            # releases the SSE waiter through the outbound chokepoint without a bubble
+            # (``level="silent"`` makes that explicit rather than faking it via empty text).
+            # ``stop_output_for`` (not the terminal-turn default) keeps this empty body out
+            # of the run's terminal state so the stop settles it ``canceled`` instead of
+            # ``succeeded`` — see its docstring.
+            await self.controller.emit_agent_message(
+                request.context,
+                "result",
+                "",
+                level="silent",
+                output=stop_output_for(request),
+            )
+            logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
+            return True
 
     async def clear_sessions(self, session_key: str) -> int:
         self.sessions.clear_agent_sessions(session_key, self.name)

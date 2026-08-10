@@ -32,7 +32,11 @@ def _agent():
     agent = object.__new__(OpenCodeAgent)
     agent._active_requests = {}
     agent._user_stopped_sessions = set()
-    agent._session_manager = SimpleNamespace(get_request_session=lambda _base: None)
+    session_lock = asyncio.Lock()
+    agent._session_manager = SimpleNamespace(
+        get_request_session=lambda _base: None,
+        get_session_lock=lambda _base: session_lock,
+    )
 
     async def _abort(_base, task, _request_session, *, cancel_before_abort=False):
         if cancel_before_abort and not task.done():
@@ -55,6 +59,44 @@ def _request(session_id="session-1"):
 
 
 class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_abort_settles_before_request_releases_turn_ownership(self):
+        agent = _agent()
+        request = _request()
+        request_started = asyncio.Event()
+        abort_started = asyncio.Event()
+        release_abort = asyncio.Event()
+        agent.controller.mark_turn_complete = Mock()
+
+        async def in_flight(_request):
+            request_started.set()
+            await asyncio.Event().wait()
+
+        async def abort(_base, task, _request_session, *, cancel_before_abort=False):
+            self.assertTrue(cancel_before_abort)
+            task.cancel()
+            abort_started.set()
+            await release_abort.wait()
+            return True
+
+        agent._process_message = in_flight
+        agent._abort_active_request = abort
+        agent._session_manager.pop_request_session = Mock()
+
+        message_task = asyncio.create_task(agent.handle_message(request))
+        await request_started.wait()
+        stop_task = asyncio.create_task(agent.handle_stop(request))
+        await abort_started.wait()
+        await asyncio.sleep(0)
+
+        self.assertFalse(message_task.done())
+        agent.controller.mark_turn_complete.assert_not_called()
+
+        release_abort.set()
+        self.assertTrue(await stop_task)
+        await message_task
+
+        agent.controller.mark_turn_complete.assert_called_once_with(request.context)
+
     async def test_cancelled_request_sees_the_user_stop_intent(self):
         agent = _agent()
         observed: list[bool] = []

@@ -1409,8 +1409,8 @@ class SlackBot(BaseIMClient):
             "🤷": "shrug",
             # Terminal receipts. Both forms of each are listed because the
             # constants carry U+FE0F and callers may strip it.
-            "⏹️": "stop_button",
-            "⏹": "stop_button",
+            "⏹️": "black_square_for_stop",
+            "⏹": "black_square_for_stop",
             "⚠️": "warning",
             "⚠": "warning",
         }

@@ -489,13 +489,16 @@ class TerminalReceiptEmojiMappingTests(unittest.TestCase):
     def test_slack_maps_both_forms_to_short_names(self):
         from modules.im.slack import SlackBot
 
-        for emoji in self.receipts:
-            for form in (emoji, emoji.replace("️", "")):
-                with self.subTest(emoji=form):
-                    name = SlackBot._slack_reaction_name(form)
-                    # Unmapped codepoints fall through raw and reactions.add
-                    # rejects them with ``invalid_name``.
-                    self.assertTrue(name.isascii(), name)
+        expected = {
+            STOPPED_REACTION_EMOJI: "black_square_for_stop",
+            STOPPED_REACTION_EMOJI.replace("️", ""): "black_square_for_stop",
+            INTERRUPTED_REACTION_EMOJI: "warning",
+            INTERRUPTED_REACTION_EMOJI.replace("️", ""): "warning",
+        }
+        self.assertEqual(
+            {emoji: SlackBot._slack_reaction_name(emoji) for emoji in expected},
+            expected,
+        )
 
     def test_telegram_maps_to_supported_distinct_reactions(self):
         from modules.im.telegram import TelegramBot

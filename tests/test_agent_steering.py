@@ -110,9 +110,13 @@ class _OpenCodeSessionManager:
     def __init__(self, base_session_id: str, native_session_id: str, cwd: str) -> None:
         self.base_session_id = base_session_id
         self.request_session = (native_session_id, cwd, "session-key")
+        self.session_lock = asyncio.Lock()
 
     def get_request_session(self, base_session_id: str):
         return self.request_session if base_session_id == self.base_session_id else None
+
+    def get_session_lock(self, _base_session_id: str):
+        return self.session_lock
 
 
 class _OpenCodeServer:
