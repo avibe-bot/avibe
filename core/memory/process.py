@@ -34,7 +34,9 @@ from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     create_confined_file,
     ensure_private_directory,
+    open_confined_directory,
     open_confined_regular_file,
+    remove_anchored_entry,
 )
 from core.memory.everos import EverOSPort
 from core.memory.types import MemoryErrorCode
@@ -150,6 +152,90 @@ class _ProviderRootLock:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+
+
+class _PlannedReapTokens:
+    """One-shot provider-root handoff tokens bound to exact process generations."""
+
+    def __init__(self, provider_root: Path) -> None:
+        self._provider_root = provider_root
+
+    def _layout(self) -> tuple[Path, Path, str]:
+        """Resolve the secure namespace only after its provider parent exists."""
+
+        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
+        return (
+            lock_path.parent.parent,
+            lock_path.parent,
+            f"{lock_path.name}.handoff-",
+        )
+
+    def record(self, pid: int, created_at: float) -> None:
+        confinement_root, directory, prefix = self._layout()
+        path = self._path(directory, prefix, pid, created_at)
+        ensure_private_directory(
+            confinement_root,
+            directory,
+            harden_confinement_root=False,
+        )
+        try:
+            descriptor = create_confined_file(
+                confinement_root,
+                path,
+            )
+        except ConfinedFilesystemError:
+            # Rediscovery can name the same exact sidecar twice. A secure token
+            # is idempotent; a symlink, special file, or loose mode still fails.
+            descriptor = open_confined_regular_file(
+                confinement_root,
+                path,
+            )
+        os.close(descriptor)
+
+    def consume(self, pid: int, created_at: float) -> bool:
+        try:
+            confinement_root, directory, prefix = self._layout()
+            path = self._path(directory, prefix, pid, created_at)
+            descriptor = open_confined_regular_file(
+                confinement_root,
+                path,
+            )
+        except (ConfinedFilesystemError, OSError):
+            return False
+        try:
+            info = os.fstat(descriptor)
+            expected_identity = (info.st_dev, info.st_ino)
+        finally:
+            os.close(descriptor)
+        parent: int | None = None
+        try:
+            parent = open_confined_directory(
+                confinement_root,
+                directory,
+            )
+            remove_anchored_entry(
+                parent,
+                path.name,
+                expected_identity=expected_identity,
+            )
+        except ConfinedFilesystemError:
+            return False
+        finally:
+            if parent is not None:
+                os.close(parent)
+        return True
+
+    @staticmethod
+    def _path(
+        directory: Path,
+        prefix: str,
+        pid: int,
+        created_at: float,
+    ) -> Path:
+        generation = hashlib.sha256(
+            f"{pid}:{float(created_at).hex()}".encode("ascii")
+        ).hexdigest()
+        return directory / f"{prefix}{generation}"
 
 
 async def _wait_for_provider_root_lock(
@@ -699,11 +785,18 @@ class EverOSProcess:
             self._ownership.retire_if_group_is_clear(process.pid, process_group)
             self._starting = False
             await self._notify_reaped()
+            planned_reap = (
+                process.pid in owned_processes
+                and self._ownership.consume_planned_reap(
+                    process.pid,
+                    owned_processes[process.pid],
+                )
+            )
             if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
                 self._consecutive_failures = 0
             if not self._desired_running:
                 return
-            if _sidecar_exit_was_managed(process.returncode):
+            if planned_reap:
                 # Provider-root reconciliation terminates a supervised sidecar
                 # before taking over its root. That is an ownership handoff, not
                 # a child crash: restart through the shared lock without spending
@@ -1188,18 +1281,6 @@ def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult
     return RebuildProcessResult.FAILED
 
 
-def _sidecar_exit_was_managed(exit_code: int | None) -> bool:
-    """Whether an external owner intentionally terminated the sidecar."""
-
-    if exit_code is None or exit_code >= 0:
-        return False
-    terminating_signal = -exit_code
-    return terminating_signal in {
-        signal.SIGTERM,
-        getattr(signal, "SIGKILL", signal.SIGTERM),
-    }
-
-
 def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:
     """Release a bootstrap only after this parent has persisted ownership."""
 
@@ -1263,6 +1344,17 @@ class SidecarOwnership:
         self._role = role
         self._python = Path(python) if python is not None else None
         self._host = _SystemProcessHost() if _host is None else _host
+        self._planned_reaps = _PlannedReapTokens(self._provider_root)
+
+    def record_planned_reap(self, pid: int, created_at: float) -> None:
+        """Persist an exact one-shot handoff before terminating a live sidecar."""
+
+        self._planned_reaps.record(pid, created_at)
+
+    def consume_planned_reap(self, pid: int, created_at: float) -> bool:
+        """Consume this process generation's handoff, if one was recorded."""
+
+        return self._planned_reaps.consume(pid, created_at)
 
     def record_launch(self, pid: int, created_at: float, process_group: int | None) -> None:
         """Persist the launched child's identity so a later boot can reap an orphan.
@@ -1400,7 +1492,22 @@ class SidecarOwnership:
             )
 
         logger.warning("Reaping an orphaned EverOS %s left by a previous Avibe run", recorded_role.value)
-        if not await self._terminate_orphan_tree(pid, confirmed_create_time):
+        planned_sidecar_reap = (
+            self._role is _MemoryChildRole.CASCADE_REBUILD
+            and recorded_role is _MemoryChildRole.SIDECAR
+        )
+        if planned_sidecar_reap:
+            self.record_planned_reap(pid, confirmed_create_time)
+        terminated = False
+        try:
+            terminated = await self._terminate_orphan_tree(
+                pid,
+                confirmed_create_time,
+            )
+        finally:
+            if planned_sidecar_reap and not terminated:
+                self.consume_planned_reap(pid, confirmed_create_time)
+        if not terminated:
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self.record_path})")
         # The recorded root is gone, but a helper it spawned after the last
         # rediscovery is not among the identities that proved it. With the leader
@@ -1722,11 +1829,22 @@ class SidecarOwnership:
                         group,
                         foreign,
                     )
-            terminated, later_foreign = await self._terminate_claimed_processes(
-                group,
-                identities,
-                role=role,
+            planned_sidecar_reap = (
+                self._role is _MemoryChildRole.CASCADE_REBUILD
+                and role is _MemoryChildRole.SIDECAR
             )
+            if planned_sidecar_reap:
+                self.record_planned_reap(pid, created_at)
+            terminated = False
+            try:
+                terminated, later_foreign = await self._terminate_claimed_processes(
+                    group,
+                    identities,
+                    role=role,
+                )
+            finally:
+                if planned_sidecar_reap and not terminated:
+                    self.consume_planned_reap(pid, created_at)
             foreign = sorted(set(foreign).union(later_foreign))
             if not terminated:
                 raise RuntimeError(

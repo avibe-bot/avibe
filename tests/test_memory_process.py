@@ -876,7 +876,9 @@ def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
 
 def _write_orphan_record(process: EverOSProcess, record: dict) -> Path:
     path = process._ownership.record_path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(path.parent.parent, 0o700)
+    os.chmod(path.parent, 0o700)
     path.write_text(json.dumps(record), encoding="utf-8")
     return path
 
@@ -976,11 +978,20 @@ def test_new_sidecar_role_record_reaps_with_exact_role_environment(tmp_path: Pat
         process,
         _orphan_record(process, role="sidecar", python=sys.executable),
     )
+    rebuild = _rebuild_process(tmp_path, host)
 
-    asyncio.run(process._ownership.reap())
+    asyncio.run(rebuild._ownership.reap())
 
     assert not host.live_processes
     assert not record_path.exists()
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is True
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
 
 
 def test_legacy_sidecar_group_matching_remains_role_agnostic(tmp_path: Path) -> None:
@@ -1604,7 +1615,9 @@ def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
     )
     process = _orphan_process(tmp_path, host=host, stop_timeout_seconds=0.1)
     record_path = process._ownership.record_path
-    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(record_path.parent.parent, 0o700)
+    os.chmod(record_path.parent, 0o700)
     record_path.write_bytes(_UNUSABLE_RECORDS["truncated"])
     with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
         asyncio.run(process._ownership.reap())
@@ -1614,6 +1627,10 @@ def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
     assert str(_FOREIGN_GROUP_PID) not in caplog.text
     assert str(_FOREIGN_UID_GROUP_PID) not in caplog.text
     assert not record_path.exists()
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
 
 
 @pytest.mark.parametrize("corruption", sorted(_UNUSABLE_RECORDS))
@@ -1775,6 +1792,7 @@ async def test_planned_sidecar_reaps_do_not_consume_crash_budget(
         effective_home=tmp_path,
         settings=_settings(),
     )
+    process._memory_dir.mkdir(mode=0o700)
 
     async def terminate(*_args, **_kwargs) -> None:
         return None
@@ -1790,14 +1808,123 @@ async def test_planned_sidecar_reaps_do_not_consume_crash_budget(
         child.returncode = -termination_signal
         _supervising(process, child)
         process._desired_running = True
+        process._ownership.record_planned_reap(
+            child.pid,
+            _ORPHAN_CREATE_TIME,
+        )
 
         await process._watch_child(child)
         assert process._restart_task is not None
         await process._restart_task
+        assert process._ownership.consume_planned_reap(
+            child.pid,
+            _ORPHAN_CREATE_TIME,
+        ) is False
 
     assert process.consecutive_failures == 0
     assert process.down is False
     assert restart_delays == [0.0] * 5
+
+
+@pytest.mark.parametrize(
+    "termination_signal",
+    [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)],
+)
+async def test_unplanned_sidecar_signals_still_consume_crash_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    termination_signal: int,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._consecutive_failures = 4
+    child = _ExitedChild()
+    child.returncode = -termination_signal
+    _supervising(process, child)
+    process._desired_running = True
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 5
+    assert process.down is True
+    assert process._restart_task is None
+
+
+async def test_stale_planned_reap_cannot_exempt_replacement_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._memory_dir.mkdir(mode=0o700)
+    process._consecutive_failures = 4
+    process._ownership.record_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    )
+    child = _ExitedChild()
+    child.returncode = -signal.SIGTERM
+    replacement_create_time = _ORPHAN_CREATE_TIME + 1
+    process._process = child
+    process._process_group = _ORPHAN_PID
+    process._owned_processes = {_ORPHAN_PID: replacement_create_time}
+    process._desired_running = True
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 5
+    assert process.down is True
+    assert process._restart_task is None
+
+
+async def test_planned_reap_does_not_restart_a_stopped_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._memory_dir.mkdir(mode=0o700)
+    child = _ExitedChild()
+    child.returncode = -getattr(signal, "SIGKILL", signal.SIGTERM)
+    _supervising(process, child)
+    process._desired_running = False
+    process._ownership.record_planned_reap(
+        child.pid,
+        _ORPHAN_CREATE_TIME,
+    )
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 0
+    assert process._restart_task is None
+    assert process._ownership.consume_planned_reap(
+        child.pid,
+        _ORPHAN_CREATE_TIME,
+    ) is False
 
 
 def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
@@ -3984,6 +4111,14 @@ async def test_rebuild_boot_reaps_sidecar_from_another_home_on_shared_root(
     assert host.live_processes == {}
     assert host.signal_calls == [(identities, signal.SIGTERM, _ORPHAN_PID, None)]
     assert not process._ownership.record_path.exists()
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is True
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
 
 
 async def test_rebuild_boot_fails_closed_on_ambiguous_discovery(tmp_path: Path) -> None:
