@@ -434,8 +434,61 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
     assert manager.provider_root_format() == "everos-1.2.3"
     assert manager.compatible_provider_root_formats() == frozenset({"everos-1.2.3"})
     assert manager.artifact_fingerprint() == "dev-everos-1.2.3"
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert "DEV RUNTIME bypass active - not for production" in caplog.text
+
+
+def test_memory_artifact_smoke_requires_pinned_cli_cascade_module(
+    monkeypatch, tmp_path: Path
+) -> None:
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+    commands: list[list[str]] = []
+
+    def smoke_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="1.2.3\n3.12.12\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
+
+    assert MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True).resolve_python() == dev_python
+    assert "everos.entrypoints.cli.main" in commands[0][-1]
+    assert "everos.memory.cascade" in commands[0][-1]
+    assert "everalgo.types.modality" in commands[0][-1]
+
+
+def test_memory_artifact_rejects_scrubber_incompatibility_as_repairable_dependency_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+
+    def scrubber_fails(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        if "-I" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="1.2.3\n3.12.12\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="incompatible patch")
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", scrubber_fails)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    assert manager.resolve_python() is None
+    assert manager.status()["reason"] == "memory_runtime_install_failed"
 
 
 def test_memory_artifact_refuses_dev_runtime_without_importable_everos(monkeypatch, caplog, tmp_path: Path) -> None:

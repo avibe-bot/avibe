@@ -28,6 +28,35 @@ class SidecarSnapshot:
         return bool(self.process and self.process.running)
 
 
+@dataclass(frozen=True, slots=True)
+class RecorderAdmission:
+    """Closed projection of the child's recorder compatibility handshake."""
+
+    state: str
+    reason: str | None
+
+    @classmethod
+    def from_health(cls, value: object) -> "RecorderAdmission":
+        if not isinstance(value, dict):
+            return cls("degraded", "writer_failures")
+        state = value.get("state")
+        reason = value.get("reason")
+        if state == "active" and reason is None:
+            return cls(state, reason)
+        if state == "degraded" and isinstance(reason, str):
+            return cls(state, reason)
+        if state == "disabled" and reason in {None, "writer_failures"}:
+            return cls(state, reason)
+        return cls("degraded", "writer_failures")
+
+    @property
+    def records_calls(self) -> bool:
+        return self.state != "disabled"
+
+    def health(self) -> dict[str, str | None]:
+        return {"state": self.state, "reason": self.reason}
+
+
 class MemorySidecarLifecycle:
     """Own sidecar supervision, readiness admission, and recorder handoff.
 
@@ -46,6 +75,7 @@ class MemorySidecarLifecycle:
         retain_call_log: Callable[[], Awaitable[str | None]],
         on_current_sidecar_ready: Callable[[int], Awaitable[None] | None],
         on_recorder_health: Callable[[dict[str, str | None]], None],
+        read_recorder_health: Callable[[], Awaitable[dict[str, str | None]]],
     ) -> None:
         self._process_factory = process_factory
         self._provider_root = provider_root
@@ -55,6 +85,7 @@ class MemorySidecarLifecycle:
         self._retain_call_log = retain_call_log
         self._on_current_sidecar_ready = on_current_sidecar_ready
         self._on_recorder_health = on_recorder_health
+        self._read_recorder_health = read_recorder_health
         self._process: EverOSProcessPort | None = None
         self._generation = 0
         self._records_calls = False
@@ -84,6 +115,7 @@ class MemorySidecarLifecycle:
 
         await self.stop()
         await self._stop_retention()
+        self._ready_admission_open = False
         self._generation += 1
         generation = self._generation
         sidecar: EverOSProcessPort | None = None
@@ -122,18 +154,43 @@ class MemorySidecarLifecycle:
             if self._is_current(sidecar, generation):
                 self._records_calls = False
                 self._ensure_retention()
+            self._ready_admission_open = True
             raise
         if not started:
             if self._is_current(sidecar, generation):
                 self._records_calls = False
                 self._ensure_retention()
+            self._ready_admission_open = True
             return False
+        try:
+            await self._admit_recorder_health(sidecar, generation)
+        finally:
+            self._ready_admission_open = True
         # Runtime accepts the successful explicit start synchronously. The
         # supervisor's same-turn ready notification is therefore redundant;
         # later recovery notifications still emit the semantic event.
         if self._ready_generation == generation:
             self._ready_generation = None
         return True
+
+    async def _admit_recorder_health(
+        self,
+        sidecar: EverOSProcessPort,
+        generation: int,
+    ) -> None:
+        """Make the child health projection, not file timing, own recorder state."""
+
+        try:
+            health = await self._read_recorder_health()
+        except Exception:
+            health = {"state": "degraded", "reason": "writer_failures"}
+        if not self._is_current(sidecar, generation):
+            return
+        admission = RecorderAdmission.from_health(health)
+        self._on_recorder_health(admission.health())
+        if not admission.records_calls:
+            self._records_calls = False
+            self._ensure_retention()
 
     async def stop(self) -> None:
         """Stop the current child; failed cleanup intentionally retains ownership."""

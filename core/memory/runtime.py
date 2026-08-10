@@ -358,6 +358,7 @@ class MemoryRuntime:
             retain_call_log=self._maintain_call_log_once,
             on_current_sidecar_ready=self._current_sidecar_ready,
             on_recorder_health=self._update_recorder_health,
+            read_recorder_health=self._provider.recorder_health,
         )
         self._maintenance = MemoryMaintenance(
             None,
@@ -868,7 +869,6 @@ class MemoryRuntime:
         if not started:
             self._runtime_error = "memory_sidecar_unavailable"
             return {"ok": False, "error": self._runtime_error}
-        self._update_recorder_health(_RECORDER_DEGRADED)
         self._runtime_error = None
         self.module.resume_claims()
         self._ensure_worker()

@@ -13,6 +13,7 @@ import os
 import secrets
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterable
@@ -48,6 +49,7 @@ from core.memory.provider_root import (
     ProviderRootMetadata,
     ProviderRootState,
 )
+from core.memory.modality import pinned_modality_contract_script
 
 
 EVEROS_VERSION = "1.2.3"
@@ -72,12 +74,20 @@ _SMOKE_SCRIPT = (
     "import everos\n"
     "import uvicorn\n"
     "from everos.entrypoints.api.app import create_app\n"
+    "import everos.entrypoints.cli.main\n"
+    "import everos.memory.cascade\n"
     f"assert version('everos') == '{EVEROS_VERSION}'\n"
     "assert platform.python_version() == '3.12.12'\n"
     "assert everos is not None and uvicorn is not None\n"
     "assert callable(create_app)\n"
+    + pinned_modality_contract_script()
+    +
     "print(version('everos'))\n"
     "print(platform.python_version())\n"
+)
+_SCRUBBER_ADMISSION_SCRIPT = (
+    "from core.memory.everos_insight import install_error_scrubbers\n"
+    "install_error_scrubbers()\n"
 )
 
 
@@ -576,12 +586,44 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return {"ok": False, "reason": "memory_runtime_smoke_failed"}
         if result.returncode != 0 or result.stdout.splitlines() != [EVEROS_VERSION, EMBEDDED_PYTHON_VERSION]:
             return {"ok": False, "reason": "memory_runtime_smoke_failed"}
+        if not self._admit_error_scrubbers(binary):
+            return {"ok": False, "reason": "memory_runtime_prepare_failed"}
         return {
             "ok": True,
             "everos_version": EVEROS_VERSION,
             "python_version": EMBEDDED_PYTHON_VERSION,
             "lock_sha256": PACKAGE_LOCK_SHA256,
         }
+
+    def _admit_error_scrubbers(self, binary: Path) -> bool:
+        """Prove the child can install mandatory diagnostic scrubbers before launch."""
+
+        source_root = Path(__file__).resolve().parents[2]
+        try:
+            with tempfile.TemporaryDirectory(prefix="avibe-memory-admission-") as home:
+                child_home = Path(home)
+                result = subprocess.run(
+                    [str(binary), "-c", _SCRUBBER_ADMISSION_SCRIPT],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    cwd=str(source_root),
+                    env={
+                        "HOME": str(child_home),
+                        "PATH": os.defpath,
+                        "PYTHONNOUSERSITE": "1",
+                        "PYTHONPATH": str(source_root),
+                        "XDG_CACHE_HOME": str(child_home / ".cache"),
+                        "XDG_CONFIG_HOME": str(child_home / ".config"),
+                        "XDG_DATA_HOME": str(child_home / ".local" / "share"),
+                        "XDG_STATE_HOME": str(child_home / ".local" / "state"),
+                    },
+                    **isolated_subprocess_kwargs(),
+                )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0
 
 
 def _write_memory_pointer_atomic(

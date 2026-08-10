@@ -21,9 +21,18 @@ def _settings() -> EverOSProcessSettings:
     )
 
 
-def _lifecycle(tmp_path: Path, factory: FakeEverOSProcessFactory, ready) -> MemorySidecarLifecycle:
+def _lifecycle(
+    tmp_path: Path,
+    factory: FakeEverOSProcessFactory,
+    ready,
+    recorder_health=None,
+    on_recorder_health=None,
+) -> MemorySidecarLifecycle:
     async def retain() -> str | None:
         return None
+
+    async def read_recorder_health() -> dict[str, str | None]:
+        return {"state": "active", "reason": None}
 
     return MemorySidecarLifecycle(
         factory,
@@ -33,7 +42,8 @@ def _lifecycle(tmp_path: Path, factory: FakeEverOSProcessFactory, ready) -> Memo
         call_log_db_path=tmp_path / "memory" / "call-log" / "call-log.db",
         retain_call_log=retain,
         on_current_sidecar_ready=ready,
-        on_recorder_health=lambda _health: None,
+        on_recorder_health=on_recorder_health or (lambda _health: None),
+        read_recorder_health=recorder_health or read_recorder_health,
     )
 
 
@@ -56,6 +66,50 @@ async def test_start_assigns_owner_before_sidecar_callbacks_and_ignores_stale_re
     assert stale_reap is not None
     await stale_reap()
     assert lifecycle.snapshot().process is second
+    assert lifecycle.snapshot().records_calls is True
+
+
+async def test_start_handoffs_disabled_recorder_from_child_health_without_file_inference(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    seen: list[dict[str, str | None]] = []
+
+    async def disabled() -> dict[str, str | None]:
+        return {"state": "disabled", "reason": "writer_failures"}
+
+    lifecycle = _lifecycle(
+        tmp_path,
+        factory,
+        lambda _generation: None,
+        disabled,
+        seen.append,
+    )
+
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    assert seen == [{"state": "disabled", "reason": "writer_failures"}]
+    assert lifecycle.snapshot().records_calls is False
+
+
+async def test_start_keeps_recorder_ownership_when_child_health_is_malformed(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    seen: list[dict[str, str | None]] = []
+
+    async def malformed() -> dict[str, str | None]:
+        return {"state": "disabled", "reason": "unexpected"}
+
+    lifecycle = _lifecycle(
+        tmp_path,
+        factory,
+        lambda _generation: None,
+        malformed,
+        seen.append,
+    )
+
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    assert seen == [{"state": "degraded", "reason": "writer_failures"}]
     assert lifecycle.snapshot().records_calls is True
 
 
@@ -126,6 +180,7 @@ async def test_corrupt_host_log_stays_blocked_across_sidecar_reaps(tmp_path: Pat
         retain_call_log=retain,
         on_current_sidecar_ready=lambda _generation: None,
         on_recorder_health=lambda _health: None,
+        read_recorder_health=lambda: asyncio.sleep(0, result={"state": "active", "reason": None}),
     )
     lifecycle.handoff_to_host_retention()
     task = lifecycle.retention_task
@@ -167,6 +222,7 @@ async def test_recorder_corruption_blocks_host_retention_after_a_reap(tmp_path: 
         retain_call_log=retain,
         on_current_sidecar_ready=lambda _generation: None,
         on_recorder_health=lambda _health: None,
+        read_recorder_health=lambda: asyncio.sleep(0, result={"state": "active", "reason": None}),
     )
     lifecycle.observe_recorder_health({"state": "degraded", "reason": "call_log_corrupt"})
     assert await lifecycle.start(Path(sys.executable), _settings()) is True

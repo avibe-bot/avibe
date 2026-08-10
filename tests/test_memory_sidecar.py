@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from core.memory import everos
 from core.memory import sidecar
 from core.memory.sidecar import (
@@ -55,6 +57,30 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
     sidecar.serve(tmp_path / "everos.sock")
 
     assert captured["timeout_graceful_shutdown"] == 1
+
+
+def test_sidecar_rejects_artifact_before_everos_can_persist_diagnostics(
+    monkeypatch, tmp_path: Path
+) -> None:
+    imported = False
+
+    def scrubbers_fail() -> None:
+        raise RuntimeError("incompatible scrubber")
+
+    def import_app(_module: str):
+        nonlocal imported
+        imported = True
+        raise AssertionError("EverOS app must not load after scrubber rejection")
+
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.3")
+    monkeypatch.setattr(sidecar, "install_error_scrubbers", scrubbers_fail)
+    monkeypatch.setattr(sidecar.importlib, "import_module", import_app)
+    monkeypatch.setenv("AVIBE_MEMORY_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+
+    with pytest.raises(RuntimeError, match="incompatible scrubber"):
+        sidecar.serve(tmp_path / "everos.sock")
+
+    assert imported is False
 
 
 def test_sidecar_prepares_recorder_before_import_and_wraps_existing_lifespan(
