@@ -835,6 +835,92 @@ def test_memory_artifact_readmits_active_pointer_after_contract_revision(
         assert admissions == [binary]
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_memory_artifact_readmits_existing_install_before_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    admitted: bool,
+) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    binary_contents = b"#!/bin/sh\nexit 0\n"
+    binary_sha256 = hashlib.sha256(binary_contents).hexdigest()
+    archive = ManagedRuntimeArchive(
+        platform=memory_artifact.runtime_platform_tag(),
+        name="memory-runtime.tar.gz",
+        url="file:///memory-runtime.tar.gz",
+        sha256="d" * 64,
+        binary_sha256=binary_sha256,
+        size=1,
+        bin_path="bin/python",
+    )
+    manifest = ManagedRuntimeManifest(
+        schema_version=1,
+        runtime_version=memory_artifact.EVEROS_VERSION,
+        source="test",
+        source_url=None,
+        archives={archive.platform: archive},
+        digest="c" * 64,
+        loaded_from="test",
+        payload={
+            "release_state": "published",
+            "python_version": memory_artifact.EMBEDDED_PYTHON_VERSION,
+            "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
+            "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
+            "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
+            "provider_root_format": "everos-1.2.3",
+            "compatible_provider_root_formats": [],
+        },
+    )
+    install_dir = manager._manifest_install_dir(manifest, archive)
+    binary = install_dir / archive.bin_path
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(binary_contents)
+    binary.chmod(0o755)
+    manager._write_manifest_install_metadata(
+        install_dir,
+        manifest,
+        archive,
+        binary_sha256=binary_sha256,
+    )
+    manager._restore_current_pointer(
+        {
+            "provider": "manifest",
+            "runtime_id": manager.spec.runtime_id,
+            "runtime_version": manifest.runtime_version,
+            "platform": archive.platform,
+            "install_dir": str(install_dir),
+            "manifest_sha256": manifest.digest,
+            "archive_sha256": archive.sha256,
+            "bin_path": archive.bin_path,
+        }
+    )
+    monkeypatch.setattr(manager, "_load_manifest", lambda *, allow_network: manifest)
+    admissions: list[Path] = []
+
+    def admit(candidate: Path) -> dict[str, object]:
+        admissions.append(candidate)
+        return {
+            "ok": admitted,
+            "reason": None if admitted else "memory_runtime_install_failed",
+        }
+
+    monkeypatch.setattr(manager, "_prepare_binary", admit)
+
+    result = manager.ensure(force=False)
+
+    assert result["ok"] is admitted
+    assert result.get("reason") is (None if admitted else "memory_runtime_install_failed")
+    assert admissions == [binary]
+    active = manager._active_pointer()
+    assert active is not None
+    assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+    assert active["admission_ok"] is admitted
+    assert manager.resolve_python() == (binary if admitted else None)
+    if not admitted:
+        assert manager.status()["reason"] == "memory_runtime_install_failed"
+    assert admissions == [binary]
+
+
 def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Path) -> None:
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True, mode=0o700)

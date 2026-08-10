@@ -364,6 +364,51 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return False
         return True
 
+    def _reuse_existing_install(
+        self,
+        binary: Path,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-admit an existing install before activating it under this contract."""
+
+        try:
+            admission_ok = self._prepare_binary(binary).get("ok") is True
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to admit existing Memory runtime binary")
+            admission_ok = False
+        if not admission_ok:
+            try:
+                self._persist_active_pointer_admission(binary, admitted=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to persist rejected Memory runtime admission")
+            return self._failure(
+                "memory_runtime_install_failed",
+                manifest=manifest,
+                archive=archive,
+            )
+        return super()._reuse_existing_install(
+            binary,
+            install_dir,
+            manifest,
+            archive,
+            reason=reason,
+        )
+
+    def _persist_active_pointer_admission(self, binary: Path, *, admitted: bool) -> None:
+        current, invalid = self._read_active_pointer()
+        if invalid or current is None:
+            return
+        if self._verified_active_pointer_binary(current) != binary:
+            return
+        admitted_pointer = dict(current)
+        admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
+        admitted_pointer["admission_ok"] = admitted
+        self._restore_current_pointer(admitted_pointer)
+
     def _write_current_pointer(
         self,
         install_dir: Path,
