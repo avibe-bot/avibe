@@ -950,12 +950,13 @@ async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
     journal = maintenance._clear_journal
     assert journal is not None
     maintenance._backup_active = True
-    assert maintenance.observation_block_reason() == "busy"
+    assert (await maintenance.observe()).block_reason == "busy"
     maintenance._backup_active = False
     restore_journal = maintenance._backup_restore_journal
     assert restore_journal is not None
 
-    def unavailable_clear_journal():
+    def unavailable_clear_journal(*, operator_ref: str | None):
+        del operator_ref
         raise OSError("clear journal unavailable")
 
     with monkeypatch.context() as restore_patch:
@@ -964,10 +965,10 @@ async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
             "get_open_operation",
             lambda: object(),
         )
-        assert maintenance.observation_block_reason() == "busy"
+        assert (await maintenance.observe()).block_reason == "busy"
         restore_patch.setattr(
             journal,
-            "get_open_operation",
+            "observe_open_operation",
             unavailable_clear_journal,
         )
         observation = await runtime._processing_record_maintenance_observation(None)
