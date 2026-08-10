@@ -59,6 +59,7 @@ _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 _REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 _REBUILD_LOCK_PREFIX = "cascade-rebuild-"
 _REBUILD_LOCK_DIRECTORY = ".avibe-memory-locks"
+_PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
 _REBUILD_HANDSHAKE_TIMEOUT_SECONDS = 30.0
 _REBUILD_TIMEOUT_SECONDS = 30 * 60.0
 
@@ -151,6 +152,23 @@ class _ProviderRootLock:
             os.close(descriptor)
 
 
+async def _wait_for_provider_root_lock(
+    root_lock: _ProviderRootLock,
+    *,
+    keep_waiting: Callable[[], bool],
+) -> bool:
+    """Acquire without blocking the event loop or consuming crash budget."""
+
+    while keep_waiting():
+        try:
+            root_lock.acquire()
+        except _ProviderRootBusy:
+            await asyncio.sleep(_PROVIDER_LOCK_RETRY_INTERVAL_SECONDS)
+            continue
+        return True
+    return False
+
+
 @runtime_checkable
 class _ProcessHost(Protocol):
     """Host capabilities needed to supervise one owned sidecar process tree."""
@@ -235,10 +253,16 @@ class EverOSProcess:
         _host: _ProcessHost | None = None,
     ) -> None:
         self._python = Path(python)
-        self._effective_home = Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
+        effective_home_path = (
+            Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
+        )
+        self._effective_home = Path(os.path.abspath(os.fspath(effective_home_path)))
         self._memory_dir = self._effective_home / "memory"
         self._attachments_root = attachment_pin_root(self._effective_home)
-        self._provider_root = Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
+        provider_root_path = (
+            Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
+        )
+        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
         self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._host = _SystemProcessHost() if _host is None else _host
@@ -258,6 +282,7 @@ class EverOSProcess:
         self._watch_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._restart_task: asyncio.Task[None] | None = None
+        self._retained_provider_root_lock: _ProviderRootLock | None = None
         self._owned_processes: dict[int, float] = {}
         self._on_ready = on_ready
         self._before_start = before_start
@@ -329,7 +354,7 @@ class EverOSProcess:
         async with self._lifecycle_lock:
             if not self._desired_running or self.running or self._down or self._process is not None:
                 return self.running
-            return await self._start_locked()
+        return await self._start_with_provider_lock()
 
     async def stop(self) -> None:
         """Stop this object’s child group and every descendant it owns."""
@@ -355,7 +380,7 @@ class EverOSProcess:
                 # Only a reaped tracked child retires the record, and only once
                 # its group is clear. Stopping a supervisor that holds no child
                 # must leave any recorded orphan discoverable by the next launch.
-                self._ownership.retire_if_group_is_clear(process_group)
+                self._ownership.retire_if_group_is_clear(process.pid, process_group)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
@@ -368,6 +393,10 @@ class EverOSProcess:
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
+            retained_root_lock = self._retained_provider_root_lock
+            self._retained_provider_root_lock = None
+            if retained_root_lock is not None:
+                retained_root_lock.release()
             if process is not None:
                 await self._notify_reaped()
 
@@ -439,12 +468,14 @@ class EverOSProcess:
             self._write_generated_config()
             self._remove_owned_socket()
             child_env = self._child_environment(role=_MemoryChildRole.SIDECAR)
-            process = await self._host.spawn(
-                _ProcessKind.SIDECAR,
-                self._python,
-                cwd=self._memory_dir,
-                env=child_env,
-                socket_path=self._socket_path,
+            process, spawn_interrupted = await _finish_handoff_despite_cancellation(
+                self._host.spawn(
+                    _ProcessKind.SIDECAR,
+                    self._python,
+                    cwd=self._memory_dir,
+                    env=child_env,
+                    socket_path=self._socket_path,
+                )
             )
             self._process = process
             self._process_group = self._host.process_group(process.pid)
@@ -456,6 +487,8 @@ class EverOSProcess:
                 self._owned_processes[process.pid],
                 self._process_group,
             )
+            if spawn_interrupted:
+                raise asyncio.CancelledError
             self._started_at = time.monotonic()
             self._healthy_since = None
             await self._wait_for_ready(process)
@@ -466,6 +499,44 @@ class EverOSProcess:
             self._starting = False
             await self._notify_ready()
             return True
+        except asyncio.CancelledError:
+            self._desired_running = False
+            process = self._process
+            process_group = self._process_group
+            if process is not None:
+                try:
+                    await _finish_cleanup_despite_cancellation(
+                        self._terminate_owned_tree(
+                            process,
+                            process_group=process_group,
+                            owned_processes=dict(self._owned_processes),
+                        )
+                    )
+                except Exception:
+                    # Keep both the child identity and provider-root lock so a
+                    # rebuild cannot enter before Stop retries the cleanup.
+                    self._down = True
+                    self._last_error = "memory_sidecar_unavailable"
+                    self._starting = False
+                    raise
+                self._ownership.retire_if_group_is_clear(process.pid, process_group)
+            self._process = None
+            self._process_group = None
+            self._owned_processes = {}
+            self._started_at = None
+            self._healthy_since = None
+            watch_task = self._watch_task
+            self._watch_task = None
+            monitor_task = self._monitor_task
+            self._monitor_task = None
+            if watch_task is not None and watch_task is not asyncio.current_task():
+                watch_task.cancel()
+            if monitor_task is not None and monitor_task is not asyncio.current_task():
+                monitor_task.cancel()
+            self._remove_owned_socket()
+            self._starting = False
+            await _finish_cleanup_despite_cancellation(self._notify_reaped())
+            raise
         except Exception:
             # Every start failure collapses into `memory_sidecar_unavailable`, and
             # some of them are permanent: a recorded orphan that cannot be
@@ -499,7 +570,7 @@ class EverOSProcess:
                 # reaped, and only once its group is clear. A startup that failed
                 # while reaping a recorded orphan must leave that orphan
                 # discoverable by the next attempt.
-                self._ownership.retire_if_group_is_clear(process_group)
+                self._ownership.retire_if_group_is_clear(process.pid, process_group)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
@@ -521,6 +592,57 @@ class EverOSProcess:
             await self._notify_reaped()
             self._record_start_failure_locked()
             return False
+
+    async def _start_with_provider_lock(self) -> bool:
+        """Serialize sidecar admission with every rebuild of this provider root."""
+
+        async with self._lifecycle_lock:
+            if not self._desired_running or self.running or self._down or self._process is not None:
+                return self.running
+            self._starting = True
+        root_lock: _ProviderRootLock | None = None
+        try:
+            # The default provider root lives below this Avibe-owned directory.
+            # Only its parent is needed to resolve the adjacent lock; provider
+            # data remains untouched until lock admission succeeds.
+            _ensure_owner_directory(self._memory_dir)
+            root_lock = self._provider_root_lock()
+            acquired = await _wait_for_provider_root_lock(
+                root_lock,
+                keep_waiting=lambda: self._desired_running,
+            )
+        except asyncio.CancelledError:
+            async with self._lifecycle_lock:
+                self._starting = False
+            raise
+        except Exception:
+            logger.exception("EverOS sidecar provider-root admission failed")
+            async with self._lifecycle_lock:
+                self._starting = False
+                if self._desired_running:
+                    await self._notify_reaped()
+                    self._record_start_failure_locked()
+            return False
+        if not acquired:
+            async with self._lifecycle_lock:
+                self._starting = False
+                return self.running
+        try:
+            async with self._lifecycle_lock:
+                if (
+                    not self._desired_running
+                    or self.running
+                    or self._down
+                    or self._process is not None
+                ):
+                    self._starting = False
+                    return self.running
+                return await self._start_locked()
+        finally:
+            if self._process is not None and self._down:
+                self._retained_provider_root_lock = root_lock
+            else:
+                root_lock.release()
 
     async def _wait_for_ready(self, process: asyncio.subprocess.Process) -> None:
         deadline = time.monotonic() + self._startup_timeout_seconds
@@ -574,7 +696,7 @@ class EverOSProcess:
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
-            self._ownership.retire_if_group_is_clear(process_group)
+            self._ownership.retire_if_group_is_clear(process.pid, process_group)
             self._starting = False
             await self._notify_reaped()
             if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
@@ -634,7 +756,7 @@ class EverOSProcess:
                 self._healthy_since = None
                 self._monitor_task = None
                 self._remove_owned_socket()
-                self._ownership.retire_if_group_is_clear(process_group)
+                self._ownership.retire_if_group_is_clear(process.pid, process_group)
                 await self._notify_reaped()
 
     def _record_start_failure_locked(self) -> None:
@@ -655,15 +777,7 @@ class EverOSProcess:
                     return
             if not await self._await_before_start():
                 return
-            async with self._lifecycle_lock:
-                if (
-                    not self._desired_running
-                    or self.running
-                    or self._down
-                    or self._process is not None
-                ):
-                    return
-                await self._start_locked()
+            await self._start_with_provider_lock()
         except asyncio.CancelledError:
             return
 
@@ -680,6 +794,13 @@ class EverOSProcess:
             memory_dir=self._memory_dir,
             provider_root=self._provider_root,
             settings=self._settings,
+        )
+
+    def _provider_root_lock(self) -> _ProviderRootLock:
+        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
+        return _ProviderRootLock(
+            confinement_root=lock_path.parent.parent,
+            path=lock_path,
         )
 
     def _write_generated_config(self) -> None:
@@ -1379,7 +1500,11 @@ class SidecarOwnership:
                 f"(leader pid {leader_pid}, group {group}, record {self.record_path})"
             )
 
-    def retire_if_group_is_clear(self, process_group: int | None) -> None:
+    def retire_if_group_is_clear(
+        self,
+        leader_pid: int,
+        process_group: int | None,
+    ) -> None:
         """Retire the ownership record, unless the group still holds one of ours.
 
         A successful ``_terminate_owned_tree`` proves that every identity it
@@ -1401,6 +1526,18 @@ class SidecarOwnership:
         overwrites the record as it always has.
         """
 
+        record = _read_sidecar_record(self.record_path)
+        if (
+            _recorded_sidecar_pid(record) != leader_pid
+            or _recorded_child_role(record) is not self._role
+            or _recorded_sidecar_group(
+                record,
+                socket_path=self._socket_path,
+                provider_root=self._provider_root,
+            )
+            != process_group
+        ):
+            return
         if process_group is not None:
             claimed, _foreign = self._host.recorded_group_members(
                 process_group,

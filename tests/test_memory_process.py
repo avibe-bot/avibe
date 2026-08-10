@@ -1747,7 +1747,11 @@ def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
         events.append("tree-cleaned")
 
     monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
-    monkeypatch.setattr(process._ownership, "retire_if_group_is_clear", lambda _group: events.append("retired"))
+    monkeypatch.setattr(
+        process._ownership,
+        "retire_if_group_is_clear",
+        lambda _pid, _group: events.append("retired"),
+    )
 
     asyncio.run(process._watch_child(child))
 
@@ -2759,6 +2763,334 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
         owner.stdin.close()
         await owner.wait()
         assert owner.returncode == 0
+
+
+async def _hold_provider_root_lock(provider_root: Path) -> asyncio.subprocess.Process:
+    lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
+    lock_path.parent.mkdir(mode=0o700)
+    script = "\n".join(
+        (
+            "import fcntl",
+            "import os",
+            "import sys",
+            "descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)",
+            "fcntl.flock(descriptor, fcntl.LOCK_EX)",
+            "print('locked', flush=True)",
+            "sys.stdin.read(1)",
+            "fcntl.flock(descriptor, fcntl.LOCK_UN)",
+            "os.close(descriptor)",
+        )
+    )
+    owner = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(lock_path),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert owner.stdout is not None
+    assert await owner.stdout.readline() == b"locked\n"
+    return owner
+
+
+async def _release_provider_root_lock(owner: asyncio.subprocess.Process) -> None:
+    assert owner.stdin is not None
+    owner.stdin.write(b"\n")
+    await owner.stdin.drain()
+    owner.stdin.close()
+    await owner.wait()
+    assert owner.returncode == 0
+
+
+@pytest.mark.parametrize("entrypoint", ["start", "supervisor_restart"])
+async def test_sidecar_start_and_restart_wait_for_shared_rebuild_lock(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+    entrypoint: str,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o755)
+    sentinel = provider_root / "owner-data"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    owner = await _hold_provider_root_lock(provider_root)
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "other-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    lock_attempted = asyncio.Event()
+    ownership_scan = asyncio.Event()
+    original_acquire = memory_process._ProviderRootLock.acquire
+
+    def observe_lock_attempt(root_lock) -> None:
+        lock_attempted.set()
+        original_acquire(root_lock)
+
+    async def observe_reap() -> None:
+        ownership_scan.set()
+
+    async def ready(_child) -> None:
+        return None
+
+    monkeypatch.setattr(memory_process._ProviderRootLock, "acquire", observe_lock_attempt)
+    monkeypatch.setattr(process._ownership, "reap", observe_reap)
+    monkeypatch.setattr(process, "_wait_for_ready", ready)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+    if entrypoint == "start":
+        start_task = asyncio.create_task(process.start())
+    else:
+        process._desired_running = True
+        start_task = asyncio.create_task(process._restart_after(0))
+    try:
+        await asyncio.wait_for(lock_attempted.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        assert not start_task.done()
+        assert not ownership_scan.is_set()
+        assert host.spawn_calls == []
+        assert stat.S_IMODE(provider_root.stat().st_mode) == 0o755
+        assert sentinel.read_text(encoding="utf-8") == "unchanged"
+        assert sorted(path.name for path in provider_root.iterdir()) == ["owner-data"]
+
+        await _release_provider_root_lock(owner)
+        result = await asyncio.wait_for(start_task, timeout=1.0)
+        assert result is (True if entrypoint == "start" else None)
+        assert process.running
+        assert ownership_scan.is_set()
+        assert len(host.spawn_calls) == 1
+    finally:
+        if owner.returncode is None:
+            await _release_provider_root_lock(owner)
+        if process.running:
+            await process.stop()
+
+
+async def test_sidecar_stop_and_cancellation_end_a_busy_root_wait(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o755)
+    owner = await _hold_provider_root_lock(provider_root)
+    host = _FakeProcessHost()
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "other-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    lock_attempted = asyncio.Event()
+    original_acquire = memory_process._ProviderRootLock.acquire
+
+    def observe_lock_attempt(root_lock) -> None:
+        lock_attempted.set()
+        original_acquire(root_lock)
+
+    monkeypatch.setattr(memory_process._ProviderRootLock, "acquire", observe_lock_attempt)
+    try:
+        start_task = asyncio.create_task(process.start())
+        await asyncio.wait_for(lock_attempted.wait(), timeout=0.5)
+        await asyncio.wait_for(process.stop(), timeout=0.5)
+        assert await asyncio.wait_for(start_task, timeout=0.5) is False
+        assert process.consecutive_failures == 0
+        assert process.last_error is None
+        assert process.down is False
+        assert process.starting is False
+        assert host.spawn_calls == []
+
+        lock_attempted.clear()
+        cancelled_start = asyncio.create_task(process.start())
+        await asyncio.wait_for(lock_attempted.wait(), timeout=0.5)
+        cancelled_start.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_start
+        assert process.consecutive_failures == 0
+        assert process.last_error is None
+        assert process.down is False
+        assert process.starting is False
+        assert host.spawn_calls == []
+    finally:
+        await process.stop()
+        await _release_provider_root_lock(owner)
+
+
+async def test_sidecar_stop_does_not_retire_an_active_rebuild_record(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        _host=host,
+    )
+    process._process = child
+    process._process_group = child.pid
+    process._owned_processes = dict(identities)
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(
+            {
+                "pid": _ORPHAN_DESCENDANT_PID,
+                "create_time": _ORPHAN_CREATE_TIME + 1,
+                "process_group": _ORPHAN_DESCENDANT_PID,
+                "socket_path": str(process._socket_path),
+                "provider_root": str(process._provider_root),
+                "role": "cascade_rebuild",
+                "python": sys.executable,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await process.stop()
+
+    record = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+    assert record["role"] == "cascade_rebuild"
+    assert record["pid"] == _ORPHAN_DESCENDANT_PID
+
+
+@pytest.mark.parametrize("cancel_stage", ["spawn_handoff", "readiness"])
+async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+    cancel_stage: str,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o700)
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+
+    class _BlockingStartHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.spawn_started = asyncio.Event()
+            self.release_spawn = asyncio.Event()
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def spawn(self, *args, **kwargs):
+            self.live_processes[child.pid] = _ORPHAN_CREATE_TIME
+            self.spawn_started.set()
+            if cancel_stage == "spawn_handoff":
+                await self.release_spawn.wait()
+            return await super().spawn(*args, **kwargs)
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    host = _BlockingStartHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+    )
+    retention_started = asyncio.Event()
+
+    async def on_reaped() -> None:
+        assert host.live_processes == {}
+        assert not process._ownership.record_path.exists()
+        retention_started.set()
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        stop_timeout_seconds=0.1,
+        on_reaped=on_reaped,
+        _host=host,
+    )
+    ready_started = asyncio.Event()
+    release_ready = asyncio.Event()
+
+    async def blocking_ready(_child) -> None:
+        ready_started.set()
+        await release_ready.wait()
+
+    monkeypatch.setattr(process, "_wait_for_ready", blocking_ready)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+    start_task = asyncio.create_task(process.start())
+    try:
+        if cancel_stage == "spawn_handoff":
+            await asyncio.wait_for(host.spawn_started.wait(), timeout=0.5)
+        else:
+            await asyncio.wait_for(ready_started.wait(), timeout=0.5)
+            assert process._ownership.record_path.exists()
+        start_task.cancel()
+        await asyncio.sleep(0)
+        assert not start_task.done()
+        host.release_spawn.set()
+        release_ready.set()
+        await asyncio.wait_for(host.cleanup_started.wait(), timeout=0.5)
+
+        contender_host = _FakeProcessHost()
+        contender = EverOSRebuildProcess(
+            sys.executable,
+            effective_home=tmp_path / "rebuild-home",
+            provider_root=provider_root,
+            settings=_settings(),
+            stop_timeout_seconds=0.1,
+            _host=contender_host,
+        )
+        assert await contender.run() is RebuildProcessResult.ROOT_BUSY
+        assert contender_host.spawn_calls == []
+        assert not start_task.done()
+
+        host.release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert host.live_processes == {}
+        assert not process._ownership.record_path.exists()
+        assert retention_started.is_set()
+        assert process.consecutive_failures == 0
+        assert process.starting is False
+
+        rebuild_child = _RebuildChild(0, pid=_ORPHAN_DESCENDANT_PID)
+        rebuild_identities = {
+            rebuild_child.pid: _ORPHAN_CREATE_TIME + 1,
+        }
+        contender_host.spawns.append(rebuild_child)
+        contender_host.trees[(rebuild_child.pid, None)] = rebuild_identities
+        contender_host.live_processes.update(rebuild_identities)
+        assert await contender.run() is RebuildProcessResult.COMPLETED
+    finally:
+        host.release_spawn.set()
+        release_ready.set()
+        host.release_cleanup.set()
+        if process._process is not None:
+            await process.stop()
 
 
 async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) -> None:
