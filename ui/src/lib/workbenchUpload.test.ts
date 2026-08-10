@@ -24,7 +24,7 @@ describe('workbench attachment upload', () => {
     }, { status: 201 }));
     const file = new File(['hello'], '报告.txt', { type: 'text/plain' });
 
-    await expect(uploadWorkbenchAttachment('ses/one', file)).resolves.toMatchObject({
+    await expect(uploadWorkbenchAttachment('ses/one', file, 'upload-id-123456')).resolves.toMatchObject({
       token: 'media-token',
       size: 5,
     });
@@ -33,6 +33,7 @@ describe('workbench attachment upload', () => {
     expect(path).toBe('/api/sessions/ses%2Fone/attachments');
     expect(init.method).toBe('POST');
     expect(init.headers).toBeUndefined();
+    expect((init.body as FormData).get('upload_id')).toBe('upload-id-123456');
     expect((init.body as FormData).get('file')).toMatchObject({
       name: '报告.txt',
       size: 5,
@@ -44,7 +45,7 @@ describe('workbench attachment upload', () => {
     const file = new File(['x'], 'large.bin');
     Object.defineProperty(file, 'size', { value: MAX_WORKBENCH_ATTACHMENT_BYTES + 1 });
 
-    await expect(uploadWorkbenchAttachment('ses-1', file)).rejects.toMatchObject({
+    await expect(uploadWorkbenchAttachment('ses-1', file, 'upload-id-123456')).rejects.toMatchObject({
       code: 'too_large',
       status: 413,
     });
@@ -57,7 +58,11 @@ describe('workbench attachment upload', () => {
       error: { code: 'session_not_found', message: 'Session not found' },
     }, { status: 404 }));
 
-    const promise = uploadWorkbenchAttachment('missing', new File(['x'], 'x.txt'));
+    const promise = uploadWorkbenchAttachment(
+      'missing',
+      new File(['x'], 'x.txt'),
+      'upload-id-123456',
+    );
 
     await expect(promise).rejects.toEqual(expect.objectContaining({
       name: 'WorkbenchUploadError',
@@ -70,7 +75,7 @@ describe('workbench attachment upload', () => {
     api.apiFetch.mockRejectedValue(new TypeError('Failed to fetch'));
 
     await expect(
-      uploadWorkbenchAttachment('ses-1', new File(['x'], 'x.txt')),
+      uploadWorkbenchAttachment('ses-1', new File(['x'], 'x.txt'), 'upload-id-123456'),
     ).rejects.toMatchObject({ code: 'network_error' });
   });
 });

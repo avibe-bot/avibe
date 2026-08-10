@@ -224,6 +224,14 @@
       }
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
+    "workbenchAttachment": {
+      "session_not_found": "This session is no longer available.",
+      "file_required": "Choose a file to upload.",
+      "empty_file": "Empty files cannot be uploaded.",
+      "too_large": "The file exceeds the attachment size limit.",
+      "invalid_upload": "The file upload is invalid.",
+      "upload_failed": "The file could not be saved. Please try again."
+    },
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` is built in and cannot be deleted.",

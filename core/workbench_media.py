@@ -22,7 +22,9 @@ import io
 import logging
 import os
 import re
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -40,6 +42,9 @@ MAX_SHOW_SCREENSHOT_LONG_EDGE = 2048
 MAX_SHOW_SCREENSHOT_BYTES = 25 * 1024 * 1024
 MAX_WORKBENCH_ATTACHMENT_BYTES = 25 * 1024 * 1024
 _WORKBENCH_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_WORKBENCH_UPLOAD_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,80}")
+_WORKBENCH_UPLOAD_LOCKS_GUARD = threading.Lock()
+_WORKBENCH_UPLOAD_LOCKS: dict[str, "_WorkbenchUploadLock"] = {}
 _SHOW_SCREENSHOT_DATA_URL_RE = re.compile(
     r"\Adata:(image/(?P<format>png|webp));base64,(?P<data>[A-Za-z0-9+/=]+)\Z",
     re.IGNORECASE,
@@ -79,6 +84,46 @@ class MaterializedWorkbenchAttachment:
     path: str
     width: int | None
     height: int | None
+    created: bool
+
+
+@dataclass
+class _WorkbenchUploadLock:
+    lock: threading.Lock
+    users: int = 0
+
+
+def normalize_workbench_upload_id(value: object) -> str | None:
+    """Validate the optional stable browser key used for upload retries."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or _WORKBENCH_UPLOAD_ID_RE.fullmatch(value) is None:
+        raise WorkbenchAttachmentUploadError("invalid_upload", "Upload ID is invalid", 400)
+    return value
+
+
+@contextmanager
+def workbench_attachment_upload_lock(session_id: str, upload_id: str | None):
+    """Serialize retries for one upload key without serializing other files."""
+    if upload_id is None:
+        yield
+        return
+    key = f"{session_id}\0{upload_id}"
+    with _WORKBENCH_UPLOAD_LOCKS_GUARD:
+        entry = _WORKBENCH_UPLOAD_LOCKS.get(key)
+        if entry is None:
+            entry = _WorkbenchUploadLock(lock=threading.Lock())
+            _WORKBENCH_UPLOAD_LOCKS[key] = entry
+        entry.users += 1
+    entry.lock.acquire()
+    try:
+        yield
+    finally:
+        entry.lock.release()
+        with _WORKBENCH_UPLOAD_LOCKS_GUARD:
+            entry.users -= 1
+            if entry.users == 0:
+                _WORKBENCH_UPLOAD_LOCKS.pop(key, None)
 
 
 def materialize_workbench_attachment(
@@ -89,6 +134,7 @@ def materialize_workbench_attachment(
     file_name: object,
     content_type: object,
     source: BinaryIO,
+    upload_id: object = None,
 ) -> MaterializedWorkbenchAttachment:
     """Stream one browser upload to disk and register its media capability.
 
@@ -102,12 +148,40 @@ def materialize_workbench_attachment(
     mime = raw_mime[:255] or "application/octet-stream"
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "upload"
     safe_name = safe_name[-160:]
+    stable_upload_id = normalize_workbench_upload_id(upload_id)
 
     upload_dir = paths.get_attachments_dir() / "avibe" / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    upload_id = uuid.uuid4().hex[:16]
-    local_path = upload_dir / f"{upload_id}_{safe_name}"
-    temp_path = upload_dir / f".{upload_id}.tmp"
+    path_id = stable_upload_id or uuid.uuid4().hex[:16]
+    if stable_upload_id:
+        for candidate in sorted(upload_dir.glob(f"{stable_upload_id}_*")):
+            if not candidate.is_file():
+                continue
+            candidate_path = str(candidate.resolve())
+            existing = media_service.get_live_user_upload_by_path(
+                conn,
+                session_id=session_id,
+                local_path=candidate_path,
+            )
+            if existing:
+                return MaterializedWorkbenchAttachment(
+                    token=existing["token"],
+                    name=existing.get("file_name") or name,
+                    mime=existing.get("content_type") or mime,
+                    size=existing.get("size_bytes") or candidate.stat().st_size,
+                    kind=existing.get("kind") or "file",
+                    path=candidate_path,
+                    width=existing.get("width_px"),
+                    height=existing.get("height_px"),
+                    created=False,
+                )
+            candidate.unlink(missing_ok=True)
+        for stale_temp in upload_dir.glob(f".{stable_upload_id}.*.tmp"):
+            stale_temp.unlink(missing_ok=True)
+
+    local_path = upload_dir / f"{path_id}_{safe_name}"
+    canonical_path = str(local_path.resolve())
+    temp_path = upload_dir / f".{path_id}.{uuid.uuid4().hex[:8]}.tmp"
     size = 0
     try:
         with temp_path.open("xb") as target:
@@ -155,6 +229,7 @@ def materialize_workbench_attachment(
         path=canonical_path,
         width=row.get("width_px") if row else None,
         height=row.get("height_px") if row else None,
+        created=True,
     )
 
 

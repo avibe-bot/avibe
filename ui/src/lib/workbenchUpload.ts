@@ -50,6 +50,7 @@ const normalizedErrorCode = (code: unknown): WorkbenchUploadErrorCode => {
 export async function uploadWorkbenchAttachment(
   sessionId: string,
   file: File,
+  uploadId: string,
 ): Promise<WorkbenchUploadResult> {
   if (file.size === 0) throw new WorkbenchUploadError('empty_file', 'File is empty', 400);
   if (file.size > MAX_WORKBENCH_ATTACHMENT_BYTES) {
@@ -57,6 +58,7 @@ export async function uploadWorkbenchAttachment(
   }
 
   const form = new FormData();
+  form.append('upload_id', uploadId);
   form.append('file', file, file.name);
 
   let response: Response;

@@ -14,6 +14,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -330,6 +331,7 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     upload = client.post(
         f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
         files={"file": ("diagram.png", b"attachment-bytes", "image/png")},
         headers=headers,
         base_url="http://127.0.0.1:15131",
@@ -1709,6 +1711,7 @@ def test_attachment_upload_preserves_unicode_name_and_binary_body(isolated_state
 
     response = client.post(
         f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
         files={"file": ("报告.txt", b"raw-binary\x00body", "text/plain")},
         headers=csrf_headers(client),
     )
@@ -1743,6 +1746,7 @@ def test_attachment_upload_rejects_oversized_part_without_partial_file(
 
     response = client.post(
         f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
         files={"file": ("large.bin", b"12345", "application/octet-stream")},
         headers=csrf_headers(client),
     )
@@ -1752,8 +1756,10 @@ def test_attachment_upload_rejects_oversized_part_without_partial_file(
         "ok": False,
         "error": {
             "code": "too_large",
-            "message": "File exceeds the attachment size limit",
+            "message": "The file exceeds the attachment size limit.",
         },
+        "code": "too_large",
+        "message": "The file exceeds the attachment size limit.",
         "max_file_bytes": 4,
     }
     upload_dir = paths.get_attachments_dir() / "avibe" / session_id
@@ -1778,6 +1784,7 @@ def test_attachment_upload_cleans_partial_file_after_registration_failure(
     client = app.test_client()
     response = client.post(
         f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
         files={"file": ("note.txt", b"hello", "text/plain")},
         headers=csrf_headers(client),
     )
@@ -1786,6 +1793,69 @@ def test_attachment_upload_cleans_partial_file_after_registration_failure(
     assert response.get_json()["error"]["code"] == "upload_failed"
     upload_dir = paths.get_attachments_dir() / "avibe" / session_id
     assert not upload_dir.exists() or not list(upload_dir.iterdir())
+
+
+def test_attachment_upload_retry_reuses_committed_file_and_token(isolated_state, tmp_path):
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.models import media_objects
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    first = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=headers,
+    )
+    retried = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=headers,
+    )
+
+    assert first.status_code == 201
+    assert retried.status_code == 200
+    assert retried.get_json()["token"] == first.get_json()["token"]
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert len(list(upload_dir.iterdir())) == 1
+    with create_sqlite_engine().connect() as conn:
+        rows = conn.execute(
+            select(media_objects.c.token).where(
+                media_objects.c.session_id == session_id,
+                media_objects.c.source == "user_upload",
+            )
+        ).all()
+    assert rows == [(first.get_json()["token"],)]
+
+
+def test_attachment_upload_errors_follow_configured_language(isolated_state, monkeypatch):
+    from core.services import settings as settings_service
+    from vibe.ui_server import app
+
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        lambda: SimpleNamespace(language="zh"),
+    )
+    client = app.test_client()
+
+    response = client.post(
+        "/api/sessions/ses_missing/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"] == {
+        "code": "session_not_found",
+        "message": "当前会话已不可用。",
+    }
 
 
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):

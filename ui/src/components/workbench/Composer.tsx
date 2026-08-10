@@ -80,7 +80,10 @@ const UPLOAD_CONCURRENCY = 4;
 // Unique-enough id for an optimistic attachment chip before the server token
 // lands. Date.now() collides within a batch, so the random suffix separates
 // files staged in the same tick.
-const newLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const newLocalId = () => (
+  globalThis.crypto?.randomUUID?.()
+  ?? `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
+);
 
 type VoiceSegment = VoiceTranscriptionSegment & {
   task: Promise<void>;
@@ -546,7 +549,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // ``sid`` is threaded in so the fan-out below stays typed after the guard.
   const uploadOne = async (file: File, localId: string, sid: string) => {
     try {
-      const json = await uploadWorkbenchAttachment(sid, file);
+      const json = await uploadWorkbenchAttachment(sid, file, localId);
       if (attachmentFilesRef.current.get(localId) !== file) return;
       attachmentFilesRef.current.delete(localId);
       setAttachments((cur) =>
@@ -574,7 +577,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const retryAttachment = (localId: string) => {
-    if (!sessionId) return;
+    if (!sessionId || disabledRef.current || voiceDraftReadOnly) return;
     const file = attachmentFilesRef.current.get(localId);
     if (!file) return;
     setAttachments((cur) => cur.map((a) => (
@@ -1258,6 +1261,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   type="button"
                   variant="ghost"
                   size="icon"
+                  disabled={disabled || voiceDraftReadOnly}
                   onClick={() => retryAttachment(att.localId)}
                   aria-label={t('chat.compose.retryAttachment')}
                   className="size-5 shrink-0 text-muted hover:text-foreground"

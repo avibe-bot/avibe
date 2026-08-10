@@ -5,7 +5,6 @@ const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 let csrfTokenPromise: Promise<string> | null = null;
-let csrfRefreshPromise: Promise<string> | null = null;
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') {
@@ -108,21 +107,11 @@ async function refreshRejectedCsrfToken(
   const current = readCookie(CSRF_COOKIE_NAME);
   if (current && current !== rejectedToken) return current;
 
-  if (!csrfRefreshPromise) {
+  if (!csrfTokenPromise) {
     clearCsrfCookie();
-    csrfTokenPromise = null;
-    const pending = fetchCsrfToken();
-    csrfRefreshPromise = pending;
-    void pending.then(
-      () => {
-        if (csrfRefreshPromise === pending) csrfRefreshPromise = null;
-      },
-      () => {
-        if (csrfRefreshPromise === pending) csrfRefreshPromise = null;
-      },
-    );
+    startCsrfTokenFetch();
   }
-  return waitForSignal(csrfRefreshPromise!, signal);
+  return waitForSignal(csrfTokenPromise!, signal);
 }
 
 async function isInvalidCsrfResponse(response: Response): Promise<boolean> {

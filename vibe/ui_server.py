@@ -8003,16 +8003,31 @@ def media_meta(token: str):
     )
 
 
-def _workbench_attachment_error(code: str, message: str, status: int):
-    from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES
+_WORKBENCH_ATTACHMENT_ERROR_CODES = {
+    "session_not_found",
+    "file_required",
+    "empty_file",
+    "too_large",
+    "invalid_upload",
+    "upload_failed",
+}
 
-    payload: dict[str, Any] = {
-        "ok": False,
-        "error": {"code": code, "message": message},
-    }
+
+def _workbench_attachment_error(code: str, status: int):
+    from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES
+    from core.services import settings as settings_service
+
+    message_code = code if code in _WORKBENCH_ATTACHMENT_ERROR_CODES else "invalid_upload"
+    lang = settings_service.load_config_or_default().language
+    extra: dict[str, Any] = {}
     if code == "too_large":
-        payload["max_file_bytes"] = MAX_WORKBENCH_ATTACHMENT_BYTES
-    return jsonify(payload), status
+        extra["max_file_bytes"] = MAX_WORKBENCH_ATTACHMENT_BYTES
+    return _coded_error_response(
+        code,
+        t(f"error.workbenchAttachment.{message_code}", lang),
+        status,
+        **extra,
+    )
 
 
 def _workbench_attachment_response(result: Any):
@@ -8029,7 +8044,7 @@ def _workbench_attachment_response(result: Any):
                 "height": result.height,
             }
         ),
-        201,
+        201 if result.created else 200,
     )
 
 
@@ -8055,7 +8070,7 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
             with engine.connect() as conn:
                 session = workbench_sessions_service.get_session(conn, session_id)
         except LookupError:
-            return _workbench_attachment_error("session_not_found", "Session not found", 404)
+            return _workbench_attachment_error("session_not_found", 404)
 
         form = None
         try:
@@ -8071,73 +8086,75 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                 )
                 upload = form.get("file")
                 if not isinstance(upload, StarletteUploadFile):
-                    return _workbench_attachment_error("file_required", "File is required", 400)
+                    return _workbench_attachment_error("file_required", 400)
                 await upload.seek(0)
                 source = upload.file
                 name = upload.filename
                 mime = upload.content_type
+                upload_id = form.get("upload_id")
             elif content_type == "application/json":
                 payload = request.json or {}
                 data_b64 = payload.get("data") or ""
                 if not isinstance(data_b64, str) or not data_b64:
-                    return _workbench_attachment_error("file_required", "File data is required", 400)
+                    return _workbench_attachment_error("file_required", 400)
                 if data_b64.startswith("data:") and "," in data_b64:
                     data_b64 = data_b64.split(",", 1)[1]
                 max_encoded_bytes = ((workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3) * 4
                 if len(data_b64) > max_encoded_bytes:
-                    return _workbench_attachment_error(
-                        "too_large", "File exceeds the attachment size limit", 413
-                    )
+                    return _workbench_attachment_error("too_large", 413)
                 try:
                     raw = base64.b64decode(data_b64, validate=True)
                 except (binascii.Error, ValueError):
-                    return _workbench_attachment_error("invalid_upload", "File data is invalid", 400)
+                    return _workbench_attachment_error("invalid_upload", 400)
                 source = io.BytesIO(raw)
                 name = payload.get("name")
                 mime = payload.get("mime") or payload.get("content_type")
+                upload_id = payload.get("upload_id")
             else:
-                return _workbench_attachment_error(
-                    "invalid_upload", "Upload must use multipart form data", 415
-                )
+                return _workbench_attachment_error("invalid_upload", 415)
+
+            stable_upload_id = workbench_media.normalize_workbench_upload_id(upload_id)
 
             def persist_attachment():
                 result = None
                 try:
-                    with engine.begin() as conn:
-                        result = workbench_media.materialize_workbench_attachment(
-                            conn,
-                            scope_id=session["scope_id"],
-                            session_id=session_id,
-                            file_name=name,
-                            content_type=mime,
-                            source=source,
-                        )
+                    with workbench_media.workbench_attachment_upload_lock(
+                        session_id, stable_upload_id
+                    ):
+                        with engine.begin() as conn:
+                            result = workbench_media.materialize_workbench_attachment(
+                                conn,
+                                scope_id=session["scope_id"],
+                                session_id=session_id,
+                                file_name=name,
+                                content_type=mime,
+                                source=source,
+                                upload_id=stable_upload_id,
+                            )
                     return result
                 except Exception:
                     # Registration and commit are one logical publish. If the DB
                     # commit fails after the file was materialized, remove it too.
-                    if result is not None:
+                    if result is not None and result.created:
                         Path(result.path).unlink(missing_ok=True)
                     raise
 
             result = await asyncio.to_thread(persist_attachment)
             return _workbench_attachment_response(result)
         except workbench_media.WorkbenchAttachmentUploadError as exc:
-            return _workbench_attachment_error(exc.code, exc.message, exc.status)
+            return _workbench_attachment_error(exc.code, exc.status)
         except MultiPartException as exc:
             if "too large" in str(exc).lower():
-                return _workbench_attachment_error(
-                    "too_large", "File exceeds the attachment size limit", 413
-                )
-            return _workbench_attachment_error("invalid_upload", str(exc), 400)
+                return _workbench_attachment_error("too_large", 413)
+            return _workbench_attachment_error("invalid_upload", 400)
         except FileBrowserError as exc:
             code = "too_large" if exc.code == "too_large" else "invalid_upload"
-            return _workbench_attachment_error(code, exc.message, exc.status_code)
-        except StarletteHTTPException as exc:
-            return _workbench_attachment_error("invalid_upload", str(exc.detail), 400)
+            return _workbench_attachment_error(code, exc.status_code)
+        except StarletteHTTPException:
+            return _workbench_attachment_error("invalid_upload", 400)
         except Exception:
             logger.exception("workbench attachment upload failed for session %s", session_id)
-            return _workbench_attachment_error("upload_failed", "Could not save the file", 500)
+            return _workbench_attachment_error("upload_failed", 500)
         finally:
             if form is not None:
                 await form.close()

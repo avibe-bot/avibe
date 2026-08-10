@@ -102,6 +102,47 @@ describe('apiFetch remote auth recovery', () => {
     expect(new Headers(fetchMock.mock.calls[2][1]?.headers).get('X-Vibe-CSRF-Token')).toBe('fresh-token');
   });
 
+  it('shares a CSRF refresh with mutations that start while the cookie is cleared', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    let resolveToken!: (response: Response) => void;
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        return new Promise<Response>((resolve) => {
+          resolveToken = resolve;
+        });
+      }
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      if (token === 'stale-token') {
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      return Response.json({ ok: true }, { status: 201 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const retrying = apiFetch('/api/attachments', { method: 'POST', body: new FormData() });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const concurrent = apiFetch('/api/settings', { method: 'POST' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock.mock.calls.filter(([input]) => input === '/api/csrf-token')).toHaveLength(1);
+
+    document.cookie = 'vibe_csrf_token=fresh-token; path=/';
+    resolveToken(Response.json({ csrf_token: 'fresh-token' }));
+
+    await expect(Promise.all([retrying, concurrent])).resolves.toEqual([
+      expect.objectContaining({ status: 201 }),
+      expect.objectContaining({ status: 201 }),
+    ]);
+    expect(fetchMock.mock.calls.filter(([input]) => input === '/api/csrf-token')).toHaveLength(1);
+  });
+
   it('does not retry an unrelated forbidden mutation', async () => {
     vi.stubGlobal('document', { cookie: 'vibe_csrf_token=token' });
     const fetchMock = vi.fn(async () =>
