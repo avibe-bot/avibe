@@ -1664,6 +1664,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             request.stop_failure_reason = "not_active"
             return False
 
+        # Read alongside ``task``, not after the abort. Aborting can make the
+        # task settle normally, which lets ``handle_message``'s ``finally`` run
+        # and pop this entry while we are still awaiting — by the time the
+        # receipt branch below looks, the request it needs would be gone.
+        stopped_request = self._active_ack_requests.get(request.base_session_id)
+
         req_info = self._session_manager.get_request_session(request.base_session_id)
         opencode_session_id = None
         if req_info:
@@ -1696,7 +1702,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 # the ⏹️ on the command instead of on the message that started
                 # the turn (and leave the real 👀 behind). Codex does the same
                 # with the request it recovers from ``clear_pending``.
-                stopped_request = self._active_ack_requests.get(request.base_session_id)
                 if stopped_request is not None:
                     await self._remove_ack_reaction(
                         stopped_request,

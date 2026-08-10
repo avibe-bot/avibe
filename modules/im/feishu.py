@@ -56,6 +56,16 @@ _EMOJI_MAP: Dict[str, str] = {
     "✍": "Typing",
     "shrug": "Shrug",
     "🤷": "Shrug",
+    # Terminal receipts: ⏹️ stopped, ⚠️ interrupted. Lark has neither glyph, so
+    # each maps to the published key whose meaning matches — ``SILENT`` for a
+    # turn told to go quiet (the stop result is deliberately silent, so the
+    # reaction is its only trace) and ``ERROR`` for a runtime that died mid-turn.
+    "stop_button": "SILENT",
+    "⏹️": "SILENT",
+    "⏹": "SILENT",
+    "warning": "ERROR",
+    "⚠️": "ERROR",
+    "⚠": "ERROR",
     "thumbsup": "THUMBSUP",
     "👍": "THUMBSUP",
     "+1": "THUMBSUP",

@@ -5,7 +5,13 @@ Lark rejects an unknown ``emoji_type`` with a parameter error, and the keys are
 like a typo, silently, because ``add_reaction`` only warns when the normalized
 value is non-ASCII. Every expectation below was read off the published table
 (https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce)
-rather than guessed from the unicode name.
+rather than guessed from the unicode name. That page renders its table
+client-side, so where it could not be read directly the key was confirmed
+against the ``chyroc/lark`` ``type_emoji.go`` enum, in which every key carries
+the official ``lark-reaction-cn/emoji_*.png`` CDN image it renders as — enough
+to verify a key exists and what it depicts. Absence from that enum proves
+nothing (it omits ``Shrug`` and ``GoGoGo``, both of which work), so it is only
+ever used as evidence *for* a key.
 """
 
 import sys
@@ -47,6 +53,12 @@ VERIFIED_EMOJI_TYPES = {
     "👏": "APPLAUSE",
     "💪": "MUSCLE",
     "🎉": "PARTY",
+    # Terminal receipts. Lark publishes no ⏹️/⚠️ glyph; these two keys are the
+    # closest published meanings (emoji_silent.png / emoji_errr.png).
+    "⏹️": "SILENT",
+    "⏹": "SILENT",
+    "⚠️": "ERROR",
+    "⚠": "ERROR",
 }
 
 
@@ -71,26 +83,25 @@ class FeishuReactionEmojiTests(unittest.TestCase):
             UNCONFIRMED_REACTION_EMOJI,
             NOT_DELIVERED_REACTION_EMOJI,
             SUBAGENT_REACTION_EMOJI,
+            STOPPED_REACTION_EMOJI,
+            INTERRUPTED_REACTION_EMOJI,
         ):
             with self.subTest(emoji=emoji):
                 self.assertIn(emoji, _EMOJI_MAP)
                 self.assertTrue(_normalize_emoji(emoji).isascii())
 
-    def test_terminal_receipts_are_knowingly_unmapped(self):
-        """⏹️/⚠️ degrade to no reaction on Lark, on purpose, for now.
+    def test_terminal_receipts_stay_distinguishable(self):
+        """A stop and a crash must not land on the same reaction.
 
-        The module docstring's rule is that every key is read off the published
-        table, never guessed, and that table was not reachable when the receipts
-        landed. An unmapped emoji is the safe failure: ``add_reaction`` warns and
-        the user loses only the receipt, whereas a guessed ``STOP`` would be
-        rejected wholesale. The interruption NOTICE is a real message and is
-        unaffected either way. Delete this test and add the two rows to
-        ``VERIFIED_EMOJI_TYPES`` once the keys are confirmed.
+        ⏹️ is the only trace a ``/stop`` leaves — its result is deliberately
+        silent — so collapsing it onto the crash key would make a clean stop
+        look like a dead runtime.
         """
 
-        for emoji in (STOPPED_REACTION_EMOJI, INTERRUPTED_REACTION_EMOJI):
-            with self.subTest(emoji=emoji):
-                self.assertNotIn(emoji, _EMOJI_MAP)
+        self.assertNotEqual(
+            _normalize_emoji(STOPPED_REACTION_EMOJI),
+            _normalize_emoji(INTERRUPTED_REACTION_EMOJI),
+        )
 
     def test_variation_selector_forms_share_one_mapping(self):
         """``_normalize_emoji`` strips colons and whitespace, not U+FE0F."""

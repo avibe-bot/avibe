@@ -133,6 +133,49 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(receipts[0][0], stop_request)
         self.assertEqual(agent._user_stopped_sessions, set())
 
+    async def test_receipt_survives_handle_messages_cleanup_racing_the_abort(self):
+        """The waiter that owns the turn can finish its ``finally`` mid-abort.
+
+        ``handle_message`` is blocked on ``await task``; a task settled by the
+        abort wakes it, and it pops both registries before ``handle_stop``
+        resumes. Looking the request up after the abort finds nothing, so the
+        receipt has to be captured up front.
+        """
+        agent = _agent()
+        receipts: list[tuple[object, object]] = []
+        agent._remove_ack_reaction = AsyncMock(
+            side_effect=lambda request, *, terminal_emoji=None: receipts.append(
+                (request, terminal_emoji)
+            )
+        )
+
+        async def in_flight():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(in_flight())
+        agent._active_requests["session-1"] = task
+        turn_request = _request()
+        agent._active_ack_requests["session-1"] = turn_request
+        await asyncio.sleep(0)
+
+        async def abort(*_args, **_kwargs):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            # Exactly what handle_message's finally does once its await returns.
+            if agent._active_requests.get("session-1") is task:
+                agent._active_requests.pop("session-1", None)
+                agent._active_ack_requests.pop("session-1", None)
+
+        agent._abort_active_request = abort
+
+        self.assertTrue(await agent.handle_stop(_request()))
+
+        self.assertEqual(receipts, [(turn_request, STOPPED_REACTION_EMOJI)])
+        self.assertEqual(agent._active_ack_requests, {})
+
     async def test_no_receipt_when_the_turns_request_was_not_retained(self):
         # Better no receipt than one stamped on the wrong message: a turn with
         # nothing retained (restored poll already cleaned up) just ends silently.
