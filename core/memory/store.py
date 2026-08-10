@@ -1457,47 +1457,31 @@ class MemoryStore:
             return "flush_required"
         return "complete"
 
-    def acquire_flush(
+    def begin_flush_attempt(
         self,
         *,
+        provider_session_ref: ProviderSessionRef,
         now: str,
-        provider_session_ref: ProviderSessionRef | None = None,
         force: bool = False,
     ) -> FlushLease | None:
-        """Acquire or resume one due generation, persisting the fence first."""
+        """Acquire or resume one exact session and reclaim its raced claims.
 
+        The caller must hold the exact session lock until the returned lease is
+        settled or returned.
+        """
+
+        serialized_ref = provider_session_ref.serialize()
         with self._transaction() as conn:
             meta = self._meta_in_connection(conn)
             if meta is None or meta.clear_in_progress:
                 return None
-            if provider_session_ref is not None:
-                serialized_ref = provider_session_ref.serialize()
-                row = conn.execute(
-                    """
-                    SELECT * FROM memory_session_flush_state
-                    WHERE provider_session_ref = ? AND epoch = ?
-                    """,
-                    (serialized_ref, meta.epoch),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    """
-                    SELECT * FROM memory_session_flush_state
-                    WHERE epoch = ? AND (
-                        (state = 'due' AND submission_started_at IS NULL
-                            AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
-                        OR
-                        (state = 'idle' AND unflushed_count > 0
-                            AND due_at IS NOT NULL AND due_at <= ?)
-                    )
-                    ORDER BY
-                        CASE WHEN state = 'due' THEN 0 ELSE 1 END,
-                        COALESCE(next_attempt_at, due_at), provider_session_ref
-                    LIMIT 1
-                    """,
-                    (meta.epoch, now, now),
-                ).fetchone()
-                serialized_ref = str(row["provider_session_ref"]) if row is not None else ""
+            row = conn.execute(
+                """
+                SELECT * FROM memory_session_flush_state
+                WHERE provider_session_ref = ? AND epoch = ?
+                """,
+                (serialized_ref, meta.epoch),
+            ).fetchone()
             if row is None:
                 return None
 
@@ -1508,61 +1492,72 @@ class MemoryStore:
                 next_attempt_at = row["next_attempt_at"]
                 if next_attempt_at is not None and str(next_attempt_at) > now:
                     return None
-                return _flush_lease_from_row(row)
-            if state != "idle":
-                return None
-
-            if provider_session_ref is not None and force:
-                pending = conn.execute(
-                    """
-                    SELECT 1 FROM memory_capture_queue
-                    WHERE provider_session_ref = ? AND epoch = ?
-                      AND generation = ? AND state IN ('pending', 'processing')
-                    LIMIT 1
-                    """,
-                    (serialized_ref, meta.epoch, int(row["open_generation"])),
-                ).fetchone()
-                if int(row["unflushed_count"]) == 0 and pending is None:
+                lease = _flush_lease_from_row(row)
+            else:
+                if state != "idle":
                     return None
-            elif not (
-                int(row["unflushed_count"]) > 0
-                and row["due_at"] is not None
-                and str(row["due_at"]) <= now
-            ):
-                return None
+                if force:
+                    pending = conn.execute(
+                        """
+                        SELECT 1 FROM memory_capture_queue
+                        WHERE provider_session_ref = ? AND epoch = ?
+                          AND generation = ? AND state IN ('pending', 'processing')
+                        LIMIT 1
+                        """,
+                        (serialized_ref, meta.epoch, int(row["open_generation"])),
+                    ).fetchone()
+                    if int(row["unflushed_count"]) == 0 and pending is None:
+                        return None
+                elif not (
+                    int(row["unflushed_count"]) > 0
+                    and row["due_at"] is not None
+                    and str(row["due_at"]) <= now
+                ):
+                    return None
 
-            generation = int(row["open_generation"])
-            operation_epoch = int(row["operation_epoch"]) + 1
-            fence_token = f"flush-{operation_epoch}-{secrets.token_hex(16)}"
-            updated = conn.execute(
+                generation = int(row["open_generation"])
+                operation_epoch = int(row["operation_epoch"]) + 1
+                fence_token = f"flush-{operation_epoch}-{secrets.token_hex(16)}"
+                updated = conn.execute(
+                    """
+                    UPDATE memory_session_flush_state
+                    SET open_generation = open_generation + 1,
+                        target_generation = open_generation,
+                        state = 'due', operation_epoch = ?, fence_token = ?,
+                        next_attempt_at = NULL, retry_count = 0,
+                        submission_started_at = NULL, updated_at = ?
+                    WHERE provider_session_ref = ? AND epoch = ?
+                      AND state = 'idle' AND operation_epoch = ?
+                    """,
+                    (
+                        operation_epoch,
+                        fence_token,
+                        now,
+                        serialized_ref,
+                        meta.epoch,
+                        int(row["operation_epoch"]),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    return None
+                lease = FlushLease(
+                    provider_session_ref=provider_session_ref,
+                    epoch=meta.epoch,
+                    generation=generation,
+                    operation_epoch=operation_epoch,
+                    fence_token=fence_token,
+                )
+
+            conn.execute(
                 """
-                UPDATE memory_session_flush_state
-                SET open_generation = open_generation + 1,
-                    target_generation = open_generation,
-                    state = 'due', operation_epoch = ?, fence_token = ?,
-                    next_attempt_at = NULL, retry_count = 0,
-                    submission_started_at = NULL, updated_at = ?
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND state = 'idle' AND operation_epoch = ?
+                UPDATE memory_capture_queue
+                SET state = 'pending', lease_owner = NULL, lease_at = NULL
+                WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
+                  AND state = 'processing'
                 """,
-                (
-                    operation_epoch,
-                    fence_token,
-                    now,
-                    serialized_ref,
-                    meta.epoch,
-                    int(row["operation_epoch"]),
-                ),
+                (serialized_ref, lease.epoch, lease.generation),
             )
-            if updated.rowcount != 1:
-                return None
-            return FlushLease(
-                provider_session_ref=ProviderSessionRef.deserialize(serialized_ref),
-                epoch=meta.epoch,
-                generation=generation,
-                operation_epoch=operation_epoch,
-                fence_token=fence_token,
-            )
+            return lease
 
     def list_flush_candidates(self, *, now: str, limit: int = 16) -> tuple[ProviderSessionRef, ...]:
         """List independently acquirable session refs without changing state."""
@@ -1595,89 +1590,11 @@ class MemoryStore:
             for row in rows
         )
 
-    def target_generation_counts(self, lease: FlushLease) -> tuple[int, int]:
-        """Return pending/processing rows only after verifying the exact fence."""
-
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._connection() as conn:
-            authority = conn.execute(
-                """
-                SELECT 1 FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND state = 'due'
-                """,
-                (
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            ).fetchone()
-            if authority is None:
-                return (0, 0)
-            row = conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending,
-                    SUM(CASE WHEN state = 'processing' THEN 1 ELSE 0 END) AS processing
-                FROM memory_capture_queue
-                WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
-                """,
-                (serialized_ref, lease.epoch, lease.generation),
-            ).fetchone()
-        return (int(row["pending"] or 0), int(row["processing"] or 0))
-
-    def reclaim_fenced_generation_claims(self, lease: FlushLease) -> int:
-        """Return pre-call raced claims while the coordinator owns the session lock."""
+    def begin_flush_submission(self, lease: FlushLease, *, now: str) -> bool:
+        """Atomically prove generation emptiness and persist provider submission."""
 
         serialized_ref = lease.provider_session_ref.serialize()
         with self._transaction() as conn:
-            authority = conn.execute(
-                """
-                SELECT 1 FROM memory_session_flush_state
-                WHERE provider_session_ref = ? AND epoch = ?
-                  AND target_generation = ? AND operation_epoch = ?
-                  AND fence_token = ? AND state = 'due'
-                """,
-                (
-                    serialized_ref,
-                    lease.epoch,
-                    lease.generation,
-                    lease.operation_epoch,
-                    lease.fence_token,
-                ),
-            ).fetchone()
-            if authority is None:
-                return 0
-            updated = conn.execute(
-                """
-                UPDATE memory_capture_queue
-                SET state = 'pending', lease_owner = NULL, lease_at = NULL
-                WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
-                  AND state = 'processing'
-                """,
-                (serialized_ref, lease.epoch, lease.generation),
-            )
-            return int(updated.rowcount)
-
-    def mark_flush_submission_started(self, lease: FlushLease, *, now: str) -> bool:
-        """Persist the ambiguity boundary only after the target generation drains."""
-
-        serialized_ref = lease.provider_session_ref.serialize()
-        with self._transaction() as conn:
-            remaining = conn.execute(
-                """
-                SELECT 1 FROM memory_capture_queue
-                WHERE provider_session_ref = ? AND epoch = ? AND generation = ?
-                  AND state IN ('pending', 'processing')
-                LIMIT 1
-                """,
-                (serialized_ref, lease.epoch, lease.generation),
-            ).fetchone()
-            if remaining is not None:
-                return False
             updated = conn.execute(
                 """
                 UPDATE memory_session_flush_state
@@ -1686,6 +1603,17 @@ class MemoryStore:
                   AND target_generation = ? AND operation_epoch = ?
                   AND fence_token = ? AND state = 'due'
                   AND submission_started_at IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM memory_meta AS meta
+                      WHERE meta.singleton = 1 AND meta.epoch = ?
+                        AND meta.clear_in_progress = 0
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM memory_capture_queue AS queue
+                      WHERE queue.provider_session_ref = ? AND queue.epoch = ?
+                        AND queue.generation = ?
+                        AND queue.state IN ('pending', 'processing')
+                  )
                 """,
                 (
                     now,
@@ -1695,6 +1623,10 @@ class MemoryStore:
                     lease.generation,
                     lease.operation_epoch,
                     lease.fence_token,
+                    lease.epoch,
+                    serialized_ref,
+                    lease.epoch,
+                    lease.generation,
                 ),
             )
             return updated.rowcount == 1

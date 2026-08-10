@@ -783,12 +783,12 @@ def test_stale_flush_settlement_cannot_clear_newer_generation(tmp_path: Path) ->
         now=current,
         idle_timeout=timedelta(0),
     ).settled
-    lease = store.acquire_flush(
+    lease = store.begin_flush_attempt(
         now="2026-01-01T00:00:00.000Z",
         provider_session_ref=row.provider_session_ref,
     )
     assert lease is not None
-    assert store.mark_flush_submission_started(lease, now="2026-01-01T00:00:01.000Z")
+    assert store.begin_flush_submission(lease, now="2026-01-01T00:00:01.000Z")
     assert store.settle_flush(
         lease,
         FlushSucceeded("first", "extracted"),
@@ -823,12 +823,12 @@ async def test_stale_flush_finalization_does_not_open_processing_fault(
         now=current,
         idle_timeout=timedelta(0),
     ).settled
-    lease = store.acquire_flush(
+    lease = store.begin_flush_attempt(
         now="2026-01-01T00:00:00.000Z",
         provider_session_ref=row.provider_session_ref,
     )
     assert lease is not None
-    assert store.mark_flush_submission_started(
+    assert store.begin_flush_submission(
         lease,
         now="2026-01-01T00:00:01.000Z",
     )
@@ -875,12 +875,12 @@ def test_boot_recovery_never_replays_submitted_flush(tmp_path: Path) -> None:
         now=datetime(2026, 1, 1, tzinfo=UTC),
         idle_timeout=timedelta(0),
     ).settled
-    lease = store.acquire_flush(
+    lease = store.begin_flush_attempt(
         now="2026-01-01T00:00:00.000Z",
         provider_session_ref=row.provider_session_ref,
     )
     assert lease is not None
-    assert store.mark_flush_submission_started(lease, now="2026-01-01T00:00:01.000Z")
+    assert store.begin_flush_submission(lease, now="2026-01-01T00:00:01.000Z")
 
     recovered = MemoryStore(store.path)
     evidence = recovered.recover_after_boot(
@@ -891,7 +891,7 @@ def test_boot_recovery_never_replays_submitted_flush(tmp_path: Path) -> None:
     assert evidence.interrupted_flushes == 1
     state = recovered.get_session_flush_state(row.provider_session_ref)
     assert state is not None and state.state == "manual_required"
-    assert recovered.acquire_flush(
+    assert recovered.begin_flush_attempt(
         now="2026-01-01T00:10:00.000Z",
         provider_session_ref=row.provider_session_ref,
         force=True,
@@ -919,12 +919,12 @@ async def test_boot_recovery_opens_and_emits_processing_fault_once(
             now=datetime(2026, 1, 1, tzinfo=UTC),
             idle_timeout=timedelta(0),
         ).settled
-        lease = store.acquire_flush(
+        lease = store.begin_flush_attempt(
             now="2026-01-01T00:00:01.000Z",
             provider_session_ref=row.provider_session_ref,
         )
         assert lease is not None
-        assert store.mark_flush_submission_started(
+        assert store.begin_flush_submission(
             lease,
             now="2026-01-01T00:00:02.000Z",
         )
@@ -1031,13 +1031,13 @@ async def test_restart_finishes_submitted_flush_fault_notification_once(
         lease_owner="old-boot",
         now=datetime(2026, 1, 1, tzinfo=UTC),
     ).settled
-    lease = store.acquire_flush(
+    lease = store.begin_flush_attempt(
         now="2026-01-01T00:00:01.000Z",
         provider_session_ref=row.provider_session_ref,
         force=True,
     )
     assert lease is not None
-    assert store.mark_flush_submission_started(
+    assert store.begin_flush_submission(
         lease,
         now="2026-01-01T00:00:02.000Z",
     )
@@ -1121,13 +1121,13 @@ async def test_restart_finishes_atomic_processing_recovery_notification_once(
         assert store.open_processing_fault(now="2026-01-01T00:00:02.500Z")
         assert store.classify_processing_fault("engine")
         assert store.mark_processing_alert_active()
-        lease = store.acquire_flush(
+        lease = store.begin_flush_attempt(
             now="2026-01-01T00:00:03.000Z",
             provider_session_ref=row.provider_session_ref,
             force=True,
         )
         assert lease is not None
-        assert store.mark_flush_submission_started(
+        assert store.begin_flush_submission(
             lease,
             now="2026-01-01T00:00:04.000Z",
         )
@@ -1584,7 +1584,7 @@ async def test_cancelled_flush_while_submission_marker_commits_remains_retryable
 
     marker_committed = threading.Event()
     release_marker = threading.Event()
-    original_mark = store.mark_flush_submission_started
+    original_mark = store.begin_flush_submission
 
     def blocking_mark(lease, *, now: str) -> bool:
         marked = original_mark(lease, now=now)
@@ -1592,7 +1592,7 @@ async def test_cancelled_flush_while_submission_marker_commits_remains_retryable
         release_marker.wait(timeout=2)
         return marked
 
-    monkeypatch.setattr(store, "mark_flush_submission_started", blocking_mark)
+    monkeypatch.setattr(store, "begin_flush_submission", blocking_mark)
     flush_call = asyncio.create_task(
         coordinator.final_flush(row.provider_session_ref, deadline_seconds=5)
     )
