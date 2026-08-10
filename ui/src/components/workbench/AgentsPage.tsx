@@ -50,9 +50,9 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 import { errorMessage } from '@/lib/errorMessage';
-
-type AgentsTabKey = 'definitions' | 'running';
-const AGENTS_TAB_ORDER: AgentsTabKey[] = ['definitions', 'running'];
+// Tab set + its cross-visit memory live together so the remembered value can
+// never name a tab this page no longer renders (see agentsViewMemory).
+import { AGENTS_TAB_ORDER, readAgentsTab, writeAgentsTab, type AgentsTabKey } from '../../lib/agentsViewMemory';
 
 function isSystemAgent(agent: { source: string }): boolean {
   return agent.source === 'builtin' || agent.source === 'system';
@@ -62,7 +62,12 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>('definitions');
+  // Resume the tab the user left the page on; a fresh browser opens Definitions.
+  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>(readAgentsTab);
+  const selectAgentsTab = useCallback((next: AgentsTabKey) => {
+    setAgentsTab(next);
+    writeAgentsTab(next);
+  }, []);
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
@@ -365,7 +370,7 @@ export const AgentsPage: React.FC = () => {
             <button
               key={key}
               type="button"
-              onClick={() => setAgentsTab(key)}
+              onClick={() => selectAgentsTab(key)}
               className={clsx(
                 'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
                 active
