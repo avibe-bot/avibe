@@ -1550,7 +1550,7 @@ async def test_final_flush_fences_capture_before_queue_visibility(
 
     release_pin.set()
     assert isinstance(await old_capture, CaptureAccepted)
-    drain = asyncio.create_task(runtime.module._worker.drain())
+    drain = asyncio.create_task(runtime.module._worker.drain_once())
 
     assert await asyncio.to_thread(flush_entered.wait, 1.0)
     assert [capture.text for capture in provider.captures] == [
