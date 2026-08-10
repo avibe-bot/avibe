@@ -93,7 +93,10 @@ import {
   transcriptSelectionActions,
   type SessionReadOnlyReason,
 } from './sessionArchived';
-import { createSessionRowRefreshGate } from './sessionRowRefresh';
+import {
+  createSessionRowRefreshGate,
+  sessionRowWithBootstrapFallback,
+} from './sessionRowRefresh';
 import { chatSessionViewState } from './chatSessionViewState';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
@@ -1383,8 +1386,14 @@ export const ChatPage: React.FC = () => {
       if (bootstrapIsCurrent()) {
         setSession(bootstrap.session);
       } else {
-        // A newer turn-end/activity read won the row race. Keep its route-bearing
-        // snapshot and repair a cold page if that read has not hydrated it yet.
+        // A newer turn-end/activity read won the row race. Preserve its row if
+        // it landed, but keep this successful bootstrap as the fallback while a
+        // cold-page recovery is pending or if both bounded attempts fail.
+        setSession((current) => sessionRowWithBootstrapFallback(
+          current,
+          sessionId,
+          bootstrap.session,
+        ));
         void refreshSessionRow();
       }
       setAgents(bootstrap.agents);

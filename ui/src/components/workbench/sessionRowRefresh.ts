@@ -7,6 +7,12 @@ export type SessionRowRefreshGate = {
   invalidate: () => void;
 };
 
+export const sessionRowWithBootstrapFallback = <T extends { id: string }>(
+  current: T | null,
+  routeSessionId: string,
+  bootstrap: T,
+): T => (current?.id === routeSessionId ? current : bootstrap);
+
 export const createSessionRowRefreshGate = (): SessionRowRefreshGate => {
   let generation = 0;
   let activeMutations = 0;
