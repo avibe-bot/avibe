@@ -41,7 +41,6 @@ import {
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
 import {
-  isVoiceRealtimeEnabled,
   VoiceRealtimeSession,
   type VoiceRealtimeFinal,
 } from '../../lib/voiceRealtime';
@@ -970,32 +969,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           dictationId,
         }),
       };
-      if (isVoiceRealtimeEnabled()) {
-        session.realtimeState = 'connecting';
-        session.realtime = new VoiceRealtimeSession({
-          before: insertion.before,
-          after: insertion.after,
-          signal: abortController.signal,
-          onPreview: (preview) => {
-            if (recordingSessionRef.current !== session || unmountedRef.current) return;
-            session.realtimeFirstPreviewAt ??= Date.now();
-            showRealtimePreview(session, `${preview.text}${preview.stash}`.trim());
-          },
-          onError: () => {
-            if (abortController.signal.aborted) return;
-            session.realtimeState = 'failed';
-            activateHttpFallback(session);
-          },
-        });
-        void session.realtime.start().then(() => {
-          if (abortController.signal.aborted) return;
-          session.realtimeState = 'active';
-        }).catch(() => {
+      session.realtimeState = 'connecting';
+      session.realtime = new VoiceRealtimeSession({
+        before: insertion.before,
+        after: insertion.after,
+        signal: abortController.signal,
+        onPreview: (preview) => {
+          if (recordingSessionRef.current !== session || unmountedRef.current) return;
+          session.realtimeFirstPreviewAt ??= Date.now();
+          showRealtimePreview(session, `${preview.text}${preview.stash}`.trim());
+        },
+        onError: () => {
           if (abortController.signal.aborted) return;
           session.realtimeState = 'failed';
           activateHttpFallback(session);
-        });
-      }
+        },
+      });
+      void session.realtime.start().then(() => {
+        if (abortController.signal.aborted) return;
+        session.realtimeState = 'active';
+      }).catch(() => {
+        if (abortController.signal.aborted) return;
+        session.realtimeState = 'failed';
+        activateHttpFallback(session);
+      });
       startingSession = session;
       const pipeline = new VoiceRecordingPipeline({
         stream,

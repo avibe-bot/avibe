@@ -296,9 +296,6 @@ export class VoiceRealtimeSession {
   }
 }
 
-export const isVoiceRealtimeEnabled = (): boolean =>
-  import.meta.env.VITE_VOICE_REALTIME_ENABLED === 'true';
-
 export const voiceRealtimeError = (error: unknown): Error => {
   if (error instanceof CloudUnavailableError) return error;
   return error instanceof Error ? error : asError('realtime_failed');

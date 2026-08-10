@@ -1,14 +1,8 @@
-# Realtime Voice Prototype
+# Realtime Voice
 
-The browser Realtime path is opt-in and preserves the existing HTTP dictation
-queue as its fallback. Enable `VITE_VOICE_REALTIME_ENABLED=true` in the UI
-build and `VOICE_REALTIME_ENABLED=true` in the cloud service only after both
-halves are deployed together. The default model is
+The browser Realtime path is enabled by default and preserves the existing HTTP
+dictation queue as its fallback. The default model is
 `qwen3-asr-flash-realtime`.
-
-For Incus regression builds, set `REGRESSION_VOICE_REALTIME_ENABLED=true` in
-`.env.regression`. The runner maps it to the Vite build flag and includes it in
-the UI fingerprint, so changing the flag forces a rebuild.
 
 The browser sends `start`, 250 ms PCM16 `audio`, and `finish` frames over the
 `avibe-asr-v1.<cloud-token>` subprotocol. The cloud route authenticates the
