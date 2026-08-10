@@ -93,6 +93,21 @@ class _Unavailable(Exception):
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopedMemcellFilter:
+    principal_id: str
+    project_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AdminMemcellFilter:
+    pass
+
+
+_MemcellFilter: TypeAlias = _ScopedMemcellFilter | _AdminMemcellFilter
+_ADMIN_MEMCELL_FILTER = _AdminMemcellFilter()
+
+
 class MemoryInsightReader:
     """Synchronous projections over pinned EverOS diagnostics."""
 
@@ -159,8 +174,10 @@ class MemoryInsightReader:
         cursor_key = _decode_cursor(cursor) if cursor is not None else None
 
         memcells, everos_section = self._read_memcell_page(
-            principal_id=principal_id,
-            project_id=project_id,
+            query_filter=_ScopedMemcellFilter(
+                principal_id=principal_id,
+                project_id=project_id,
+            ),
             cursor_key=cursor_key,
             limit=limit + 1,
         )
@@ -227,7 +244,8 @@ class MemoryInsightReader:
             raise ValueError("limit must be between 1 and 50")
         cursor_key = _decode_cursor(cursor) if cursor is not None else None
 
-        memcells, everos_section = self._read_admin_memcell_page(
+        memcells, everos_section = self._read_memcell_page(
+            query_filter=_ADMIN_MEMCELL_FILTER,
             cursor_key=cursor_key,
             limit=limit + 1,
         )
@@ -285,8 +303,10 @@ class MemoryInsightReader:
             raise ValueError("invalid memcell id")
 
         row, everos_section = self._read_detail_memcell(
-            principal_id=principal_id,
-            project_id=project_id,
+            query_filter=_ScopedMemcellFilter(
+                principal_id=principal_id,
+                project_id=project_id,
+            ),
             memcell_id=memcell_id,
         )
         return self._entry_detail_result(
@@ -299,7 +319,10 @@ class MemoryInsightReader:
     def admin_entry_detail(self, memcell_id: str) -> dict[str, Any]:
         if not isinstance(memcell_id, str) or not _ID_RE.fullmatch(memcell_id):
             raise ValueError("invalid memcell id")
-        row, everos_section = self._read_admin_detail_memcell(memcell_id=memcell_id)
+        row, everos_section = self._read_detail_memcell(
+            query_filter=_ADMIN_MEMCELL_FILTER,
+            memcell_id=memcell_id,
+        )
         scope = _memcell_scope(row) if row is not None else None
         if scope is None:
             row = None
@@ -480,13 +503,13 @@ class MemoryInsightReader:
     def _read_memcell_page(
         self,
         *,
-        principal_id: str,
-        project_id: str,
+        query_filter: _MemcellFilter,
         cursor_key: tuple[int, str] | None,
         limit: int,
     ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
         try:
             with _read_only(self._paths.system_db_path) as conn:
+                project_sql, sender_sql, scope_args = _memcell_scope_sql(query_filter)
                 sql = f"""
                     SELECT memcell_id, app_id, project_id, message_ids_json,
                            sender_ids_json, payload_json, timestamp, timestamp_ms
@@ -504,64 +527,18 @@ class MemoryInsightReader:
                                timestamp,
                                {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
                         FROM memcell
-                        WHERE app_id = ? AND project_id = ?
+                        WHERE app_id = ? AND {project_sql}
                           AND length(CAST(sender_ids_json AS BLOB))
                                 <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
                           AND CASE WHEN json_valid(sender_ids_json) THEN
                                 json_type(sender_ids_json) = 'array'
                                 AND json_array_length(sender_ids_json) = 1
                                 AND json_type(sender_ids_json, '$[0]') = 'text'
-                                AND json_extract(sender_ids_json, '$[0]') = ?
+                                AND {sender_sql}
                               ELSE 0 END
                     )
                 """
-                args: list[object] = [_APP_ID, project_id, principal_id]
-                if cursor_key is not None:
-                    sql += " WHERE timestamp_ms < ? OR (timestamp_ms = ? AND memcell_id < ?)"
-                    args.extend((cursor_key[0], cursor_key[0], cursor_key[1]))
-                sql += " ORDER BY timestamp_ms DESC, memcell_id DESC LIMIT ?"
-                args.append(limit)
-                return list(conn.execute(sql, args)), {"status": "available"}
-        except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
-
-    def _read_admin_memcell_page(
-        self,
-        *,
-        cursor_key: tuple[int, str] | None,
-        limit: int,
-    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
-        try:
-            with _read_only(self._paths.system_db_path) as conn:
-                sql = f"""
-                    SELECT memcell_id, app_id, project_id, message_ids_json,
-                           sender_ids_json, payload_json, timestamp, timestamp_ms
-                    FROM (
-                        SELECT memcell_id, app_id, project_id,
-                               CASE WHEN length(CAST(message_ids_json AS BLOB))
-                                             <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
-                                    THEN message_ids_json ELSE '[]' END AS message_ids_json,
-                               CASE WHEN length(CAST(sender_ids_json AS BLOB))
-                                             <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                                    THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
-                               CASE WHEN length(CAST(payload_json AS BLOB))
-                                             <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
-                                    THEN payload_json ELSE NULL END AS payload_json,
-                               timestamp,
-                               {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
-                        FROM memcell
-                        WHERE app_id = ? AND project_id GLOB ?
-                          AND length(CAST(sender_ids_json AS BLOB))
-                                <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                          AND CASE WHEN json_valid(sender_ids_json) THEN
-                                json_type(sender_ids_json) = 'array'
-                                AND json_array_length(sender_ids_json) = 1
-                                AND json_type(sender_ids_json, '$[0]') = 'text'
-                                AND json_extract(sender_ids_json, '$[0]') GLOB ?
-                              ELSE 0 END
-                    )
-                """
-                args: list[object] = [_APP_ID, _PROJECT_GLOB, _PRINCIPAL_GLOB]
+                args: list[object] = [_APP_ID, *scope_args]
                 if cursor_key is not None:
                     sql += " WHERE timestamp_ms < ? OR (timestamp_ms = ? AND memcell_id < ?)"
                     args.extend((cursor_key[0], cursor_key[0], cursor_key[1]))
@@ -1100,47 +1077,14 @@ class MemoryInsightReader:
             return None, 0, {"status": "unavailable", "reason": unavailable.reason}
 
     def _read_detail_memcell(
-        self, *, principal_id: str, project_id: str, memcell_id: str
-    ) -> tuple[sqlite3.Row | None, dict[str, str]]:
-        try:
-            with _read_only(self._paths.system_db_path) as conn:
-                row = conn.execute(
-                    f"""
-                    SELECT memcell_id, app_id, project_id,
-                           CASE WHEN length(CAST(message_ids_json AS BLOB))
-                                         <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
-                                THEN message_ids_json ELSE '[]' END AS message_ids_json,
-                           CASE WHEN length(CAST(sender_ids_json AS BLOB))
-                                         <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                                THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
-                           CASE WHEN length(CAST(payload_json AS BLOB))
-                                         <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
-                                THEN payload_json ELSE NULL END AS payload_json,
-                           timestamp
-                    FROM memcell
-                    WHERE memcell_id = ? AND app_id = ? AND project_id = ?
-                      AND length(CAST(sender_ids_json AS BLOB))
-                            <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                      AND CASE WHEN json_valid(sender_ids_json) THEN
-                            json_type(sender_ids_json) = 'array'
-                            AND json_array_length(sender_ids_json) = 1
-                            AND json_type(sender_ids_json, '$[0]') = 'text'
-                            AND json_extract(sender_ids_json, '$[0]') = ?
-                          ELSE 0 END
-                    """,
-                    (memcell_id, _APP_ID, project_id, principal_id),
-                ).fetchone()
-                return row, {"status": "available"}
-        except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
-
-    def _read_admin_detail_memcell(
         self,
         *,
+        query_filter: _MemcellFilter,
         memcell_id: str,
     ) -> tuple[sqlite3.Row | None, dict[str, str]]:
         try:
             with _read_only(self._paths.system_db_path) as conn:
+                project_sql, sender_sql, scope_args = _memcell_scope_sql(query_filter)
                 row = conn.execute(
                     f"""
                     SELECT memcell_id, app_id, project_id,
@@ -1155,17 +1099,17 @@ class MemoryInsightReader:
                                 THEN payload_json ELSE NULL END AS payload_json,
                            timestamp
                     FROM memcell
-                    WHERE memcell_id = ? AND app_id = ? AND project_id GLOB ?
+                    WHERE memcell_id = ? AND app_id = ? AND {project_sql}
                       AND length(CAST(sender_ids_json AS BLOB))
                             <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
                       AND CASE WHEN json_valid(sender_ids_json) THEN
                             json_type(sender_ids_json) = 'array'
                             AND json_array_length(sender_ids_json) = 1
                             AND json_type(sender_ids_json, '$[0]') = 'text'
-                            AND json_extract(sender_ids_json, '$[0]') GLOB ?
+                            AND {sender_sql}
                           ELSE 0 END
                     """,
-                    (memcell_id, _APP_ID, _PROJECT_GLOB, _PRINCIPAL_GLOB),
+                    (memcell_id, _APP_ID, *scope_args),
                 ).fetchone()
                 return row, {"status": "available"}
         except _Unavailable as unavailable:
@@ -1384,6 +1328,24 @@ def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:
     if not isinstance(project_id, str) or not _PROJECT_RE.fullmatch(project_id):
         raise ValueError("invalid memory project")
     return principal_id, project_id
+
+
+def _memcell_scope_sql(
+    query_filter: _MemcellFilter,
+) -> tuple[str, str, tuple[str, str]]:
+    if isinstance(query_filter, _ScopedMemcellFilter):
+        return (
+            "project_id = ?",
+            "json_extract(sender_ids_json, '$[0]') = ?",
+            (query_filter.project_id, query_filter.principal_id),
+        )
+    if isinstance(query_filter, _AdminMemcellFilter):
+        return (
+            "project_id GLOB ?",
+            "json_extract(sender_ids_json, '$[0]') GLOB ?",
+            (_PROJECT_GLOB, _PRINCIPAL_GLOB),
+        )
+    raise TypeError("unsupported memcell query filter")
 
 
 def _decode_json(value: object) -> Any:

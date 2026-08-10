@@ -408,6 +408,121 @@ def test_admin_log_spans_projects_and_principals_with_explicit_scope(
     assert [call["id"] for call in detail["calls"]] == ["call_bob"]
 
 
+def test_scoped_and_admin_memcell_queries_match_for_one_scope_at_page_boundaries(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reader_module,
+        "_utc_observed_at",
+        lambda: "2026-08-10T00:00:00.000Z",
+    )
+    for memcell_id, timestamp_ms in (
+        ("mc_newest", 3_000),
+        ("mc_middle", 2_000),
+        ("mc_oldest", 1_000),
+    ):
+        _insert_memcell(insight_paths, memcell_id, ALICE, timestamp_ms=timestamp_ms)
+    _insert_memcell(insight_paths, "mc_multi", [ALICE, BOB], timestamp_ms=5_000)
+    _insert_memcell(insight_paths, "mc_missing_owner", [], timestamp_ms=4_000)
+
+    reader = MemoryInsightReader(insight_paths)
+    scoped_first = reader.list_entries((ALICE, PROJECT), None, 2)
+    admin_first = reader.list_admin_entries(None, 2)
+    scoped_second = reader.list_entries(
+        (ALICE, PROJECT), scoped_first["next_cursor"], 2
+    )
+    admin_second = reader.list_admin_entries(admin_first["next_cursor"], 2)
+
+    assert scoped_first == admin_first
+    assert scoped_second == admin_second
+    assert [entry["memcell_id"] for entry in scoped_first["entries"]] == [
+        "mc_newest",
+        "mc_middle",
+    ]
+    assert [entry["memcell_id"] for entry in scoped_second["entries"]] == [
+        "mc_oldest"
+    ]
+    for memcell_id in ("mc_newest", "mc_middle", "mc_oldest"):
+        assert reader.entry_detail((ALICE, PROJECT), memcell_id) == (
+            reader.admin_entry_detail(memcell_id)
+        )
+
+
+def test_scoped_and_admin_memcell_queries_keep_distinct_fail_closed_authorization(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_alice", ALICE, timestamp_ms=6_000)
+    _insert_memcell(insight_paths, "mc_foreign", BOB, timestamp_ms=5_000)
+    _insert_memcell(insight_paths, "mc_multi", [ALICE, BOB], timestamp_ms=4_000)
+    _insert_memcell(insight_paths, "mc_missing_owner", [], timestamp_ms=3_000)
+    _insert_memcell(
+        insight_paths,
+        "mc_bad_project",
+        ALICE,
+        timestamp_ms=2_000,
+        project="missing-provenance",
+    )
+    _insert_memcell(insight_paths, "mc_bad_owner", ALICE, timestamp_ms=1_000)
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute(
+            "UPDATE memcell SET sender_ids_json = 'not-json' "
+            "WHERE memcell_id = 'mc_bad_owner'"
+        )
+
+    reader = MemoryInsightReader(insight_paths)
+    scoped = reader.list_entries((ALICE, PROJECT), None, 50)
+    admin = reader.list_admin_entries(None, 50)
+
+    assert [entry["memcell_id"] for entry in scoped["entries"]] == ["mc_alice"]
+    assert [entry["memcell_id"] for entry in admin["entries"]] == [
+        "mc_alice",
+        "mc_foreign",
+    ]
+    assert reader.entry_detail((ALICE, PROJECT), "mc_foreign") == {
+        "status": "not_found"
+    }
+    assert reader.admin_entry_detail("mc_foreign")["entry"]["principal_id"] == BOB
+    for memcell_id in (
+        "mc_multi",
+        "mc_missing_owner",
+        "mc_bad_project",
+        "mc_bad_owner",
+    ):
+        assert reader.entry_detail((ALICE, PROJECT), memcell_id) == {
+            "status": "not_found"
+        }
+        assert reader.admin_entry_detail(memcell_id) == {"status": "not_found"}
+
+
+def test_scoped_and_admin_memcell_queries_degrade_same_on_malformed_schema(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reader_module,
+        "_utc_observed_at",
+        lambda: "2026-08-10T00:00:00.000Z",
+    )
+    _insert_memcell(insight_paths, "mc_alice", ALICE, timestamp_ms=1_000)
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute("ALTER TABLE memcell DROP COLUMN payload_json")
+
+    reader = MemoryInsightReader(insight_paths)
+
+    assert reader.list_entries((ALICE, PROJECT), None, 10) == (
+        reader.list_admin_entries(None, 10)
+    )
+    assert reader.entry_detail((ALICE, PROJECT), "mc_alice") == (
+        reader.admin_entry_detail("mc_alice")
+    )
+
+
+def test_memcell_query_core_has_no_admin_specific_private_twins() -> None:
+    assert not hasattr(MemoryInsightReader, "_read_admin_memcell_page")
+    assert not hasattr(MemoryInsightReader, "_read_admin_detail_memcell")
+
+
 def test_admin_log_aggregates_many_scopes_in_four_queries(
     insight_paths: MemoryInsightPaths,
     monkeypatch: pytest.MonkeyPatch,
