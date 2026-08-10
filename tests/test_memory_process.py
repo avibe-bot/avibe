@@ -2329,6 +2329,62 @@ async def test_rebuild_rejects_final_provider_root_symlink_without_touching_targ
     assert sorted(path.name for path in target.iterdir()) == ["sentinel"]
 
 
+async def test_direct_ownership_reap_rejects_provider_root_symlink(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(mode=0o700)
+    target = tmp_path / "provider-target"
+    target.mkdir(mode=0o700)
+    provider_root = memory_dir / "everos-root"
+    provider_root.symlink_to(target, target_is_directory=True)
+    host = _FakeProcessHost(root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME})
+    ownership = memory_process.SidecarOwnership(
+        record_path=memory_process.sidecar_record_path(memory_dir),
+        socket_path=memory_dir / ".rt" / "everos.sock",
+        provider_root=provider_root,
+        _host=host,
+    )
+
+    with pytest.raises(RuntimeError, match="provider root chain contains a symlink"):
+        await ownership.reap(discover_missing=True)
+    assert host.signal_calls == []
+
+
+def test_case_aliases_share_existing_provider_root_lock_identity(
+    tmp_path: Path,
+) -> None:
+    provider_parent = tmp_path / "ProviderData"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "EverOS"
+    provider_root.mkdir(mode=0o700)
+    case_alias = provider_parent / "everos"
+    if case_alias == provider_root or not case_alias.exists():
+        pytest.skip("filesystem is case-sensitive")
+
+    first = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "first-home",
+        provider_root=provider_root,
+        settings=_settings(),
+    )
+    second = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "second-home",
+        provider_root=case_alias,
+        settings=_settings(),
+    )
+    first_lock = first._provider_root_lock()
+    second_lock = second._provider_root_lock()
+    first_lock.acquire()
+    try:
+        with pytest.raises(memory_process._ProviderRootBusy):
+            second_lock.acquire()
+    finally:
+        first_lock.release()
+        second_lock.release()
+
+
 async def test_rebuild_normalizes_relative_interpreter_before_child_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4284,6 +4340,35 @@ async def test_rebuild_boot_reaps_sidecar_from_another_home_on_shared_root(
     assert not process._ownership.record_path.exists()
     assert consumed == [True]
     assert sidecar._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
+
+
+async def test_rebuild_retains_committed_handoff_until_delayed_watcher_ack(
+    tmp_path: Path,
+) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        root_sidecars=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    rebuild = _rebuild_process(tmp_path, host)
+    await rebuild.reconcile_orphan()
+
+    delayed_watcher = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "delayed-sidecar-home",
+        provider_root=rebuild._provider_root,
+        settings=_settings(),
+    )
+    assert delayed_watcher._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is True
+    assert delayed_watcher._ownership.consume_planned_reap(
         _ORPHAN_PID,
         _ORPHAN_CREATE_TIME,
     ) is False

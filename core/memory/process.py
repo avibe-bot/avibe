@@ -37,6 +37,7 @@ from core.memory.confined_filesystem import (
     open_confined_directory,
     open_confined_regular_file,
     remove_anchored_entry,
+    required_no_follow_flag,
 )
 from core.memory.everos import EverOSPort
 from core.memory.types import MemoryErrorCode
@@ -64,6 +65,7 @@ _REBUILD_LOCK_DIRECTORY = ".avibe-memory-locks"
 _PROVIDER_LOCK_RETRY_INTERVAL_SECONDS = 0.05
 _REBUILD_HANDSHAKE_TIMEOUT_SECONDS = 30.0
 _REBUILD_TIMEOUT_SECONDS = 30 * 60.0
+_PLANNED_REAP_TOKEN_TTL_SECONDS = _REBUILD_TIMEOUT_SECONDS
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
 
@@ -179,6 +181,7 @@ class _PlannedReapTokens:
             harden_confinement_root=False,
         )
         created = False
+        created = False
         try:
             descriptor = create_confined_file(
                 confinement_root,
@@ -188,15 +191,15 @@ class _PlannedReapTokens:
         except ConfinedFilesystemError:
             # Rediscovery can name the same exact sidecar twice. A secure token
             # is idempotent; a symlink, special file, or loose mode still fails.
-            descriptor = open_confined_regular_file(
-                confinement_root,
-                path,
-            )
+            descriptor = self._open_writable(confinement_root, directory, path)
         try:
             import fcntl
 
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             info = os.fstat(descriptor)
+            os.ftruncate(descriptor, 0)
+            os.write(descriptor, b"pending\n")
+            os.fsync(descriptor)
         except BaseException:
             info = os.fstat(descriptor)
             os.close(descriptor)
@@ -209,6 +212,29 @@ class _PlannedReapTokens:
             path=path,
             identity=(info.st_dev, info.st_ino),
         )
+
+    @staticmethod
+    def _open_writable(confinement_root: Path, directory: Path, path: Path) -> int:
+        parent = open_confined_directory(confinement_root, directory)
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR | required_no_follow_flag() | int(getattr(os, "O_CLOEXEC", 0)),
+                dir_fd=parent,
+            )
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+            ):
+                os.close(descriptor)
+                raise ConfinedFilesystemError("planned-reap token is unsafe")
+            return descriptor
+        except OSError as error:
+            raise ConfinedFilesystemError("planned-reap token cannot be opened safely") from error
+        finally:
+            os.close(parent)
 
     def consume(self, pid: int, created_at: float) -> bool:
         try:
@@ -233,12 +259,20 @@ class _PlannedReapTokens:
                 active_issuer = True
             else:
                 acquired = True
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            state = os.read(descriptor, 256).decode("ascii", errors="ignore").strip()
             removed = self._remove(path, expected_identity)
         finally:
             if acquired:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
-        return active_issuer and removed
+        committed = False
+        if state.startswith("committed:") and not active_issuer:
+            try:
+                committed = float(state.split(":", 1)[1]) >= time.time()
+            except (ValueError, IndexError):
+                committed = False
+        return removed and (active_issuer or committed)
 
     def _remove(self, path: Path, expected_identity: tuple[int, int]) -> bool:
         confinement_root, directory, _prefix = self._layout()
@@ -288,6 +322,26 @@ class _PlannedReapLease:
         self._descriptor = descriptor
         self._path = path
         self._identity = identity
+        self._committed = False
+
+    @property
+    def committed(self) -> bool:
+        return self._committed
+
+    def commit(self) -> None:
+        """Authenticate that the planned target was actually signalled."""
+
+        descriptor = self._descriptor
+        if descriptor is None:
+            raise RuntimeError("planned-reap issuer lease is no longer held")
+        payload = f"committed:{time.time() + _PLANNED_REAP_TOKEN_TTL_SECONDS:.6f}\n".encode(
+            "ascii"
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+        self._committed = True
 
     def release(self, *, remove_token: bool = True) -> bool:
         descriptor = self._descriptor
@@ -1371,10 +1425,21 @@ def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
     """Bind coordination to the canonical root location, outside provider data."""
 
     canonical_root = _canonical_provider_root(provider_root)
-    canonical_root = canonical_root.parent.resolve(strict=True) / canonical_root.name
-    root_identity = hashlib.sha256(os.fsencode(canonical_root)).hexdigest()
+    canonical_parent = _physical_existing_path(canonical_root.parent.resolve(strict=True))
+    root_identity_path = (
+        _physical_existing_path(canonical_root)
+        if canonical_root.exists()
+        else canonical_root
+    )
+    if sys.platform == "darwin" and not canonical_root.exists():
+        # APFS/HFS volumes are commonly case-insensitive. Folding only the
+        # not-yet-created final entry avoids alias races without changing
+        # Linux's case-sensitive path semantics.
+        root_identity_path = canonical_parent / canonical_root.name.casefold()
+    root_identity = f"path:{root_identity_path}"
+    root_identity = hashlib.sha256(root_identity.encode("utf-8")).hexdigest()
     return (
-        canonical_root.parent
+        canonical_parent
         / _REBUILD_LOCK_DIRECTORY
         / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
     )
@@ -1384,6 +1449,36 @@ def _canonical_provider_root(provider_root: Path | str) -> Path:
     """Resolve a read-only physical identity for locks and process matching."""
 
     return Path(os.path.abspath(os.fspath(provider_root))).resolve(strict=False)
+
+
+def _physical_existing_path(path: Path) -> Path:
+    """Recover the directory-entry spelling for an existing physical path."""
+
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        candidate = current / component
+        try:
+            target = os.stat(candidate, follow_symlinks=False)
+        except FileNotFoundError:
+            return path
+        match = component
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name == component:
+                        match = entry.name
+                        break
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+                        match = entry.name
+                        break
+        except OSError:
+            return path
+        current /= match
+    return current
 
 
 def _require_provider_root_access_path(provider_root: Path) -> None:
@@ -1412,7 +1507,16 @@ def _provider_roots_match(value: object, expected: Path) -> bool:
     if not isinstance(value, str) or not value:
         return False
     try:
-        return _canonical_provider_root(value) == _canonical_provider_root(expected)
+        observed = _canonical_provider_root(value)
+        configured = _canonical_provider_root(expected)
+        if observed == configured:
+            return True
+        observed_info = os.stat(observed, follow_symlinks=True)
+        configured_info = os.stat(configured, follow_symlinks=True)
+        return (observed_info.st_dev, observed_info.st_ino) == (
+            configured_info.st_dev,
+            configured_info.st_ino,
+        )
     except (OSError, RuntimeError):
         return False
 
@@ -1471,6 +1575,16 @@ class SidecarOwnership:
                 created_at,
             )
 
+    def commit_planned_reap(self, pid: int, created_at: float) -> None:
+        """Persist authenticated success before releasing the issuer lease."""
+
+        lease = self._planned_reap_leases.get(
+            self._planned_reap_key(pid, created_at),
+        )
+        if lease is None:
+            raise RuntimeError("planned-reap issuer lease is missing")
+        lease.commit()
+
     def consume_planned_reap(self, pid: int, created_at: float) -> bool:
         """Consume this process generation's handoff, if one was recorded."""
 
@@ -1499,7 +1613,7 @@ class SidecarOwnership:
         self._planned_reap_leases.clear()
         for lease in leases:
             try:
-                lease.release()
+                lease.release(remove_token=not lease.committed)
             except Exception:
                 # Closing the descriptor still revokes the issuer lease. An
                 # unlocked leftover token is stale and cannot suppress a crash.
@@ -1585,6 +1699,7 @@ class SidecarOwnership:
         swept as well. See ``_reap_recorded_group_without_leader``.
         """
 
+        _require_provider_root_access_path(self._provider_root)
         record = _read_sidecar_record(self.record_path)
         pid = _recorded_sidecar_pid(record)
         if pid is None or pid == os.getpid():
@@ -1662,6 +1777,8 @@ class SidecarOwnership:
                 self.cancel_planned_reap(pid, confirmed_create_time)
         if not terminated:
             raise RuntimeError(f"orphaned sidecar did not exit (pid {pid}, record {self.record_path})")
+        if planned_sidecar_reap:
+            self.commit_planned_reap(pid, confirmed_create_time)
         # The recorded root is gone, but a helper it spawned after the last
         # rediscovery is not among the identities that proved it. With the leader
         # dead, that is exactly the sweep below, and it fails the launch rather
@@ -2007,6 +2124,8 @@ class SidecarOwnership:
                     f"EverOS {role.value} left by an unusable record did not exit "
                     f"(pid {pid}, record {self.record_path})"
                 )
+            if planned_sidecar_reap:
+                self.commit_planned_reap(pid, created_at)
             if foreign and role is _MemoryChildRole.CASCADE_REBUILD:
                 raise RuntimeError(
                     "orphaned rebuild group could not be verified "
