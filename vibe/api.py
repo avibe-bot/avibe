@@ -10576,7 +10576,12 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         if isinstance(exc, asyncio.CancelledError):
             raise
         logger.warning("OpenCode custom provider delete failed for %s: %s", pid, exc, exc_info=True)
-        return {"ok": False, "message": str(exc), "restart": restart}
+        return _opencode_delete_failure_result(
+            pid,
+            str(exc),
+            restart,
+            mutation_attempted=mutation_started,
+        )
 
     restart = await _settle_opencode_delete_runtime(
         pid,
@@ -10584,7 +10589,12 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         settlement=settlement,
     )
     settlement.raise_if_cancelled()
-    partial = _opencode_delete_partial_result(pid, restart, removed=True)
+    partial = _opencode_delete_partial_result(
+        pid,
+        restart,
+        removed=True,
+        mutation_attempted=True,
+    )
     if partial is not None:
         return partial
     return {"ok": True, "provider_id": pid, "restart": restart}
@@ -10756,8 +10766,12 @@ async def _save_opencode_provider_auth_async(
     # flow, but provider options are the source OpenCode-compatible
     # providers consistently use at invocation time.
     config_key = config_api_key or api_key
+    mutation_attempted = False
     if config_key:
         try:
+            # The write may commit before raising, so this is possibly
+            # irreversible from the moment the operation starts.
+            mutation_attempted = True
             await asyncio.to_thread(
                 upsert_opencode_provider_api_key,
                 provider_id,
@@ -10773,6 +10787,7 @@ async def _save_opencode_provider_auth_async(
             )
             return {
                 "ok": False,
+                "mutation_attempted": mutation_attempted,
                 "message": (
                     "Provider credential persistence failed: "
                     f"{exc}"
@@ -10789,6 +10804,7 @@ async def _save_opencode_provider_auth_async(
                 if not auth_cleanup.get("ok"):
                     return {
                         "ok": False,
+                        "mutation_attempted": mutation_attempted,
                         "message": auth_cleanup.get("message")
                         or "API key saved, but stale OpenCode auth cleanup failed",
                     }
@@ -10801,6 +10817,7 @@ async def _save_opencode_provider_auth_async(
             )
             return {
                 "ok": False,
+                "mutation_attempted": mutation_attempted,
                 "message": (
                     "API key saved, but stale OpenCode auth cleanup failed: "
                     f"{exc}"
@@ -10816,6 +10833,7 @@ async def _save_opencode_provider_auth_async(
         return {"ok": True}
 
     try:
+        mutation_attempted = True
         if base_url:
             await asyncio.to_thread(
                 upsert_opencode_provider_base_url,
@@ -10835,6 +10853,7 @@ async def _save_opencode_provider_auth_async(
         )
         return {
             "ok": False,
+            "mutation_attempted": mutation_attempted,
             "message": (
                 "API key saved, but base URL persistence failed: "
                 f"{exc}"
@@ -10943,8 +10962,17 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
         logger.warning("OpenCode set-auth failed for %s: %s", provider_id, exc, exc_info=True)
         return {"ok": False, "message": str(exc)}
 
-    if result.get("ok"):
+    mutation_attempted = bool(result.get("mutation_attempted"))
+    if mutation_attempted or result.get("ok"):
         _OPENCODE_OPTIONS_CACHE.clear()
+
+    if not result.get("ok") and mutation_attempted:
+        result.update(
+            {
+                "partial": True,
+                "provider_id": provider_id.strip(),
+            }
+        )
 
     # Ask the live controller to refresh the OpenCode server so the
     # daemon's in-memory ``connected`` cache picks up the new auth.
@@ -11046,7 +11074,8 @@ def _opencode_delete_partial_result(
     provider_id: str,
     restart: dict,
     *,
-    removed: bool,
+    removed: bool | None,
+    mutation_attempted: bool,
 ) -> dict | None:
     """Expose a committed delete whose required runtime settlement failed."""
 
@@ -11056,12 +11085,36 @@ def _opencode_delete_partial_result(
         "ok": False,
         "partial": True,
         "removed": removed,
+        "mutation_attempted": mutation_attempted,
         "provider_id": provider_id,
         "restart": restart,
     }
     message = restart.get("message")
     if isinstance(message, str) and message:
         result["message"] = message
+    return result
+
+
+def _opencode_delete_failure_result(
+    provider_id: str,
+    message: str,
+    restart: dict | None,
+    *,
+    mutation_attempted: bool,
+) -> dict:
+    """Return one closed response shape for an uncertain delete outcome."""
+
+    result: dict[str, Any] = {
+        "ok": False,
+        "partial": mutation_attempted,
+        "mutation_attempted": mutation_attempted,
+        "provider_id": provider_id,
+        "removed": None if mutation_attempted else False,
+    }
+    if message:
+        result["message"] = message
+    if restart is not None:
+        result["restart"] = restart
     return result
 
 
@@ -11112,7 +11165,6 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
                 _delete_opencode_provider_auth_async(pid)
             )
             removed_auth = bool(result.get("ok"))
-            mutation_started = removed_auth
         if pid in config_api_key_provider_ids:
             mutation_started = True
             await settlement.run_blocking(
@@ -11135,7 +11187,12 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         if isinstance(exc, asyncio.CancelledError):
             raise
         logger.warning("OpenCode delete-auth failed for %s: %s", provider_id, exc, exc_info=True)
-        return {"ok": False, "message": str(exc), "restart": restart}
+        return _opencode_delete_failure_result(
+            pid,
+            str(exc),
+            restart,
+            mutation_attempted=mutation_started,
+        )
 
     # Revalidate the saved default after the credential mutation. A
     # failure is partial because the credential is already gone, but it
@@ -11157,6 +11214,7 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         pid,
         result["restart"],
         removed=removed_auth,
+        mutation_attempted=mutation_started,
     )
     if partial is not None:
         return partial

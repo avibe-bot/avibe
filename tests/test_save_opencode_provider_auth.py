@@ -404,6 +404,10 @@ def test_delete_custom_provider_settles_after_auth_delete_then_custom_failure(
 
     assert result["ok"] is False
     assert result["message"] == "custom provider delete failed"
+    assert result["partial"] is True
+    assert result["mutation_attempted"] is True
+    assert result["removed"] is None
+    assert result["provider_id"] == "custom"
     assert result["restart"] == {"ok": True}
     assert clear_calls == ["custom"]
     assert restart_calls == ["opencode"]
@@ -465,8 +469,43 @@ def test_delete_provider_settles_when_auth_delete_commits_then_close_fails(
 
     assert result["ok"] is False
     assert result["message"] == "session close failed"
+    assert result["partial"] is True
+    assert result["mutation_attempted"] is True
+    assert result["removed"] is None
+    assert result["provider_id"] == provider_id
     assert server._read_auth() == {}
     assert clear_calls == [provider_id]
+    assert restart_calls == ["opencode"]
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+
+
+def test_save_provider_auth_partial_cleanup_clears_prefilled_cache(
+    monkeypatch,
+    fake_save_env,
+) -> None:
+    server, _home = fake_save_env
+    server._write_auth({"deepseek": {"type": "api", "key": "sk-old"}})
+
+    async def fail_close(*_args, **_kwargs) -> None:
+        raise RuntimeError("session close failed")
+
+    monkeypatch.setattr(server, "close_http_session", fail_close)
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
+    restart_calls: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+
+    result = _save("deepseek", {"api_key": "sk-new"})
+
+    assert result["ok"] is False
+    assert result["partial"] is True
+    assert result["mutation_attempted"] is True
+    assert result["provider_id"] == "deepseek"
+    assert result["message"] == "API key saved, but stale OpenCode auth cleanup failed: session close failed"
+    assert result["restart"] == {"ok": True}
     assert restart_calls == ["opencode"]
     assert api._OPENCODE_OPTIONS_CACHE == {}
 
@@ -581,6 +620,7 @@ def test_delete_provider_reports_restart_failure_at_top_level(
         "ok": False,
         "partial": True,
         "removed": True,
+        "mutation_attempted": True,
         "provider_id": provider_id,
         "message": "restart failed",
         "restart": {"ok": False, "message": "restart failed"},

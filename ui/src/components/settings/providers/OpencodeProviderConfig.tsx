@@ -450,10 +450,17 @@ export const OpencodeProviderConfig: React.FC<{
     try {
       const result = await api.deleteOpencodeCustomProvider(provider.id);
       if (!result.ok) {
+        const message = result.message || (t('settings.backends.opencodeCustomProviderRemoveFailed') as string);
         updateEdit(provider.id, {
           deletingProvider: false,
-          error: result.message || (t('settings.backends.opencodeCustomProviderRemoveFailed') as string),
+          error: message,
         });
+        if (result.partial) {
+          showToast(message, 'warning');
+          notifyOpenCodeModelOptionsChanged();
+          if (expandedId === provider.id) setExpandedId(null);
+          await loadProviders();
+        }
         return;
       }
       updateEdit(provider.id, { deletingProvider: false, error: null });
@@ -541,10 +548,17 @@ export const OpencodeProviderConfig: React.FC<{
     try {
       const result = await api.deleteOpencodeProviderAuth(provider.id);
       if (!result.ok) {
+        const message = result.message || (t('settings.backends.opencodeProviderRemoveFailed') as string);
         updateEdit(provider.id, {
           removing: false,
-          error: result.message || (t('settings.backends.opencodeProviderRemoveFailed') as string),
+          error: message,
         });
+        if (result.partial) {
+          showToast(message, 'warning');
+          notifyOpenCodeModelOptionsChanged();
+          if (expandedId === provider.id) setExpandedId(null);
+          await loadProviders();
+        }
         return;
       }
       updateEdit(provider.id, { removing: false, error: null });
