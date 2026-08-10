@@ -52,6 +52,42 @@ def test_list_degrades_to_global_with_flag(folderless, monkeypatch):
     assert body["skills"][0]["scope"] == "global"
 
 
+def test_resolve_project_dir_uses_request_authorization_context(monkeypatch):
+    from vibe.authorization import AuthorizationContext
+    from vibe.ui_compat import g
+
+    seen = {}
+
+    class _Engine:
+        class _Connection:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *_exc_info):
+                return False
+
+        def connect(self):
+            return self._Connection()
+
+    def fake_get_project(conn, project_id, *, authorization_context=None):
+        seen["project_id"] = project_id
+        seen["authorization_context"] = authorization_context
+        return {"folder_path": "/tmp/project"}
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr("storage.projects_service.get_project", fake_get_project)
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True, subject="user-1")
+
+    with app.test_request_context("/api/skills?project_id=proj-restricted"):
+        g.authorization_context = remote_context
+        assert ui_server._resolve_project_dir("proj-restricted") == "/tmp/project"
+
+    assert seen == {
+        "project_id": "proj-restricted",
+        "authorization_context": remote_context,
+    }
+
+
 def test_check_returns_empty(folderless, monkeypatch):
     monkeypatch.setattr(api, "check_skills", _boom)
 

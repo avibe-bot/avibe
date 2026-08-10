@@ -2406,7 +2406,7 @@ def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
     if normalized_method == "POST" and path == "/api/sessions":
         return _payload_has_only_fields(payload, {"project_id", "title"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/sessions/[^/]+", path):
-        return _payload_has_only_fields(payload, {"pinned", "title", "visibility"})
+        return _payload_has_only_fields(payload, {"title"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
         return _payload_has_only_fields(payload, {"display_name"})
     if normalized_method == "POST" and path == "/api/projects":
@@ -7669,14 +7669,23 @@ def _resolve_project_dir(project_id):
     an unknown id (→ 404) and _ProjectNoFolder when the project's folder is
     unset/blank, so callers can degrade gracefully rather than passing an empty
     cwd to askill (which would surface as a raw ``project folder not found:``).
+
+    Project-scoped skill routes are remote-readable, so the project lookup must
+    carry the current request's authorization context; a resource ACL on the
+    skill is an additional gate, not a substitute for Project access.
     """
     if not project_id:
         return None
     from storage import projects_service
 
+    authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     with engine.connect() as conn:
-        project = projects_service.get_project(conn, project_id)
+        project = projects_service.get_project(
+            conn,
+            project_id,
+            authorization_context=authorization_context,
+        )
     folder = (project.get("folder_path") or "").strip()
     if not folder:
         raise _ProjectNoFolder(project_id)

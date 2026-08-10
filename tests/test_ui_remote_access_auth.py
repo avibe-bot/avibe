@@ -1150,6 +1150,8 @@ def test_remote_runtime_snapshots_are_blocked_before_controller_access(monkeypat
         {"model": "gpt-5"},
         {"reasoning_effort": "high"},
         {"scope_id": "scope-local"},
+        {"visibility": "background"},
+        {"pinned": True},
     ],
 )
 def test_remote_session_execution_settings_are_blocked_before_store_access(
@@ -1405,6 +1407,12 @@ def test_remote_execution_config_changes_are_blocked_before_runtime_reconcile(
 def test_remote_session_and_project_metadata_predicates_remain_allowed():
     assert not ui_server._is_remote_local_execution_request(
         "PATCH", "/api/sessions/ses-local", {"title": "renamed"}
+    )
+    assert ui_server._is_remote_local_execution_request(
+        "PATCH", "/api/sessions/ses-local", {"visibility": "background"}
+    )
+    assert ui_server._is_remote_local_execution_request(
+        "PATCH", "/api/sessions/ses-local", {"pinned": True}
     )
     assert not ui_server._is_remote_local_execution_request(
         "PATCH", "/api/projects/proj-local", {"display_name": "renamed"}
@@ -2012,6 +2020,52 @@ def test_remote_skill_operations_are_blocked_before_api_calls(
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_project_scoped_skill_reads_require_project_access(
+    monkeypatch,
+    tmp_path,
+):
+    from storage import project_access_service, projects_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    folder = tmp_path / "project"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, str(folder), display_name="Restricted")
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": project["id"],
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner", role="editor"),
+        domain="alex.avibe.bot",
+    )
+
+    async def unexpected_list(*args, **kwargs):
+        raise AssertionError("restricted remote skill read reached the Skills API")
+
+    monkeypatch.setattr(api, "list_skills", unexpected_list)
+    response = client.get(
+        f"/api/skills?scope=project&project_id={project['id']}",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "project_not_found"
 
 
 @pytest.mark.parametrize(
