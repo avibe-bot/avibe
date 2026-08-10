@@ -128,6 +128,115 @@ async def test_factory_early_close_is_not_repeated_at_teardown(tmp_path: Path) -
     assert close_calls == 1
 
 
+async def test_factory_teardown_joins_a_blocked_explicit_close(tmp_path: Path) -> None:
+    factory = MemoryRuntimeFactory()
+    runtime = _runtime(factory, tmp_path)
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    close_calls = 0
+
+    async def close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_entered.set()
+        await release_close.wait()
+
+    runtime.close = close
+    explicit_close = asyncio.create_task(factory.close(runtime))
+    await close_entered.wait()
+    teardown = asyncio.create_task(factory.close_all())
+    try:
+        await asyncio.sleep(0)
+        assert close_calls == 1
+    finally:
+        release_close.set()
+        results = await asyncio.gather(
+            explicit_close,
+            teardown,
+            return_exceptions=True,
+        )
+
+    assert results == [None, None]
+    await factory.close(runtime)
+    assert close_calls == 1
+
+
+async def test_factory_teardown_joins_close_after_explicit_caller_cancellation(
+    tmp_path: Path,
+) -> None:
+    factory = MemoryRuntimeFactory()
+    runtime = _runtime(factory, tmp_path)
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    close_calls = 0
+
+    async def close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_entered.set()
+        await release_close.wait()
+
+    runtime.close = close
+    explicit_close = asyncio.create_task(factory.close(runtime))
+    await close_entered.wait()
+    explicit_close.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await explicit_close
+
+    teardown = asyncio.create_task(factory.close_all())
+    try:
+        await asyncio.sleep(0)
+        assert close_calls == 1
+    finally:
+        release_close.set()
+        await teardown
+
+    await factory.close(runtime)
+    assert close_calls == 1
+
+
+async def test_factory_shares_an_in_flight_close_failure_with_teardown_and_repeats(
+    tmp_path: Path,
+) -> None:
+    factory = MemoryRuntimeFactory()
+    runtime = _runtime(factory, tmp_path)
+    close_entered = asyncio.Event()
+    release_close = asyncio.Event()
+    close_calls = 0
+
+    async def close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_entered.set()
+        await release_close.wait()
+        raise RuntimeError("shared close failure")
+
+    runtime.close = close
+    explicit_close = asyncio.create_task(factory.close(runtime))
+    await close_entered.wait()
+    teardown = asyncio.create_task(factory.close_all())
+    try:
+        await asyncio.sleep(0)
+        assert close_calls == 1
+    finally:
+        release_close.set()
+        results = await asyncio.gather(
+            explicit_close,
+            teardown,
+            return_exceptions=True,
+        )
+
+    assert len(results) == 2
+    assert all(
+        isinstance(result, RuntimeError) and str(result) == "shared close failure"
+        for result in results
+    )
+    assert results[0] is results[1]
+    with pytest.raises(RuntimeError, match="shared close failure"):
+        await factory.close(runtime)
+    assert close_calls == 1
+
+
 async def test_factory_settles_runtime_tasks_and_sidecar_before_scope_exit(
     tmp_path: Path,
 ) -> None:
