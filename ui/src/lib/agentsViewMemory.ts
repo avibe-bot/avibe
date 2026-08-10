@@ -45,6 +45,16 @@ export function readAgentsTab(storage?: ViewStorage): AgentsTabKey {
   return read(TAB_STORAGE_KEY, AGENTS_TAB_ORDER, DEFAULT_AGENTS_TAB, storage);
 }
 
+// A contextual link that needs a specific tab says so with ``?tab=`` — e.g.
+// "New agent" / "Open in Agents" both need the Definitions controls, not the run
+// graph, whichever tab the user happens to have left the page on. Unlike
+// harnessTabFromParam this returns null rather than the default for an absent or
+// unknown value, because here "no explicit intent" means *resume the remembered
+// tab*, which only the caller can fall back to.
+export function agentsTabFromParam(param: string | null | undefined): AgentsTabKey | null {
+  return (AGENTS_TAB_ORDER as string[]).includes(param ?? '') ? (param as AgentsTabKey) : null;
+}
+
 export function writeAgentsTab(tab: AgentsTabKey, storage?: ViewStorage): void {
   write(TAB_STORAGE_KEY, tab, storage);
 }

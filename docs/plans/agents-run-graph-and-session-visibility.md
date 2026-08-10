@@ -79,7 +79,9 @@ standalone session" entry point (model support only); mobile canvas rendering
   widens 活跃 → 含历史 to surface an out-of-window node is transient, like the
   disabled-trigger reveal. Best-effort local storage
   (`ui/src/lib/agentsViewMemory.ts`); blocked storage falls back to the defaults.
-  Time window / project / `显示后台会话` are not remembered.
+  Time window / project / `显示后台会话` are not remembered. Only general
+  navigation resumes the memory: a contextual entry point passes
+  `/agents?tab=definitions` and that destination wins without being remembered.
 
 ### Graph semantics (all from existing columns)
 

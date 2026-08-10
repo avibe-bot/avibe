@@ -4,6 +4,7 @@ import {
   AGENTS_TAB_ORDER,
   DEFAULT_AGENTS_TAB,
   DEFAULT_AGENT_GRAPH_MODE,
+  agentsTabFromParam,
   readAgentGraphMode,
   readAgentsTab,
   writeAgentGraphMode,
@@ -68,6 +69,27 @@ describe('agents view memory', () => {
 
     expect(readAgentsTab(stale.storage)).toBe('definitions');
     expect(readAgentGraphMode(stale.storage)).toBe('history');
+  });
+
+  it('reads a contextual ?tab= intent for every tab and nothing else', () => {
+    for (const tab of AGENTS_TAB_ORDER) {
+      expect(agentsTabFromParam(tab)).toBe(tab);
+    }
+    // No intent ⇒ null, so the caller resumes the remembered tab instead of
+    // being forced onto a default.
+    for (const absent of [null, undefined, '', 'webhooks', 'Definitions']) {
+      expect(agentsTabFromParam(absent)).toBeNull();
+    }
+  });
+
+  it('a contextual ?tab= destination never rewrites the remembered tab', () => {
+    const memory = memoryStorage();
+    writeAgentsTab('running', memory.storage);
+
+    // Resolving an explicit destination is a pure read — only an actual tab
+    // click (writeAgentsTab) may change what the next bare visit opens.
+    expect(agentsTabFromParam('definitions')).toBe('definitions');
+    expect(readAgentsTab(memory.storage)).toBe('running');
   });
 
   it('tolerates blocked storage', () => {

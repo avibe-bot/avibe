@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
   ChevronDown,
@@ -52,7 +53,13 @@ import {
 import { errorMessage } from '@/lib/errorMessage';
 // Tab set + its cross-visit memory live together so the remembered value can
 // never name a tab this page no longer renders (see agentsViewMemory).
-import { AGENTS_TAB_ORDER, readAgentsTab, writeAgentsTab, type AgentsTabKey } from '../../lib/agentsViewMemory';
+import {
+  AGENTS_TAB_ORDER,
+  agentsTabFromParam,
+  readAgentsTab,
+  writeAgentsTab,
+  type AgentsTabKey,
+} from '../../lib/agentsViewMemory';
 
 function isSystemAgent(agent: { source: string }): boolean {
   return agent.source === 'builtin' || agent.source === 'system';
@@ -62,8 +69,22 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  // Resume the tab the user left the page on; a fresh browser opens Definitions.
-  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>(readAgentsTab);
+  // General navigation (sidebar / nav / capability tabs) resumes the tab the user
+  // left the page on; a fresh browser opens Definitions. A contextual caller that
+  // needs a specific tab passes ``?tab=`` and wins over the memory — the tab it
+  // asked for is a destination, not a choice the user made, so it is deliberately
+  // NOT written back to the memory.
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>(
+    () => agentsTabFromParam(tabParam) ?? readAgentsTab(),
+  );
+  // One-way URL -> state, keyed on the param so a later user tab click isn't
+  // yanked back: a contextual link can arrive while this page is already mounted.
+  useEffect(() => {
+    const requested = agentsTabFromParam(tabParam);
+    if (requested) setAgentsTab(requested);
+  }, [tabParam]);
   const selectAgentsTab = useCallback((next: AgentsTabKey) => {
     setAgentsTab(next);
     writeAgentsTab(next);

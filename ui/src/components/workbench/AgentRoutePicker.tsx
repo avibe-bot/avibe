@@ -358,7 +358,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               onClick={() => {
                 setOpen(false);
                 onNavigateAway?.(); // close the create sheet before leaving, if any
-                navigate('/agents');
+                // Creating an agent needs the Definitions controls, so ask for
+                // that tab explicitly instead of resuming the remembered one.
+                navigate('/agents?tab=definitions');
               }}
               className="mt-1 h-auto w-full justify-start gap-1.5 rounded px-2 py-1.5 text-[11px] font-medium text-cyan hover:bg-cyan/[0.08] hover:text-cyan"
             >
