@@ -1339,6 +1339,7 @@ class MemoryRuntime:
             return
         if surface.surface == "call_log":
             await run_blocking(clear_call_log, self._call_log_db_path)
+            self._sidecar.reset_host_retention_after_clear()
             self._set_recorder_health_disabled()
             return
         if surface.surface == "attachments":

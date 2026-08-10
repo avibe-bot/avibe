@@ -61,6 +61,7 @@ class MemorySidecarLifecycle:
         self._ready_generation: int | None = None
         self._ready_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
+        self._retention_blocked = False
         self._ready_admission_open = True
         self._closed = False
         self._processing_probe_active = False
@@ -202,6 +203,11 @@ class MemorySidecarLifecycle:
     async def stop_host_retention(self) -> None:
         await self._stop_retention()
 
+    def reset_host_retention_after_clear(self) -> None:
+        """Reopen retention only after Clear repaired its corrupt call-log surface."""
+
+        self._retention_blocked = False
+
     def _is_current(self, process: EverOSProcessPort | None, generation: int) -> bool:
         return process is not None and process is self._process and generation == self._generation
 
@@ -226,7 +232,12 @@ class MemorySidecarLifecycle:
                     await result
 
     def _ensure_retention(self) -> None:
-        if self._closed or self._records_calls or not self._call_log_exists():
+        if (
+            self._closed
+            or self._retention_blocked
+            or self._records_calls
+            or not self._call_log_exists()
+        ):
             return
         if self._retention_task is None or self._retention_task.done():
             self._retention_task = asyncio.create_task(
@@ -254,6 +265,7 @@ class MemorySidecarLifecycle:
                 if reason is not None:
                     self._on_recorder_health({"state": "degraded", "reason": reason})
                     if reason == "call_log_corrupt":
+                        self._retention_blocked = True
                         return
                 else:
                     self._on_recorder_health({"state": "disabled", "reason": None})

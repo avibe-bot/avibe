@@ -103,3 +103,44 @@ async def test_close_never_restarts_host_retention_after_stopping_sidecar(tmp_pa
 
     assert lifecycle.snapshot().process is None
     assert lifecycle.retention_task is None
+
+
+async def test_corrupt_host_log_stays_blocked_across_sidecar_reaps(tmp_path: Path) -> None:
+    factory = FakeEverOSProcessFactory()
+    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
+    call_log.parent.mkdir(parents=True)
+    call_log.touch()
+    attempts = 0
+
+    async def retain() -> str | None:
+        nonlocal attempts
+        attempts += 1
+        return "call_log_corrupt"
+
+    lifecycle = MemorySidecarLifecycle(
+        factory,
+        provider_root=tmp_path / "memory" / "everos-root",
+        effective_home=tmp_path,
+        socket_path=tmp_path / "memory" / ".rt" / "everos.sock",
+        call_log_db_path=call_log,
+        retain_call_log=retain,
+        on_current_sidecar_ready=lambda _generation: None,
+        on_recorder_health=lambda _health: None,
+    )
+    lifecycle.handoff_to_host_retention()
+    task = lifecycle.retention_task
+    assert task is not None
+    await task
+    assert attempts == 1
+
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    await lifecycle.stop()
+    await asyncio.sleep(0)
+    assert attempts == 1
+
+    lifecycle.reset_host_retention_after_clear()
+    lifecycle.handoff_to_host_retention()
+    resumed = lifecycle.retention_task
+    assert resumed is not None
+    await resumed
+    assert attempts == 2
