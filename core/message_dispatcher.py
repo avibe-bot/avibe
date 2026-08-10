@@ -1355,6 +1355,37 @@ class ConsolidatedMessageDispatcher:
         metadata["turn_failure_notification"] = notification
         return replace(output_semantics, metadata=metadata)
 
+    def _output_with_implicit_turn_failure_notification(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+        *,
+        is_error: bool,
+        has_visible_result: bool,
+        mutates_turn_lifecycle: bool,
+    ) -> MessageOutput:
+        """Give an invisible failed Harness Turn one shared fallback identity."""
+
+        if (
+            not is_error
+            or has_visible_result
+            or not mutates_turn_lifecycle
+            or not output_semantics.settles_run
+        ):
+            return output_semantics
+        notification = output_semantics.metadata.get("turn_failure_notification")
+        if isinstance(notification, dict) and str(notification.get("failure_id") or "").strip():
+            return output_semantics
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        if not turn_id or not self._terminal_agent_run_ids(context, output_semantics):
+            return output_semantics
+        metadata = dict(output_semantics.metadata)
+        metadata["turn_failure_notification"] = {
+            "failure_id": f"turn:{turn_id}",
+            "delivered": False,
+        }
+        return replace(output_semantics, metadata=metadata)
+
     def _run_has_blocking_activity(self, run_id: str) -> bool:
         service = getattr(self.controller, "agent_service", None)
         registry = getattr(service, "activities", None)
@@ -1999,11 +2030,6 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
-        if canonical_type == "result" and output_semantics.completes_turn:
-            output_semantics = self._output_with_turn_fallback_owner(
-                context,
-                output_semantics,
-            )
         activity_batch_incomplete = bool(
             output_semantics.requires_delivery_for_run_settlement
             and output_semantics.metadata.get("activity_batch_complete") is False
@@ -2058,6 +2084,18 @@ class ConsolidatedMessageDispatcher:
             text = enhanced.visible_text
         else:
             text = strip_silent_blocks(raw_text)
+        if canonical_type == "result" and output_semantics.completes_turn:
+            output_semantics = self._output_with_implicit_turn_failure_notification(
+                context,
+                output_semantics,
+                is_error=is_error,
+                has_visible_result=level != "silent" and bool(text and text.strip()),
+                mutates_turn_lifecycle=mutates_turn_lifecycle,
+            )
+            output_semantics = self._output_with_turn_fallback_owner(
+                context,
+                output_semantics,
+            )
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
         # without guessing from transcript order or requiring a live sink.

@@ -4235,6 +4235,15 @@ scenarios:
     # Exit 124 keeps a once Watch waiting only when listed, then the first event
     # queues one Run and retires normally.
     test: tests/test_watches.py::test_once_watch_retries_timeout_only_when_124_is_allowed
+  - id: HFR-472
+    name: empty failed Turn owns one fallback across all accepted Runs
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # The shared dispatcher stamps one Turn failure identity before the immutable
+    # terminal snapshot; the existing atomic settlement elects one Run owner.
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

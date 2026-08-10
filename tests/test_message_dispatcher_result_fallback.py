@@ -229,6 +229,85 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         store.get_run.assert_not_called()
 
+    async def test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract(self):
+        controller = self._terminal_lifecycle_controller()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        dispatcher._clear_consolidated_state = mock.AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-empty-failure",
+                "accepted_agent_run_ids": ["run-b", "run-a"],
+            },
+        )
+        store = mock.Mock()
+        store.get_run.side_effect = lambda run_id: {
+            "run-a": {"id": "run-a", "status": "running"},
+            "run-b": {"id": "run-b", "status": "running"},
+        }.get(run_id)
+
+        with mock.patch(
+            "core.message_dispatcher.SQLiteBackgroundTaskStore",
+            return_value=store,
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                output=MessageOutput(completes_turn=True, completes_run=True),
+            )
+
+        evidence = controller.session_turns.on_terminal_result.call_args.kwargs[
+            "terminal_evidence"
+        ]
+        notification = evidence["output_provenance"]["turn_failure_notification"]
+        self.assertEqual(
+            notification,
+            {
+                "failure_id": "turn:turn-empty-failure",
+                "delivered": False,
+                "fallback_run_id": "run-a",
+            },
+        )
+        store.record_turn_run_outputs.assert_called_once()
+        record_call = store.record_turn_run_outputs.call_args
+        self.assertEqual(record_call.args[0], ["run-b", "run-a"])
+        self.assertEqual(
+            record_call.kwargs["provenance"]["turn_failure_notification"],
+            notification,
+        )
+        self.assertEqual(controller.im_client.sent_messages, [])
+
+    def test_visible_direct_error_does_not_create_a_turn_fallback_contract(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController(platform="slack"))
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-visible-error",
+                "accepted_agent_run_ids": ["run-a", "run-b"],
+            },
+        )
+        output = MessageOutput(completes_turn=True, completes_run=True)
+
+        unchanged = dispatcher._output_with_implicit_turn_failure_notification(
+            context,
+            output,
+            is_error=True,
+            has_visible_result=True,
+            mutates_turn_lifecycle=True,
+        )
+
+        self.assertIs(unchanged, output)
+        self.assertNotIn("turn_failure_notification", unchanged.metadata)
+
     async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
         controller = _StubController(platform="slack")
         controller.agent_service = type(
