@@ -519,10 +519,7 @@ class OpenCodePollLoop:
         """Continue a poll loop that was interrupted by restart."""
 
         session_id = poll_info.opencode_session_id
-        active_ack_requests = getattr(self._agent, "_active_ack_requests", {})
-        restored_request = active_ack_requests.get(
-            poll_info.base_session_id
-        ) or self._build_restored_ack_request(poll_info)
+        restored_request = self._build_restored_ack_request(poll_info)
         context = restored_request.context
         processing_snapshot = (
             poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}

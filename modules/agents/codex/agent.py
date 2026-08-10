@@ -647,11 +647,18 @@ class CodexAgent(BaseAgent):
                 {"threadId": thread_id, "turnId": turn_id},
             )
             interrupted_request = self._event_handler.clear_pending(turn_id)
-            if interrupted_request and self.consume_user_stop_intent(turn_id):
+            stopped_by_user = self.consume_user_stop_intent(turn_id)
+            if interrupted_request and stopped_by_user:
                 await self._remove_ack_reaction(
                     interrupted_request,
                     terminal_emoji=STOPPED_REACTION_EMOJI,
                 )
+            elif interrupted_request is None and stopped_by_user:
+                # A normal/failed completion won the race and popped the turn
+                # without consuming the stop intent. Its own terminal output is
+                # authoritative, so do not overwrite it with a silent cancel.
+                logger.info("Codex turn %s completed before /stop claimed it", turn_id)
+                return True
             # A user-initiated stop is terminal but intentional, so it carries NO
             # user-facing message: a single SILENT result settles the dot to idle +
             # releases the SSE waiter through the outbound chokepoint without a
@@ -673,10 +680,12 @@ class CodexAgent(BaseAgent):
         except Exception as e:
             request.stop_failure_reason = "interrupt_failed"
             logger.error("Failed to interrupt Codex turn: %s", e)
-            # The turn was not stopped, so nothing is owed a stopped receipt;
-            # leaving the intent behind would mis-stamp a later ending.
-            self._user_stopped_turn_ids.discard(turn_id)
             return False
+        finally:
+            # A normal/failed completion does not consume stop intent, and the
+            # caller itself may be cancelled while the RPC is in flight. Never
+            # let either path leave a stale turn id in this long-lived agent.
+            self._user_stopped_turn_ids.discard(turn_id)
 
     def consume_user_stop_intent(self, turn_id: str) -> bool:
         """Claim the /stop intent for ``turn_id``; True for the first claimer only.
