@@ -869,6 +869,7 @@ def test_dependencies_status_shape(monkeypatch):
     out = api.dependencies_status()
     assert out["ok"]
     assert out["reconciling"] is False
+    assert out["reconciling_dependencies"] == []
     by = {d["id"]: d for d in out["deps"]}
     assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
@@ -917,6 +918,39 @@ def test_dependencies_status_preserves_reconciliation_seen_before_probes(monkeyp
     monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _LockSnapshot())
 
     assert api.dependencies_status(offline=True)["reconciling"] is True
+
+
+def test_dependencies_status_detects_reconciliation_during_probes(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
+    monkeypatch.setattr(api.V2Config, "load", classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=False))))
+
+    import core.show_runtime as srt_mod
+
+    class _ShowRuntime:
+        def status(self):
+            return {"installed": True, "node_available": True, "node_version": "22.0"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _ShowRuntime())
+
+    import core.tmux_runtime as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
+    monkeypatch.setattr(api, "_startup_dependency_state_snapshot", iter([(7, set()), (8, set())]).__next__)
+
+    class _Unlocked:
+        def locked(self):
+            return False
+
+    monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _Unlocked())
+    result = api.dependencies_status()
+
+    assert result["reconciling"] is True
+    assert result["reconciling_dependencies"] == []
 
 
 @pytest.mark.parametrize(

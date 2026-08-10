@@ -59,6 +59,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   const [deps, setDeps] = useState<DependencyItem[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [reconciling, setReconciling] = useState(false);
+  const [startupRepairingIds, setStartupRepairingIds] = useState<Set<string> | undefined>(undefined);
   const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -68,12 +69,16 @@ export const SettingsDependenciesPage: React.FC = () => {
       if (sequence === refreshSequence.current) {
         setDeps(res.deps ?? []);
         setReconciling(Boolean(res.reconciling));
+        setStartupRepairingIds(
+          Array.isArray(res.reconciling_dependencies) ? new Set(res.reconciling_dependencies) : undefined,
+        );
       }
       return res;
     } catch {
       if (sequence === refreshSequence.current) {
         setDeps([]);
         setReconciling(false);
+        setStartupRepairingIds(undefined);
       }
       return null;
     }
@@ -138,7 +143,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusText = (d: DependencyItem) => {
-    if (reconciling && dependencyIsStartupRepairing(d)) {
+    if (reconciling && dependencyIsStartupRepairing(d, startupRepairingIds)) {
       return t('settings.dependencies.installing');
     }
     // Closed non-installed failure states render distinctly, ahead
@@ -152,7 +157,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   };
 
   const statusVariant = (d: DependencyItem): 'success' | 'warning' | 'destructive' => {
-    if (reconciling && dependencyIsStartupRepairing(d)) return 'warning';
+    if (reconciling && dependencyIsStartupRepairing(d, startupRepairingIds)) return 'warning';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
     return d.installed ? 'success' : 'destructive';
@@ -182,7 +187,7 @@ export const SettingsDependenciesPage: React.FC = () => {
           {deps.map((d) => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
-            const startupInstalling = reconciling && dependencyIsStartupRepairing(d);
+            const startupInstalling = reconciling && dependencyIsStartupRepairing(d, startupRepairingIds);
             const showAction = dependencyHasInstallAction(d);
             return (
               <SettingsResourceRow

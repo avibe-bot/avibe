@@ -12,13 +12,19 @@ export const dependencyIsStartupManaged = (dependency: Pick<DependencyItem, 'id'
 
 export const dependencyIsStartupRepairing = (
   dependency: Pick<DependencyItem, 'id' | 'installed' | 'status'>,
+  activeIds?: ReadonlySet<string>,
 ): boolean =>
   dependencyIsStartupManaged(dependency) &&
+  (activeIds === undefined || activeIds.has(dependency.id)) &&
   (!dependency.installed || dependency.status === 'upgrade_required' || dependency.status === 'error');
 
 export const dependenciesNeedAutomaticRefresh = (
   result: DependenciesResult,
   allowInitialRetry = false,
-): boolean =>
-  Boolean(result.reconciling) ||
-  (allowInitialRetry && result.deps.some((dependency) => dependencyIsStartupRepairing(dependency)));
+): boolean => {
+  const activeIds = Array.isArray(result.reconciling_dependencies)
+    ? new Set(result.reconciling_dependencies)
+    : undefined;
+  return Boolean(result.reconciling) ||
+    (allowInitialRetry && result.deps.some((dependency) => dependencyIsStartupRepairing(dependency, activeIds)));
+};

@@ -83,4 +83,18 @@ describe('startup dependency refresh', () => {
       }, true),
     ).toBe(true);
   });
+
+  it('limits startup repair status to dependencies currently active in the backend', () => {
+    const showRuntime = dependency('show-runtime', false);
+    expect(dependencyIsStartupRepairing(showRuntime, new Set(['tmux']))).toBe(false);
+    expect(dependencyIsStartupRepairing(showRuntime, new Set(['show-runtime']))).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        reconciling_dependencies: [],
+        deps: [showRuntime],
+      }, true),
+    ).toBe(false);
+  });
 });

@@ -426,6 +426,11 @@ class ShowRuntimeManager:
                 return command
         command = self._install_managed_runtime()
         if command:
+            # A successful prepare is already the installation attempt for the
+            # request-time resolver. This is especially important for archive
+            # providers, where re-entering the installer would download and
+            # unpack the same runtime a second time during prewarm.
+            self._install_attempted = True
             self._managed_command = command
         return command
 

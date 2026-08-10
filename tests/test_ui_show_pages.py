@@ -4964,6 +4964,23 @@ def test_show_runtime_startup_reuses_github_install_but_explicit_prepare_refresh
     assert installs == [True]
 
 
+def test_show_runtime_prepare_marks_archive_install_attempted(monkeypatch, tmp_path):
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+    )
+    command = ["/bin/node", str(tmp_path / "runtime.js")]
+    installs = []
+    monkeypatch.setattr(manager, "_install_managed_runtime", lambda: installs.append(True) or command)
+    monkeypatch.setattr(manager, "_installed_archive_runtime_command", lambda: command)
+
+    assert manager.prepare()["command"] == command
+    assert manager._install_attempted is True
+    assert asyncio.run(manager._resolve_managed_command()) == command
+    assert installs == [True]
+
+
 def test_show_runtime_manager_can_disable_auto_install(tmp_path):
     manager = ShowRuntimeManager(
         workspace_root=tmp_path / "show",
