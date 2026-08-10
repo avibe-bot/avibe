@@ -1722,6 +1722,7 @@
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
+        "localOnly": "Enable notifications on this device locally",
         "installFirst": "Add to Home Screen first",
         "enable": "Enable notifications",
         "enabled": "Notifications on",

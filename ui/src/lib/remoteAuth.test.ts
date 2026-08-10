@@ -14,6 +14,7 @@ import {
   canEditProjectInstructions,
   canManageSkills,
   canManageVaultSecrets,
+  canRegisterWebPush,
   canUseHarness,
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
@@ -40,6 +41,7 @@ describe('local-only workbench controls', () => {
   const predicates = {
     canManageSkills,
     canManageVaultSecrets,
+    canRegisterWebPush,
     canUseHarness,
     canArchiveProjects,
     canEditProjectInstructions,

@@ -2303,6 +2303,79 @@ def test_remote_owner_instruction_reads_stay_local_while_queue_reads_do_not(
     assert ui_server._is_remote_local_execution_request("POST", "/api/skills/preview")
 
 
+def test_remote_owner_cannot_register_or_test_a_web_push_endpoint(
+    monkeypatch,
+    tmp_path,
+):
+    """Push registration is the SSRF surface; the status read is not.
+
+    A subscription endpoint is caller-supplied and ``send_web_push()`` fetches
+    it from this host, and nothing between the payload and that request keeps
+    it pointed at a real push service - an HTTPS URL naming loopback, a private
+    LAN host or a rebinding name is accepted. A remote caller could therefore
+    register one and use ``/test`` to have the Avibe host issue the request
+    from inside its own network, so both mutations stop at the boundary while
+    the principal-scoped status read still crosses it.
+    """
+
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda **kwargs: sent.append(kwargs),
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, "https://alex.avibe.bot")
+
+    def _post(path: str, payload: dict):
+        return client.post(
+            path,
+            json=payload,
+            headers=headers,
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+
+    internal_endpoint = "https://127.0.0.1:8443/push"
+    subscribe = _post(
+        "/api/web-push/subscriptions",
+        {
+            "endpoint": internal_endpoint,
+            "keys": {"p256dh": "public-key", "auth": "auth-secret"},
+        },
+    )
+    test_send = _post("/api/web-push/test", {"endpoint": internal_endpoint})
+    unsubscribe = client.delete(
+        "/api/web-push/subscriptions",
+        json={"endpoint": internal_endpoint},
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    status = client.get(
+        "/api/web-push/status",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    for response in (subscribe, test_send, unsubscribe):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == "remote_execution_disabled"
+    assert sent == []
+    assert status.status_code == 200
+    # No endpoint was stored, so the status read reports nothing to send to.
+    assert status.get_json()["subscription_count"] == 0
+
+
 def test_remote_show_dispatch_is_rejected_before_event_reservation(
     monkeypatch,
     tmp_path,

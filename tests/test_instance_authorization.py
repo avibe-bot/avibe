@@ -206,7 +206,17 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/dock", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
         ("PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
-        ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_ALLOWED),
+        # A push endpoint is caller-supplied and `send_web_push()` fetches it
+        # from this host, so registering or testing one from across the tunnel
+        # would let a remote caller aim an outbound request at loopback, a
+        # private LAN host or a rebinding name. Status reads stay remote: they
+        # report the caller's own subscription and reach no endpoint.
+        ("GET", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/web-push/vapid-public-key", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_LOCAL_ONLY),
+        ("DELETE", "/api/web-push/subscriptions", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/web-push/test", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
         ("HEAD", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
@@ -342,6 +352,23 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
         ),
         ("dockAndWorkbenchPrefs", "PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
         ("dockAndWorkbenchPrefs", "PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
+        # canRegisterWebPush: status reads stay remote, but registering or
+        # testing an endpoint this host will call does not.
+        ("canRegisterWebPush", "GET", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        ("canRegisterWebPush", "POST", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        (
+            "canRegisterWebPush",
+            "POST",
+            "/api/web-push/subscriptions",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        (
+            "canRegisterWebPush",
+            "DELETE",
+            "/api/web-push/subscriptions",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("canRegisterWebPush", "POST", "/api/web-push/test", REMOTE_HTTP_LOCAL_ONLY),
     ],
 )
 def test_local_only_workbench_gates_match_the_remote_http_policy(

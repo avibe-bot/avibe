@@ -416,15 +416,25 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         # remote write would reorder and re-pin everyone else's Dock and flip
         # another principal's banner preference, so the mutations stay local.
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
+        # Reading push status stays remote, and so does the `POST` form of it:
+        # it reports this principal's own subscription count and can only
+        # re-attach a device id to an endpoint that is already stored and
+        # enabled for that same principal, so it can neither introduce an
+        # endpoint nor send to one.
+        #
+        # Registering and testing a subscription are different: the endpoint is
+        # caller-supplied data that `send_web_push()` later fetches from the
+        # Avibe host, and nothing between the payload and the request restricts
+        # it to a real push service. A remote caller could register an HTTPS
+        # endpoint aimed at loopback, a private LAN host or a rebinding name and
+        # then have this host issue the request from inside the network, so the
+        # write and the test stay local until the endpoint is checked against
+        # its resolved addresses.
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/web-push/(?:status|vapid-public-key)$",
         ),
-        (
-            frozenset({"POST"}),
-            r"^/api/web-push/(?:status|subscriptions|test)$",
-        ),
-        (frozenset({"DELETE"}), r"^/api/web-push/subscriptions$"),
+        (frozenset({"POST"}), r"^/api/web-push/status$"),
         (
             frozenset({"PUT"}),
             r"^/api/resource-policies/[^/]+/[^/]+$",

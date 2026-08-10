@@ -1722,6 +1722,7 @@
       "notifications": {
         "checking": "正在检查通知",
         "unsupported": "当前不支持通知",
+        "localOnly": "请在本机开启通知",
         "installFirst": "先添加到主屏幕",
         "enable": "开启通知",
         "enabled": "通知已开启",

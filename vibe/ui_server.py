@@ -9519,10 +9519,37 @@ def media_get(token: str):
     return _registered_media_response(token)
 
 
+def _media_row_show_page_access_allowed(context: Any, row: dict[str, Any]) -> bool:
+    """Whether *context* may still read a Show annotation's screenshot bytes.
+
+    A `show_annotation` screenshot is part of the page it was drawn on, so it
+    inherits that page's resource ACL rather than only the Project/session role
+    the rest of the media proxy checks. Without this the media token outlives
+    the access that produced it: a caller who saw a private page once keeps its
+    screenshot readable after the page policy stops naming them, and being the
+    Instance owner does not override the page ACL either -- a direct read of a
+    page owned by another subject is denied, so its screenshot must be too.
+
+    Media from any other source is unaffected and keeps the Project/session
+    authorization below as its only gate.
+    """
+
+    if (row.get("source") or "") != "show_annotation":
+        return True
+    session_id = row.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        # Fail closed: an annotation screenshot with no page to check against
+        # cannot be authorized, and serving it would be the exact bypass above.
+        return False
+    return _show_page_resource_access_allowed(context, session_id)
+
+
 def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
     from storage import media_service, project_access_service
 
     context = getattr(g, "authorization_context", None)
+    if not _media_row_show_page_access_allowed(context, row):
+        return False
     if context is None or context.is_instance_owner:
         return True
     session_ids = media_service.referenced_session_ids(conn, token)

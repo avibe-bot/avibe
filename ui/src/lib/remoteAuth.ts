@@ -117,6 +117,17 @@ export function canAdministerMemory(context: RemoteContext): boolean {
   return isTrustedLocal(context);
 }
 
+/**
+ * Registering and testing a Web Push subscription is local-only: the endpoint is
+ * caller-supplied and this host later fetches it, so a remote subscription would
+ * be an outbound request to an address the caller picked. Reading push status
+ * stays remote-permitted, which is why this gates the enable / disable / test
+ * controls rather than the surface that shows them.
+ */
+export function canRegisterWebPush(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
 
 export async function checkRemoteAuthForPath<Session extends RemoteSession>(
   path: string,
