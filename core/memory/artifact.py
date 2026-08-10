@@ -13,6 +13,7 @@ import os
 import secrets
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterable
@@ -48,12 +49,14 @@ from core.memory.provider_root import (
     ProviderRootMetadata,
     ProviderRootState,
 )
+from core.memory.modality import pinned_modality_contract_script
 
 
 EVEROS_VERSION = "1.2.3"
 EMBEDDED_PYTHON_VERSION = "3.12.12"
 PACKAGE_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 RUNTIME_BUILDER_UV_VERSION = "0.9.18"
+ARTIFACT_ADMISSION_REVISION = 1
 _DEV_RUNTIME_ENV = "AVIBE_MEMORY_DEV_RUNTIME"
 _DEV_RUNTIME_FAILURE_REASON = "memory_runtime_install_failed"
 _DEV_PROVIDER_ROOT_FORMAT = f"everos-{EVEROS_VERSION}"
@@ -72,12 +75,20 @@ _SMOKE_SCRIPT = (
     "import everos\n"
     "import uvicorn\n"
     "from everos.entrypoints.api.app import create_app\n"
+    "import everos.entrypoints.cli.main\n"
+    "import everos.memory.cascade\n"
     f"assert version('everos') == '{EVEROS_VERSION}'\n"
     "assert platform.python_version() == '3.12.12'\n"
     "assert everos is not None and uvicorn is not None\n"
     "assert callable(create_app)\n"
+    + pinned_modality_contract_script()
+    +
     "print(version('everos'))\n"
     "print(platform.python_version())\n"
+)
+_SCRUBBER_ADMISSION_SCRIPT = (
+    "from core.memory.everos_insight import install_error_scrubbers\n"
+    "install_error_scrubbers()\n"
 )
 
 
@@ -162,7 +173,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if pointer is None:
             return None
         try:
-            return self._verified_active_pointer_binary(pointer)
+            return self._admitted_active_pointer_binary(pointer)
         except Exception:  # noqa: BLE001
             return None
 
@@ -172,7 +183,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if self._dev_runtime_configured():
             return self._dev_runtime_status(self._dev_runtime_python())
         pointer, pointer_invalid = self._read_active_pointer()
-        if pointer is not None and self._verified_active_pointer_binary(pointer) is None:
+        if pointer is not None and self._admitted_active_pointer_binary(pointer) is None:
             pointer_invalid = True
         status_payload = super().status()
         if pointer_invalid:
@@ -353,6 +364,51 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return False
         return True
 
+    def _reuse_existing_install(
+        self,
+        binary: Path,
+        install_dir: Path,
+        manifest: ManagedRuntimeManifest,
+        archive: ManagedRuntimeArchive,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-admit an existing install before activating it under this contract."""
+
+        try:
+            admission_ok = self._prepare_binary(binary).get("ok") is True
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to admit existing Memory runtime binary")
+            admission_ok = False
+        if not admission_ok:
+            try:
+                self._persist_active_pointer_admission(binary, admitted=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to persist rejected Memory runtime admission")
+            return self._failure(
+                "memory_runtime_install_failed",
+                manifest=manifest,
+                archive=archive,
+            )
+        return super()._reuse_existing_install(
+            binary,
+            install_dir,
+            manifest,
+            archive,
+            reason=reason,
+        )
+
+    def _persist_active_pointer_admission(self, binary: Path, *, admitted: bool) -> None:
+        current, invalid = self._read_active_pointer()
+        if invalid or current is None:
+            return
+        if self._verified_active_pointer_binary(current) != binary:
+            return
+        admitted_pointer = dict(current)
+        admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
+        admitted_pointer["admission_ok"] = admitted
+        self._restore_current_pointer(admitted_pointer)
+
     def _write_current_pointer(
         self,
         install_dir: Path,
@@ -504,6 +560,58 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None
         return binary
 
+    def _admitted_active_pointer_binary(
+        self,
+        pointer: dict[str, Any],
+    ) -> Path | None:
+        """Re-admit artifacts accepted under an older compatibility contract."""
+
+        binary = self._verified_active_pointer_binary(pointer)
+        if binary is None:
+            return None
+        revision = pointer.get("admission_revision")
+        if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
+            if pointer.get("admission_ok") is True:
+                return binary
+            self._install_reason = "memory_runtime_install_failed"
+            return None
+        try:
+            file_lock = self._acquire_mutation_lock()
+        except Exception:  # noqa: BLE001
+            self._install_reason = "memory_runtime_install_failed"
+            return None
+        if file_lock is None:
+            return None
+        try:
+            current, invalid = self._read_active_pointer()
+            if invalid or current is None:
+                return None
+            binary = self._verified_active_pointer_binary(current)
+            if binary is None:
+                return None
+            revision = current.get("admission_revision")
+            if type(revision) is int and revision == ARTIFACT_ADMISSION_REVISION:
+                if current.get("admission_ok") is True:
+                    return binary
+                self._install_reason = "memory_runtime_install_failed"
+                return None
+            preparation = self._prepare_binary(binary)
+            admission_ok = preparation.get("ok") is True
+            admitted_pointer = dict(current)
+            admitted_pointer["admission_revision"] = ARTIFACT_ADMISSION_REVISION
+            admitted_pointer["admission_ok"] = admission_ok
+            self._restore_current_pointer(admitted_pointer)
+            if not admission_ok:
+                self._install_reason = "memory_runtime_install_failed"
+                return None
+        except Exception:  # noqa: BLE001
+            self._install_reason = "memory_runtime_install_failed"
+            return None
+        finally:
+            self._release_mutation_lock(file_lock)
+        self._install_reason = None
+        return binary
+
     def _write_memory_current_pointer(
         self,
         install_dir: Path,
@@ -523,6 +631,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 "manifest_sha256": manifest.digest,
                 "archive_sha256": archive.sha256,
                 "bin_path": archive.bin_path,
+                "admission_revision": ARTIFACT_ADMISSION_REVISION,
+                "admission_ok": True,
                 "provider_root_format": candidate.provider_root_format,
                 "compatible_provider_root_formats": sorted(candidate.compatible_provider_root_formats - {candidate.provider_root_format}),
                 "artifact_fingerprint": candidate.artifact_fingerprint,
@@ -573,15 +683,47 @@ class MemoryArtifactManager(ManagedRuntimeManager):
                 **isolated_subprocess_kwargs(),
             )
         except (OSError, subprocess.SubprocessError):
-            return {"ok": False, "reason": "memory_runtime_smoke_failed"}
+            return {"ok": False, "reason": "memory_runtime_install_failed"}
         if result.returncode != 0 or result.stdout.splitlines() != [EVEROS_VERSION, EMBEDDED_PYTHON_VERSION]:
-            return {"ok": False, "reason": "memory_runtime_smoke_failed"}
+            return {"ok": False, "reason": "memory_runtime_install_failed"}
+        if not self._admit_error_scrubbers(binary):
+            return {"ok": False, "reason": "memory_runtime_install_failed"}
         return {
             "ok": True,
             "everos_version": EVEROS_VERSION,
             "python_version": EMBEDDED_PYTHON_VERSION,
             "lock_sha256": PACKAGE_LOCK_SHA256,
         }
+
+    def _admit_error_scrubbers(self, binary: Path) -> bool:
+        """Prove the child can install mandatory diagnostic scrubbers before launch."""
+
+        source_root = Path(__file__).resolve().parents[2]
+        try:
+            with tempfile.TemporaryDirectory(prefix="avibe-memory-admission-") as home:
+                child_home = Path(home)
+                result = subprocess.run(
+                    [str(binary), "-c", _SCRUBBER_ADMISSION_SCRIPT],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    cwd=str(source_root),
+                    env={
+                        "HOME": str(child_home),
+                        "PATH": os.defpath,
+                        "PYTHONNOUSERSITE": "1",
+                        "PYTHONPATH": str(source_root),
+                        "XDG_CACHE_HOME": str(child_home / ".cache"),
+                        "XDG_CONFIG_HOME": str(child_home / ".config"),
+                        "XDG_DATA_HOME": str(child_home / ".local" / "share"),
+                        "XDG_STATE_HOME": str(child_home / ".local" / "state"),
+                    },
+                    **isolated_subprocess_kwargs(),
+                )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0
 
 
 def _write_memory_pointer_atomic(

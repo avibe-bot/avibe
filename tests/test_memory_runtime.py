@@ -434,8 +434,121 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
     assert manager.provider_root_format() == "everos-1.2.3"
     assert manager.compatible_provider_root_formats() == frozenset({"everos-1.2.3"})
     assert manager.artifact_fingerprint() == "dev-everos-1.2.3"
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert "DEV RUNTIME bypass active - not for production" in caplog.text
+
+
+def test_memory_artifact_smoke_requires_pinned_cli_cascade_module(
+    monkeypatch, tmp_path: Path
+) -> None:
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+    commands: list[list[str]] = []
+
+    def smoke_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="1.2.3\n3.12.12\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
+
+    assert MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True).resolve_python() == dev_python
+    assert "everos.entrypoints.cli.main" in commands[0][-1]
+    assert "everos.memory.cascade" in commands[0][-1]
+    assert "everalgo.types.modality" in commands[0][-1]
+
+
+def test_memory_artifact_rejects_scrubber_incompatibility_as_repairable_dependency_failure(
+    monkeypatch, tmp_path: Path
+) -> None:
+    dev_python = tmp_path / "dev-venv" / "bin" / "python"
+    dev_python.parent.mkdir(parents=True)
+    dev_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    dev_python.chmod(0o755)
+    monkeypatch.setenv("AVIBE_MEMORY_DEV_RUNTIME", str(dev_python))
+
+    def scrubber_fails(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        if "-I" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="1.2.3\n3.12.12\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="incompatible patch")
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", scrubber_fails)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    assert manager.resolve_python() is None
+    assert manager.status()["reason"] == "memory_runtime_install_failed"
+
+
+def test_memory_artifact_prepare_maps_scrubber_rejection_to_public_install_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "python"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    def smoke_succeeds(
+        command: list[str],
+        **_kwargs,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="1.2.3\n3.12.12\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
+    monkeypatch.setattr(manager, "_admit_error_scrubbers", lambda _binary: False)
+
+    assert manager._prepare_binary(binary) == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("cannot execute"),
+        subprocess.CompletedProcess(["python"], 1, stdout="", stderr="incompatible"),
+    ],
+)
+def test_memory_artifact_prepare_maps_smoke_rejection_to_public_install_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: BaseException | subprocess.CompletedProcess[str],
+) -> None:
+    binary = tmp_path / "python"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    def reject_smoke(
+        _command: list[str],
+        **_kwargs,
+    ) -> subprocess.CompletedProcess[str]:
+        if isinstance(failure, BaseException):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", reject_smoke)
+
+    assert manager._prepare_binary(binary) == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+    }
 
 
 def test_memory_artifact_refuses_dev_runtime_without_importable_everos(monkeypatch, caplog, tmp_path: Path) -> None:
@@ -660,6 +773,154 @@ def test_memory_artifact_rejects_an_active_pointer_built_for_another_target(
     assert manager.resolve_python() is None
 
 
+@pytest.mark.parametrize("admitted", [False, True])
+def test_memory_artifact_readmits_active_pointer_after_contract_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    admitted: bool,
+) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    install_dir = manager.runtime_dir / "versions" / "old"
+    binary = install_dir / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    pointer = {
+        "provider": "manifest",
+        "runtime_id": "memory-runtime",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
+        "install_dir": str(install_dir),
+        "manifest_sha256": "a" * 64,
+        "archive_sha256": "b" * 64,
+        "bin_path": "bin/python",
+    }
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps(
+            {
+                **pointer,
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+    admissions: list[Path] = []
+
+    def admit(candidate: Path) -> dict[str, object]:
+        admissions.append(candidate)
+        return {
+            "ok": admitted,
+            "reason": None if admitted else "memory_runtime_install_failed",
+        }
+
+    monkeypatch.setattr(manager, "_prepare_binary", admit)
+
+    resolved = manager.resolve_python()
+
+    assert resolved == (binary if admitted else None)
+    assert admissions == [binary]
+    active = manager._active_pointer()
+    assert active is not None
+    if admitted:
+        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is True
+        assert manager.resolve_python() == binary
+        assert admissions == [binary]
+    else:
+        assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        assert active["admission_ok"] is False
+        assert manager.resolve_python() is None
+        assert manager.status()["reason"] == "memory_runtime_install_failed"
+        assert admissions == [binary]
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_memory_artifact_readmits_existing_install_before_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    admitted: bool,
+) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    binary_contents = b"#!/bin/sh\nexit 0\n"
+    binary_sha256 = hashlib.sha256(binary_contents).hexdigest()
+    archive = ManagedRuntimeArchive(
+        platform=memory_artifact.runtime_platform_tag(),
+        name="memory-runtime.tar.gz",
+        url="file:///memory-runtime.tar.gz",
+        sha256="d" * 64,
+        binary_sha256=binary_sha256,
+        size=1,
+        bin_path="bin/python",
+    )
+    manifest = ManagedRuntimeManifest(
+        schema_version=1,
+        runtime_version=memory_artifact.EVEROS_VERSION,
+        source="test",
+        source_url=None,
+        archives={archive.platform: archive},
+        digest="c" * 64,
+        loaded_from="test",
+        payload={
+            "release_state": "published",
+            "python_version": memory_artifact.EMBEDDED_PYTHON_VERSION,
+            "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
+            "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
+            "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
+            "provider_root_format": "everos-1.2.3",
+            "compatible_provider_root_formats": [],
+        },
+    )
+    install_dir = manager._manifest_install_dir(manifest, archive)
+    binary = install_dir / archive.bin_path
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(binary_contents)
+    binary.chmod(0o755)
+    manager._write_manifest_install_metadata(
+        install_dir,
+        manifest,
+        archive,
+        binary_sha256=binary_sha256,
+    )
+    manager._restore_current_pointer(
+        {
+            "provider": "manifest",
+            "runtime_id": manager.spec.runtime_id,
+            "runtime_version": manifest.runtime_version,
+            "platform": archive.platform,
+            "install_dir": str(install_dir),
+            "manifest_sha256": manifest.digest,
+            "archive_sha256": archive.sha256,
+            "bin_path": archive.bin_path,
+        }
+    )
+    monkeypatch.setattr(manager, "_load_manifest", lambda *, allow_network: manifest)
+    admissions: list[Path] = []
+
+    def admit(candidate: Path) -> dict[str, object]:
+        admissions.append(candidate)
+        return {
+            "ok": admitted,
+            "reason": None if admitted else "memory_runtime_install_failed",
+        }
+
+    monkeypatch.setattr(manager, "_prepare_binary", admit)
+
+    result = manager.ensure(force=False)
+
+    assert result["ok"] is admitted
+    assert result.get("reason") is (None if admitted else "memory_runtime_install_failed")
+    assert admissions == [binary]
+    active = manager._active_pointer()
+    assert active is not None
+    assert active["admission_revision"] == memory_artifact.ARTIFACT_ADMISSION_REVISION
+    assert active["admission_ok"] is admitted
+    assert manager.resolve_python() == (binary if admitted else None)
+    if not admitted:
+        assert manager.status()["reason"] == "memory_runtime_install_failed"
+    assert admissions == [binary]
+
+
 def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Path) -> None:
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True, mode=0o700)
@@ -694,6 +955,8 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
         "bin_path": "bin/python",
+        "admission_revision": memory_artifact.ARTIFACT_ADMISSION_REVISION,
+        "admission_ok": True,
         "provider_root_format": "everos-1.0",
         "compatible_provider_root_formats": [],
         "artifact_fingerprint": "old-artifact",
@@ -707,6 +970,11 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         calls.append(("candidate", candidate.provider_root_format))
         calls.append(("root", (root_state.provider_root_format, root_state.empty)))
         commit()
+        assert (
+            manager._active_pointer()["admission_revision"]
+            == memory_artifact.ARTIFACT_ADMISSION_REVISION
+        )
+        assert manager._active_pointer()["admission_ok"] is True
         calls.append(("active", manager.provider_root_format()))
         rollback()
 
@@ -790,6 +1058,8 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
         "bin_path": "bin/python",
+        "admission_revision": memory_artifact.ARTIFACT_ADMISSION_REVISION,
+        "admission_ok": True,
         "provider_root_format": "everos-1.0",
         "compatible_provider_root_formats": [],
         "artifact_fingerprint": "old-artifact",
@@ -3092,6 +3362,85 @@ async def test_runtime_restart_replaces_process_without_processing_preflight(
     assert old.stops == 1
     assert len(factory.created) == 1
     assert factory.supervised[0].starts == 1
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_restart_preserves_admitted_recorder_health(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    runtime._process = FakeEverOSProcess()
+
+    async def disabled_recorder_health() -> dict[str, str | None]:
+        return {"state": "disabled", "reason": "writer_failures"}
+
+    monkeypatch.setattr(
+        runtime._sidecar,
+        "_read_recorder_health",
+        disabled_recorder_health,
+    )
+
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert runtime._recorder_health == {
+        "state": "disabled",
+        "reason": "writer_failures",
+    }
+    assert runtime._sidecar.snapshot().records_calls is False
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_discards_recorder_health_from_prior_launch_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = memory_runtime_factory(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
+    supervised = factory.supervised[0]
+    assert supervised.before_start is not None
+    health = ProviderHealthSnapshot(
+        status="ok",
+        version="1.2.3",
+        capabilities={},
+        disabled_features=(),
+        cascade=None,
+        recorder={"state": "disabled", "reason": "writer_failures"},
+    )
+
+    async def stale_health() -> ProviderHealthSnapshot:
+        entered.set()
+        await release.wait()
+        return health
+
+    monkeypatch.setattr(runtime._provider, "health_snapshot", stale_health)
+    observation = asyncio.create_task(runtime._processing_record_health(None))
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    await supervised.before_start()
+    release.set()
+    result = await observation
+
+    assert result.snapshot is None
+    assert result.unavailable_reason == "memory_sidecar_unavailable"
+    assert runtime._process_records_calls is True
+    assert runtime._call_log_retention_task is None
     await memory_runtime_factory.close(runtime)
 
 
