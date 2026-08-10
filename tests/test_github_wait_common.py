@@ -62,6 +62,15 @@ def test_github_get_without_cache_sends_no_conditional_header() -> None:
     assert requests[0].get_header("If-none-match") is None
 
 
+def test_get_token_prefers_gh_token_like_github_cli(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv("GH_TOKEN", "preferred")
+    monkeypatch.setenv("GITHUB_TOKEN", "stale")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+
+    assert module.get_token() == "preferred"
+
+
 def test_github_get_revalidates_with_etag_and_reuses_the_cached_body() -> None:
     module = _load_module()
     cache = module.ResponseCache()

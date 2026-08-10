@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.11.7
+version: 0.12.0
 ---
 
 # Background Watch Hook
@@ -179,6 +179,22 @@ Use bundled waiters as examples or as ready-to-run building blocks. The main ski
 When running a bundled script through `uv`, prefer `uv run --no-project ...` so the script does not accidentally attach itself to an unrelated parent project.
 Bundled GitHub waiters use exit code `75` for retryable startup errors such as temporary network failures or GitHub `408/429/5xx` responses, and exit code `64` with the `avibe-watch: no-event` marker when a cycle finished with nothing worth an Agent turn.
 
+The waiter is distributed with this skill, not with the caller's repository.
+Resolve the active skill directory before constructing a watch command:
+
+```bash
+BACKGROUND_WATCH_HOOK_SKILL_FILE="${BACKGROUND_WATCH_HOOK_SKILL_FILE:-}"
+if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
+  for SKILL_ROOT in "${CODEX_HOME:-$HOME/.codex}/skills" "${AGENTS_HOME:-$HOME/.agents}/skills"; do
+    [ -d "$SKILL_ROOT" ] || continue
+    BACKGROUND_WATCH_HOOK_SKILL_FILE="$(find "$SKILL_ROOT" -path '*/background-watch-hook/SKILL.md' -print -quit)"
+    [ -n "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ] && break
+  done
+fi
+test -f "$BACKGROUND_WATCH_HOOK_SKILL_FILE"
+BACKGROUND_WATCH_HOOK_DIR="$(dirname "$BACKGROUND_WATCH_HOOK_SKILL_FILE")"
+```
+
 ## GitHub Example Waiter
 
 Use the bundled GitHub waiter only when the watched thing is PR review activity.
@@ -190,20 +206,28 @@ vibe watch add \
   --name "Watch PR 151 reviews" \
   --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
   -- \
-  uv run --no-project scripts/wait_pr.py \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
     --pr 151 \
     --actionable-only \
     --settle 20 \
-    --catch-up \
     --interval 60
 ```
 
-Use `--catch-up` when the watch is armed after the triggering push or review
-comment. Without an explicit state baseline, the first poll treats activity
-already present as history and can wait past the event that should wake the
-Agent. A pre-seeded owner-specific `--state-file` is the alternative when the
-watch is armed before the push.
+Before a push or review trigger, seed an owner-specific state file from the
+current complete PR snapshot. Arm the post-action watch with that same file so
+activity that lands during the handoff remains visible:
+
+```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151.json"
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+  --repo avibe-bot/avibe --pr 151 --state-file "$STATE_FILE" --seed-state
+
+# Push or post the review trigger, then create the watch with STATE_FILE.
+```
+
+Use `--catch-up` only when deliberately processing historical activity. It is
+not a substitute for the pre-action baseline in a review loop.
 
 Prefer `--actionable-only` for review loops. Without it the waiter wakes the Agent
 for every comment on the PR, including the `@codex review` triggers the loop itself
@@ -233,7 +257,7 @@ vibe watch add \
   --name "Catch up PR 151 reviews" \
   --message "PR #151 already has review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
   -- \
-  uv run --no-project scripts/wait_pr.py \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
     --pr 151 \
     --catch-up
@@ -249,7 +273,7 @@ vibe watch add \
   --lifetime-timeout 86400 \
   --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
   -- \
-  uv run --no-project scripts/wait_pr.py \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
     --pr 151 \
     --actionable-only \
@@ -261,18 +285,19 @@ vibe watch add \
 Always pass `--state-file` to a `--forever` watch. Each cycle is a fresh waiter
 process, so without it the next cycle re-snapshots the PR as its baseline and
 anything that arrived between the previous cycle's exit and that snapshot is lost.
-The file also carries the `since` filters and the resolved GitHub login forward, so
-a resumed cycle asks GitHub only for what is new instead of re-reading the whole PR.
+The file carries the resolved GitHub login and the complete mutable PR baseline
+forward. PR cycles reread complete review/comment/thread collections because
+edits, deletions, and thread-resolution changes are wake-worthy state.
 The login is reused only while the token still fingerprints to the account it was
-resolved for, and an explicit `--since-review-comment-id` /
-`--since-issue-comment-id` drops the matching saved `since` so the replay it asks
-for is not narrowed away. It is written on every cursor advance and on timeout,
-replaced atomically. The state also records the last observed PR head and mutable
-review/comment fingerprints, so a pushed head or an edited existing comment is
-activity even when no new numeric ID exists. Cursors that cover a reported event are not committed by the
+resolved for. Explicit cursor flags still request a replay from that cursor, while
+the complete PR collections remain the source of truth for edits and removals. The
+state also records the last observed PR head, review/comment fingerprints, and every
+review-thread resolution state, so a pushed head, edited object, deletion, or thread
+transition is activity even when no new numeric ID exists. Cursors that cover a reported event are not committed by the
 cycle that reports it. A waiter cannot observe its own delivery — `vibe watch` reads
 its stdout only after the process exits — so those cursors are staged under `pending`
-while the committed ones stay before the event, together with the value of
+while the committed ones stay before the event, together with the rendered report
+and the value of
 `AVIBE_WATCH_LAST_DELIVERY` the cycle started from. That variable is when this watch
 last had a report durably queued, stamped in the same transaction as the follow-up, so
 any later cycle that reads a *different* value knows the report was delivered and
@@ -343,7 +368,7 @@ vibe watch add \
   --name "Watch new PRs" \
   --message "The repository has new pull requests. Review the new PRs and continue as needed." \
   -- \
-  uv run --no-project scripts/wait_pr.py \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
     --new-prs \
     --interval 60
@@ -352,8 +377,8 @@ vibe watch add \
 New issues or issue comments:
 
 ```bash
-uv run --no-project scripts/wait_issue.py --repo avibe-bot/avibe --new-issues --interval 60
-uv run --no-project scripts/wait_issue.py --repo avibe-bot/avibe --issue 157 --interval 60
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_issue.py" --repo avibe-bot/avibe --new-issues --interval 60
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_issue.py" --repo avibe-bot/avibe --issue 157 --interval 60
 ```
 
 GitHub Actions for a pushed commit:
@@ -363,7 +388,7 @@ vibe watch add \
   --name "Watch CI" \
   --message "GitHub Actions failed. Inspect the result below and fix the failures. Then summarise the round here in one or two lines -- what failed and what you changed. Save a longer message for the build going green, the loop being blocked, or a decision that needs the user." \
   -- \
-  uv run --no-project scripts/wait_action.py \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_action.py" \
     --repo cyhhao/sub2api \
     --branch main \
     --sha "$HEAD_SHA" \

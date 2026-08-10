@@ -194,7 +194,8 @@ turn ends because you armed a watch and are waiting, say exactly that.
   delegated. Each concern needs independent waiter state. Never share cursor
   state between concurrent watches or count unrelated global monitors as the
   lane watch.
-- Follow `background-watch-hook` for waiter commands, state, catch-up,
+- Follow `background-watch-hook` for waiter commands, state, baseline seeding,
+  catch-up,
   filtering, settling, retries, and delivery acknowledgement. Those mechanics
   belong to the reusable skill; this policy only constrains when and why the
   watch is armed.
@@ -205,10 +206,11 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `background-watch-hook` management commands to verify exactly one live watch
   for this owner, concern, repository, and PR. Do not rely on a remembered watch
   ID or one bookkeeping field as proof that its waiter is live.
-- When the watch is armed after a push or review trigger, use the
-  `background-watch-hook` catch-up mode or a pre-seeded owner-specific state file
-  so activity that landed before the first poll is still delivered. A first-poll
-  baseline is only safe when it was established before the action being watched.
+- Before a push or review trigger, use `background-watch-hook` to seed a complete
+  owner-specific state file. Arm the post-action watch with that same file so
+  activity that lands during the handoff is delivered. Use catch-up only when
+  deliberately processing historical activity; a first-poll baseline after the
+  action is not a valid review-loop handoff.
 - A watch you remove while handling its event is not a liveness break: the
   running turn owns progress until the replacement is armed. Re-arm after the
   push and close-out actions, then verify the invariant again.

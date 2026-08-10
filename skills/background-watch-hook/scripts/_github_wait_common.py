@@ -68,7 +68,7 @@ def no_event(summary: str = "") -> int:
 
 
 def get_token() -> str | None:
-    for env_name in ("GITHUB_TOKEN", "GH_TOKEN"):
+    for env_name in ("GH_TOKEN", "GITHUB_TOKEN"):
         value = os.environ.get(env_name)
         if value:
             return value
@@ -168,6 +168,28 @@ def github_get(url: str, token: str | None, *, cache: ResponseCache | None = Non
                 cache.revalidated += 1
                 return payload
         raise
+
+
+def github_graphql(query: str, variables: dict[str, Any], token: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        "https://api.github.com/graphql",
+        data=json.dumps({"query": query, "variables": variables}).encode("utf-8"),
+        method="POST",
+    )
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("Content-Type", "application/json")
+    request.add_header("User-Agent", "background-watch-hook/0.1.0")
+    request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub GraphQL returned an unexpected payload")
+    if payload.get("errors"):
+        raise RuntimeError(f"GitHub GraphQL error: {payload['errors']}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError("GitHub GraphQL response has no data object")
+    return data
 
 
 def latest_timestamp(items: list[dict[str, Any]]) -> str | None:

@@ -23,6 +23,16 @@ def _load_module():
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
     spec.loader.exec_module(module)
+    module.github_graphql = lambda *_args, **_kwargs: {
+        "repository": {
+            "pullRequest": {
+                "reviewThreads": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+    }
     return module
 
 
@@ -1340,6 +1350,7 @@ def _pr_state(
     review_comments=None,
     issue_comments=None,
     reactions=None,
+    review_threads=None,
     pr_state="open",
 ):
     return {
@@ -1353,6 +1364,7 @@ def _pr_state(
         "review_comments": review_comments or [],
         "issue_comments": issue_comments or [],
         "reactions": reactions or [],
+        "review_threads": review_threads or [],
     }
 
 
@@ -1396,8 +1408,8 @@ def test_fetch_state_narrows_comments_and_filters_reactions_server_side() -> Non
     # The reviews endpoint supports neither `since` nor a newest-first order, so it
     # must stay unfiltered and lean on revalidation instead.
     assert "since=" not in reviews_url
-    assert "since=2026-08-04T06%3A47%3A10Z" in review_comments_url
-    assert "since=2026-08-04T06%3A47%3A10Z" in issue_comments_url
+    assert "since=" not in review_comments_url
+    assert "since=" not in issue_comments_url
     # Only the Codex pass reaction is ever reported, so the rest never travel.
     assert "content=%2B1" in reactions_url
 
@@ -1436,6 +1448,197 @@ def test_fetch_state_shares_one_cache_across_every_request() -> None:
 
     assert caches == [sentinel, sentinel, sentinel, sentinel]
     assert fake_get.call_args.kwargs["cache"] is sentinel
+
+
+def test_fetch_state_paginates_review_threads_as_part_of_the_pr_snapshot() -> None:
+    module = _load_module()
+    graphql_pages = iter(
+        [
+            {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [{"id": "thread-1", "isResolved": False}],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                        }
+                    }
+                }
+            },
+            {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [{"id": "thread-2", "isResolved": True}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            },
+        ]
+    )
+    with (
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "github_graphql", side_effect=lambda *_args, **_kwargs: next(graphql_pages)),
+    ):
+        state, request_count = module._fetch_state("avibe-bot/avibe", 153, "token")
+
+    assert state["review_threads"] == [
+        {"id": "thread-1", "isResolved": False},
+        {"id": "thread-2", "isResolved": True},
+    ]
+    assert request_count == 7
+
+
+def test_render_activity_reports_review_edit_and_thread_transition() -> None:
+    module = _load_module()
+    old_review = {
+        "id": 7,
+        "state": "COMMENTED",
+        "body": "old",
+        "commit_id": "old-head",
+        "user": {"login": "reviewer"},
+    }
+    baseline = _pr_state(reviews=[old_review], review_threads=[{"id": "thread-1", "isResolved": False}])
+    current = _pr_state(
+        reviews=[{**old_review, "body": "edited", "commit_id": "new-head"}],
+        review_threads=[{"id": "thread-1", "isResolved": True}],
+    )
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=current,
+        review_cursor=7,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        snapshot=module._normalized_pr_snapshot(baseline, ignore_self_comments=False),
+        review_fingerprints={"7": module._item_fingerprint(old_review)},
+        review_thread_states={"thread-1": False},
+        ignore_self_comments=False,
+    )
+
+    assert output is not None
+    assert "review #7" in output
+    assert "edited" in output
+    assert "review_thread thread-1 unresolved -> resolved" in output
+
+
+def test_snapshot_gate_advances_past_filtered_activity_without_waking() -> None:
+    module = _load_module()
+    baseline = _pr_state()
+    current = _pr_state(
+        issue_comments=[
+            {
+                "id": 9,
+                "body": "@codex review",
+                "user": {"login": "maintainer"},
+            }
+        ]
+    )
+
+    result = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=current,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        snapshot=module._normalized_pr_snapshot(
+            baseline,
+            viewer_login="maintainer",
+            ignore_self_comments=True,
+        ),
+        viewer_login="maintainer",
+        ignore_self_comments=True,
+    )
+
+    assert result[0] is None
+    assert result[3] == 9
+
+
+def test_pending_report_payload_is_replayable_without_remote_state(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": "filters",
+                "owner": "watch-1",
+                "pending": {
+                    "delivered_after": "delivery-1",
+                    "output": "persisted report",
+                    "cursors": {"review_cursor": 2},
+                },
+            }
+        )
+    )
+    saved = module._load_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="filters",
+        watch_id="watch-1",
+    )
+
+    resolved = module._resolve_staged_state(
+        str(state_file),
+        saved,
+        delivery="delivery-1",
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity="filters",
+        watch_id="watch-1",
+    )
+
+    assert resolved == saved
+    assert module._staged_replay_output(saved, "delivery-1") == "persisted report"
+
+
+def test_main_replays_pending_output_before_auth_or_remote_preflight(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    _managed_state(
+        module,
+        state_file,
+        "wat_9",
+        **{
+            module.STAGED_KEY: {
+                "delivered_after": "delivery-1",
+                "output": "persisted report",
+                "cursors": {"review_cursor": 2},
+            }
+        },
+    )
+
+    stdout = io.StringIO()
+    with (
+        patch.dict(
+            "os.environ",
+            {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: "delivery-1"},
+            clear=False,
+        ),
+        patch.object(module, "get_token", side_effect=AssertionError("must not authenticate")),
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert stdout.getvalue() == "persisted report\n"
 
 
 def test_main_settle_window_reports_a_batched_review_as_one_event() -> None:
@@ -1594,6 +1797,80 @@ def test_main_writes_the_state_file_even_with_nothing_to_report(tmp_path) -> Non
     assert saved["viewer_login"] == "qiqi"
     assert saved["token_fingerprint"] == module._token_fingerprint("token")
     assert saved["review_comment_since"] == "2026-08-04T09:59:58Z"
+
+
+def test_seed_state_persists_a_complete_pr_baseline_and_exits(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153.json"
+    state = _pr_state(
+        reviews=[
+            {
+                "id": 7,
+                "body": "reviewed",
+                "state": "COMMENTED",
+                "submitted_at": "2026-08-04T10:00:00Z",
+                "commit_id": "head-1",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        review_comments=[_review_comment(501)],
+        review_threads=[{"id": "thread-1", "isResolved": False}],
+    )
+    state["pull_request"]["head"] = {"sha": "head-1"}
+
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(state, 7)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", side_effect=AssertionError("must not wait")),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--state-file",
+                str(state_file),
+                "--seed-state",
+            ],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["review_cursor"] == 7
+    assert saved["review_comment_cursor"] == 501
+    assert saved["head_sha"] == "head-1"
+    assert saved["review_fingerprints"]["7"]
+    assert saved["review_comment_fingerprints"]["501"]
+    assert saved["review_thread_states"] == {"thread-1": False}
+    assert saved["snapshot"]
+    assert "Seeded GitHub PR baseline" in stderr.getvalue()
+
+
+def test_invalid_remote_target_does_not_claim_the_state_file(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-999.json"
+
+    with (
+        patch.object(module, "_fetch_state", side_effect=RuntimeError("pull request not found")),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "999", "--state-file", str(state_file)],
+        ),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+
+    assert rc == 1
+    assert not state_file.exists()
 
 
 def test_main_resumes_from_the_state_file_instead_of_re_baselining(tmp_path) -> None:
@@ -2846,6 +3123,7 @@ def test_main_new_prs_commits_the_cursor_only_after_the_event_is_reported(tmp_pa
 def _managed_state(module, path, watch_id: str | None, **fields) -> None:
     """A state file already owned by ``watch_id``, so a managed run resumes from it."""
 
+    baseline = _pr_state()
     path.write_text(
         json.dumps(
             {
@@ -2859,6 +3137,15 @@ def _managed_state(module, path, watch_id: str | None, **fields) -> None:
                 "issue_comment_cursor": 0,
                 "reaction_cursor": 0,
                 "pr_status": "open",
+                "head_sha": "unknown",
+                "review_fingerprints": {},
+                "review_comment_fingerprints": {},
+                "issue_comment_fingerprints": {},
+                "review_thread_states": {},
+                "snapshot": module._normalized_pr_snapshot(
+                    baseline,
+                    ignore_self_comments=False,
+                ),
                 **fields,
             }
         ),
@@ -2911,6 +3198,7 @@ def test_a_managed_run_stages_the_cursors_that_cover_its_report(tmp_path) -> Non
     # Still pointing before the event that was just reported.
     assert payload["review_comment_cursor"] == 500
     assert payload[module.STAGED_KEY]["cursors"]["review_comment_cursor"] == 501
+    assert payload[module.STAGED_KEY]["output"] == stdout.strip()
     # Stamped with the delivery this cycle started from, which is what a later cycle
     # compares against to learn whether this report was queued.
     assert payload[module.STAGED_KEY]["delivered_after"] == "2026-08-04T10:00:00+00:00"
