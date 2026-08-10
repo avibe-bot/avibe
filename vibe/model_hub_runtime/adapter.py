@@ -95,10 +95,12 @@ def _parse_protocol_authenticated_evidence(
 ) -> _ProtocolEvidence:
     """Classify only response shapes that identify the attempted protocol.
 
-    Observation is sequential and stops at the first proof. Status, vendor,
-    URL, and probe order never prove a protocol or credential by themselves;
-    a generic response therefore remains unproven even when its HTTP status is
-    conventionally associated with authentication or validation.
+    Observation is sequential and stops at the first authenticated proof.
+    Status, vendor, URL, and probe order never prove a protocol or credential
+    by themselves; a generic response therefore remains unproven even when its
+    HTTP status is conventionally associated with authentication or validation.
+    The observation result exposes a non-null protocol if and only if a
+    protocol-specific response shape also proves authentication acceptance.
     """
 
     try:
@@ -549,13 +551,14 @@ class CLIProxyEngineAdapter:
         credential_ref: str,
         protocol_order: Sequence[str],
     ) -> SourceObservation:
-        """Observe sequentially and stop at the first response-backed proof.
+        """Observe sequentially and stop at the first authenticated proof.
 
-        ``protocol_order`` orders attempts only. A protocol-specific upstream
-        response proves the current attempt and terminates observation before any
-        later candidate runs; vendor, URL, and order never create a conclusion.
-        A successful response whose shape proves no candidate is the single
-        ambiguous boundary. This is the require-proven reading of AC-27.
+        ``protocol_order`` orders attempts only. A protocol-specific response
+        with accepted authentication proves the current attempt and terminates
+        observation. A shaped credential rejection is recorded while later
+        candidates continue. Vendor, URL, and order never create a conclusion;
+        exhausting the order without any shaped response is the ambiguous
+        boundary. This is the require-proven reading of AC-27.
         """
 
         metadata = await asyncio.to_thread(
@@ -594,6 +597,7 @@ class CLIProxyEngineAdapter:
             raise EngineStateError("credential does not match observation target")
 
         failures: list[EngineClientError] = []
+        received_rejection = False
         received_unproven_response = False
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
@@ -622,14 +626,8 @@ class CLIProxyEngineAdapter:
                 received_unproven_response = True
                 continue
             if evidence is _ProtocolEvidence.REJECTED:
-                return SourceObservation(
-                    outcome=ObservationOutcome.AUTHENTICATION_FAILED,
-                    reachable=True,
-                    authenticated=False,
-                    protocol=protocol,
-                    discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                    model_ids=(),
-                )
+                received_rejection = True
+                continue
             try:
                 if credential_kind == "api_key":
                     models = await probe_models(
@@ -659,6 +657,15 @@ class CLIProxyEngineAdapter:
                 model_ids=tuple(models),
             )
 
+        if received_rejection:
+            return SourceObservation(
+                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+                reachable=True,
+                authenticated=False,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
         if received_unproven_response:
             return SourceObservation(
                 outcome=ObservationOutcome.AMBIGUOUS,

@@ -1357,7 +1357,7 @@ def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them
     assert asyncio.run(adapter.credential_supports_refresh(oauth_ref)) is True
 
 
-def test_source_observation_stops_at_the_first_response_backed_proof(
+def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     tmp_path: Path,
 ) -> None:
     base_url = "https://relay.example/v1?api-version=2026-07-23"
@@ -1472,6 +1472,74 @@ def test_source_observation_stops_at_the_first_response_backed_proof(
     )
     assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
     assert inventory_probe.await_args.kwargs["base_url"] == base_url
+
+    rejected_protocol = SOURCE_PROTOCOLS[0]
+    accepted_protocol = SOURCE_PROTOCOLS[1]
+
+    async def rejected_then_authenticated(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == rejected_protocol:
+            return _ProtocolEvidence.REJECTED
+        return _ProtocolEvidence.AUTHENTICATED
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=rejected_then_authenticated),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("later-protocol-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.authenticated is True
+    assert observed.protocol == accepted_protocol
+    assert observed.model_ids == ("later-protocol-model",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == [
+        rejected_protocol,
+        accepted_protocol,
+    ]
+    assert inventory_probe.await_args.kwargs["protocol"] == accepted_protocol
+
+    async def reject_every_candidate(**_kwargs) -> _ProtocolEvidence:
+        return _ProtocolEvidence.REJECTED
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=reject_every_candidate),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("unreachable-model",)),
+        ) as inventory_probe,
+    ):
+        rejected = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert rejected.outcome.value == "authentication_failed"
+    assert rejected.reachable is True
+    assert rejected.authenticated is False
+    assert rejected.protocol is None
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
+        SOURCE_PROTOCOLS
+    )
+    inventory_probe.assert_not_awaited()
 
 
 def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof(
