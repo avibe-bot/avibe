@@ -272,6 +272,56 @@ def test_failed_recovery_claim_is_released_without_changing_direction(
     assert reclaimed.execution_token is not None
 
 
+def test_open_operation_observation_uses_one_owner_scoped_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    operation = journal.start(
+        operation_id="observe-recovery",
+        operator_ref="user:owner",
+        pre_epoch=4,
+        target_epoch=5,
+    )
+    operation = _record_all_snapshots(journal, operation)
+    recovery = journal.mark_boot_recovery_needed()
+    assert recovery is not None
+
+    connection_count = 0
+    transactions: list[str] = []
+    original_connect = journal._connect
+
+    def observed_connect():
+        nonlocal connection_count
+        connection_count += 1
+        connection = original_connect()
+        connection.set_trace_callback(transactions.append)
+        return connection
+
+    monkeypatch.setattr(journal, "_connect", observed_connect)
+
+    owner = journal.observe_open_operation(operator_ref="user:owner")
+
+    assert owner.operation == recovery
+    assert owner.can_resume is True
+    assert owner.can_abort is True
+    assert connection_count == 1
+    assert [statement for statement in transactions if statement == "BEGIN"] == [
+        "BEGIN"
+    ]
+
+    different_owner = journal.observe_open_operation(operator_ref="user:other")
+    missing_owner = journal.observe_open_operation()
+
+    assert different_owner.operation == recovery
+    assert different_owner.can_resume is False
+    assert different_owner.can_abort is False
+    assert missing_owner.operation == recovery
+    assert missing_owner.can_resume is False
+    assert missing_owner.can_abort is False
+    assert connection_count == 3
+
+
 def test_abort_refuses_an_incomplete_snapshot(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     operation = journal.start(

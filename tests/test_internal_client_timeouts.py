@@ -15,6 +15,11 @@ from pathlib import Path
 
 from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
 from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from core.memory.processing_record import (
+    PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS,
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
+    PROCESSING_RECORD_WORK_TIMEOUT_SECONDS,
+)
 from core.memory.process import (
     _PROCESSING_PROBE_TIMEOUT_SECONDS,
     _STARTUP_TIMEOUT_SECONDS,
@@ -83,16 +88,27 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
 
 def test_processing_record_client_covers_identity_journals_and_parallel_sources() -> None:
     sqlite_bound = PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
-    sequential_bound = (
-        sqlite_bound
-        + (2 * sqlite_bound)
+    identity_lookup_bound = sqlite_bound
+    initial_journal_observation_bound = 2 * sqlite_bound
+    metadata_and_fresh_observation_bound = sqlite_bound + (2 * sqlite_bound)
+    work_bound = (
+        identity_lookup_bound
+        + initial_journal_observation_bound
         + max(
             PROVIDER_READ_TIMEOUT_SECONDS,
             4 * sqlite_bound,
-            sqlite_bound + (2 * sqlite_bound),
+            metadata_and_fresh_observation_bound,
         )
     )
-    assert MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS == sequential_bound + 5.0
+    assert PROCESSING_RECORD_WORK_TIMEOUT_SECONDS == work_bound
+    assert (
+        PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
+        == work_bound + PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS
+    )
+    assert (
+        MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+        == PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
+    )
     assert (
         inspect.signature(memory_processing_record).parameters["timeout"].default
         == MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS

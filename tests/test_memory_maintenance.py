@@ -192,6 +192,48 @@ async def test_maintenance_advertises_clear_only_for_a_healthy_runtime(
     await runtime.close()
 
 
+async def test_maintenance_observes_clear_recovery_with_one_journal_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    maintenance = _maintenance(runtime)
+    journal = maintenance._clear_journal
+    assert journal is not None
+    operation = journal.start(
+        operation_id="single-observation",
+        operator_ref="user:owner",
+        pre_epoch=0,
+        target_epoch=1,
+    )
+    recovery = journal.mark_boot_recovery_needed()
+    assert recovery is not None
+
+    connection_count = 0
+    original_connect = journal._connect
+
+    def observed_connect():
+        nonlocal connection_count
+        connection_count += 1
+        return original_connect()
+
+    monkeypatch.setattr(journal, "_connect", observed_connect)
+
+    observation = await maintenance.observe(operator_ref="user:owner")
+
+    assert observation.clear_recovery == ClearRecoveryResult(
+        state="recovery_needed",
+        operation_id=operation.operation_id,
+        occurred_at=recovery.updated_at,
+        error_code="memory_clear_failed",
+        can_resume=True,
+        can_abort=False,
+    )
+    assert connection_count == 1
+    await runtime.close()
+
+
 async def test_maintenance_revalidates_journals_after_store_metadata_reads(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

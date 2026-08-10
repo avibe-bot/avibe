@@ -209,26 +209,32 @@ class MemoryMaintenance:
         return self._open_backup_restore_operation() is not None
 
     def recovery(self, *, operator_ref: str | None = None) -> ClearRecoveryResult | None:
-        operation = self._open_clear_operation()
-        if operation is None:
+        journal = self._clear_journal
+        if journal is None:
             return None
-        return self._clear_recovery(operation, operator_ref=operator_ref)
+        try:
+            observation = journal.observe_open_operation(
+                operator_ref=(
+                    None if self._initialization_error is not None else operator_ref
+                )
+            )
+        except Exception:
+            return None
+        if observation.operation is None:
+            return None
+        return self._clear_recovery(
+            observation.operation,
+            can_resume=observation.can_resume,
+            can_abort=observation.can_abort,
+        )
 
+    @staticmethod
     def _clear_recovery(
-        self,
         operation: ClearOperation,
         *,
-        operator_ref: str | None,
+        can_resume: bool,
+        can_abort: bool,
     ) -> ClearRecoveryResult:
-        can_resume = False
-        can_abort = False
-        try:
-            if operator_ref is not None and operation.operator_ref == operator_ref:
-                journal = self._require_clear_journal()
-                can_resume = journal.can_resume(operation.operation_id)
-                can_abort = journal.can_abort(operation.operation_id)
-        except Exception:
-            pass
         return ClearRecoveryResult(
             state=operation.state,
             operation_id=operation.operation_id,
@@ -257,6 +263,8 @@ class MemoryMaintenance:
         backup_active = self._backup_active
         restore_operation: BackupRestoreOperation | None = None
         clear_operation: ClearOperation | None = None
+        clear_can_resume = False
+        clear_can_abort = False
         initialization_unavailable = self._initialization_error is not None
 
         restore_journal = self._backup_restore_journal
@@ -273,7 +281,12 @@ class MemoryMaintenance:
         if not clear_unavailable:
             assert clear_journal is not None
             try:
-                clear_operation = clear_journal.get_open_operation()
+                clear_observation = clear_journal.observe_open_operation(
+                    operator_ref=operator_ref
+                )
+                clear_operation = clear_observation.operation
+                clear_can_resume = clear_observation.can_resume
+                clear_can_abort = clear_observation.can_abort
             except Exception:
                 clear_unavailable = True
 
@@ -282,7 +295,8 @@ class MemoryMaintenance:
             if clear_operation is None
             else self._clear_recovery(
                 clear_operation,
-                operator_ref=operator_ref,
+                can_resume=clear_can_resume,
+                can_abort=clear_can_abort,
             )
         )
         if backup_active:

@@ -136,6 +136,15 @@ class ClearOperation:
 
 
 @dataclass(frozen=True, slots=True)
+class ClearJournalObservation:
+    """One owner-scoped snapshot of the open Clear operation."""
+
+    operation: ClearOperation | None
+    can_resume: bool
+    can_abort: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ClearSurface:
     operation_id: str
     surface: ClearSurfaceName
@@ -274,6 +283,39 @@ class MemoryClearJournal:
             connection.close()
         return _operation_from_row(row) if row is not None else None
 
+    def observe_open_operation(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> ClearJournalObservation:
+        """Read the open operation and its recovery capabilities once."""
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT * FROM clear_operation WHERE open_slot = 1"
+            ).fetchone()
+            if row is None:
+                return ClearJournalObservation(None, False, False)
+            owns_recovery = (
+                operator_ref is not None and row["operator_ref"] == operator_ref
+            )
+            can_resume = owns_recovery and self._can_resume_from_row(row)
+            can_abort = False
+            if owns_recovery:
+                try:
+                    can_abort = self._can_abort_from_row(connection, row)
+                except sqlite3.Error:
+                    can_abort = False
+            return ClearJournalObservation(
+                operation=_operation_from_row(row),
+                can_resume=can_resume,
+                can_abort=can_abort,
+            )
+        finally:
+            connection.close()
+
     def get_surfaces(self, operation_id: str) -> tuple[ClearSurface, ...]:
         identifier = _validated_operation_id(operation_id)
         connection = self._connect()
@@ -309,12 +351,7 @@ class MemoryClearJournal:
             ).fetchone()
             if row is None:
                 raise ClearOperationNotFound(identifier)
-            return bool(
-                row["state"] == "recovery_needed"
-                and row["execution_token"] is None
-                and row["resolution"] != "resume"
-                and self._abort_snapshot_complete(connection, row)
-            )
+            return self._can_abort_from_row(connection, row)
         finally:
             connection.close()
 
@@ -330,12 +367,7 @@ class MemoryClearJournal:
             ).fetchone()
             if row is None:
                 raise ClearOperationNotFound(identifier)
-            return bool(
-                row["state"] == "recovery_needed"
-                and row["execution_token"] is None
-                and row["resolution"] != "abort"
-                and row["recovery_from_state"] in {"preparing", "prepared", "deleting"}
-            )
+            return self._can_resume_from_row(row)
         finally:
             connection.close()
 
@@ -1228,6 +1260,28 @@ class MemoryClearJournal:
             summary is not None
             and summary["surface_count"] == len(_SURFACE_NAMES)
             and summary["invalid_count"] == 0
+        )
+
+    def _can_abort_from_row(
+        self,
+        connection: sqlite3.Connection,
+        operation: sqlite3.Row,
+    ) -> bool:
+        return bool(
+            operation["state"] == "recovery_needed"
+            and operation["execution_token"] is None
+            and operation["resolution"] != "resume"
+            and self._abort_snapshot_complete(connection, operation)
+        )
+
+    @staticmethod
+    def _can_resume_from_row(operation: sqlite3.Row) -> bool:
+        return bool(
+            operation["state"] == "recovery_needed"
+            and operation["execution_token"] is None
+            and operation["resolution"] != "abort"
+            and operation["recovery_from_state"]
+            in {"preparing", "prepared", "deleting"}
         )
 
     def _operation_transition(
