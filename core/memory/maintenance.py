@@ -88,6 +88,7 @@ class MemoryMaintenanceRuntimePort:
     quiesce: Callable[[bool], Awaitable[None]]
     resume: Callable[[], Awaitable[None]]
     delete_surface: Callable[[ClearSurface, int], Awaitable[None]]
+    restore_completed: Callable[[], None]
 
 
 class MemoryMaintenance:
@@ -411,6 +412,7 @@ class MemoryMaintenance:
                         execution_token=self._backup_restore_execution_token(operation),
                     )
                 )
+                self._runtime.restore_completed()
                 return restored
             except BaseException:
                 await self._mark_backup_restore_recovery(operation)
@@ -717,6 +719,7 @@ class MemoryMaintenance:
                         actor_ref="system:boot",
                     )
                 )
+                self._runtime.restore_completed()
             return True
         except asyncio.CancelledError:
             await self._mark_backup_restore_recovery(operation)
