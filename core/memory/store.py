@@ -35,7 +35,7 @@ from core.memory.types import (
 
 MEMORY_STORE_FILENAME = "memory.sqlite"
 MEMORY_STORE_DIRNAME = "memory"
-MEMORY_STORE_SCHEMA_VERSION = 1
+MEMORY_STORE_SCHEMA_VERSION = 2
 MAX_NONTERMINAL_QUEUE_ROWS = 500
 MAX_MESSAGE_ATTEMPTS = 3
 TERMINAL_TOMBSTONE_LIMIT = 100_000
@@ -54,9 +54,11 @@ _MEMORY_STORE_REQUIRED_COLUMNS = {
     "memory_meta": frozenset(
         {
             "singleton",
+            "processing_fault_generation",
             "processing_fault_kind",
             "processing_fault_since",
             "processing_alert_active",
+            "processing_recovery_generation",
             "processing_recovery_pending_at",
         }
     ),
@@ -155,6 +157,56 @@ def _install_clean_schema(
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add generation fencing without rebuilding or dropping existing v1 data."""
+
+    # SQLite ADD COLUMN cannot retrofit the clean-v2 cross-column pair CHECK.
+    # The backfill and every Store transition update the recovery pair together.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            """
+            ALTER TABLE memory_meta
+            ADD COLUMN processing_fault_generation INTEGER NOT NULL DEFAULT 0
+                CHECK (processing_fault_generation >= 0)
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE memory_meta
+            ADD COLUMN processing_recovery_generation INTEGER
+                CHECK (
+                    processing_recovery_generation IS NULL
+                    OR processing_recovery_generation >= 0
+                )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memory_meta
+            SET processing_fault_generation = CASE
+                    WHEN processing_fault_since IS NOT NULL
+                         AND processing_recovery_pending_at IS NOT NULL THEN 2
+                    WHEN processing_fault_since IS NOT NULL
+                         OR processing_recovery_pending_at IS NOT NULL THEN 1
+                    ELSE 0
+                END,
+                processing_recovery_generation = CASE
+                    WHEN processing_recovery_pending_at IS NOT NULL THEN 1
+                    ELSE NULL
+                END
+            WHERE singleton = 1
+            """
+        )
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+        _verify_current_schema(conn)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
 def _verify_current_schema(conn: sqlite3.Connection) -> None:
     application_tables = _application_tables(conn)
     if application_tables != _MEMORY_STORE_TABLES:
@@ -224,9 +276,11 @@ class MemoryMeta:
     last_success_at: str | None
     last_error: MemoryErrorCode | None
     last_error_at: str | None
+    processing_fault_generation: int
     processing_fault_kind: Literal["credential", "engine"] | None
     processing_fault_since: str | None
     processing_alert_active: bool
+    processing_recovery_generation: int | None
     processing_recovery_pending_at: str | None
     updated_at: str
 
@@ -395,6 +449,34 @@ class BootRecovery:
     reclaimed: int
     interrupted_flushes: int
     due_flushes: int = 0
+
+
+@dataclass(frozen=True)
+class ProcessingHealthProbe:
+    """A provider-health read fenced to one exact open fault cycle."""
+
+    generation: int
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class ProcessingNotification:
+    """One stable durable processing event awaiting external delivery."""
+
+    event: Literal["fault", "recovered"]
+    generation: int
+    kind: Literal["credential", "engine"] | None
+    occurred_at: str
+
+
+ProcessingAction = ProcessingHealthProbe | ProcessingNotification
+
+
+@dataclass(frozen=True)
+class ProcessingHealthCommit:
+    """Whether a health result classified the exact probe generation."""
+
+    committed: bool
 
 
 class MemoryStore:
@@ -1905,6 +1987,8 @@ class MemoryStore:
             if result.rowcount != 1:
                 return False
             self._set_last_error_in_connection(conn, error, now)
+            if error == "memory_processing_failed":
+                self._open_processing_fault_in_connection(conn, now=now)
             return True
 
     def _record_message_failure(
@@ -2414,7 +2498,8 @@ class MemoryStore:
                     last_success_at = NULL, last_error = NULL, last_error_at = NULL,
                     processing_fault_kind = NULL, processing_fault_since = NULL,
                     processing_alert_active = 0,
-                    processing_recovery_pending_at = NULL, updated_at = ?
+                    processing_recovery_pending_at = NULL,
+                    processing_recovery_generation = NULL, updated_at = ?
                 WHERE singleton = 1
                 """,
                 (epoch, now),
@@ -2429,9 +2514,11 @@ class MemoryStore:
                 last_success_at=None,
                 last_error=None,
                 last_error_at=None,
+                processing_fault_generation=meta.processing_fault_generation,
                 processing_fault_kind=None,
                 processing_fault_since=None,
                 processing_alert_active=False,
+                processing_recovery_generation=None,
                 processing_recovery_pending_at=None,
                 updated_at=now,
             )
@@ -2503,9 +2590,11 @@ class MemoryStore:
                 last_success_at=meta.last_success_at,
                 last_error=None,
                 last_error_at=None,
+                processing_fault_generation=meta.processing_fault_generation,
                 processing_fault_kind=meta.processing_fault_kind,
                 processing_fault_since=meta.processing_fault_since,
                 processing_alert_active=meta.processing_alert_active,
+                processing_recovery_generation=meta.processing_recovery_generation,
                 processing_recovery_pending_at=meta.processing_recovery_pending_at,
                 updated_at=now,
             )
@@ -2544,7 +2633,8 @@ class MemoryStore:
                     last_success_at = NULL, last_error = NULL, last_error_at = NULL,
                     processing_fault_kind = NULL, processing_fault_since = NULL,
                     processing_alert_active = 0,
-                    processing_recovery_pending_at = NULL, updated_at = ?
+                    processing_recovery_pending_at = NULL,
+                    processing_recovery_generation = NULL, updated_at = ?
                 WHERE singleton = 1
                 """,
                 (epoch, now),
@@ -2566,12 +2656,6 @@ class MemoryStore:
                 now,
             )
 
-    def open_processing_fault(self, *, now: str) -> bool:
-        """Persist one OPEN cycle and return whether it starts a new outage."""
-
-        with self._transaction() as conn:
-            return self._open_processing_fault_in_connection(conn, now=now)
-
     def _open_processing_fault_in_connection(
         self,
         conn: sqlite3.Connection,
@@ -2583,11 +2667,19 @@ class MemoryStore:
         conn.execute(
             """
             UPDATE memory_meta
-            SET processing_fault_kind = CASE
+            SET processing_fault_generation = CASE
+                    WHEN processing_fault_since IS NULL
+                    THEN processing_fault_generation + 1
+                    ELSE processing_fault_generation
+                END,
+                processing_fault_kind = CASE
                     WHEN processing_fault_since IS NULL THEN NULL
                     ELSE processing_fault_kind
                 END,
-                processing_fault_since = ?,
+                processing_fault_since = CASE
+                    WHEN processing_fault_since IS NULL THEN ?
+                    ELSE processing_fault_since
+                END,
                 last_error = 'memory_processing_failed', last_error_at = ?,
                 updated_at = ?
             WHERE singleton = 1
@@ -2596,48 +2688,106 @@ class MemoryStore:
         )
         return newly_open
 
-    def classify_processing_fault(self, kind: Literal["credential", "engine"]) -> bool:
-        """Store display classification and report whether its alert is pending."""
+    def next_processing_action(self) -> ProcessingAction | None:
+        """Return the next stable external action in durable event order."""
 
-        if kind not in {"credential", "engine"}:
-            raise ValueError("invalid processing fault kind")
-        now = utc_now_iso()
-        with self._transaction() as conn:
+        with self._connection() as conn:
             meta = self._meta_in_connection(conn)
-            if meta is None or meta.processing_fault_since is None:
-                return False
-            should_alert = not meta.processing_alert_active
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET processing_fault_kind = ?, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (kind, now),
+        if meta is None:
+            return None
+        if (
+            meta.processing_recovery_pending_at is not None
+            and meta.processing_recovery_generation is not None
+        ):
+            return ProcessingNotification(
+                event="recovered",
+                generation=meta.processing_recovery_generation,
+                kind=None,
+                occurred_at=meta.processing_recovery_pending_at,
             )
-            return should_alert
+        if meta.processing_fault_since is None:
+            return None
+        if meta.processing_fault_kind is None:
+            return ProcessingHealthProbe(
+                generation=meta.processing_fault_generation,
+                occurred_at=meta.processing_fault_since,
+            )
+        if not meta.processing_alert_active:
+            return ProcessingNotification(
+                event="fault",
+                generation=meta.processing_fault_generation,
+                kind=meta.processing_fault_kind,
+                occurred_at=meta.processing_fault_since,
+            )
+        return None
 
-    def mark_processing_alert_active(self) -> bool:
-        """Persist that the current outage notification was delivered."""
+    def record_processing_health(
+        self,
+        probe: ProcessingHealthProbe,
+        *,
+        healthy: bool,
+    ) -> ProcessingHealthCommit:
+        """Classify only the still-open fault identified by ``probe``."""
 
+        kind: Literal["credential", "engine"] = "engine" if healthy else "credential"
         now = utc_now_iso()
         with self._transaction() as conn:
             result = conn.execute(
                 """
                 UPDATE memory_meta
+                SET processing_fault_kind = ?, updated_at = ?
+                WHERE singleton = 1 AND processing_fault_generation = ?
+                  AND processing_fault_since = ?
+                  AND processing_fault_kind IS NULL
+                """,
+                (kind, now, probe.generation, probe.occurred_at),
+            )
+            return ProcessingHealthCommit(committed=result.rowcount == 1)
+
+    def acknowledge_processing_notification(
+        self,
+        notification: ProcessingNotification,
+    ) -> bool:
+        """Acknowledge one exact durable event after at-least-once delivery."""
+
+        now = utc_now_iso()
+        with self._transaction() as conn:
+            if notification.event == "recovered":
+                if notification.kind is not None:
+                    return False
+                result = conn.execute(
+                    """
+                    UPDATE memory_meta
+                    SET processing_recovery_pending_at = NULL,
+                        processing_recovery_generation = NULL, updated_at = ?
+                    WHERE singleton = 1
+                      AND processing_recovery_generation = ?
+                      AND processing_recovery_pending_at = ?
+                    """,
+                    (now, notification.generation, notification.occurred_at),
+                )
+                return result.rowcount == 1
+            if notification.event != "fault" or notification.kind not in {
+                "credential",
+                "engine",
+            }:
+                return False
+            result = conn.execute(
+                """
+                UPDATE memory_meta
                 SET processing_alert_active = 1, updated_at = ?
-                WHERE singleton = 1 AND processing_fault_since IS NOT NULL
+                WHERE singleton = 1 AND processing_fault_generation = ?
+                  AND processing_fault_since = ? AND processing_fault_kind = ?
                   AND processing_alert_active = 0
                 """,
-                (now,),
+                (
+                    now,
+                    notification.generation,
+                    notification.occurred_at,
+                    notification.kind,
+                ),
             )
-            return bool(result.rowcount)
-
-    def close_processing_fault(self, *, now: str) -> bool:
-        """Close an active breaker and retain any owed recovery notification."""
-
-        with self._transaction() as conn:
-            return self._close_processing_fault_in_connection(conn, now=now)
+            return result.rowcount == 1
 
     def _close_processing_fault_in_connection(
         self,
@@ -2658,6 +2808,14 @@ class MemoryStore:
                     THEN COALESCE(processing_recovery_pending_at, ?)
                     ELSE processing_recovery_pending_at
                 END,
+                processing_recovery_generation = CASE
+                    WHEN processing_alert_active = 1
+                    THEN COALESCE(
+                        processing_recovery_generation,
+                        processing_fault_generation
+                    )
+                    ELSE processing_recovery_generation
+                END,
                 last_error = CASE
                     WHEN last_error = 'memory_processing_failed' THEN NULL
                     ELSE last_error
@@ -2672,21 +2830,6 @@ class MemoryStore:
             (now, now),
         )
         return True
-
-    def mark_processing_recovery_notified(self, *, occurred_at: str) -> bool:
-        """Acknowledge the exact durable recovery edge after it was delivered."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            result = conn.execute(
-                """
-                UPDATE memory_meta
-                SET processing_recovery_pending_at = NULL, updated_at = ?
-                WHERE singleton = 1 AND processing_recovery_pending_at = ?
-                """,
-                (now, occurred_at),
-            )
-            return bool(result.rowcount)
 
     def clear_system_outage_error(self) -> None:
         """Clear only the availability categories resolved by a fresh health probe."""
@@ -2743,9 +2886,11 @@ class MemoryStore:
         with self._connection() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             application_tables = _application_tables(conn)
-            if version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
+            if version == 1:
+                _migrate_v1_to_v2(conn)
+            elif version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
-            if version == 0:
+            elif version == 0:
                 _install_clean_schema(conn, schema_sql, application_tables)
             _verify_current_schema(conn)
 
@@ -2805,6 +2950,8 @@ class MemoryStore:
             processing_fault_kind=None,
             processing_fault_since=None,
             processing_alert_active=False,
+            processing_fault_generation=0,
+            processing_recovery_generation=None,
             processing_recovery_pending_at=None,
             updated_at=now,
         )
@@ -3003,6 +3150,7 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
             if row["last_error_at"] is not None
             else None
         ),
+        processing_fault_generation=int(row["processing_fault_generation"]),
         processing_fault_kind=(
             str(row["processing_fault_kind"])
             if row["processing_fault_kind"] in {"credential", "engine"}
@@ -3014,6 +3162,11 @@ def _meta_from_row(row: sqlite3.Row) -> MemoryMeta:
             else None
         ),
         processing_alert_active=bool(row["processing_alert_active"]),
+        processing_recovery_generation=(
+            int(row["processing_recovery_generation"])
+            if row["processing_recovery_generation"] is not None
+            else None
+        ),
         processing_recovery_pending_at=(
             str(row["processing_recovery_pending_at"])
             if row["processing_recovery_pending_at"] is not None

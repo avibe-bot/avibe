@@ -1,4 +1,4 @@
--- Initial Memory schema for new databases.
+-- Exact v1 Memory schema from dev at 63eb6efc.
 CREATE TABLE IF NOT EXISTS memory_meta (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     epoch INTEGER NOT NULL,
@@ -20,9 +20,6 @@ CREATE TABLE IF NOT EXISTS memory_meta (
         )
     ),
     last_error_at TEXT,
-    processing_fault_generation INTEGER NOT NULL DEFAULT 0 CHECK (
-        processing_fault_generation >= 0
-    ),
     processing_fault_kind TEXT CHECK (
         processing_fault_kind IS NULL OR processing_fault_kind IN ('credential', 'engine')
     ),
@@ -31,17 +28,7 @@ CREATE TABLE IF NOT EXISTS memory_meta (
         processing_alert_active IN (0, 1)
     ),
     processing_recovery_pending_at TEXT,
-    processing_recovery_generation INTEGER CHECK (
-        processing_recovery_generation IS NULL OR processing_recovery_generation >= 0
-    ),
-    updated_at TEXT NOT NULL,
-    CHECK (
-        (processing_recovery_pending_at IS NULL
-            AND processing_recovery_generation IS NULL)
-        OR
-        (processing_recovery_pending_at IS NOT NULL
-            AND processing_recovery_generation IS NOT NULL)
-    )
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS memory_attachment_bundle (
@@ -189,3 +176,4 @@ WHEN COALESCE(
 BEGIN
     SELECT RAISE(ABORT, 'memory flush settlements are immutable');
 END;
+PRAGMA user_version = 1;

@@ -16,7 +16,7 @@ def test_new_lease_activation_recovers_before_claiming() -> None:
             calls.append(("recover", lease_owner))
             return BootRecovery(reclaimed=0, interrupted_flushes=0)
 
-        def get_meta(self):
+        def next_processing_action(self):
             return None
 
         def list_flush_candidates(self, *, now: str, limit: int):
