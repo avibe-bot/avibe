@@ -534,7 +534,7 @@ async def _read_json_payload(request: FastAPIRequest) -> Any:
     if not body:
         return None
     try:
-        return json.loads(body)
+        return await run_in_threadpool(json.loads, body)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Malformed JSON")
 

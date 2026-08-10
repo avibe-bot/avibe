@@ -74,7 +74,15 @@ export async function uploadWorkbenchAttachment(
     );
   }
 
-  const payload = await response.json().catch(() => null) as (WorkbenchUploadResult & ErrorPayload) | null;
+  let payload: (WorkbenchUploadResult & ErrorPayload) | null;
+  try {
+    payload = await response.json() as (WorkbenchUploadResult & ErrorPayload) | null;
+  } catch (error) {
+    throw new WorkbenchUploadError(
+      'network_error',
+      error instanceof Error ? error.message : 'Upload response could not be read',
+    );
+  }
   if (!response.ok || !payload?.token) {
     throw new WorkbenchUploadError(
       normalizedErrorCode(payload?.error?.code),

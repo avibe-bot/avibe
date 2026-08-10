@@ -85,6 +85,21 @@ describe('workbench attachment upload', () => {
     ).rejects.toMatchObject({ code: 'network_error' });
   });
 
+  it('keeps response-body failures retryable after successful headers', async () => {
+    const response = new Response(null, { status: 201 });
+    vi.spyOn(response, 'json').mockRejectedValue(new TypeError('terminated'));
+    api.apiFetch.mockResolvedValue(response);
+
+    const error = await uploadWorkbenchAttachment(
+      'ses-1',
+      new File(['x'], 'x.txt'),
+      'upload-id-123456',
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'network_error' });
+    expect(isWorkbenchUploadRetryable(error)).toBe(true);
+  });
+
   it('only retries failures that can succeed with the same file and session', () => {
     expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('network_error', 'offline'))).toBe(true);
     expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('upload_failed', 'server', 503))).toBe(true);
