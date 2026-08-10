@@ -218,3 +218,21 @@ def is_referenced_by_session(conn: Connection, token: str, session_id: str) -> b
         ).scalar_one_or_none()
         is not None
     )
+
+
+def get_live_user_upload_by_path(
+    conn: Connection,
+    *,
+    session_id: str,
+    local_path: str,
+) -> Optional[dict[str, Any]]:
+    """Return an existing idempotent browser upload for this session/path."""
+    row = conn.execute(
+        select(media_objects).where(
+            media_objects.c.session_id == session_id,
+            media_objects.c.source == "user_upload",
+            media_objects.c.local_path == local_path,
+            media_objects.c.revoked_at.is_(None),
+        )
+    ).mappings().first()
+    return dict(row) if row else None

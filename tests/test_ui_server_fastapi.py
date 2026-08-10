@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from fastapi import Request as FastAPIRequest
 from storage.importer import ensure_sqlite_state
 from vibe.ui_compat import (
     TEST_REMOTE_ADDR_HEADER,
     CompatApp,
+    _read_json_payload,
     normalize_response,
     route_path_to_fastapi,
     run_maybe_async,
@@ -2376,6 +2378,52 @@ def test_run_maybe_async_offloads_sync_handlers_without_losing_context():
 
     assert result == "/threadpool-check"
     assert tick == "tick"
+
+
+def test_json_payload_parsing_runs_off_the_asgi_loop(monkeypatch):
+    parse_threads: list[int] = []
+    original_loads = json.loads
+
+    def tracked_loads(payload):
+        parse_threads.append(threading.get_ident())
+        return original_loads(payload)
+
+    monkeypatch.setattr("vibe.ui_compat.json.loads", tracked_loads)
+
+    async def receive():
+        return {
+            "type": "http.request",
+            "body": b'{"attachment":"legacy"}',
+            "more_body": False,
+        }
+
+    starlette_request = FastAPIRequest(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/legacy-upload",
+            "raw_path": b"/legacy-upload",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        },
+        receive,
+    )
+
+    async def exercise():
+        loop_thread = threading.get_ident()
+        payload = await _read_json_payload(starlette_request)
+        return loop_thread, payload
+
+    loop_thread, payload = asyncio.run(exercise())
+
+    assert payload == {"attachment": "legacy"}
+    assert parse_threads
+    assert parse_threads[0] != loop_thread
 
 
 def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatch):

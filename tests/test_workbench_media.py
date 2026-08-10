@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from core.workbench_media import rewrite_agent_media
+from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES, rewrite_agent_media
 from storage import media_service, settings_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
@@ -23,6 +23,10 @@ from storage.models import agent_sessions, media_object_references, media_object
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_workbench_attachment_limit_is_100_mib():
+    assert MAX_WORKBENCH_ATTACHMENT_BYTES == 100 * 1024 * 1024
 
 
 def _png_bytes(width: int, height: int) -> bytes:
