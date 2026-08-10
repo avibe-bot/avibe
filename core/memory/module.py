@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import shutil
-import stat
 import unicodedata
 import weakref
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -22,14 +20,10 @@ from core.memory.attachments import (
     PinnedBundle,
     encode_pinned_bundle,
 )
-from core.memory.provider_root import (
-    ProviderRoot,
-    ProviderRootMetadata,
-)
+from core.memory.provider_root import ProviderRoot
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
 from core.memory.store import (
     MAX_NONTERMINAL_QUEUE_ROWS,
-    MemoryMeta,
     MemoryStore,
     is_principal_id,
     is_project_id,
@@ -72,18 +66,9 @@ MAX_PROVIDER_RESULT_BYTES = 256 * 1024
 MAX_PROVIDER_RESULT_ITEMS = 20
 PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
-CLEAR_CLEANUP_TIMEOUT_SECONDS = 20.0
-MAX_PROVIDER_DISK_ENTRIES = 100_000
-SLICE1_PROVIDER_ROOT_FORMAT = "slice1"
-SLICE1_ARTIFACT_FINGERPRINT = "slice1-core"
 
 
 _ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
-_ROOT_CLEANUP_TASKS: dict[str, asyncio.Task[None]] = {}
-
-
-class _ClearStepFailure(RuntimeError):
-    """Internal signal used to retain the durable clear-recovery marker."""
 
 
 class MemoryModule:
@@ -95,19 +80,11 @@ class MemoryModule:
         provider: MemoryProviderPort,
         *,
         enabled: bool | Callable[[], bool] = False,
-        runtime_error: MemoryErrorCode | None | Callable[[], MemoryErrorCode | None] = None,
-        starting: bool | Callable[[], bool] = False,
         disk_free_bytes: Callable[[], int] | None = None,
         provider_root: Path | None = None,
-        clear_provider_data: Callable[[], Awaitable[None] | None] | None = None,
         maintenance_open: Callable[[], bool] | None = None,
         provider_root_owner: ProviderRoot | None = None,
-        provider_root_metadata: Callable[[], ProviderRootMetadata] | None = None,
-        provider_root_format: str = SLICE1_PROVIDER_ROOT_FORMAT,
-        artifact_fingerprint: str = SLICE1_ARTIFACT_FINGERPRINT,
-        compatible_provider_root_formats: Iterable[str] = (),
         clear_drain_timeout_seconds: float = CLEAR_DRAIN_TIMEOUT_SECONDS,
-        clear_cleanup_timeout_seconds: float = CLEAR_CLEANUP_TIMEOUT_SECONDS,
         processing_event: ProcessingEvent | None = None,
         worker: MemoryWorker | None = None,
         attachment_store: AttachmentPinStore | None = None,
@@ -116,8 +93,6 @@ class MemoryModule:
         self._store = store
         self._provider = provider
         self._enabled_source = enabled
-        self._runtime_error_source = runtime_error
-        self._starting_source = starting
         self._disk_free_bytes = disk_free_bytes or self._default_free_disk_bytes
         self._effective_home = (
             paths.get_vibe_remote_dir()
@@ -130,18 +105,8 @@ class MemoryModule:
             self._provider_root,
             effective_home=self._effective_home,
         )
-        static_metadata = _provider_root_metadata(
-            provider_root_format=provider_root_format,
-            artifact_fingerprint=artifact_fingerprint,
-            compatible_provider_root_formats=compatible_provider_root_formats,
-        )
-        self._provider_root_metadata = provider_root_metadata or (
-            lambda: static_metadata
-        )
-        self._clear_provider_data = clear_provider_data
         self._maintenance_open = maintenance_open or (lambda: False)
         self._clear_drain_timeout_seconds = _positive_timeout(clear_drain_timeout_seconds)
-        self._clear_cleanup_timeout_seconds = _positive_timeout(clear_cleanup_timeout_seconds)
         self._lifecycle_lock = asyncio.Lock()
         self._capture_admission_locks: weakref.WeakValueDictionary[
             tuple[str, str, str], asyncio.Lock
@@ -573,43 +538,11 @@ class MemoryModule:
             return False
         return bool(value)
 
-    def _runtime_error(self) -> MemoryErrorCode | None:
-        try:
-            value = self._runtime_error_source() if callable(self._runtime_error_source) else self._runtime_error_source
-        except Exception:
-            return "memory_runtime_install_failed"
-        return value if is_memory_error_code(value) else None
-
-    def _is_starting(self) -> bool:
-        try:
-            value = self._starting_source() if callable(self._starting_source) else self._starting_source
-        except Exception:
-            return False
-        return bool(value)
-
     def _is_maintenance_open(self) -> bool:
         try:
             return bool(self._maintenance_open())
         except Exception:
             return True
-
-    async def _has_minimum_free_disk(self) -> bool:
-        try:
-            return int(await asyncio.to_thread(self._disk_free_bytes)) >= MIN_FREE_DISK_BYTES
-        except Exception:
-            return False
-
-    async def _clear_provider_data_or_fail(self, meta: MemoryMeta) -> None:
-        """Clear one verified root without allowing timed-out cleanup to escape ownership."""
-
-        metadata = self._provider_root_metadata()
-        await asyncio.to_thread(self.provider_root.ensure, meta, metadata)
-        await self._run_owned_provider_cleanup()
-        await asyncio.to_thread(
-            self.provider_root.recreate_empty,
-            meta,
-            metadata,
-        )
 
     def _root_lifecycle_lock(self) -> asyncio.Lock:
         return _ROOT_LIFECYCLE_LOCKS.setdefault(self._provider_root_key, asyncio.Lock())
@@ -635,89 +568,11 @@ class MemoryModule:
             self._capture_admission_locks[key] = lock
         return lock
 
-    async def _run_owned_provider_cleanup(self) -> None:
-        """Await a cleanup task once, retaining it after timeout until it actually ends."""
-
-        existing = _ROOT_CLEANUP_TASKS.get(self._provider_root_key)
-        if existing is not None:
-            if not existing.done():
-                raise _ClearStepFailure("provider cleanup is still running")
-            _ROOT_CLEANUP_TASKS.pop(self._provider_root_key, None)
-            try:
-                existing.result()
-            except BaseException as error:
-                raise _ClearStepFailure("provider cleanup failed") from error
-            return
-
-        task = asyncio.create_task(self._invoke_provider_cleanup())
-        _ROOT_CLEANUP_TASKS[self._provider_root_key] = task
-        task.add_done_callback(_consume_cleanup_task_exception)
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=self._clear_cleanup_timeout_seconds,
-            )
-        except asyncio.TimeoutError as error:
-            # Shielding leaves the task owned here.  A later recovery sees it and
-            # cannot start a second cleanup against the same provider root.
-            raise _ClearStepFailure("provider clear timed out") from error
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            _ROOT_CLEANUP_TASKS.pop(self._provider_root_key, None)
-            raise _ClearStepFailure("provider cleanup failed") from error
-        else:
-            _ROOT_CLEANUP_TASKS.pop(self._provider_root_key, None)
-
-    async def _invoke_provider_cleanup(self) -> None:
-        callback = self._clear_provider_data
-        if callback is None:
-            raise _ClearStepFailure("provider clear dependency is unavailable")
-        result = await asyncio.to_thread(callback)
-        if inspect.isawaitable(result):
-            await result
-
-    async def _record_clear_failure(self) -> None:
-        try:
-            await self._store_call(self._store.set_last_error, "memory_clear_failed")
-        except Exception:
-            return
-
     async def _store_call(self, method: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         return await run_blocking(method, *args, **kwargs)
 
     def _default_free_disk_bytes(self) -> int:
         return int(shutil.disk_usage(self._store.path.parent).free)
-
-    def _provider_disk_bytes(self) -> int:
-        try:
-            root_info = self._provider_root.lstat()
-            if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-                return 0
-        except OSError:
-            return 0
-
-        total = 0
-        visited = 0
-        directories = [self._provider_root]
-        try:
-            while directories and visited < MAX_PROVIDER_DISK_ENTRIES:
-                directory = directories.pop()
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        if visited >= MAX_PROVIDER_DISK_ENTRIES:
-                            break
-                        visited += 1
-                        info = entry.stat(follow_symlinks=False)
-                        if stat.S_ISLNK(info.st_mode):
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            directories.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
-                            total += int(info.st_size)
-        except OSError:
-            return 0
-        return total
 
     @staticmethod
     def _normalize_text(value: object) -> str:
@@ -813,59 +668,6 @@ def _profile_bytes(profile: object) -> int | None:
 
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return error.error if is_memory_error_code(error.error) else fallback
-
-
-def _consume_cleanup_task_exception(task: asyncio.Task[None]) -> None:
-    """Retrieve a retained task error without exposing provider details anywhere."""
-
-    if task.cancelled():
-        return
-    try:
-        task.exception()
-    except BaseException:
-        return
-
-
-def _is_root_metadata_value(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value) <= 128
-        and value.isascii()
-        and all(character.isalnum() or character in {"-", "_", "."} for character in value)
-    )
-
-
-def _provider_root_metadata(
-    *,
-    provider_root_format: object,
-    artifact_fingerprint: object,
-    compatible_provider_root_formats: Iterable[object],
-) -> ProviderRootMetadata:
-    root_format = (
-        provider_root_format
-        if _is_root_metadata_value(provider_root_format)
-        else SLICE1_PROVIDER_ROOT_FORMAT
-    )
-    fingerprint = (
-        artifact_fingerprint
-        if _is_root_metadata_value(artifact_fingerprint)
-        else SLICE1_ARTIFACT_FINGERPRINT
-    )
-    return ProviderRootMetadata(
-        provider_root_format=root_format,
-        artifact_fingerprint=fingerprint,
-        compatible_provider_root_formats=frozenset(
-            {
-                root_format,
-                *(
-                    value
-                    for value in compatible_provider_root_formats
-                    if _is_root_metadata_value(value)
-                ),
-            }
-        ),
-    )
 
 
 def _utf8_bytes(value: str) -> bytes | None:

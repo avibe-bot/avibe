@@ -2482,47 +2482,6 @@ class MemoryStore:
             )
             return deleted.rowcount == 1
 
-    def begin_clear(self) -> MemoryMeta:
-        """Persist the clear-recovery marker and advance the epoch exactly once."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            if meta.clear_in_progress:
-                return meta
-            epoch = meta.epoch + 1
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET epoch = ?, clear_in_progress = 1, missed_count = 0,
-                    last_success_at = NULL, last_error = NULL, last_error_at = NULL,
-                    processing_fault_kind = NULL, processing_fault_since = NULL,
-                    processing_alert_active = 0,
-                    processing_recovery_pending_at = NULL,
-                    processing_recovery_generation = NULL, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (epoch, now),
-            )
-            return MemoryMeta(
-                epoch=epoch,
-                clear_in_progress=True,
-                scope_key=meta.scope_key,
-                provider_root_id=meta.provider_root_id,
-                last_provider_timestamp_ms=meta.last_provider_timestamp_ms,
-                missed_count=0,
-                last_success_at=None,
-                last_error=None,
-                last_error_at=None,
-                processing_fault_generation=meta.processing_fault_generation,
-                processing_fault_kind=None,
-                processing_fault_since=None,
-                processing_alert_active=False,
-                processing_recovery_generation=None,
-                processing_recovery_pending_at=None,
-                updated_at=now,
-            )
-
     def begin_clear_fence(self) -> MemoryMeta:
         """Fence admission without changing the pre-clear snapshot generation."""
 
@@ -2560,44 +2519,6 @@ class MemoryStore:
             if refreshed is None:
                 raise RuntimeError("Memory metadata disappeared while releasing clear")
             return refreshed
-
-    def finish_clear(self) -> MemoryMeta:
-        """Delete all queue state and make the advanced epoch available again."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            meta = self._ensure_meta_in_connection(conn)
-            conn.execute("DELETE FROM memory_capture_queue")
-            conn.execute("DELETE FROM memory_flush_settlements")
-            conn.execute("DELETE FROM memory_session_flush_state")
-            conn.execute("DELETE FROM memory_attachment_bundle")
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET clear_in_progress = 0, last_error = NULL,
-                    last_error_at = NULL, updated_at = ?
-                WHERE singleton = 1
-                """,
-                (now,),
-            )
-            return MemoryMeta(
-                epoch=meta.epoch,
-                clear_in_progress=False,
-                scope_key=meta.scope_key,
-                provider_root_id=meta.provider_root_id,
-                last_provider_timestamp_ms=meta.last_provider_timestamp_ms,
-                missed_count=meta.missed_count,
-                last_success_at=meta.last_success_at,
-                last_error=None,
-                last_error_at=None,
-                processing_fault_generation=meta.processing_fault_generation,
-                processing_fault_kind=meta.processing_fault_kind,
-                processing_fault_since=meta.processing_fault_since,
-                processing_alert_active=meta.processing_alert_active,
-                processing_recovery_generation=meta.processing_recovery_generation,
-                processing_recovery_pending_at=meta.processing_recovery_pending_at,
-                updated_at=now,
-            )
 
     def reset_for_clear(self, *, target_epoch: int | None = None) -> MemoryMeta:
         """Clear SQLite state at an exact, replay-safe target epoch."""
@@ -2830,49 +2751,6 @@ class MemoryStore:
             (now, now),
         )
         return True
-
-    def clear_system_outage_error(self) -> None:
-        """Clear only the availability categories resolved by a fresh health probe."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            conn.execute(
-                """
-                UPDATE memory_meta
-                SET last_error = NULL, last_error_at = NULL, updated_at = ?
-                WHERE singleton = 1
-                  AND (
-                    last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
-                    OR (last_error = 'memory_processing_failed' AND processing_fault_since IS NULL)
-                  )
-                """,
-                (now,),
-            )
-
-    def clear_superseded_error(
-        self,
-        *,
-        expected_error: MemoryErrorCode,
-        expected_error_at: str,
-    ) -> bool:
-        """Atomically retire a legacy error superseded by a newer flush observation."""
-
-        now = utc_now_iso()
-        with self._transaction() as conn:
-            result = conn.execute(
-                """
-                UPDATE memory_meta
-                SET last_error = NULL, last_error_at = NULL, updated_at = ?
-                WHERE singleton = 1
-                  AND last_error = ? AND last_error_at = ?
-                  AND (
-                    last_error IN ('memory_sidecar_unavailable', 'memory_provider_timeout')
-                    OR (last_error = 'memory_processing_failed' AND processing_fault_since IS NULL)
-                  )
-                """,
-                (now, expected_error, expected_error_at),
-            )
-            return bool(result.rowcount)
 
     def compact_terminal_tombstones(self, *, now: datetime | None = None) -> int:
         """Bound terminal digest retention by age and count without exposing payloads."""

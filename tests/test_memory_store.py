@@ -822,22 +822,14 @@ def test_recovery_for_generation_one_coexists_with_open_generation_two(
     assert current.generation == 2
 
 
-@pytest.mark.parametrize("clear_path", ["begin-finish", "reset"])
-def test_processing_fault_generation_survives_clear(
-    tmp_path: Path,
-    clear_path: str,
-) -> None:
+def test_processing_fault_generation_survives_clear(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     _open_processing_fault(store, "before-clear", at="2026-01-01T00:00:00.000Z")
     pre_clear_probe = store.next_processing_action()
     assert isinstance(pre_clear_probe, ProcessingHealthProbe)
 
     epoch = store.ensure_meta().epoch
-    if clear_path == "begin-finish":
-        store.begin_clear()
-        cleared = store.finish_clear()
-    else:
-        cleared = store.reset_for_clear(target_epoch=epoch + 1)
+    cleared = store.reset_for_clear(target_epoch=epoch + 1)
     assert cleared.processing_fault_generation == 1
     _open_processing_fault(store, "after-clear", at="2026-01-01T00:00:01.000Z")
 
@@ -1255,23 +1247,16 @@ def test_begin_flush_submission_refuses_a_stale_completed_lease(tmp_path: Path) 
     assert not store.begin_flush_submission(lease, now="2026-01-01T00:00:05.000Z")
 
 
-@pytest.mark.parametrize("advance_epoch", (False, True), ids=("same-epoch", "advanced-epoch"))
-def test_begin_flush_submission_refuses_clear_meta_cas(
-    tmp_path: Path,
-    advance_epoch: bool,
-) -> None:
+def test_begin_flush_submission_refuses_clear_fence(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    session_ref = _deliver(store, f"clear-cas-{advance_epoch}")
+    session_ref = _deliver(store, "clear-fence")
     lease = store.begin_flush_attempt(
         provider_session_ref=session_ref,
         now="2026-01-01T00:00:02.000Z",
         force=True,
     )
     assert lease is not None
-    if advance_epoch:
-        store.begin_clear()
-    else:
-        store.begin_clear_fence()
+    store.begin_clear_fence()
 
     assert not store.begin_flush_submission(lease, now="2026-01-01T00:00:03.000Z")
     state = store.get_session_flush_state(session_ref)
@@ -1424,9 +1409,8 @@ def test_store_settles_one_fenced_generation_not_individual_queue_rows(tmp_path:
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             conn.execute("DELETE FROM memory_flush_settlements")
 
-    clearing = store.begin_clear()
-    assert clearing.clear_in_progress is True
-    assert store.finish_clear().clear_in_progress is False
+    epoch = store.ensure_meta().epoch
+    assert store.reset_for_clear(target_epoch=epoch + 1).clear_in_progress is False
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM memory_flush_settlements").fetchone()[0] == 0
 
@@ -1804,12 +1788,9 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
         ).fetchall() == [("boot",)]
 
     before = store.ensure_meta()
-    clearing = store.begin_clear()
-    assert clearing.epoch == before.epoch + 1
-    assert clearing.clear_in_progress is True
-    completed = store.finish_clear()
+    completed = store.reset_for_clear(target_epoch=before.epoch + 1)
     assert completed.clear_in_progress is False
-    assert completed.epoch == clearing.epoch
+    assert completed.epoch == before.epoch + 1
     assert store.list_queue_rows() == ()
 
 
