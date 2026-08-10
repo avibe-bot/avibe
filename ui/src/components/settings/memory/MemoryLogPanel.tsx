@@ -399,8 +399,7 @@ const MemoryLogDetail: React.FC<{
 
 export const MemoryLogPanel: React.FC<{
   refreshToken?: number;
-  onSectionsChange?: (sections: MemoryLogSections | null) => void;
-}> = ({ refreshToken = 0, onSectionsChange }) => {
+}> = ({ refreshToken = 0 }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [listState, dispatchListPage] = useReducer(reduceMemoryLogPage, INITIAL_MEMORY_LOG_LIST_STATE);
@@ -438,10 +437,6 @@ export const MemoryLogPanel: React.FC<{
     // that accepted page into the cursor accumulator used by the list view.
     dispatchListPage(listPage);
   }, [listPage]);
-  useEffect(() => {
-    onSectionsChange?.(sections);
-  }, [onSectionsChange, sections]);
-
   const openDetail = (memcellId: string) => {
     setSelected(memcellId);
   };

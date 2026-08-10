@@ -528,6 +528,7 @@ export type ApiContextType = {
   installDependency: (dep: string) => Promise<InstallResult>;
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
+  getMemoryProcessingRecord: () => Promise<MemoryProcessingRecordResult>;
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
   getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
@@ -1825,6 +1826,30 @@ export type MemoryMaintenance = {
 
 export type MemoryMaintenanceResult = MemoryMaintenance | MemoryFailure | { error: string };
 
+export type MemoryProcessingRecordSummary = {
+  status: 'ok';
+  runtime: {
+    source: MemoryStatus['source'];
+    health: MemoryStatus['health'];
+  };
+  sources: MemoryLogSections;
+  anomalies: {
+    source: MemoryLogSourceStatus;
+    items: MemoryFailureLogEntry[];
+  };
+  maintenance: {
+    source: MemoryLogSourceStatus;
+    data_exists: boolean;
+    can_clear: boolean;
+    clear_recovery: MemoryClearRecovery | null;
+  };
+};
+
+export type MemoryProcessingRecordResult =
+  | MemoryProcessingRecordSummary
+  | MemoryFailure
+  | { error: string };
+
 export type MemoryItemKind = 'profile' | 'episode' | 'fact';
 
 export type MemoryProfileExplicitInfo = {
@@ -2956,6 +2981,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // thrown ApiError/toast) so the Memory page can render its own inline state per code.
     getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
     saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
+    getMemoryProcessingRecord: () => getJson('/api/memory/processing-record', { handleError: false }),
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
     getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),

@@ -13,6 +13,7 @@ from typing import Sequence
 
 _DIRECTORY_ORDER_INSERT_BATCH_SIZE = 256
 _DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
+PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class ConfinedFilesystemError(RuntimeError):
@@ -61,10 +62,15 @@ class PrivateSqliteDatabase:
                 continue
             _require_private_regular(sidecar_info, "private SQLite sidecar")
 
-        connection = sqlite3.connect(self._path, timeout=5.0)
+        connection = sqlite3.connect(
+            self._path,
+            timeout=PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute(
+            f"PRAGMA busy_timeout={int(PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}"
+        )
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         return connection

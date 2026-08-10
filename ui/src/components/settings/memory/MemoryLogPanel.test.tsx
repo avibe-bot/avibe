@@ -250,15 +250,6 @@ describe('MemoryLogPanel', () => {
     expect(screen.getByText('Fast')).toBeTruthy();
   });
 
-  it('reports source sections to the merged Processing Record view', async () => {
-    api.getMemoryLog.mockResolvedValue(listResult([]));
-    const onSectionsChange = vi.fn();
-    renderPanel({ onSectionsChange });
-
-    await screen.findByText('memory.log.empty');
-    await waitFor(() => expect(onSectionsChange).toHaveBeenLastCalledWith(sections));
-  });
-
   it('reloads the timeline when the merged view refresh token changes', async () => {
     api.getMemoryLog
       .mockResolvedValueOnce(listResult([entry('mc-initial', 'Initial')]))

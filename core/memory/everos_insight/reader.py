@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from core.memory.processing_record import (
+    ProcessingSourceObservations,
+    SourceObservation,
+)
+
 from .recorder import _scrub_json, _scrub_text
 
 MemoryReadScope: TypeAlias = tuple[str, str]
@@ -114,6 +119,32 @@ class MemoryInsightReader:
                 key=len,
                 reverse=True,
             )
+        )
+
+    def source_observation(self) -> ProcessingSourceObservations:
+        """Perform compact representative reads for each Processing Record source."""
+
+        system_section = self._memcell_status()
+        _, runs_section = self._read_run_summaries([])
+        capture_section = self._capture_status()
+        _, calls_section = self._read_call_counts(
+            [],
+            capture_available=False,
+            runs_available=False,
+        )
+        observed_at = _utc_observed_at()
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(system_section, runs_section),
+                "capture": capture_section,
+                "calls": calls_section,
+            },
+            observed_at=observed_at,
+        )
+        return ProcessingSourceObservations(
+            everos=_source_observation(sections["everos"]),
+            capture=_source_observation(sections["capture"]),
+            calls=_source_observation(sections["calls"]),
         )
 
     def list_entries(
@@ -540,6 +571,28 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
+    def _memcell_status(self) -> dict[str, str]:
+        try:
+            with _read_only(self._paths.system_db_path) as conn:
+                conn.execute(
+                    """
+                    SELECT memcell_id, app_id, project_id, message_ids_json,
+                           sender_ids_json, payload_json, timestamp
+                    FROM memcell
+                    LIMIT 1
+                    """
+                ).fetchone()
+                conn.execute(
+                    """
+                    SELECT md_path, status, last_changed_at, error
+                    FROM md_change_state
+                    LIMIT 1
+                    """
+                ).fetchone()
+            return {"status": "available"}
+        except _Unavailable as unavailable:
+            return {"status": "unavailable", "reason": unavailable.reason}
+
     def _capture_status(self) -> dict[str, str]:
         try:
             with _read_only(self._paths.capture_db_path) as conn:
@@ -547,7 +600,8 @@ class MemoryInsightReader:
                     """
                     SELECT queue.session_id, queue.provider_session_ref, queue.epoch,
                            queue.generation, queue.principal_id, queue.project_ref,
-                           queue.provider_timestamp_ms, queue.add_request_id,
+                           queue.provider_timestamp_ms, queue.state,
+                           queue.occurred_at_ms, queue.add_request_id,
                            settlement.request_id
                     FROM memory_capture_queue AS queue
                     LEFT JOIN memory_flush_settlements AS settlement
@@ -569,7 +623,7 @@ class MemoryInsightReader:
         try:
             with _read_only(self._paths.ome_db_path) as conn:
                 if not memcells:
-                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    _validate_run_record_source(conn)
                     return {}, {"status": "available"}
                 page = [
                     {
@@ -581,7 +635,7 @@ class MemoryInsightReader:
                     if (scope := _memcell_scope(row)) is not None
                 ]
                 if not page:
-                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    _validate_run_record_source(conn)
                     return {}, {"status": "available"}
                 page_json = json.dumps(page, separators=(",", ":"))
                 status_columns = ", ".join(
@@ -652,7 +706,7 @@ class MemoryInsightReader:
                 if runs_available:
                     _attach_read_only(conn, self._paths.ome_db_path, "ome")
                 if not memcells:
-                    conn.execute("SELECT 1 FROM provider_call LIMIT 1").fetchone()
+                    _validate_provider_call_source(conn)
                     return {}, {"status": "available"}
 
                 page_json = json.dumps(
@@ -1188,6 +1242,52 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, 0, {"status": "unavailable", "reason": unavailable.reason}
 
+def _validate_run_record_source(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        SELECT run_id, strategy_name, status, attempt, started_at, finished_at,
+               error, event_topic, event_payload
+        FROM run_record
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def _validate_provider_call_source(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        SELECT id, started_at_ms, duration_ms, kind, stage, model, status, error,
+               finish_reason, prompt_tokens, completion_tokens, request_json,
+               response_json, request_bytes, response_bytes, request_id, run_id,
+               memcell_id, app_id, project_id, owner_id, parent_type, parent_id,
+               dropped_before
+        FROM provider_call INDEXED BY provider_call_memcell_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, request_id
+        FROM provider_call INDEXED BY provider_call_request_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, run_id
+        FROM provider_call INDEXED BY provider_call_run_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, parent_type, parent_id
+        FROM provider_call INDEXED BY provider_call_parent_idx
+        LIMIT 1
+        """
+    ).fetchone()
+
+
 @contextmanager
 def _read_only(path: Path) -> Iterator[sqlite3.Connection]:
     if not path.is_file():
@@ -1254,6 +1354,17 @@ def _observed_sections(
         }
         for name, section in sections.items()
     }
+
+
+def _source_observation(section: dict[str, str | None]) -> SourceObservation:
+    status = section["status"]
+    if status not in {"available", "partial", "unavailable"}:
+        status = "unavailable"
+    return SourceObservation(
+        status=status,
+        observed_at=section.get("observed_at"),
+        reason=section.get("reason"),
+    )
 
 
 def _utc_observed_at() -> str:

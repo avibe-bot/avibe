@@ -1288,6 +1288,159 @@ def test_source_sections_include_query_observation_time(
     assert detail["sections"] == expected
 
 
+def test_processing_record_source_observation_uses_representative_safe_reads(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+    assert observation.everos.observed_at is not None
+
+
+def test_processing_record_source_observation_avoids_timeline_query(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    memcell_queries = [
+        statement
+        for statement in statements
+        if "FROM memcell" in statement and statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(memcell_queries) == 1
+    query = memcell_queries[0]
+    for column in (
+        "memcell_id",
+        "app_id",
+        "project_id",
+        "message_ids_json",
+        "sender_ids_json",
+        "payload_json",
+        "timestamp",
+    ):
+        assert column in query
+    assert "LIMIT 1" in query
+    assert "ORDER BY" not in query
+    assert "json_" not in query.casefold()
+    indexing_queries = [
+        statement
+        for statement in statements
+        if "FROM md_change_state" in statement
+        and statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(indexing_queries) == 1
+    indexing_query = indexing_queries[0]
+    for column in ("md_path", "status", "last_changed_at", "error"):
+        assert column in indexing_query
+    assert "LIMIT 1" in indexing_query
+    assert "ORDER BY" not in indexing_query
+
+
+def test_processing_record_source_observation_degrades_sources_independently(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.capture_db_path) as connection:
+        connection.execute("DROP TABLE memory_capture_queue")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "unavailable"
+    assert observation.capture.reason == "malformed"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_capture_detail_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.capture_db_path) as connection:
+        connection.execute(
+            "ALTER TABLE memory_capture_queue DROP COLUMN occurred_at_ms"
+        )
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "unavailable"
+    assert observation.capture.reason == "malformed"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_memcell_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.system_db_path) as connection:
+        connection.execute("ALTER TABLE memcell DROP COLUMN payload_json")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "unavailable"
+    assert observation.everos.reason == "malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+@pytest.mark.parametrize("damage", ["missing_table", "missing_required_column"])
+def test_processing_record_source_observation_validates_indexing_state_schema(
+    insight_paths: MemoryInsightPaths,
+    damage: str,
+) -> None:
+    with sqlite3.connect(insight_paths.system_db_path) as connection:
+        if damage == "missing_table":
+            connection.execute("DROP TABLE md_change_state")
+        else:
+            connection.execute("ALTER TABLE md_change_state DROP COLUMN error")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "unavailable"
+    assert observation.everos.reason == "malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_run_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.ome_db_path) as connection:
+        connection.execute("ALTER TABLE run_record DROP COLUMN event_payload")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "partial"
+    assert observation.everos.reason == "runs_malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_call_indexes(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.call_log_db_path) as connection:
+        connection.execute("DROP INDEX provider_call_parent_idx")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "unavailable"
+    assert observation.calls.reason == "malformed"
+
+
 def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     root = tmp_path / "missing"
     reader = MemoryInsightReader(

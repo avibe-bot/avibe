@@ -48,6 +48,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from core.memory.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -1066,14 +1067,6 @@ def create_app(
             return None
         return user_key
 
-    def _memory_ui_operator_ref(request: Request, runtime: Any) -> str | None:
-        """Resolve a signed browser identity to its opaque Memory principal."""
-
-        user_key = _verified_memory_ui_user_key(request)
-        if user_key is None:
-            return None
-        return runtime.principal_for_user_key(user_key)
-
     def _memory_read_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import MEMORY_USER_KEY_HEADER
 
@@ -1121,6 +1114,22 @@ def create_app(
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
+    @app.get("/internal/memory/processing-record")
+    async def _memory_processing_record(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.processing_record_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except Exception:
+            logger.warning("internal memory Processing Record read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
     @app.get("/internal/memory/failures")
     async def _memory_failures(request: Request) -> Any:
         runtime = _memory_runtime()
@@ -1128,7 +1137,7 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
             return await runtime.failure_log_payload(
-                operator_ref=_memory_ui_operator_ref(request, runtime)
+                verified_user_key=_verified_memory_ui_user_key(request)
             )
         except Exception:
             logger.warning("internal memory failure log failed")
@@ -1141,7 +1150,7 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
             return await runtime.maintenance_payload(
-                operator_ref=_memory_ui_operator_ref(request, runtime)
+                verified_user_key=_verified_memory_ui_user_key(request)
             )
         except Exception:
             logger.warning("internal memory maintenance read failed")

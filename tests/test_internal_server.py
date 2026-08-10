@@ -20,6 +20,7 @@ import contextlib
 import socket
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
+from core.memory.maintenance import MemoryStoreUnavailableError
 from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
@@ -500,12 +502,34 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 "avibe:remote:subject-2": "u-remote-principal",
             }[user_key]
 
-        async def failure_log_payload(self, *, operator_ref: str | None = None):
-            calls.append(("failures", operator_ref))
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("processing-record", verified_user_key))
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+        async def failure_log_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("failures", verified_user_key))
             return {"status": "ok", "items": [], "recovery": None}
 
-        async def maintenance_payload(self, *, operator_ref: str | None = None):
-            calls.append(("maintenance", operator_ref))
+        async def maintenance_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("maintenance", verified_user_key))
             return {
                 "status": "ok",
                 "data_exists": False,
@@ -531,6 +555,13 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
     async def _exercise():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            composite = await client.get(
+                "/internal/memory/processing-record",
+                headers=headers(
+                    "/internal/memory/processing-record",
+                    "avibe:remote:subject-2",
+                ),
+            )
             local = await client.get(
                 "/internal/memory/failures",
                 headers=headers("/internal/memory/failures", "avibe:local"),
@@ -543,16 +574,136 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 ),
             )
             unsigned = await client.get("/internal/memory/failures")
-            return local, remote, unsigned
+            return composite, local, remote, unsigned
 
-    local, remote, unsigned = asyncio.run(_exercise())
+    composite, local, remote, unsigned = asyncio.run(_exercise())
 
-    assert local.status_code == remote.status_code == unsigned.status_code == 200
+    assert composite.status_code == local.status_code == remote.status_code == unsigned.status_code == 200
+    assert "avibe:remote:subject-2" not in composite.text
+    assert "u-remote-principal" not in composite.text
     assert calls == [
-        ("failures", "u-local-principal"),
-        ("maintenance", "u-remote-principal"),
+        ("processing-record", "avibe:remote:subject-2"),
+        ("failures", "avibe:local"),
+        ("maintenance", "avibe:remote:subject-2"),
         ("failures", None),
     ]
+
+
+def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    verified_user_keys: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise MemoryStoreUnavailableError("Memory store is unavailable")
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ) -> dict[str, object]:
+            verified_user_keys.append(verified_user_key)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "unavailable"}, "items": []},
+                "maintenance": {
+                    "source": {"status": "unavailable"},
+                    "can_clear": False,
+                    "clear_recovery": None,
+                },
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert verified_user_keys == [user_key]
+
+
+def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    verified_user_keys: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise AssertionError("the socket route must not resolve Memory operators")
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ) -> dict[str, object]:
+            verified_user_keys.append(verified_user_key)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert verified_user_keys == [user_key]
 
 
 @pytest.mark.parametrize(

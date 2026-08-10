@@ -61,6 +61,16 @@ class MaintenanceResult:
     data_exists: bool
     can_clear: bool
     clear_recovery: ClearRecoveryResult | None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class MaintenanceObservation:
+    """One point-in-time view of the journals used by read projections."""
+
+    block_reason: str | None
+    clear_recovery: ClearRecoveryResult | None
+    can_clear: bool
 
 
 @dataclass(frozen=True)
@@ -153,6 +163,32 @@ class MemoryMaintenance:
         except Exception:
             return True
 
+    def observation_block_reason(self) -> str | None:
+        """Describe why read-only provider observations are currently fenced."""
+
+        if self._backup_active:
+            return "busy"
+        restore_journal = self._backup_restore_journal
+        if restore_journal is None or self._initialization_error is not None:
+            return "memory_store_unavailable"
+        try:
+            if restore_journal.get_open_operation() is not None:
+                return "busy"
+        except Exception:
+            return "memory_store_unavailable"
+        clear_journal = self._clear_journal
+        if clear_journal is None:
+            return "memory_store_unavailable"
+        try:
+            operation = clear_journal.get_open_operation()
+        except Exception:
+            return "memory_store_unavailable"
+        if operation is None:
+            return None
+        if operation.state == "recovery_needed":
+            return operation.closed_error or "memory_clear_failed"
+        return "busy"
+
     def can_disable_without_authority(self) -> bool:
         restore_journal = self._backup_restore_journal
         clear_journal = self._clear_journal
@@ -173,18 +209,32 @@ class MemoryMaintenance:
         return self._open_backup_restore_operation() is not None
 
     def recovery(self, *, operator_ref: str | None = None) -> ClearRecoveryResult | None:
-        operation = self._open_clear_operation()
-        if operation is None:
+        journal = self._clear_journal
+        if journal is None:
             return None
-        can_resume = False
-        can_abort = False
         try:
-            if operator_ref is not None and operation.operator_ref == operator_ref:
-                journal = self._require_clear_journal()
-                can_resume = journal.can_resume(operation.operation_id)
-                can_abort = journal.can_abort(operation.operation_id)
+            observation = journal.observe_open_operation(
+                operator_ref=(
+                    None if self._initialization_error is not None else operator_ref
+                )
+            )
         except Exception:
-            pass
+            return None
+        if observation.operation is None:
+            return None
+        return self._clear_recovery(
+            observation.operation,
+            can_resume=observation.can_resume,
+            can_abort=observation.can_abort,
+        )
+
+    @staticmethod
+    def _clear_recovery(
+        operation: ClearOperation,
+        *,
+        can_resume: bool,
+        can_abort: bool,
+    ) -> ClearRecoveryResult:
         return ClearRecoveryResult(
             state=operation.state,
             operation_id=operation.operation_id,
@@ -194,11 +244,95 @@ class MemoryMaintenance:
             can_abort=can_abort,
         )
 
+    async def observe(
+        self,
+        *,
+        operator_ref: str | None = None,
+    ) -> MaintenanceObservation:
+        """Read both maintenance journals without blocking the controller loop."""
+
+        return await self._run_maintenance_io(
+            lambda: self._observe(operator_ref=operator_ref)
+        )
+
+    def _observe(
+        self,
+        *,
+        operator_ref: str | None,
+    ) -> MaintenanceObservation:
+        backup_active = self._backup_active
+        restore_operation: BackupRestoreOperation | None = None
+        clear_operation: ClearOperation | None = None
+        clear_can_resume = False
+        clear_can_abort = False
+        initialization_unavailable = self._initialization_error is not None
+
+        restore_journal = self._backup_restore_journal
+        restore_unavailable = restore_journal is None or initialization_unavailable
+        if not restore_unavailable:
+            assert restore_journal is not None
+            try:
+                restore_operation = restore_journal.get_open_operation()
+            except Exception:
+                restore_unavailable = True
+
+        clear_journal = self._clear_journal
+        clear_unavailable = clear_journal is None
+        if not clear_unavailable:
+            assert clear_journal is not None
+            try:
+                clear_observation = clear_journal.observe_open_operation(
+                    operator_ref=(
+                        None if initialization_unavailable else operator_ref
+                    )
+                )
+                clear_operation = clear_observation.operation
+                clear_can_resume = clear_observation.can_resume
+                clear_can_abort = clear_observation.can_abort
+            except Exception:
+                clear_unavailable = True
+
+        recovery = (
+            None
+            if clear_operation is None
+            else self._clear_recovery(
+                clear_operation,
+                can_resume=clear_can_resume,
+                can_abort=clear_can_abort,
+            )
+        )
+        if backup_active:
+            block_reason = "busy"
+        elif restore_unavailable:
+            block_reason = "memory_store_unavailable"
+        elif restore_operation is not None:
+            block_reason = "busy"
+        elif clear_unavailable:
+            block_reason = "memory_store_unavailable"
+        elif clear_operation is None:
+            block_reason = None
+        elif clear_operation.state == "recovery_needed":
+            block_reason = clear_operation.closed_error or "memory_clear_failed"
+        else:
+            block_reason = "busy"
+        return MaintenanceObservation(
+            block_reason=block_reason,
+            clear_recovery=recovery,
+            can_clear=(
+                self.ready
+                and block_reason is None
+                and recovery is None
+            ),
+        )
+
     async def maintenance_payload(
         self,
         *,
         operator_ref: str | None = None,
+        observation: MaintenanceObservation | None = None,
     ) -> MaintenanceResult:
+        if observation is None:
+            observation = await self.observe(operator_ref=operator_ref)
         try:
             meta, history, manual_required = await asyncio.gather(
                 asyncio.to_thread(self._store.get_meta),
@@ -209,18 +343,32 @@ class MemoryMaintenance:
             return MaintenanceResult(
                 data_exists=True,
                 can_clear=False,
-                clear_recovery=self.recovery(operator_ref=operator_ref),
+                clear_recovery=observation.clear_recovery,
+                error="memory_store_unavailable",
             )
-        recovery = self.recovery(operator_ref=operator_ref)
+        try:
+            latest = await self.observe(operator_ref=operator_ref)
+        except Exception:
+            return MaintenanceResult(
+                data_exists=bool(history or (meta is not None and meta.last_success_at)),
+                can_clear=False,
+                clear_recovery=None,
+                error="memory_store_unavailable",
+            )
+        changed = latest != observation
         return MaintenanceResult(
             data_exists=bool(history or (meta is not None and meta.last_success_at)),
             can_clear=(
-                self.ready
-                and not self.is_open()
+                not changed
+                and latest.can_clear
                 and not manual_required
-                and recovery is None
             ),
-            clear_recovery=recovery,
+            clear_recovery=latest.clear_recovery,
+            error=(
+                "memory_store_unavailable"
+                if latest.block_reason == "memory_store_unavailable"
+                else None
+            ),
         )
 
     async def create_backup(self, backup_id: str | None = None) -> MemorySnapshot:

@@ -13,8 +13,12 @@ import inspect
 import re
 from pathlib import Path
 
-from core.memory.module import (
-    PROVIDER_READ_TIMEOUT_SECONDS,
+from core.memory.confined_filesystem import PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
+from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from core.memory.processing_record import (
+    PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS,
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
+    PROCESSING_RECORD_WORK_TIMEOUT_SECONDS,
 )
 from core.memory.process import (
     _PROCESSING_PROBE_TIMEOUT_SECONDS,
@@ -24,16 +28,22 @@ from core.memory.process import (
 from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
     MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS,
+    MEMORY_FAILURES_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
+    MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS,
     MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_SEARCH_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
+    MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
     memory_archive_session,
     memory_clear,
     memory_clear_recovery,
     memory_profile,
     memory_final_flush,
+    memory_failures,
+    memory_maintenance,
+    memory_processing_record,
     memory_profile_sync,
     memory_restart,
     memory_search,
@@ -66,6 +76,7 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
     assert MEMORY_READ_TIMEOUT_SECONDS > PROVIDER_READ_TIMEOUT_SECONDS
     for read in (
         memory_status,
+        memory_processing_record,
         memory_profile,
         memory_search,
         memory_status_sync,
@@ -73,6 +84,45 @@ def test_all_memory_read_clients_outlast_provider_reads() -> None:
         memory_search_sync,
     ):
         assert inspect.signature(read).parameters["timeout"].default > PROVIDER_READ_TIMEOUT_SECONDS
+
+
+def test_processing_record_client_covers_identity_journals_and_parallel_sources() -> None:
+    sqlite_bound = PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS
+    identity_lookup_bound = sqlite_bound
+    initial_journal_observation_bound = 2 * sqlite_bound
+    metadata_and_fresh_observation_bound = sqlite_bound + (2 * sqlite_bound)
+    work_bound = (
+        identity_lookup_bound
+        + initial_journal_observation_bound
+        + max(
+            PROVIDER_READ_TIMEOUT_SECONDS,
+            4 * sqlite_bound,
+            metadata_and_fresh_observation_bound,
+        )
+    )
+    assert PROCESSING_RECORD_WORK_TIMEOUT_SECONDS == work_bound
+    assert (
+        PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
+        == work_bound + PROCESSING_RECORD_TRANSPORT_MARGIN_SECONDS
+    )
+    assert (
+        MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+        == PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
+    )
+    assert (
+        inspect.signature(memory_processing_record).parameters["timeout"].default
+        == MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+    )
+    assert (
+        inspect.signature(memory_failures).parameters["timeout"].default
+        == MEMORY_FAILURES_TIMEOUT_SECONDS
+        == MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+    )
+    assert (
+        inspect.signature(memory_maintenance).parameters["timeout"].default
+        == MEMORY_MAINTENANCE_TIMEOUT_SECONDS
+        == MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+    )
 
 
 def test_search_clients_outlast_capability_probe_and_provider_search() -> None:
