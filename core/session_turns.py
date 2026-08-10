@@ -515,6 +515,12 @@ class SessionTurnManager:
     lives in ``internal_server``).
     """
 
+    # Backoff for re-sending an interruption notice the transport claimed to be
+    # ready for and then failed to deliver. Short enough to catch a blip, long
+    # enough that a hard outage does not spin; a class attribute so tests can
+    # shrink it instead of sleeping.
+    LOST_TURN_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0, 120.0)
+
     def __init__(
         self,
         controller: Any = None,
@@ -531,6 +537,8 @@ class SessionTurnManager:
         # Interruption reports owed to turns whose platform was not connected yet
         # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
         self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
+        # One in-flight retry task per platform for the reports above.
+        self._lost_turn_retry_tasks: dict[str, asyncio.Task[None]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -5452,6 +5460,10 @@ class SessionTurnManager:
             platform,
             session_id,
         )
+        if self._transport_can_deliver(platform):
+            # Held despite a ready transport means the send itself failed, so no
+            # ready callback is coming to flush it — retry on our own clock.
+            self._schedule_lost_turn_retry(platform)
 
     def _transport_can_deliver(self, platform: str) -> bool:
         """Whether ``platform`` can deliver right now.
@@ -5476,7 +5488,9 @@ class SessionTurnManager:
 
         Held in memory only: the turn is already terminal, so a report that never
         drains (transport disabled before it connects) is dropped rather than
-        replayed on the next start, where it would be stale news.
+        replayed on the next start, where it would be stale news. A send that
+        fails against a connected transport is retained AND retried on a bounded
+        backoff — see ``_schedule_lost_turn_retry`` for why nothing else would.
         """
 
         pending = self._pending_lost_turn_reports.pop(platform, [])
@@ -5507,12 +5521,63 @@ class SessionTurnManager:
         if unsent:
             self._pending_lost_turn_reports.setdefault(platform, []).extend(unsent)
             logger.info(
-                "%d lost turn report(s) on %s still undelivered; retained for the "
-                "next transport-ready",
+                "%d lost turn report(s) on %s still undelivered; retrying",
                 len(unsent),
                 platform,
             )
+            self._schedule_lost_turn_retry(platform)
         return reported
+
+    def _schedule_lost_turn_retry(self, platform: str) -> None:
+        """Start the bounded retry for reports this platform failed to deliver.
+
+        ``notify_transport_ready`` has exactly one caller — ``_on_im_ready`` —
+        and ``MultiIMClient`` suppresses further ready callbacks until the
+        platform goes unready again. So a connection that merely hit one API
+        error would hold the notice forever with nothing to nudge it: the retry
+        has to come from here. One task per platform, a few attempts, then give
+        up loudly — the next genuine reconnect flushes whatever is left.
+        """
+
+        existing = self._lost_turn_retry_tasks.get(platform)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("no running loop for lost turn retry on %s", platform)
+            return
+        self._lost_turn_retry_tasks[platform] = loop.create_task(
+            self._retry_lost_turn_reports(platform),
+            name=f"lost-turn-report-retry:{platform}",
+        )
+
+    async def _retry_lost_turn_reports(self, platform: str) -> None:
+        try:
+            for delay in self.LOST_TURN_RETRY_DELAYS:
+                await asyncio.sleep(delay)
+                if not self._pending_lost_turn_reports.get(platform):
+                    return
+                if not self._transport_can_deliver(platform):
+                    # Went unready again; the reconnect's ready callback flushes.
+                    return
+                await self.notify_transport_ready(platform)
+            remaining = len(self._pending_lost_turn_reports.get(platform) or [])
+            if remaining:
+                logger.warning(
+                    "%d lost turn report(s) on %s undelivered after %d retries; "
+                    "held until the transport reconnects",
+                    remaining,
+                    platform,
+                    len(self.LOST_TURN_RETRY_DELAYS),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("lost turn report retry failed for %s", platform, exc_info=True)
+        finally:
+            if self._lost_turn_retry_tasks.get(platform) is asyncio.current_task():
+                self._lost_turn_retry_tasks.pop(platform, None)
 
     async def _emit_lost_turn_report(
         self,

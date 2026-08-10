@@ -144,6 +144,68 @@ class TerminalReactionOnFinishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(handle.ack_reaction_emoji)
 
 
+class TerminalReceiptWithoutAReactionIndicatorTests(unittest.IsolatedAsyncioTestCase):
+    """ack_mode defaults to 'typing', so most turns own no 👀 to trade.
+
+    Gating the receipt on "the indicator happened to be a reaction" would make
+    ⏹️/⚠️ invisible for the default configuration — i.e. for exactly the silent
+    endings it exists to explain. Nothing is removed here (there is no running
+    reaction); the receipt goes on the message that started the turn.
+    """
+
+    async def test_typing_turn_still_gets_the_receipt(self):
+        im = _FakeIM()
+        svc = _svc(im)
+        handle = ProcessingIndicatorHandle(context=_ctx(), typing_indicator_active=True)
+
+        await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(im.calls, [("add", "m1", STOPPED_REACTION_EMOJI)])
+
+    async def test_no_receipt_without_a_terminal_emoji(self):
+        im = _FakeIM()
+        svc = _svc(im)
+        handle = ProcessingIndicatorHandle(context=_ctx(), typing_indicator_active=True)
+
+        await svc.finish(handle)
+
+        self.assertEqual(im.calls, [])
+
+    async def test_no_receipt_without_a_target_message(self):
+        im = _FakeIM()
+        svc = _svc(im)
+        handle = ProcessingIndicatorHandle(context=_ctx(message_id=""), typing_indicator_active=True)
+
+        await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(im.calls, [])
+
+    async def test_platform_without_reactions_is_skipped(self):
+        # WeChat has no reaction API at all; asking for one would just error.
+        im = _FakeIM()
+        svc = _svc(im)
+        context = MessageContext(user_id="u1", channel_id="c1", message_id="m1", platform="wechat")
+        handle = ProcessingIndicatorHandle(context=context, typing_indicator_active=True)
+
+        await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(im.calls, [])
+
+    async def test_a_running_reaction_is_still_replaced_not_duplicated(self):
+        # Regression guard for the two paths colliding: when the 👀 IS owned, the
+        # receipt must come from the replacement path only — one add, not two.
+        im = _FakeIM()
+        svc = _svc(im)
+        handle = await _running(svc, im)
+
+        await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(
+            [call for call in im.calls if call[0] == "add"],
+            [("add", "m1", STOPPED_REACTION_EMOJI)],
+        )
+
+
 class OrphanedTerminalReactionTests(unittest.IsolatedAsyncioTestCase):
     """Restart recovery has no handle — only the durable Delivery's message id."""
 

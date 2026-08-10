@@ -1244,7 +1244,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request,
                 terminal_emoji=(
                     STOPPED_REACTION_EMOJI
-                    if request.base_session_id in self._user_stopped_sessions
+                    if self.consume_user_stop_intent(request.base_session_id)
                     else None
                 ),
             )
@@ -1634,6 +1634,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             backend=self.name,
         )
 
+    def consume_user_stop_intent(self, base_session_id: str) -> bool:
+        """Claim the /stop intent for ``base_session_id``; True for the first claimer.
+
+        Two paths can end a stopped turn — the request coroutine's cancellation
+        handler, and ``handle_stop`` itself when the coroutine settled during the
+        abort — and exactly one of them owes the ⏹️. Claiming decides which.
+        """
+
+        if not base_session_id or base_session_id not in self._user_stopped_sessions:
+            return False
+        self._user_stopped_sessions.discard(base_session_id)
+        return True
+
     async def handle_stop(self, request: AgentRequest) -> bool:
         task = self._active_requests.get(request.base_session_id)
         if not task or task.done():
@@ -1659,7 +1672,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 await task
             except asyncio.CancelledError:
                 pass
+
+            if self.consume_user_stop_intent(request.base_session_id):
+                # Nobody claimed the intent, so the cancellation handler never
+                # ran: the abort made the poll loop settle on its own while we
+                # were awaiting it, and ``task.cancel()`` hit an already-finished
+                # task. The receipt is still owed — this stop is about to emit a
+                # silent result, so without it the turn ends with no trace.
+                await self._remove_ack_reaction(request, terminal_emoji=STOPPED_REACTION_EMOJI)
         finally:
+            # Only reached with the intent still set if something above raised
+            # past the handlers; a claimed intent is already gone.
             self._user_stopped_sessions.discard(request.base_session_id)
 
         if opencode_session_id:

@@ -564,6 +564,28 @@ class ProcessingIndicatorService:
             logger.debug("Failed to stamp orphaned terminal reaction: %s", err)
             return False
 
+    async def _stamp_terminal_reaction_without_indicator(
+        self,
+        context: MessageContext,
+        terminal_emoji: str,
+    ) -> bool:
+        """Leave the terminal receipt when the turn's indicator was not a reaction.
+
+        There is no 👀 to replace here, so nothing is removed — the receipt is
+        added to the message that started the turn. Capability-gated and
+        best-effort: a platform without reactions (WeChat) or without a target
+        message id simply ends with no receipt, same as before.
+        """
+
+        if not self._mode_supported(self._capabilities(context), "reaction", context):
+            return False
+        message_id = self._reaction_target_message_id(context)
+        try:
+            return bool(await self._get_im_client(context).add_reaction(context, message_id, terminal_emoji))
+        except Exception as err:
+            logger.debug("Failed to add terminal reaction without an indicator: %s", err)
+            return False
+
     def _resolve_handle(self, request_or_handle: Any) -> tuple[ProcessingIndicatorHandle, Optional[Any]]:
         if isinstance(request_or_handle, ProcessingIndicatorHandle):
             return request_or_handle, None
@@ -836,6 +858,15 @@ class ProcessingIndicatorService:
             handle.typing_indicator_active = False
             if request is not None:
                 request.typing_indicator_active = False
+
+        if terminal_emoji and not handle.ack_reaction_emoji:
+            # The receipt is not a *reaction* feature, it is the only trace a
+            # silent ending leaves. ack_mode defaults to 'typing' on every
+            # platform that has it, so gating the stamp on "the indicator
+            # happened to be a reaction" would make ⏹️/⚠️ invisible for the
+            # default configuration — exactly the turns that emit no result.
+            # Stamp on the originating message instead, wherever reactions work.
+            await self._stamp_terminal_reaction_without_indicator(handle.context, terminal_emoji)
 
         if handle.ack_reaction_message_id and handle.ack_reaction_emoji:
             reaction_message_id = handle.ack_reaction_message_id

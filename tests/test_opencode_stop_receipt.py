@@ -87,6 +87,52 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(agent._user_stopped_sessions, set())
 
+    async def test_task_that_settles_during_the_abort_still_gets_the_receipt(self):
+        """The abort can end the poll loop before ``task.cancel()`` is reached.
+
+        Then the cancellation handler — the only other receipt-stamping path —
+        never runs, ``cancel()`` is a no-op on a finished task, and the silent
+        stop result that follows would leave the turn with no trace at all.
+        """
+        agent = _agent()
+        receipts: list[object] = []
+        agent._remove_ack_reaction = AsyncMock(
+            side_effect=lambda request, *, terminal_emoji=None: receipts.append(terminal_emoji)
+        )
+
+        async def in_flight():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(in_flight())
+        agent._active_requests["session-1"] = task
+        await asyncio.sleep(0)
+
+        async def abort(*_args, **_kwargs):
+            # Whatever the abort does upstream, the effect here is a task that is
+            # already finished by the time control comes back.
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        agent._abort_active_request = abort
+
+        self.assertTrue(await agent.handle_stop(_request()))
+
+        self.assertEqual(receipts, [STOPPED_REACTION_EMOJI])
+        self.assertEqual(agent._user_stopped_sessions, set())
+
+    async def test_the_intent_is_claimed_once(self):
+        # Both paths call consume; the second must see nothing, or a turn whose
+        # coroutine already stamped would get a second ⏹️ from handle_stop.
+        agent = _agent()
+        agent._user_stopped_sessions.add("session-1")
+
+        self.assertTrue(agent.consume_user_stop_intent("session-1"))
+        self.assertFalse(agent.consume_user_stop_intent("session-1"))
+        self.assertFalse(agent.consume_user_stop_intent(""))
+
     async def test_stop_of_an_idle_session_publishes_no_intent(self):
         agent = _agent()
 
@@ -111,7 +157,7 @@ class OpenCodeStopReceiptTests(unittest.TestCase):
         branch = after.partition("raise")[0]
 
         self.assertTrue(branch, "_process_message no longer handles cancellation")
-        self.assertIn("_user_stopped_sessions", branch)
+        self.assertIn("consume_user_stop_intent", branch)
         self.assertIn("STOPPED_REACTION_EMOJI", branch)
 
 

@@ -3353,6 +3353,68 @@ def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
     assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
 
 
+def test_retained_lost_turn_report_is_retried_on_its_own_clock(managers) -> None:
+    # notify_transport_ready has exactly one caller (_on_im_ready) and the IM
+    # client suppresses repeat ready callbacks until the platform goes unready,
+    # so a connected transport that merely hit one API error would hold the
+    # notice forever. The retry has to come from the manager itself.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+    failures = 1
+
+    async def _emit(_context, kind, text, **_kwargs):
+        nonlocal failures
+        emitted.append((kind, text))
+        if failures:
+            failures -= 1
+            return None
+        return "msg-late"
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_then_settle():
+        assert await restarted.notify_transport_ready("slack") == 0
+        assert restarted._pending_lost_turn_reports["slack"]
+        # Nothing else will call in; the scheduled retry is the only hope.
+        task = restarted._lost_turn_retry_tasks["slack"]
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(_flush_then_settle())
+
+    assert len(emitted) == 2
+    assert not restarted._pending_lost_turn_reports.get("slack")
+    assert not restarted._lost_turn_retry_tasks
+
+
+def test_lost_turn_retry_gives_up_instead_of_spinning(managers) -> None:
+    # A hard outage must not turn into an unbounded resend loop; the next real
+    # reconnect flushes whatever is still owed.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return None
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_and_exhaust():
+        await restarted.notify_transport_ready("slack")
+        await asyncio.wait_for(restarted._lost_turn_retry_tasks["slack"], timeout=5)
+
+    asyncio.run(_flush_and_exhaust())
+
+    # One initial attempt plus one per configured delay, then it stops.
+    assert len(emitted) == 3
+    assert restarted._pending_lost_turn_reports["slack"] == [("ses_fsm", "m-origin")]
+
+
 def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
     # A Harness turn already gets harness.run.interrupted.* stamped on its Run.
     # Reporting again here would double-notify the same interruption.
