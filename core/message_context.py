@@ -8,6 +8,12 @@ from config.v2_settings import make_thread_settings_key
 from modules.im import MessageContext
 
 
+# Internal-only marker persisted with scheduled Delivery provenance. It keeps
+# durable turns from applying the backend-only metadata a second time when the
+# stored dispatch text is finally handed to MessageHandler.
+SCHEDULED_DISPATCH_METADATA_APPLIED_KEY = "scheduled_dispatch_metadata_applied"
+
+
 def resolve_context_platform(
     context: Optional[MessageContext],
     *,
