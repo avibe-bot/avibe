@@ -602,6 +602,7 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
         primary.working_path,
     )
     agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._user_stopped_sessions = set()
     agent._steering_states = {
         primary.base_session_id: _OpenCodeSteerState(
             task=task,
