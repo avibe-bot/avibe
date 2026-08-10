@@ -23,6 +23,7 @@ import pytest
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest
 import core.memory.artifact as memory_artifact
 import core.memory.confined_filesystem as confined_filesystem
+import core.memory.module as memory_module
 from core.memory.artifact import (
     FakeMemoryArtifactManager,
     MemoryArtifactCandidate,
@@ -1364,63 +1365,116 @@ async def test_final_flush_fences_capture_before_queue_visibility(
         attachments=(),
     )
 
-    pin_entered = threading.Event()
-    release_pin = threading.Event()
+    pin_entered = asyncio.Event()
+    release_pin = asyncio.Event()
+    handshake_timeout_seconds = 5.0
     original_pin = runtime.module._attachment_store.pin
 
-    def blocking_pin(attachments):
-        pin_entered.set()
-        assert release_pin.wait(timeout=2.0)
-        return original_pin(attachments)
+    async def gate_attachment_pin(operation, /, *args, **kwargs):
+        if operation == original_pin:
+            pin_entered.set()
+            await asyncio.wait_for(
+                release_pin.wait(), timeout=handshake_timeout_seconds
+            )
+            return operation(*args, **kwargs)
+        return await original_run_blocking(operation, *args, **kwargs)
 
-    monkeypatch.setattr(runtime.module._attachment_store, "pin", blocking_pin)
+    original_run_blocking = memory_module.run_blocking
+    monkeypatch.setattr(memory_module, "run_blocking", gate_attachment_pin)
 
-    old_capture = asyncio.create_task(runtime.module.capture(old_request))
-    assert await asyncio.to_thread(pin_entered.wait, 1.0)
+    class ObservedAdmissionLock:
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+            self._acquisitions = 0
+            self.final_flush_waiting = asyncio.Event()
+            self.later_capture_waiting = asyncio.Event()
 
-    final_flush = asyncio.create_task(
-        runtime.final_flush(
-            principal_id=old_request.principal_id,
-            project_id=old_request.project_id,
-            raw_session_id=old_request.session_id,
-            deadline_seconds=2.0,
+        async def acquire(self) -> bool:
+            self._acquisitions += 1
+            if self._acquisitions == 2:
+                self.final_flush_waiting.set()
+            elif self._acquisitions == 3:
+                self.later_capture_waiting.set()
+            return await self._lock.acquire()
+
+        def locked(self) -> bool:
+            return self._lock.locked()
+
+        def release(self) -> None:
+            self._lock.release()
+
+        async def __aenter__(self):
+            await self.acquire()
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+            del exc_type, exc_value, traceback
+            self.release()
+
+    admission_lock = ObservedAdmissionLock()
+    runtime.module._capture_admission_locks[
+        (
+            old_request.principal_id,
+            old_request.project_id,
+            old_request.session_id,
         )
-    )
-    await asyncio.sleep(0)
-    later_capture = asyncio.create_task(runtime.module.capture(later_request))
-    await asyncio.sleep(0)
-    assert not final_flush.done()
-    assert not later_capture.done()
+    ] = admission_lock
 
-    release_pin.set()
-    assert isinstance(await old_capture, CaptureAccepted)
-    drain = asyncio.create_task(runtime.module.drain())
+    try:
+        old_capture = asyncio.create_task(runtime.module.capture(old_request))
+        await asyncio.wait_for(pin_entered.wait(), timeout=handshake_timeout_seconds)
 
-    await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
-    assert [capture.text for capture in provider.captures] == [
-        "old session message"
-    ]
-    assert len(provider.flushes) == 1
-    assert not final_flush.done()
-    assert not later_capture.done()
-    assert all(
-        row.payload_text != "later session message"
-        for row in store.list_queue_rows()
-    )
+        final_flush = asyncio.create_task(
+            runtime.final_flush(
+                principal_id=old_request.principal_id,
+                project_id=old_request.project_id,
+                raw_session_id=old_request.session_id,
+                deadline_seconds=2.0,
+            )
+        )
+        await asyncio.wait_for(
+            admission_lock.final_flush_waiting.wait(),
+            timeout=handshake_timeout_seconds,
+        )
+        later_capture = asyncio.create_task(runtime.module.capture(later_request))
+        await asyncio.wait_for(
+            admission_lock.later_capture_waiting.wait(),
+            timeout=handshake_timeout_seconds,
+        )
+        assert admission_lock.locked()
+        assert not final_flush.done()
+        assert not later_capture.done()
 
-    release_flush.set()
-    assert await final_flush
+        release_pin.set()
+        assert isinstance(await old_capture, CaptureAccepted)
 
-    assert isinstance(await later_capture, CaptureAccepted)
-    await drain
-    later_rows = [
-        row
-        for row in store.list_queue_rows()
-        if row.payload_text == "later session message"
-    ]
-    assert len(later_rows) == 1
-    assert later_rows[0].state == "pending"
-    await memory_runtime_factory.close(runtime)
+        await asyncio.wait_for(flush_entered.wait(), timeout=handshake_timeout_seconds)
+        assert [capture.text for capture in provider.captures] == [
+            "old session message"
+        ]
+        assert len(provider.flushes) == 1
+        assert not final_flush.done()
+        assert not later_capture.done()
+        assert all(
+            row.payload_text != "later session message"
+            for row in store.list_queue_rows()
+        )
+
+        release_flush.set()
+        assert await final_flush
+
+        assert isinstance(await later_capture, CaptureAccepted)
+        later_rows = [
+            row
+            for row in store.list_queue_rows()
+            if row.payload_text == "later session message"
+        ]
+        assert len(later_rows) == 1
+        assert later_rows[0].state == "pending"
+    finally:
+        release_pin.set()
+        release_flush.set()
+        await memory_runtime_factory.close(runtime)
 
 
 async def test_session_lifecycle_fences_capture_through_reset(
