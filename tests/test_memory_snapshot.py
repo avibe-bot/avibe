@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import core.memory.confined_filesystem as confined_filesystem_module
 import core.memory.snapshot as snapshot_module
 from core.memory.clear_journal import (
     ClearBackupBlocked,
@@ -655,41 +656,24 @@ def test_spilled_directory_order_is_exact_and_memory_bounded_for_wide_directorie
 
     sqlite_temp = _private_directory(tmp_path / "sqlite-temp", tmp_path)
     monkeypatch.setenv("SQLITE_TMPDIR", str(sqlite_temp))
-    monkeypatch.setattr(snapshot_module.os, "scandir", lambda _descriptor: ReverseScandir())
-    monkeypatch.setattr(snapshot_module, "_DIRECTORY_ORDER_INSERT_BATCH_SIZE", 11)
+    monkeypatch.setattr(
+        confined_filesystem_module.os,
+        "scandir",
+        lambda _descriptor: ReverseScandir(),
+    )
 
     connection: sqlite3.Connection | None = None
     tracemalloc.start()
     try:
-        with snapshot_module._SpilledDirectoryOrder() as orders:
+        with confined_filesystem_module.SpilledDirectoryOrder(
+            insert_batch_size=11
+        ) as orders:
             connection = orders._connection
-            cursor = orders.scan(
-                -1,
-                error_type=MemorySnapshotUnsafePathError,
-                message="injected wide directory cannot be scanned",
-            )
+            cursor = orders.scan(-1)
             for index in range(entry_count):
-                assert orders.next_name(
-                    cursor,
-                    error_type=MemorySnapshotUnsafePathError,
-                    message="injected wide directory cannot be scanned",
-                ) == f"entry-{index:05d}-{suffix}"
-            assert (
-                orders.next_name(
-                    cursor,
-                    error_type=MemorySnapshotUnsafePathError,
-                    message="injected wide directory cannot be scanned",
-                )
-                is None
-            )
-            assert (
-                orders.next_name(
-                    cursor,
-                    error_type=MemorySnapshotUnsafePathError,
-                    message="injected wide directory cannot be scanned",
-                )
-                is None
-            )
+                assert orders.next_name(cursor) == f"entry-{index:05d}-{suffix}"
+            assert orders.next_name(cursor) is None
+            assert orders.next_name(cursor) is None
             _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -1148,7 +1132,7 @@ def test_restore_retry_converges_after_crash_between_backup_and_install(
         real_replace(source, destination, *args, **kwargs)
         if (
             not crashed
-            and Path(source) == queue
+            and Path(source).name == queue.name
             and ".before-restore-crash-retry-0-0" in Path(destination).name
         ):
             crashed = True
@@ -1197,7 +1181,7 @@ def test_create_retry_reclaims_stage_left_by_process_death(
     real_replace = snapshot_module.os.replace
 
     def crash_before_publish(source, destination, *args, **kwargs):
-        if Path(destination) == manager.snapshot_path("stage-crash"):
+        if Path(destination).name == "stage-crash":
             raise SystemExit("injected snapshot process death")
         return real_replace(source, destination, *args, **kwargs)
 
@@ -1266,9 +1250,10 @@ def test_auto_id_backup_stage_reconcile_covers_copy_and_publish_crashes(
 
     def crash_at_publish(source, destination, *args, **kwargs):
         is_publish = (
-            Path(source).parent == manager.snapshot_root
-            and Path(source).name.endswith(".tmp")
-            and Path(destination).parent == manager.snapshot_root
+            Path(source).name.endswith(".tmp")
+            and not Path(destination).name.startswith(".")
+            and kwargs.get("src_dir_fd") is not None
+            and kwargs.get("dst_dir_fd") is not None
         )
         if is_publish and crash_boundary == "before-publish":
             raise SystemExit(crash_boundary)
@@ -1348,7 +1333,7 @@ def test_explicit_id_backup_retry_still_reclaims_its_deterministic_stage(
     real_replace = snapshot_module.os.replace
 
     def crash_before_publish(source, destination, *args, **kwargs):
-        if Path(destination) == manager.snapshot_path("explicit-retry"):
+        if Path(destination).name == "explicit-retry":
             raise SystemExit("injected backup process death")
         return real_replace(source, destination, *args, **kwargs)
 

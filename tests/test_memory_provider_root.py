@@ -236,6 +236,8 @@ def test_provider_root_recreate_empty_removes_children_but_preserves_root(
     identity = root.path.stat().st_ino
     nested = root.path / "vectors" / "nested"
     nested.mkdir(parents=True)
+    nested.parent.chmod(0o700)
+    nested.chmod(0o700)
     (nested / "data").write_bytes(b"provider data")
     (root.path / "everos.toml").write_text("generated", encoding="utf-8")
 

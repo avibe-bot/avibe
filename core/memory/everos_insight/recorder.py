@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 from urllib.parse import urlsplit, urlunsplit
 
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    required_no_follow_flag,
+    strict_file_create_flags,
+)
+
 JsonPrimitive: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
 ProviderKind: TypeAlias = Literal["llm", "multimodal_llm", "embedding"]
@@ -1185,6 +1191,12 @@ def _encode_json(value: JsonValue) -> str:
 
 
 def _prepare_private_database_path(db_path: Path) -> None:
+    try:
+        required_no_follow_flag()
+    except ConfinedFilesystemError as error:
+        raise OSError(
+            "Call-log persistence requires no-follow filesystem support"
+        ) from error
     if not db_path.is_absolute() or ".." in db_path.parts:
         raise OSError("Call-log database path must be a lexical absolute path")
     _validate_directory_chain(db_path.parent)
@@ -1197,9 +1209,10 @@ def _prepare_private_database_path(db_path: Path) -> None:
     try:
         os.lstat(db_path)
     except FileNotFoundError:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        try:
+            flags = strict_file_create_flags()
+        except ConfinedFilesystemError as error:  # pragma: no cover - guarded above
+            raise OSError("Call-log persistence is unavailable") from error
         fd = os.open(db_path, flags, 0o600)
         try:
             info = os.fstat(fd)

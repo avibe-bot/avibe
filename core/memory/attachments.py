@@ -16,6 +16,11 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote_to_bytes, urlsplit
 
 from config import paths
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    SpilledDirectoryOrder,
+    required_no_follow_flag,
+)
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 from core.memory.types import (
     CaptureAttachment,
@@ -658,13 +663,13 @@ def _paths_overlap(left: Path, right: Path) -> bool:
 
 
 def _required_no_follow_flag() -> int:
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    if not no_follow:
+    try:
+        return required_no_follow_flag()
+    except ConfinedFilesystemError as error:
         raise AttachmentPinError(
             "memory_store_unavailable",
             "durable attachments require no-follow filesystem support",
-        )
-    return int(no_follow)
+        ) from error
 
 
 def _directory_open_flags() -> int:
@@ -1153,7 +1158,10 @@ def _directory_entry_names(directory_fd: int) -> tuple[str, ...]:
 def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
     bundle_fd = _open_private_directory_at(parent_fd, name, "attachment bundle")
     try:
-        filenames = sorted(_directory_entry_names(bundle_fd))
+        filenames = _bounded_ordered_directory_entry_names(
+            bundle_fd,
+            maximum=MAX_PINNED_ATTACHMENTS,
+        )
         if not 1 <= len(filenames) <= MAX_PINNED_ATTACHMENTS:
             raise AttachmentPinError(
                 "memory_store_unavailable",
@@ -1190,6 +1198,28 @@ def _validate_private_bundle(parent_fd: int, name: str) -> tuple[str, ...]:
         return tuple(filenames)
     finally:
         os.close(bundle_fd)
+
+
+def _bounded_ordered_directory_entry_names(
+    directory_fd: int,
+    *,
+    maximum: int,
+) -> tuple[str, ...]:
+    try:
+        with SpilledDirectoryOrder() as orders:
+            cursor = orders.scan(directory_fd)
+            names: list[str] = []
+            while len(names) <= maximum:
+                name = orders.next_name(cursor)
+                if name is None:
+                    break
+                names.append(name)
+            return tuple(names)
+    except ConfinedFilesystemError as error:
+        raise AttachmentPinError(
+            "memory_store_unavailable",
+            "attachment directory could not be ordered safely",
+        ) from error
 
 
 def _remove_private_bundle(parent_fd: int, name: str, *, strict_files: bool) -> None:

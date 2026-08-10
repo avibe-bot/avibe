@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,7 +15,150 @@ from core.memory.confined_filesystem import (
     PrivateSqliteDatabase,
     remove_anchored_entry,
     remove_confined_path,
+    replace_confined,
 )
+
+
+def test_memory_persistence_fails_closed_without_no_follow_before_touching_path(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "must-not-exist"
+    script = """
+import os
+import sys
+from pathlib import Path
+
+delattr(os, "O_NOFOLLOW")
+
+# Importing ordinary application wiring must remain usable when only Memory
+# persistence is unsupported on the host.
+import core.controller  # noqa: F401
+from core.memory.attachments import AttachmentPinError, AttachmentPinStore
+from core.memory.confined_filesystem import ConfinedFilesystemError, PrivateSqliteDatabase
+from core.memory.snapshot import MemorySnapshotManager, MemorySnapshotUnsafePathError
+
+home = Path(sys.argv[1])
+try:
+    MemorySnapshotManager(home)
+except MemorySnapshotUnsafePathError:
+    pass
+else:
+    raise AssertionError("Memory snapshots accepted a host without O_NOFOLLOW")
+try:
+    AttachmentPinStore(effective_home=home, source_root=home / "source")
+except AttachmentPinError:
+    pass
+else:
+    raise AssertionError("Memory attachments accepted a host without O_NOFOLLOW")
+try:
+    PrivateSqliteDatabase(home, home / "state" / "journal.sqlite").prepare()
+except ConfinedFilesystemError as error:
+    assert "no-follow" in str(error)
+else:
+    raise AssertionError("Memory persistence accepted a host without O_NOFOLLOW")
+assert not home.exists()
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script, os.fspath(home)],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not home.exists()
+
+
+def test_supported_host_exposes_strict_no_follow_capability() -> None:
+    from core.memory import confined_filesystem
+
+    assert confined_filesystem.required_no_follow_flag() == os.O_NOFOLLOW
+
+
+def test_spilled_directory_order_preserves_raw_filename_order_across_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.memory import confined_filesystem
+
+    names = ["z", "a", "\udcff", "\udc80", "middle"]
+
+    class Entry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class Scandir:
+        def __enter__(self):
+            return iter(Entry(name) for name in names)
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None
+
+    monkeypatch.setattr(confined_filesystem.os, "scandir", lambda _fd: Scandir())
+    with confined_filesystem.SpilledDirectoryOrder(insert_batch_size=2) as order:
+        cursor = order.scan(-1)
+        actual = list(order.names(cursor))
+
+    assert [os.fsencode(name) for name in actual] == sorted(
+        os.fsencode(name) for name in names
+    )
+
+
+def test_spilled_directory_order_closes_temporary_database_on_base_exception() -> None:
+    from core.memory import confined_filesystem
+
+    class InjectedCancellation(BaseException):
+        pass
+
+    order = confined_filesystem.SpilledDirectoryOrder(insert_batch_size=2)
+    connection = order._connection
+
+    with pytest.raises(InjectedCancellation):
+        with order:
+            raise InjectedCancellation()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("failed"), asyncio.CancelledError(), KeyboardInterrupt()],
+)
+def test_spilled_directory_order_closes_on_scan_failure_and_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    from core.memory import confined_filesystem
+
+    class FailingScandir:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise failure
+
+    monkeypatch.setattr(
+        confined_filesystem.os,
+        "scandir",
+        lambda _fd: FailingScandir(),
+    )
+    order = confined_filesystem.SpilledDirectoryOrder(insert_batch_size=2)
+    connection = order._connection
+
+    with pytest.raises(type(failure)):
+        with order:
+            order.scan(-1)
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
 
 
 def test_remove_confined_path_refuses_to_follow_a_swapped_directory(
@@ -52,6 +198,71 @@ def test_remove_confined_path_refuses_to_follow_a_swapped_directory(
     assert swapped
     assert target.is_symlink()
     assert victim.read_text(encoding="utf-8") == "outside must survive"
+
+
+def test_confined_atomic_replace_refuses_symlink_source_and_replaces_symlink_target(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside survives", encoding="utf-8")
+    stage = home / "stage"
+    target = home / "target"
+
+    stage.symlink_to(outside)
+    with pytest.raises(ConfinedFilesystemError):
+        replace_confined(home, stage, target)
+    assert stage.is_symlink()
+    assert not target.exists()
+
+    stage.unlink()
+    stage.write_text("published", encoding="utf-8")
+    stage.chmod(0o600)
+    target.symlink_to(outside)
+    replace_confined(home, stage, target)
+
+    assert target.read_text(encoding="utf-8") == "published"
+    assert not target.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "outside survives"
+
+
+def test_confined_atomic_replace_stays_on_pinned_parent_during_directory_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    managed = home / "managed"
+    managed.mkdir(mode=0o700)
+    stage = managed / "stage"
+    stage.write_text("published", encoding="utf-8")
+    stage.chmod(0o600)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    sentinel = outside / "target"
+    sentinel.write_text("outside survives", encoding="utf-8")
+    held = home / "held-managed"
+
+    from core.memory import confined_filesystem
+
+    real_replace = confined_filesystem.os.replace
+    swapped = False
+
+    def swap_before_replace(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            managed.rename(held)
+            managed.symlink_to(outside, target_is_directory=True)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "replace", swap_before_replace)
+    replace_confined(home, stage, managed / "target")
+
+    assert swapped
+    assert (held / "target").read_text(encoding="utf-8") == "published"
+    assert sentinel.read_text(encoding="utf-8") == "outside survives"
 
 
 def test_private_sqlite_database_prepares_and_hardens_owned_files(tmp_path: Path) -> None:

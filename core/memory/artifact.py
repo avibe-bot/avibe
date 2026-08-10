@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import stat
 import subprocess
 from dataclasses import dataclass, field
@@ -27,9 +28,17 @@ from core.managed_runtime import (
     env_flag_enabled,
     file_sha256,
     runtime_platform_tag,
-    write_json_atomic,
 )
 from core.process_isolation import isolated_subprocess_kwargs
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    create_confined_file,
+    ensure_private_directory,
+    fsync_directory,
+    open_confined_regular_file,
+    remove_confined_path,
+    replace_confined,
+)
 from core.memory.provider_root import (
     PROVIDER_ROOT_CONTROL_FILES,
     ROOT_SENTINEL_FILENAME,
@@ -405,10 +414,9 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if not stat.S_ISREG(expected.st_mode) or expected.st_size > _MAX_CURRENT_POINTER_BYTES:
             return None, True
 
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(path, flags)
-        except OSError:
+            descriptor = open_confined_regular_file(self.runtime_dir, path)
+        except (ConfinedFilesystemError, OSError):
             return None, True
         try:
             actual = os.fstat(descriptor)
@@ -501,7 +509,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         archive: ManagedRuntimeArchive,
         candidate: MemoryArtifactCandidate,
     ) -> None:
-        write_json_atomic(
+        _write_memory_pointer_atomic(
+            self.runtime_dir,
             self.runtime_dir / "current.json",
             {
                 "provider": "manifest",
@@ -521,9 +530,16 @@ class MemoryArtifactManager(ManagedRuntimeManager):
     def _restore_current_pointer(self, pointer: dict[str, Any] | None) -> None:
         current = self.runtime_dir / "current.json"
         if pointer is None:
-            current.unlink(missing_ok=True)
+            try:
+                remove_confined_path(self.runtime_dir, current)
+            except FileNotFoundError:
+                pass
+            except ConfinedFilesystemError as error:
+                raise MemoryRuntimeActivationError(
+                    "memory runtime pointer could not be removed safely"
+                ) from error
             return
-        write_json_atomic(current, pointer)
+        _write_memory_pointer_atomic(self.runtime_dir, current, pointer)
 
     def _binary_version(self, binary: Path | None) -> str | None:
         if binary is None or not binary.is_file():
@@ -564,6 +580,41 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             "python_version": EMBEDDED_PYTHON_VERSION,
             "lock_sha256": PACKAGE_LOCK_SHA256,
         }
+
+
+def _write_memory_pointer_atomic(
+    runtime_root: Path,
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    temporary = runtime_root / f".{path.name}.{secrets.token_hex(8)}.tmp"
+    descriptor: int | None = None
+    try:
+        ensure_private_directory(runtime_root, runtime_root)
+        descriptor = create_confined_file(runtime_root, temporary)
+        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("memory runtime pointer write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        replace_confined(runtime_root, temporary, path)
+        fsync_directory(runtime_root)
+    except (ConfinedFilesystemError, OSError) as error:
+        raise MemoryRuntimeActivationError(
+            "memory runtime pointer could not be written safely"
+        ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            remove_confined_path(runtime_root, temporary)
+        except (ConfinedFilesystemError, OSError):
+            pass
 
 
 @runtime_checkable

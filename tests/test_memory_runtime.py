@@ -621,6 +621,7 @@ def test_memory_artifact_rejects_an_active_pointer_built_for_another_target(
 def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Path) -> None:
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True, mode=0o700)
+    provider_root.parent.chmod(0o700)
     sentinel = provider_root / ".avibe-memory-root.json"
     sentinel.write_text(
         json.dumps(
@@ -641,6 +642,7 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         provider_root=provider_root,
     )
     manager.runtime_dir.mkdir(parents=True)
+    manager.runtime_dir.chmod(0o700)
     previous_pointer = {
         "provider": "manifest",
         "runtime_id": "memory-runtime",
@@ -654,7 +656,9 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
         "compatible_provider_root_formats": [],
         "artifact_fingerprint": "old-artifact",
     }
-    (manager.runtime_dir / "current.json").write_text(json.dumps(previous_pointer), encoding="utf-8")
+    current_pointer = manager.runtime_dir / "current.json"
+    current_pointer.write_text(json.dumps(previous_pointer), encoding="utf-8")
+    current_pointer.chmod(0o600)
     calls: list[tuple[str, object]] = []
 
     def coordinate(candidate, root_state, commit, rollback) -> None:

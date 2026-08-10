@@ -22,34 +22,331 @@ class ConfinedFilesystemError(RuntimeError):
     """A confined filesystem operation refused an unsafe path or entry."""
 
 
+def required_no_follow_flag() -> int:
+    """Return the host no-follow capability or disable Memory persistence."""
+
+    flag = getattr(os, "O_NOFOLLOW", None)
+    if not isinstance(flag, int) or isinstance(flag, bool) or flag == 0:
+        raise ConfinedFilesystemError(
+            "Memory persistence requires strict no-follow filesystem support"
+        )
+    return flag
+
+
+def strict_directory_open_flags() -> int:
+    """Flags for a directory descriptor that must not follow its final entry."""
+
+    return (
+        os.O_RDONLY
+        | required_no_follow_flag()
+        | int(getattr(os, "O_DIRECTORY", 0))
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
+
+
+def strict_file_read_flags(*, nonblocking: bool = False) -> int:
+    """Flags for a read descriptor that must not follow its final entry."""
+
+    flags = os.O_RDONLY | required_no_follow_flag() | int(getattr(os, "O_CLOEXEC", 0))
+    if nonblocking:
+        flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return flags
+
+
+def strict_file_create_flags(*, read_write: bool = False) -> int:
+    """Flags for exclusive creation of a no-follow regular file."""
+
+    access = os.O_RDWR if read_write else os.O_WRONLY
+    return (
+        access
+        | os.O_CREAT
+        | os.O_EXCL
+        | required_no_follow_flag()
+        | int(getattr(os, "O_CLOEXEC", 0))
+    )
+
+
+def ensure_private_directory(home: Path, directory: Path) -> None:
+    """Create one owner-private directory chain through anchored descriptors."""
+
+    required_no_follow_flag()
+    relative = _relative_to_home(directory, home)
+    if not home.exists():
+        try:
+            home.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confinement root cannot be created safely"
+            ) from error
+    try:
+        current = os.open(home, strict_directory_open_flags())
+    except OSError as error:
+        raise ConfinedFilesystemError(
+            "confinement root cannot be opened safely"
+        ) from error
+    try:
+        _harden_private_directory_fd(current, "confinement root")
+        for component in relative.parts:
+            try:
+                child = os.open(
+                    component,
+                    strict_directory_open_flags(),
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current)
+                    os.fsync(current)
+                except FileExistsError:
+                    pass
+                except OSError as error:
+                    raise ConfinedFilesystemError(
+                        "private directory cannot be created safely"
+                    ) from error
+                try:
+                    child = os.open(
+                        component,
+                        strict_directory_open_flags(),
+                        dir_fd=current,
+                    )
+                except OSError as error:
+                    raise ConfinedFilesystemError(
+                        "private directory cannot be opened safely"
+                    ) from error
+            except OSError as error:
+                raise ConfinedFilesystemError(
+                    "private directory cannot be opened safely"
+                ) from error
+            try:
+                _harden_private_directory_fd(child, "private directory")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(current)
+            current = child
+    finally:
+        os.close(current)
+
+
+def fsync_directory(path: Path) -> None:
+    """Synchronize one strict, owner-private directory descriptor."""
+
+    try:
+        descriptor = os.open(path, strict_directory_open_flags())
+    except OSError as error:
+        raise ConfinedFilesystemError("directory cannot be opened safely") from error
+    try:
+        _require_private_directory(os.fstat(descriptor), "directory")
+        os.fsync(descriptor)
+    except OSError as error:
+        raise ConfinedFilesystemError("directory cannot be synchronized safely") from error
+    finally:
+        os.close(descriptor)
+
+
+def create_confined_file(
+    home: Path,
+    path: Path,
+    *,
+    mode: int = 0o600,
+    read_write: bool = False,
+) -> int:
+    """Exclusively create one private regular file through its anchored parent."""
+
+    relative = _relative_to_home(path, home)
+    if not relative.parts:
+        raise ConfinedFilesystemError("confined file must be below the confinement root")
+    root = _open_confined_directory(home, ())
+    parent: int | None = None
+    descriptor: int | None = None
+    try:
+        parent = _open_descendant_directory(root, relative.parts[:-1])
+        try:
+            descriptor = os.open(
+                relative.parts[-1],
+                strict_file_create_flags(read_write=read_write),
+                mode,
+                dir_fd=parent,
+            )
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confined file cannot be created safely"
+            ) from error
+        try:
+            _require_private_regular(
+                os.fstat(descriptor),
+                "confined file",
+                require_mode=False,
+            )
+            os.fchmod(descriptor, mode)
+            _require_private_regular(os.fstat(descriptor), "confined file")
+            os.fsync(descriptor)
+            os.fsync(parent)
+        except BaseException:
+            os.close(descriptor)
+            descriptor = None
+            try:
+                os.unlink(relative.parts[-1], dir_fd=parent)
+            except OSError:
+                pass
+            raise
+        result = descriptor
+        descriptor = None
+        return result
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent is not None:
+            os.close(parent)
+        os.close(root)
+
+
+def open_confined_regular_file(home: Path, path: Path) -> int:
+    """Open one owner-private regular file through its anchored parent."""
+
+    relative = _relative_to_home(path, home)
+    if not relative.parts:
+        raise ConfinedFilesystemError("confined file must be below the confinement root")
+    root = _open_confined_directory(home, ())
+    parent: int | None = None
+    try:
+        parent = _open_descendant_directory(root, relative.parts[:-1])
+        try:
+            descriptor = os.open(
+                relative.parts[-1],
+                strict_file_read_flags(),
+                dir_fd=parent,
+            )
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confined file cannot be opened safely"
+            ) from error
+        try:
+            _require_private_regular(os.fstat(descriptor), "confined file")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+    finally:
+        if parent is not None:
+            os.close(parent)
+        os.close(root)
+
+
+def open_confined_directory(home: Path, path: Path) -> int:
+    """Open one owner-private directory beneath a pinned confinement root."""
+
+    relative = _relative_to_home(path, home)
+    return _open_confined_directory(home, relative.parts)
+
+
+def replace_confined(home: Path, source: Path, destination: Path) -> None:
+    """Atomically replace two entries through confinement-anchored parents."""
+
+    required_no_follow_flag()
+    source_relative = _relative_to_home(source, home)
+    destination_relative = _relative_to_home(destination, home)
+    if not source_relative.parts or not destination_relative.parts:
+        raise ConfinedFilesystemError("atomic replacement cannot replace the confinement root")
+    root = _open_confined_directory(home, ())
+    source_parent: int | None = None
+    destination_parent: int | None = None
+    try:
+        source_parent = _open_descendant_directory(
+            root,
+            source_relative.parts[:-1],
+        )
+        destination_parent = _open_descendant_directory(
+            root,
+            destination_relative.parts[:-1],
+        )
+        try:
+            source_info = os.stat(
+                source_relative.parts[-1],
+                dir_fd=source_parent,
+                follow_symlinks=False,
+            )
+            if stat.S_ISDIR(source_info.st_mode):
+                _require_private_directory(source_info, "atomic replacement source")
+            else:
+                _require_private_regular(source_info, "atomic replacement source")
+            os.replace(
+                source_relative.parts[-1],
+                destination_relative.parts[-1],
+                src_dir_fd=source_parent,
+                dst_dir_fd=destination_parent,
+            )
+            destination_info = os.stat(
+                destination_relative.parts[-1],
+                dir_fd=destination_parent,
+                follow_symlinks=False,
+            )
+            if (
+                destination_info.st_dev,
+                destination_info.st_ino,
+                stat.S_IFMT(destination_info.st_mode),
+            ) != (
+                source_info.st_dev,
+                source_info.st_ino,
+                stat.S_IFMT(source_info.st_mode),
+            ):
+                remove_anchored_entry(
+                    destination_parent,
+                    destination_relative.parts[-1],
+                    expected_identity=(
+                        destination_info.st_dev,
+                        destination_info.st_ino,
+                    ),
+                )
+                raise ConfinedFilesystemError(
+                    "confined atomic replacement source changed"
+                )
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confined atomic replacement failed safely"
+            ) from error
+    finally:
+        if destination_parent is not None:
+            os.close(destination_parent)
+        if source_parent is not None:
+            os.close(source_parent)
+        os.close(root)
+
+
 class PrivateSqliteDatabase:
     """Prepare and validate one owner-private SQLite database and its sidecars."""
 
     def __init__(self, home: Path, path: Path) -> None:
+        required_no_follow_flag()
         self._home = home
         self._path = path
 
     def prepare(self) -> None:
         """Create the private parent chain and database when they are absent."""
 
+        required_no_follow_flag()
         _ensure_private_parent(self._home, self._path.parent)
         try:
             info = os.lstat(self._path)
         except FileNotFoundError:
-            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(self._path, flags, 0o600)
+            descriptor = create_confined_file(
+                self._home,
+                self._path,
+                read_write=True,
+            )
             try:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-            os.chmod(self._path, 0o600)
-            _fsync_directory(self._path.parent)
             return
         _require_private_regular(info, "private SQLite database")
 
     def connect(self) -> sqlite3.Connection:
         """Open SQLite only after validating the database and owned sidecars."""
 
+        required_no_follow_flag()
         try:
             info = os.lstat(self._path)
         except FileNotFoundError as error:
@@ -167,20 +464,23 @@ class _RelativeNode:
 class _RemovalFrame:
     node: _RelativeNode
     before: tuple[int, int]
-    child_order: _DirectoryOrderCursor
+    child_order: DirectoryOrderCursor
 
 
 @dataclass(slots=True)
-class _DirectoryOrderCursor:
+class DirectoryOrderCursor:
     order_id: int
     last_name: bytes | None = None
     exhausted: bool = False
 
 
-class _SpilledDirectoryOrder:
+class SpilledDirectoryOrder:
     """Deterministically order directory names without retaining their width."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, insert_batch_size: int = _DIRECTORY_ORDER_INSERT_BATCH_SIZE) -> None:
+        if not isinstance(insert_batch_size, int) or isinstance(insert_batch_size, bool) or insert_batch_size < 1:
+            raise ValueError("directory order insertion batch size must be positive")
+        self._insert_batch_size = insert_batch_size
         self._connection = sqlite3.connect("")
         self._next_order_id = 1
         try:
@@ -200,21 +500,31 @@ class _SpilledDirectoryOrder:
             self._connection.close()
             raise
 
-    def __enter__(self) -> _SpilledDirectoryOrder:
+    def __enter__(self) -> SpilledDirectoryOrder:
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
         self._connection.close()
 
-    def scan(self, descriptor: int) -> _DirectoryOrderCursor:
+    def scan(
+        self,
+        descriptor: int,
+        *,
+        include: Callable[[str], bool] | None = None,
+    ) -> DirectoryOrderCursor:
         order_id = self._next_order_id
         self._next_order_id += 1
         rows: list[tuple[int, bytes]] = []
         try:
             with os.scandir(descriptor) as iterator:
                 for entry in iterator:
+                    if include is not None and not include(entry.name):
+                        continue
                     rows.append((order_id, os.fsencode(entry.name)))
-                    if len(rows) >= _DIRECTORY_ORDER_INSERT_BATCH_SIZE:
+                    if len(rows) >= self._insert_batch_size:
                         self._insert(rows)
                         rows.clear()
             if rows:
@@ -223,9 +533,9 @@ class _SpilledDirectoryOrder:
             raise ConfinedFilesystemError(
                 "confined directory cannot be scanned safely"
             ) from error
-        return _DirectoryOrderCursor(order_id=order_id)
+        return DirectoryOrderCursor(order_id=order_id)
 
-    def next_name(self, cursor: _DirectoryOrderCursor) -> str | None:
+    def next_name(self, cursor: DirectoryOrderCursor) -> str | None:
         if cursor.exhausted:
             return None
         try:
@@ -254,10 +564,16 @@ class _SpilledDirectoryOrder:
             )
             cursor.exhausted = True
             return None
-        except sqlite3.Error as error:
+        except (sqlite3.Error, UnicodeError) as error:
             raise ConfinedFilesystemError(
                 "confined directory cannot be read safely"
             ) from error
+
+    def names(self, cursor: DirectoryOrderCursor) -> Iterator[str]:
+        """Yield one cursor in raw filename-byte order."""
+
+        while (name := self.next_name(cursor)) is not None:
+            yield name
 
     def _insert(self, rows: Sequence[tuple[int, bytes]]) -> None:
         self._connection.executemany(
@@ -300,7 +616,7 @@ class _DirectoryDescriptorCache:
                 try:
                     next_descriptor = os.open(
                         component_node.name,
-                        _directory_open_flags(),
+                        strict_directory_open_flags(),
                         dir_fd=current,
                     )
                 except OSError as error:
@@ -310,10 +626,7 @@ class _DirectoryDescriptorCache:
                 os.close(current)
                 current = next_descriptor
                 info = os.fstat(current)
-                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                    raise ConfinedFilesystemError(
-                        "confined removal parent is not a safe directory"
-                    )
+                _require_private_directory(info, "confined removal parent")
                 self._remember(component_node, current)
             return current
         except BaseException:
@@ -336,23 +649,26 @@ def remove_confined_path(
 ) -> None:
     """Remove one entry through anchored, no-follow directory handles."""
 
+    required_no_follow_flag()
     relative = _relative_to_home(path, home)
     if not relative.parts:
         raise ConfinedFilesystemError("refusing to remove the confinement root")
     current: int | None = None
     try:
-        current = os.open(home, _directory_open_flags())
+        current = os.open(home, strict_directory_open_flags())
+        _require_private_directory(os.fstat(current), "confinement root")
         for component in relative.parts[:-1]:
             try:
                 next_descriptor = os.open(
                     component,
-                    _directory_open_flags(),
+                    strict_directory_open_flags(),
                     dir_fd=current,
                 )
             except FileNotFoundError:
                 return
             os.close(current)
             current = next_descriptor
+            _require_private_directory(os.fstat(current), "confined directory")
         remove_anchored_entry(current, relative.parts[-1])
     finally:
         if current is not None:
@@ -392,7 +708,7 @@ def _remove_entry_at(
     stack: list[_RemovalFrame | _RelativeNode] = [root_node]
     with (
         _DirectoryDescriptorCache(parent_fd) as cache,
-        _SpilledDirectoryOrder() as orders,
+        SpilledDirectoryOrder() as orders,
     ):
         while stack:
             item = stack[-1]
@@ -426,9 +742,10 @@ def _remove_entry_at(
                         raise ConfinedFilesystemError(
                             "confined removal refuses special files"
                         )
+                    _require_private_directory(before, "confined removal directory")
                     child_fd = os.open(
                         item.name,
-                        _directory_open_flags(),
+                        strict_directory_open_flags(),
                         dir_fd=node_parent_fd,
                     )
                     try:
@@ -489,26 +806,7 @@ def _relative_to_home(path: Path, home: Path) -> Path:
 
 
 def _ensure_private_parent(home: Path, directory: Path) -> None:
-    relative = _relative_to_home(directory, home)
-    if not home.exists():
-        home.mkdir(parents=True, mode=0o700)
-    _require_directory(os.lstat(home), "confinement root")
-    os.chmod(home, 0o700)
-    _fsync_directory(home)
-    current = home
-    for component in relative.parts:
-        current /= component
-        try:
-            info = os.lstat(current)
-        except FileNotFoundError:
-            os.mkdir(current, mode=0o700)
-            _fsync_directory(current.parent)
-            info = os.lstat(current)
-        _require_directory(info, "private SQLite directory")
-        os.chmod(current, 0o700)
-        _fsync_directory(current)
-        if stat.S_IMODE(os.lstat(current).st_mode) != 0o700:
-            raise ConfinedFilesystemError("private SQLite directory is not private")
+    ensure_private_directory(home, directory)
 
 
 def _database_sidecars(path: Path) -> tuple[Path, Path, Path]:
@@ -545,13 +843,72 @@ def _require_directory(info: os.stat_result, label: str) -> None:
     _require_owned(info, label)
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, _directory_open_flags())
+def _require_private_directory(info: os.stat_result, label: str) -> None:
+    _require_directory(info, label)
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise ConfinedFilesystemError(f"{label} is not private")
+
+
+def _harden_private_directory_fd(descriptor: int, label: str) -> None:
+    _require_directory(os.fstat(descriptor), label)
     try:
+        os.fchmod(descriptor, 0o700)
         os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    except OSError as error:
+        raise ConfinedFilesystemError(f"{label} cannot be hardened safely") from error
+    _require_private_directory(os.fstat(descriptor), label)
+
+
+def _open_confined_directory(home: Path, components: Sequence[str]) -> int:
+    try:
+        current = os.open(home, strict_directory_open_flags())
+    except OSError as error:
+        raise ConfinedFilesystemError(
+            "confinement root cannot be opened safely"
+        ) from error
+    try:
+        _require_private_directory(os.fstat(current), "confinement root")
+        descendant = _open_descendant_directory(current, components)
+        os.close(current)
+        return descendant
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _open_descendant_directory(
+    root_fd: int,
+    components: Sequence[str],
+) -> int:
+    current = os.dup(root_fd)
+    try:
+        for component in components:
+            try:
+                child = os.open(
+                    component,
+                    strict_directory_open_flags(),
+                    dir_fd=current,
+                )
+            except OSError as error:
+                raise ConfinedFilesystemError(
+                    "confined directory cannot be opened safely"
+                ) from error
+            try:
+                _require_private_directory(os.fstat(child), "confined directory")
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _fsync_directory(path: Path) -> None:
+    fsync_directory(path)
 
 
 def _directory_open_flags() -> int:
-    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return strict_directory_open_flags()

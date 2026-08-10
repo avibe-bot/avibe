@@ -13,7 +13,7 @@ from scripts import memory_runtime_release_guard as guard
 from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
 
 
-def test_guard_platform_contract_excludes_darwin_x64() -> None:
+def test_guard_platform_contract_keeps_no_follow_capable_shipped_targets_enabled() -> None:
     assert guard.EXPECTED_PLATFORMS == frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
 
 
