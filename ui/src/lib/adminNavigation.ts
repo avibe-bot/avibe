@@ -10,12 +10,12 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
  * the owner check alone still renders them: the Dashboard immediately requests
  * `/api/doctor`, `/api/logs`, `/api/settings`, `/api/users` and drives
  * `/api/control`; Remote Access drives pair / start / stop / optimize / settings
- * / diagnose (only its status read is remote-permitted); the service, platform
- * and backend settings pages save protected config fields; Harness opens on
- * `/api/harness/bootstrap`; and the Library's Show Page controls are local-only.
- * They therefore need the trusted-local `can_use_system` capability on top,
- * otherwise a remote owner gets partial or empty state and every mutation ends
- * in `remote_execution_disabled`.
+ * / diagnose (only its status read is remote-permitted); the service, platform,
+ * backend, and Model Hub settings pages save or reorder protected local state;
+ * Harness opens on `/api/harness/bootstrap`; and the Library's Show Page
+ * controls are local-only. They therefore need the trusted-local
+ * `can_use_system` capability on top, otherwise a remote owner gets partial or
+ * empty state and every mutation ends in `remote_execution_disabled`.
  *
  * This is the single source of truth for both halves of the gate — the route
  * redirect and the navigation entries that point at it — so a withheld page can
@@ -29,6 +29,7 @@ const LOCAL_SYSTEM_ROUTES = [
   '/admin/settings/service',
   '/admin/settings/platforms',
   '/admin/settings/backends',
+  '/admin/settings/models',
   '/harness',
   '/apps/library',
 ];

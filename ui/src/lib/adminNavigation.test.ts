@@ -39,6 +39,7 @@ describe('isLocalSystemPath', () => {
     expect(isLocalSystemPath('/admin/settings/service')).toBe(true);
     expect(isLocalSystemPath('/admin/settings/platforms')).toBe(true);
     expect(isLocalSystemPath('/admin/settings/backends')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/models')).toBe(true);
     expect(isLocalSystemPath('/harness')).toBe(true);
     expect(isLocalSystemPath('/apps/library')).toBe(true);
   });
@@ -50,7 +51,6 @@ describe('isLocalSystemPath', () => {
 
   it('leaves remotely usable destinations open', () => {
     expect(isLocalSystemPath('/admin/settings/messaging')).toBe(false);
-    expect(isLocalSystemPath('/admin/settings/models')).toBe(false);
     expect(isLocalSystemPath('/admin/organization/overview')).toBe(false);
     expect(isLocalSystemPath('/')).toBe(false);
   });

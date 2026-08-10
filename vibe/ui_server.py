@@ -8248,6 +8248,7 @@ def _session_runtime_projection(
     *,
     pending_input_count: int | None = None,
     controller_available: bool | None = True,
+    authorization_context=None,
 ) -> dict[str, Any]:
     """Normalize the controller's orthogonal Session runtime axes for the UI."""
 
@@ -8283,6 +8284,12 @@ def _session_runtime_projection(
         if isinstance(raw_activities, list)
         else []
     )
+    if getattr(authorization_context, "is_remote", False):
+        activities = [
+            item
+            for item in activities
+            if str(item.get("item_kind") or "") == "backend_activity"
+        ]
     projection: dict[str, Any] = {
         # Retained as a read-only compatibility alias for older clients.
         "in_flight": None if foreground == "unknown" else foreground == "running",
@@ -8383,18 +8390,21 @@ async def sessions_bootstrap(session_id: str):
         turn_state = _session_runtime_projection(
             turn_body,
             pending_input_count=len(visible_queued),
+            authorization_context=authorization_context,
         )
     except internal_client.InternalServerUnavailable:
         turn_state = _session_runtime_projection(
             None,
             pending_input_count=len(visible_queued),
             controller_available=False,
+            authorization_context=authorization_context,
         )
     except internal_client.InternalServerTimeout:
         turn_state = _session_runtime_projection(
             None,
             pending_input_count=len(visible_queued),
             controller_available=None,
+            authorization_context=authorization_context,
         )
 
     return jsonify(
@@ -10543,6 +10553,7 @@ async def sessions_turn_state(session_id: str):
             _session_runtime_projection(
                 None,
                 controller_available=False,
+                authorization_context=getattr(g, "authorization_context", None),
             )
         )
     except internal_client.InternalServerTimeout:
@@ -10558,7 +10569,10 @@ async def sessions_turn_state(session_id: str):
             504,
         )
     body = result.get("body") or {}
-    projection = _session_runtime_projection(body)
+    projection = _session_runtime_projection(
+        body,
+        authorization_context=getattr(g, "authorization_context", None),
+    )
     projection["recovered_agent_status"] = bool(
         body.get("recovered_agent_status", False)
     )

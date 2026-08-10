@@ -138,8 +138,12 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         calls.append(("clear", user_key))
         return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
 
+    async def failures():  # pragma: no cover - must stay unreached
+        raise AssertionError("remote memory failures reached the local sidecar")
+
     monkeypatch.setattr(internal_client, "memory_profile", profile)
     monkeypatch.setattr(internal_client, "memory_clear", clear)
+    monkeypatch.setattr(internal_client, "memory_failures", failures)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -150,6 +154,12 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
 
     settings_response = client.get(
         "/api/memory/settings",
+        headers=remote_headers,
+        base_url="https://alex.avibe.bot",
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    failures_response = client.get(
+        "/api/memory/failures",
         headers=remote_headers,
         base_url="https://alex.avibe.bot",
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
@@ -168,8 +178,10 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert settings_response.status_code == 200
-    assert "diagnostics" not in settings_response.get_json()
+    assert settings_response.status_code == 403
+    assert settings_response.get_json()["code"] == "remote_execution_disabled"
+    assert failures_response.status_code == 403
+    assert failures_response.get_json()["code"] == "remote_execution_disabled"
     assert profile_response.status_code == 200
     # The profile read is genuinely scoped to the remote principal, so it keeps
     # crossing the tunnel under that principal's user key. `clear` only carries
@@ -267,9 +279,9 @@ def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_pat
     )
 
     assert missing_origin.status_code == 403
-    assert missing_origin.get_json() == {"status": "failed", "error": "memory_disabled"}
+    assert missing_origin.get_json()["code"] == "remote_execution_disabled"
     assert cross_origin.status_code == 403
-    assert cross_origin.get_json() == {"status": "failed", "error": "memory_disabled"}
+    assert cross_origin.get_json()["code"] == "remote_execution_disabled"
 
 
 def test_memory_status_proxies_controller_over_uds(monkeypatch, tmp_path) -> None:

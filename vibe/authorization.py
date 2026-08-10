@@ -467,15 +467,14 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             r"^/api/harness/counts$",
         ),
         # Memory reads that describe this principal's own view stay remote, and
-        # search is scoped to the caller. The admin log is not: its readers
-        # enumerate and hydrate memcells for every principal, so it stays local.
-        # Memory administration is absent for the same reason: a settings PATCH
-        # repoints the shared provider endpoints, and `runtime/restart` /
-        # `clear` act on the whole local sidecar rather than one principal.
-        (
-            frozenset({"GET", "HEAD"}),
-            r"^/api/memory/(?:settings|status|failures|profile)$",
-        ),
+        # search is scoped to the caller. Shared provider settings and the
+        # process-global failure log do not: both expose data across principals,
+        # so they stay trusted-local with the admin log and other sidecar-wide
+        # operations. Memory administration is absent for the same reason: a
+        # settings PATCH repoints the shared provider endpoints, and
+        # `runtime/restart` / `clear` act on the whole local sidecar rather than
+        # one principal.
+        (frozenset({"GET", "HEAD"}), r"^/api/memory/(?:status|profile)$"),
         (frozenset({"POST"}), r"^/api/memory/search$"),
     )
 )

@@ -1419,6 +1419,54 @@ def test_remote_session_and_project_metadata_predicates_remain_allowed():
     )
 
 
+def test_remote_turn_state_filters_harness_activity_labels(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def projected(_session_id):
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "background_activities": [
+                    {
+                        "id": "backend-1",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for turn",
+                        "status": "running",
+                    },
+                    {
+                        "id": "task-1",
+                        "item_kind": "task",
+                        "label": "private prompt head",
+                        "status": "scheduled",
+                    },
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "connected",
+            },
+        }
+
+    monkeypatch.setattr("vibe.internal_client.turn_state", projected)
+    response = client.get(
+        "/api/sessions/ses-local/turn-state",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [item["id"] for item in body["background_activities"]] == ["backend-1"]
+    assert body["background_activities"][0]["label"] == "Waiting for turn"
+
+
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     [
