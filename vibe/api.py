@@ -9491,36 +9491,13 @@ def save_claude_auth(payload: dict) -> dict:
         if base_url_change == "":
             base_url_change = None
 
-    settings_env: dict[str, str] = {}
-    existing_credential_type: str | None = None
-    existing_credential: str | None = None
-    if auth_mode == "api_key":
-        try:
-            from vibe.claude_config import (
-                read_claude_credential_from_settings,
-                read_claude_settings_env,
-            )
-
-            settings_env = read_claude_settings_env()
-            existing_credential_type, existing_credential = (
-                read_claude_credential_from_settings()
-            )
-        except Exception:
-            settings_env = {}
-
-    credential_type = None
-    if auth_mode == "api_key":
-        credential_type = raw_credential_type or existing_credential_type or "api_key"
-    credential = api_key or existing_credential
-    effective_base_url = base_url_change if base_url_present else None
-    if not base_url_present and auth_mode == "api_key":
-        existing_base = settings_env.get("ANTHROPIC_BASE_URL")
-        if isinstance(existing_base, str) and existing_base.strip():
-            effective_base_url = existing_base.strip()
-
     oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
 
-    from vibe.claude_config import apply_claude_auth
+    from vibe.claude_config import (
+        apply_claude_auth,
+        read_claude_credential_from_settings,
+        read_claude_settings_env,
+    )
 
     with config_write_transaction():
         try:
@@ -9530,6 +9507,23 @@ def save_claude_auth(payload: dict) -> dict:
 
             config = default_config()
         stored_claude = getattr(getattr(config, "agents", None), "claude", None)
+        settings_env: dict[str, str] = {}
+        existing_credential_type: str | None = None
+        existing_credential: str | None = None
+        if auth_mode == "api_key":
+            try:
+                settings_env = read_claude_settings_env()
+                existing_credential_type, existing_credential = (
+                    read_claude_credential_from_settings()
+                )
+            except Exception:
+                settings_env = {}
+        credential_type = (
+            raw_credential_type or existing_credential_type or "api_key"
+            if auth_mode == "api_key"
+            else None
+        )
+        credential = api_key or existing_credential
         if auth_mode == "api_key" and not credential:
             # Legacy installs may still have a credential cached in V2Config.
             credential = getattr(stored_claude, "api_key", None) or None
@@ -9538,12 +9532,17 @@ def save_claude_auth(payload: dict) -> dict:
                     "ok": False,
                     "message": "api_key is required when auth_mode='api_key'",
                 }
+        effective_base_url = base_url_change if base_url_present else None
         if (
             auth_mode == "api_key"
             and not base_url_present
-            and effective_base_url is None
         ):
-            effective_base_url = getattr(stored_claude, "base_url", None) or None
+            existing_base = settings_env.get("ANTHROPIC_BASE_URL")
+            effective_base_url = (
+                existing_base.strip()
+                if isinstance(existing_base, str) and existing_base.strip()
+                else getattr(stored_claude, "base_url", None) or None
+            )
         try:
             apply_claude_auth(
                 auth_mode=auth_mode,

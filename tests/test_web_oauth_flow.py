@@ -461,6 +461,49 @@ def test_utility_start_callback_runs_before_subprocess_creation(
     assert callback_threads[0] != event_loop_thread
 
 
+def test_utility_start_cancellation_restores_prepared_state_before_spawn(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_entered = threading.Event()
+    release_prepare = threading.Event()
+    events: list[str] = []
+
+    def prepare_start():
+        prepare_entered.set()
+        assert release_prepare.wait(timeout=5)
+        events.append("prepared")
+
+        def restore():
+            events.append("restored")
+
+        return restore
+
+    async def unexpected_spawn(*_args, **_kwargs):
+        events.append("spawn")
+        raise AssertionError("cancelled preparation must not spawn")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_spawn)
+
+    async def exercise():
+        task = asyncio.create_task(
+            service._run_utility_command(
+                "codex",
+                "logout",
+                prepare_start=prepare_start,
+            )
+        )
+        assert await asyncio.to_thread(prepare_entered.wait, 5)
+        task.cancel()
+        release_prepare.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(exercise())
+
+    assert events == ["prepared", "restored"]
+
+
 def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(
     service: AgentAuthService,
 ) -> None:

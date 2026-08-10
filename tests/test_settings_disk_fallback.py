@@ -958,6 +958,13 @@ def test_save_claude_auth_preserved_fields_share_final_config_transaction(
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    _write_claude_settings(
+        tmp_path,
+        {
+            "ANTHROPIC_API_KEY": "sk-old-settings",
+            "ANTHROPIC_BASE_URL": "https://old.example.invalid",
+        },
+    )
 
     from config.v2_config import CONFIG_LOCK, AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from storage.lock import MigrationFileLock

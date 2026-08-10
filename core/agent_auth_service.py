@@ -1285,11 +1285,27 @@ class AgentAuthService:
         doesn't lie about a partial sign-out. ``prepare_start`` persists
         pre-command state and may return a spawn-failure restoration.
         """
-        restore_on_spawn_failure = (
-            await run_blocking(prepare_start)
-            if prepare_start is not None
-            else None
-        )
+        restore_on_spawn_failure = None
+        if prepare_start is not None:
+            prepare_task = asyncio.create_task(asyncio.to_thread(prepare_start))
+            try:
+                restore_on_spawn_failure = await asyncio.shield(prepare_task)
+            except asyncio.CancelledError as cancellation:
+                while not prepare_task.done():
+                    try:
+                        await asyncio.shield(prepare_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not prepare_task.cancelled() and prepare_task.exception() is None:
+                    restore = prepare_task.result()
+                    if restore is not None:
+                        try:
+                            await run_blocking(restore)
+                        except asyncio.CancelledError:
+                            pass
+                raise cancellation
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
