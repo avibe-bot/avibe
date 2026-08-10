@@ -435,10 +435,34 @@ export const OpencodeProviderConfig: React.FC<{
         ...(apiKey ? { api_key: apiKey } : {}),
       });
       if (!result.ok) {
-        updateCustomProviderDraft({
-          saving: false,
-          error: result.message || (t('settings.backends.opencodeCustomProviderSaveFailed') as string),
-        });
+        const message = result.message || (t('settings.backends.opencodeCustomProviderSaveFailed') as string);
+        if (result.partial) {
+          if (result.saved === true) {
+            const nextId = result.provider_id || providerId;
+            setCustomProviderDraft(emptyCustomProviderDraft());
+            setShowCustomProviderForm(false);
+            setExpandedId(nextId);
+            setEditByProvider((prev) => ({
+              ...prev,
+              [nextId]: {
+                ...(prev[nextId] || emptyEdit()),
+                apiKey: '',
+                editingKey: false,
+                baseUrl,
+                error: message,
+              },
+            }));
+          } else {
+            updateCustomProviderDraft({
+              saving: false,
+              apiKey: '',
+              error: message,
+            });
+          }
+          await settlePartialMutation(result, result.provider_id || providerId, message, false);
+          return;
+        }
+        updateCustomProviderDraft({ saving: false, error: message });
         return;
       }
       setCustomProviderDraft(emptyCustomProviderDraft());
@@ -528,6 +552,7 @@ export const OpencodeProviderConfig: React.FC<{
         const message = result.message || (t('settings.backends.opencodeProviderSaveFailed') as string);
         updateEdit(provider.id, {
           saving: false,
+          ...(result.partial ? { apiKey: '', editingKey: false } : {}),
           error: message,
         });
         await settlePartialMutation(result, provider.id, message, false);

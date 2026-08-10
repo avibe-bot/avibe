@@ -10470,7 +10470,21 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
         )
     except Exception as exc:
         logger.warning("OpenCode custom provider save failed for %s: %s", provider_id, exc, exc_info=True)
-        return {"ok": False, "message": str(exc)}
+        _OPENCODE_OPTIONS_CACHE.clear()
+        try:
+            restart = restart_backend("opencode")
+        except Exception as restart_exc:
+            restart = {"ok": False, "message": str(restart_exc)}
+        _OPENCODE_OPTIONS_CACHE.clear()
+        return {
+            "ok": False,
+            "partial": True,
+            "saved": None,
+            "mutation_attempted": True,
+            "provider_id": provider_id.strip().lower(),
+            "message": str(exc),
+            "restart": restart,
+        }
 
     _OPENCODE_OPTIONS_CACHE.clear()
     try:
@@ -10547,18 +10561,25 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         )
         settlement = CancellationSettlement()
         if pid in auth_entries:
-            mutation_started = True
             auth_result = await settlement.wait(
                 _delete_opencode_provider_auth_async(pid)
             )
+            mutation_started = bool(auth_result.get("mutation_attempted"))
             if not auth_result.get("ok"):
+                restart = None
+                if mutation_started:
+                    restart = await _settle_opencode_delete_runtime(
+                        pid,
+                        clear_default=True,
+                        settlement=settlement,
+                    )
                 settlement.raise_if_cancelled()
-                return {
-                    "ok": False,
-                    "provider_id": pid,
-                    "message": auth_result.get("message") or "Provider auth removal failed",
-                }
-            mutation_started = True
+                return _opencode_delete_failure_result(
+                    pid,
+                    str(auth_result.get("message") or "Provider auth removal failed"),
+                    restart,
+                    mutation_attempted=mutation_started,
+                )
         mutation_started = True
         await settlement.run_blocking(
             remove_opencode_custom_provider,
@@ -10770,6 +10791,7 @@ async def _save_opencode_provider_auth_async(
     # providers consistently use at invocation time.
     config_key = config_api_key or api_key
     mutation_attempted = False
+    saved: bool | None = False
     if config_key:
         try:
             # The write may commit before raising, so this is possibly
@@ -10791,11 +10813,13 @@ async def _save_opencode_provider_auth_async(
             return {
                 "ok": False,
                 "mutation_attempted": mutation_attempted,
+                "saved": None,
                 "message": (
                     "Provider credential persistence failed: "
                     f"{exc}"
                 ),
             }
+        saved = True
 
         try:
             auth_entries = await asyncio.to_thread(
@@ -10805,11 +10829,15 @@ async def _save_opencode_provider_auth_async(
             if provider_id in auth_entries:
                 auth_cleanup = await _delete_opencode_provider_auth_async(provider_id)
                 if not auth_cleanup.get("ok"):
+                    cleanup_message = auth_cleanup.get("message")
                     return {
                         "ok": False,
                         "mutation_attempted": mutation_attempted,
-                        "message": auth_cleanup.get("message")
-                        or "API key saved, but stale OpenCode auth cleanup failed",
+                        "saved": saved,
+                        "message": (
+                            "API key saved, but stale OpenCode auth cleanup failed"
+                            + (f": {cleanup_message}" if cleanup_message else "")
+                        ),
                     }
         except Exception as exc:
             logger.warning(
@@ -10821,6 +10849,7 @@ async def _save_opencode_provider_auth_async(
             return {
                 "ok": False,
                 "mutation_attempted": mutation_attempted,
+                "saved": saved,
                 "message": (
                     "API key saved, but stale OpenCode auth cleanup failed: "
                     f"{exc}"
@@ -10857,6 +10886,7 @@ async def _save_opencode_provider_auth_async(
         return {
             "ok": False,
             "mutation_attempted": mutation_attempted,
+            "saved": saved if saved else None,
             "message": (
                 "API key saved, but base URL persistence failed: "
                 f"{exc}"
@@ -10886,9 +10916,9 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
       * non-empty string    → upsert (must start with http:// or https://)
     """
     if not isinstance(provider_id, str) or not provider_id.strip():
-        return {"ok": False, "message": "provider_id is required"}
+        return {"ok": False, "saved": False, "message": "provider_id is required"}
     if not isinstance(payload, dict):
-        return {"ok": False, "message": "Payload must be an object"}
+        return {"ok": False, "saved": False, "message": "Payload must be an object"}
     raw_key = payload.get("api_key")
     # ``api_key`` is optional when the provider is already configured: the
     # UI's "Replace" flow hides the plaintext and only sends ``base_url``
@@ -10929,7 +10959,7 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
             )
             has_existing_key = False
         if not has_existing_key:
-            return {"ok": False, "message": "api_key is required"}
+            return {"ok": False, "saved": False, "message": "api_key is required"}
 
     base_url: Any = _BASE_URL_UNCHANGED
     if "base_url" in payload:
@@ -10944,15 +10974,20 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
                 if not candidate.lower().startswith(("http://", "https://")):
                     return {
                         "ok": False,
+                        "saved": False,
                         "message": "base_url must start with http:// or https://",
                     }
                 base_url = candidate
         else:
-            return {"ok": False, "message": "base_url must be a string"}
+            return {"ok": False, "saved": False, "message": "base_url must be a string"}
         if base_url is None:
             custom_provider_ids = await _read_opencode_custom_provider_ids()
             if provider_id.strip() in custom_provider_ids:
-                return {"ok": False, "message": "base_url is required for custom providers"}
+                return {
+                    "ok": False,
+                    "saved": False,
+                    "message": "base_url is required for custom providers",
+                }
 
     try:
         result = await _save_opencode_provider_auth_async(
@@ -10997,13 +11032,57 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
 async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
     server = await _opencode_get_server()
     if server is None:
-        return {"ok": False, "message": "OpenCode is disabled in V2Config"}
+        return {
+            "ok": False,
+            "message": "OpenCode is disabled in V2Config",
+            "mutation_attempted": False,
+            "removed": False,
+        }
     request_loop = asyncio.get_running_loop()
+    remove_error: Exception | None = None
+    remove_cancelled: asyncio.CancelledError | None = None
     try:
         await server.remove_provider_auth(provider_id)
-    finally:
+    except asyncio.CancelledError as exc:
+        remove_cancelled = exc
+    except Exception as exc:
+        remove_error = exc
+
+    close_error: Exception | None = None
+    try:
         await server.close_http_session(loop=request_loop)
-    return {"ok": True}
+    except Exception as exc:
+        close_error = exc
+
+    if remove_cancelled is not None:
+        if close_error is not None:
+            logger.warning(
+                "OpenCode auth session close also failed for %s after cancellation: %s",
+                provider_id,
+                close_error,
+            )
+        raise remove_cancelled
+    if remove_error is not None:
+        if close_error is not None:
+            logger.warning(
+                "OpenCode auth session close also failed for %s after remove failure: %s",
+                provider_id,
+                close_error,
+            )
+        return {
+            "ok": False,
+            "message": str(remove_error),
+            "mutation_attempted": True,
+            "removed": None,
+        }
+    if close_error is not None:
+        return {
+            "ok": False,
+            "message": str(close_error),
+            "mutation_attempted": True,
+            "removed": True,
+        }
+    return {"ok": True, "mutation_attempted": True, "removed": True}
 
 
 def _clear_opencode_default_provider_if(provider_id: str) -> None:
@@ -11164,11 +11243,11 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         removed_auth = False
         settlement = CancellationSettlement()
         if pid in auth_entries:
-            mutation_started = True
             result = await settlement.wait(
                 _delete_opencode_provider_auth_async(pid)
             )
-            removed_auth = bool(result.get("ok"))
+            mutation_started = bool(result.get("mutation_attempted"))
+            removed_auth = result.get("removed") is True
         if pid in config_api_key_provider_ids:
             mutation_started = True
             await settlement.run_blocking(

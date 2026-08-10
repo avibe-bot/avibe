@@ -112,6 +112,80 @@ class _FakeModelServer:
         pass
 
 
+@pytest.mark.parametrize(
+    ("server_factory", "expected"),
+    [
+        (
+            lambda _tmp_path: None,
+            {
+                "ok": False,
+                "message": "OpenCode is disabled in V2Config",
+                "mutation_attempted": False,
+                "removed": False,
+            },
+        ),
+        (
+            lambda tmp_path: _FakeServer(tmp_path),
+            {
+                "ok": False,
+                "message": "remove failed",
+                "mutation_attempted": True,
+                "removed": None,
+            },
+        ),
+        (
+            lambda tmp_path: _FakeServer(tmp_path),
+            {
+                "ok": False,
+                "message": "close failed",
+                "mutation_attempted": True,
+                "removed": True,
+            },
+        ),
+    ],
+)
+def test_private_delete_provider_auth_reports_exact_mutation_facts(
+    monkeypatch,
+    tmp_path,
+    server_factory,
+    expected,
+) -> None:
+    server = server_factory(tmp_path)
+
+    async def get_server():
+        return server
+
+    monkeypatch.setattr(api, "_opencode_get_server", get_server)
+    if isinstance(server, _FakeServer) and expected["removed"] is None:
+        server.remove_error = RuntimeError("remove failed")
+    if isinstance(server, _FakeServer) and expected["removed"] is True:
+        async def fail_close(*_args, **_kwargs) -> None:
+            raise RuntimeError("close failed")
+
+        monkeypatch.setattr(server, "close_http_session", fail_close)
+
+    result = asyncio.run(api._delete_opencode_provider_auth_async("deepseek"))
+
+    assert result == expected
+
+
+def test_private_delete_provider_auth_reports_full_success(monkeypatch, tmp_path) -> None:
+    server = _FakeServer(tmp_path)
+
+    async def get_server():
+        return server
+
+    monkeypatch.setattr(api, "_opencode_get_server", get_server)
+
+    result = asyncio.run(api._delete_opencode_provider_auth_async("deepseek"))
+
+    assert result == {
+        "ok": True,
+        "mutation_attempted": True,
+        "removed": True,
+    }
+
+
 @pytest.fixture()
 def fake_save_env(monkeypatch, tmp_path):
     """Wire ``save_opencode_provider_auth`` to a temp HOME + fake server."""
@@ -414,6 +488,42 @@ def test_delete_custom_provider_settles_after_auth_delete_then_custom_failure(
     assert api._OPENCODE_OPTIONS_CACHE == {}
 
 
+def test_save_provider_auth_marks_write_exception_as_uncertain_without_leaking_key(
+    monkeypatch,
+    fake_save_env,
+) -> None:
+    _server, _home = fake_save_env
+
+    def fail_write(*_args, **_kwargs) -> None:
+        raise RuntimeError("write failed after possible commit")
+
+    monkeypatch.setattr(
+        "vibe.opencode_config.upsert_opencode_provider_api_key",
+        fail_write,
+    )
+
+    result = _save("deepseek", {"api_key": "sk-top-secret"})
+
+    assert result["ok"] is False
+    assert result["partial"] is True
+    assert result["mutation_attempted"] is True
+    assert result["saved"] is None
+    assert "sk-top-secret" not in repr(result)
+
+
+def test_save_provider_auth_marks_validation_failure_as_not_saved(fake_save_env) -> None:
+    result = _save(
+        "deepseek",
+        {"api_key": "sk-top-secret", "base_url": "ftp://invalid.example"},
+    )
+
+    assert result == {
+        "ok": False,
+        "saved": False,
+        "message": "base_url must start with http:// or https://",
+    }
+
+
 def test_delete_provider_normalizes_daemon_failure_after_local_key_removed(
     monkeypatch,
 ) -> None:
@@ -509,7 +619,7 @@ def test_delete_provider_settles_when_auth_delete_commits_then_close_fails(
     assert result["message"] == "session close failed"
     assert result["partial"] is True
     assert result["mutation_attempted"] is True
-    assert result["removed"] is None
+    assert result["removed"] is (None if custom else True)
     assert result["provider_id"] == provider_id
     assert server._read_auth() == {}
     assert clear_calls == [provider_id]
@@ -541,6 +651,7 @@ def test_save_provider_auth_partial_cleanup_clears_prefilled_cache(
     assert result["ok"] is False
     assert result["partial"] is True
     assert result["mutation_attempted"] is True
+    assert result["saved"] is True
     assert result["provider_id"] == "deepseek"
     assert result["message"] == "API key saved, but stale OpenCode auth cleanup failed: session close failed"
     assert result["restart"] == {"ok": True}
@@ -1095,6 +1206,57 @@ def test_save_custom_provider_exposes_partial_auth_write_after_config_saved(
     assert saved_providers == ["my-relay"]
 
 
+def test_save_custom_provider_marks_config_write_exception_as_uncertain(
+    monkeypatch,
+) -> None:
+    restart_calls: list[str] = []
+
+    async def provider_catalog() -> dict:
+        return {"ok": True, "providers": []}
+
+    def fail_write(*_args, **_kwargs) -> None:
+        raise RuntimeError("custom write failed after possible commit")
+
+    monkeypatch.setattr(api, "_get_opencode_providers_async", provider_catalog)
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_reserved_opencode_provider_id",
+        lambda _provider_id: False,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.upsert_opencode_custom_provider",
+        fail_write,
+    )
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
+
+    result = _save_custom(
+        {
+            "provider_id": "my-relay",
+            "name": "My Relay",
+            "adapter": "openai-compatible",
+            "base_url": "https://relay.example/v1",
+            "api_key": "sk-top-secret",
+        }
+    )
+
+    assert result == {
+        "ok": False,
+        "partial": True,
+        "saved": None,
+        "mutation_attempted": True,
+        "provider_id": "my-relay",
+        "message": "custom write failed after possible commit",
+        "restart": {"ok": True},
+    }
+    assert "sk-top-secret" not in repr(result)
+    assert restart_calls == ["opencode"]
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+
+
 def test_save_custom_provider_rejects_clearing_base_url(fake_save_env) -> None:
     from vibe.opencode_config import (
         read_opencode_provider_base_url,
@@ -1112,7 +1274,11 @@ def test_save_custom_provider_rejects_clearing_base_url(fake_save_env) -> None:
 
     result = _save("my-relay", {"base_url": ""})
 
-    assert result == {"ok": False, "message": "base_url is required for custom providers"}
+    assert result == {
+        "ok": False,
+        "saved": False,
+        "message": "base_url is required for custom providers",
+    }
     assert server.set_calls == []
     assert read_opencode_provider_base_url("my-relay", home=home) == "https://relay.example/v1"
 
