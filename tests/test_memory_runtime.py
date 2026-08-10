@@ -2580,11 +2580,25 @@ async def test_runtime_close_waits_for_active_call_log_maintenance(
     await runtime.reconcile(MemoryConfig())
     assert await asyncio.to_thread(entered.wait, 1)
 
+    retention_stop_entered = asyncio.Event()
+    original_stop_retention = runtime._stop_call_log_retention
+
+    async def observed_stop_retention() -> None:
+        retention_stop_entered.set()
+        await original_stop_retention()
+
+    monkeypatch.setattr(runtime, "_stop_call_log_retention", observed_stop_retention)
     closing = asyncio.create_task(memory_runtime_factory.close(runtime))
-    await asyncio.sleep(0)
-    assert not closing.done()
-    release.set()
-    await asyncio.wait_for(closing, timeout=1)
+    close_results: list[object] = []
+    try:
+        await retention_stop_entered.wait()
+        assert not closing.done()
+    finally:
+        release.set()
+        close_results.extend(
+            await asyncio.gather(closing, return_exceptions=True)
+        )
+    assert close_results == [None]
 
 
 async def test_clear_quiesce_does_not_delete_call_log_files(
@@ -2934,9 +2948,11 @@ async def test_runtime_restart_replaces_process_without_processing_preflight(
     await memory_runtime_factory.close(runtime)
 
 
+@pytest.mark.parametrize("force_pending_assertion_failure", [False, True])
 async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(
     tmp_path: Path,
     memory_runtime_factory,
+    force_pending_assertion_failure: bool,
 ) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -2966,10 +2982,33 @@ async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(
         await detached
 
     joined = asyncio.create_task(runtime.restart())
-    await asyncio.sleep(0)
-    assert joined.done() is False
-    release.set()
-    assert await joined == {"ok": True, "state": "ready"}
+    restart_results: list[object] = []
+
+    async def verify_joined_restart_is_retained() -> None:
+        try:
+            await asyncio.sleep(0)
+            joined_done = joined.done()
+            if force_pending_assertion_failure:
+                joined_done = True
+            assert joined_done is False
+        finally:
+            release.set()
+            restart_results.extend(
+                await asyncio.gather(
+                    detached,
+                    joined,
+                    return_exceptions=True,
+                )
+            )
+
+    if force_pending_assertion_failure:
+        with pytest.raises(AssertionError):
+            await verify_joined_restart_is_retained()
+    else:
+        await verify_joined_restart_is_retained()
+
+    assert isinstance(restart_results[0], asyncio.CancelledError)
+    assert restart_results[1] == {"ok": True, "state": "ready"}
     assert old.stops == 1
     assert len(factory.created) == 1
     await memory_runtime_factory.close(runtime)
@@ -3215,11 +3254,17 @@ async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     runtime._worker_task = asyncio.create_task(worker.drain_once())
     await asyncio.wait_for(add_entered.wait(), timeout=1.0)
     restarting = asyncio.create_task(runtime.restart())
-    await asyncio.sleep(0)
-    assert old.stops == 0
+    restart_results: list[object] = []
+    try:
+        await asyncio.sleep(0)
+        assert old.stops == 0
+    finally:
+        release_add.set()
+        restart_results.extend(
+            await asyncio.gather(restarting, return_exceptions=True)
+        )
 
-    release_add.set()
-    assert await restarting == {"ok": True, "state": "ready"}
+    assert restart_results == [{"ok": True, "state": "ready"}]
     assert pause_timeouts == [5.0]
     assert old.stops == 1
     row = store.list_queue_rows()[0]
@@ -3617,6 +3662,7 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     runtime._activation_loop = asyncio.get_running_loop()
     process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
     closing = asyncio.create_task(memory_runtime_factory.close(runtime))
+    close_results: list[object] = []
 
     async def verify_readiness_stays_closed() -> None:
         try:
@@ -3628,7 +3674,9 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
             assert activations == []
         finally:
             release_stop.set()
-            await closing
+            close_results.extend(
+                await asyncio.gather(closing, return_exceptions=True)
+            )
 
     if unexpected_activation:
         with pytest.raises(AssertionError):
@@ -3636,6 +3684,7 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     else:
         await verify_readiness_stays_closed()
         assert activations == []
+    assert close_results == [None]
     assert closing.done()
     assert process.stops == 1
 

@@ -1928,11 +1928,26 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
     assert await asyncio.to_thread(entered.wait, 1)
     assert _maintenance(runtime).is_open() is False
 
+    maintenance_close_entered = asyncio.Event()
+    maintenance = _maintenance(runtime)
+    original_maintenance_close = maintenance.close
+
+    async def observed_maintenance_close() -> None:
+        maintenance_close_entered.set()
+        await original_maintenance_close()
+
+    monkeypatch.setattr(maintenance, "close", observed_maintenance_close)
     closing = asyncio.create_task(memory_runtime_factory.close(runtime))
-    await asyncio.sleep(0)
-    assert closing.done() is False
-    release.set()
-    await closing
+    close_results: list[object] = []
+    try:
+        await maintenance_close_entered.wait()
+        assert closing.done() is False
+    finally:
+        release.set()
+        close_results.extend(
+            await asyncio.gather(closing, return_exceptions=True)
+        )
+    assert close_results == [None]
     assert _maintenance(runtime)._backup_stage_reconcile_task is None
 
 
