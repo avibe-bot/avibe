@@ -727,7 +727,6 @@
         "network": "网络暂不可用",
         "recovery": "已恢复",
         "manual": "手动调整",
-        "mapping": "已应用模型映射",
         "credential_expired": "凭证已过期",
         "credential_revoked": "凭证已撤销",
         "balance_exhausted": "余额不足",
@@ -736,7 +735,10 @@
         "unclassified_error": "来源发生未分类错误",
         "no_enabled_source": "没有已启用的来源",
         "no_eligible_source": "没有适用的来源",
-        "model_unsupported": "没有来源支持此模型"
+        "route_unconfigured": "尚未配置路由",
+        "source_missing": "已配置的来源已不存在",
+        "model_unsupported": "已配置的来源不再供应此模型",
+        "native_cli_unavailable": "当前进程无法使用 CLI 登录"
       }
     },
     "launch": {

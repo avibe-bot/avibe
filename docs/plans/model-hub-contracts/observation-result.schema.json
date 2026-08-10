@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/observation-result.schema.json",
   "title": "SourceObservation",
-  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state.",
+  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state. Any upstream response proves reachability, but a bare HTTP status proves neither protocol nor authentication; ambiguous observations therefore report authentication as authenticated only when response shape proved acceptance, and unknown otherwise.",
   "type": "object",
   "required": [
     "contract_version",
@@ -55,7 +55,7 @@
       "then": {
         "properties": {
           "reachable": { "const": true },
-          "authenticated": { "const": "authenticated" },
+          "authenticated": { "enum": ["authenticated", "unknown"] },
           "protocol": { "const": null }
         }
       }
@@ -132,7 +132,7 @@
       "contract_version": 5,
       "outcome": "ambiguous",
       "reachable": true,
-      "authenticated": "authenticated",
+      "authenticated": "unknown",
       "protocol": null,
       "discovery": "not_attempted",
       "models": []

@@ -727,7 +727,6 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
-        "mapping": "model mapping applied",
         "credential_expired": "credential expired",
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",
@@ -736,7 +735,10 @@
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",
-        "model_unsupported": "no source supports this model"
+        "route_unconfigured": "the route is not configured",
+        "source_missing": "the configured source no longer exists",
+        "model_unsupported": "the configured source no longer supplies this model",
+        "native_cli_unavailable": "CLI login is not available in this process"
       }
     },
     "launch": {

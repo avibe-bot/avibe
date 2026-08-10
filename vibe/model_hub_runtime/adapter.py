@@ -6,6 +6,7 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
 import aiohttp
@@ -54,6 +55,77 @@ _OAUTH_ENDPOINTS = {
 _WEBUI_OAUTH_VENDORS = frozenset({"anthropic", "openai", "codex", "antigravity"})
 
 
+class _ProtocolEvidence(Enum):
+    AUTHENTICATED = "authenticated"
+    REJECTED = "rejected"
+    UNPROVEN = "unproven"
+
+
+_OPENAI_ERROR_PARAMS = {
+    "openai_responses": frozenset(
+        {
+            "input",
+            "instructions",
+            "max_output_tokens",
+            "previous_response_id",
+            "reasoning",
+            "text",
+            "truncation",
+        }
+    ),
+    "openai_chat": frozenset(
+        {
+            "messages",
+            "max_completion_tokens",
+            "max_tokens",
+            "response_format",
+            "stop",
+            "temperature",
+            "tool_choice",
+            "top_p",
+        }
+    ),
+}
+
+
+def _parse_protocol_authenticated_evidence(
+    protocol: str,
+    status: int,
+    body: str | bytes,
+) -> _ProtocolEvidence:
+    """Classify only response shapes that identify the attempted protocol.
+
+    Observation is sequential and stops at the first proof. Status, vendor,
+    URL, and probe order never prove a protocol or credential by themselves;
+    a generic response therefore remains unproven even when its HTTP status is
+    conventionally associated with authentication or validation.
+    """
+
+    try:
+        payload = json.loads(body)
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return _ProtocolEvidence.UNPROVEN
+    if not isinstance(payload, dict):
+        return _ProtocolEvidence.UNPROVEN
+
+    shaped = _successful_response_proves_protocol(protocol, payload)
+    if not shaped:
+        error = payload.get("error")
+        if protocol == "anthropic":
+            shaped = (
+                payload.get("type") == "error"
+                and isinstance(error, dict)
+                and isinstance(error.get("type"), str)
+            )
+        elif protocol in _OPENAI_ERROR_PARAMS and isinstance(error, dict):
+            shaped = error.get("param") in _OPENAI_ERROR_PARAMS[protocol]
+    if not shaped:
+        return _ProtocolEvidence.UNPROVEN
+    if status in {401, 403}:
+        return _ProtocolEvidence.REJECTED
+    return _ProtocolEvidence.AUTHENTICATED
+
+
 async def _probe_protocol_response(
     *,
     vendor: str,
@@ -61,7 +133,7 @@ async def _probe_protocol_response(
     base_url: str | None,
     secret: str,
     timeout: float = 15.0,
-) -> bool:
+) -> _ProtocolEvidence:
     """Require a response from the candidate protocol's distinct request path."""
 
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
@@ -92,22 +164,12 @@ async def _probe_protocol_response(
                 json={},
                 allow_redirects=False,
             ) as response:
-                if response.status in {401, 403}:
-                    raise EngineClientError(
-                        "protocol observation authentication failed",
-                        status_code=response.status,
-                    )
-                if response.status in {400, 422}:
-                    # Empty JSON is intentionally invalid. A protocol-aware endpoint
-                    # rejects it after authentication without consuming a model turn.
-                    return True
-                if not 200 <= response.status < 300:
-                    raise EngineClientError(
-                        f"protocol observation returned HTTP {response.status}",
-                        status_code=response.status,
-                    )
                 body = await response.content.read(64 * 1024)
-                return _successful_response_proves_protocol(protocol, body)
+                return _parse_protocol_authenticated_evidence(
+                    protocol,
+                    response.status,
+                    body,
+                )
     except asyncio.TimeoutError:
         raise EngineClientError("protocol observation timed out", error_type="timeout") from None
     except aiohttp.ClientError:
@@ -129,22 +191,16 @@ class _AuthRecord:
 
 def _successful_response_proves_protocol(
     protocol: str,
-    body: str | bytes,
+    body: Mapping[str, Any],
 ) -> bool:
     """Keep the ambiguous-success boundary in one response-shape classifier."""
 
-    try:
-        payload = json.loads(body)
-    except (TypeError, UnicodeDecodeError, ValueError):
-        return False
-    if not isinstance(payload, dict):
-        return False
     if protocol == "anthropic":
-        return payload.get("type") == "message"
+        return body.get("type") == "message"
     if protocol == "openai_responses":
-        return payload.get("object") == "response"
+        return body.get("object") == "response"
     if protocol == "openai_chat":
-        return payload.get("object") in {"chat.completion", "chat.completion.chunk"}
+        return body.get("object") in {"chat.completion", "chat.completion.chunk"}
     return False
 
 
@@ -154,7 +210,7 @@ def _probe_oauth_protocol_response(
     auth: _AuthRecord,
     vendor: str,
     protocol: str,
-) -> bool:
+) -> _ProtocolEvidence:
     """Probe one allowlisted OAuth upstream through the engine-held credential."""
 
     if vendor == "anthropic" and protocol == "anthropic":
@@ -199,21 +255,10 @@ def _probe_oauth_protocol_response(
             "protocol observation returned an invalid status",
             error_type="invalid_json",
         )
-    if status in {401, 403}:
-        raise EngineClientError(
-            "protocol observation authentication failed",
-            status_code=status,
-        )
-    if status in {400, 422}:
-        return True
-    if not 200 <= status < 300:
-        raise EngineClientError(
-            f"protocol observation returned HTTP {status}",
-            status_code=status,
-        )
     body = payload.get("body")
-    return _successful_response_proves_protocol(
+    return _parse_protocol_authenticated_evidence(
         protocol,
+        status,
         body if isinstance(body, str) else "",
     )
 
@@ -549,12 +594,13 @@ class CLIProxyEngineAdapter:
             raise EngineStateError("credential does not match observation target")
 
         failures: list[EngineClientError] = []
+        received_unproven_response = False
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
             try:
                 if credential_kind == "api_key":
-                    proved = await _probe_protocol_response(
+                    evidence = await _probe_protocol_response(
                         vendor=normalized_vendor,
                         protocol=protocol,
                         base_url=base_url,
@@ -562,7 +608,7 @@ class CLIProxyEngineAdapter:
                     )
                 else:
                     assert oauth_auth is not None
-                    proved = await asyncio.to_thread(
+                    evidence = await asyncio.to_thread(
                         _probe_oauth_protocol_response,
                         client=client,
                         auth=oauth_auth,
@@ -572,12 +618,15 @@ class CLIProxyEngineAdapter:
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
-            if not proved:
+            if evidence is _ProtocolEvidence.UNPROVEN:
+                received_unproven_response = True
+                continue
+            if evidence is _ProtocolEvidence.REJECTED:
                 return SourceObservation(
-                    outcome=ObservationOutcome.AMBIGUOUS,
+                    outcome=ObservationOutcome.AUTHENTICATION_FAILED,
                     reachable=True,
-                    authenticated=True,
-                    protocol=None,
+                    authenticated=False,
+                    protocol=protocol,
                     discovery=ObservationDiscovery.NOT_ATTEMPTED,
                     model_ids=(),
                 )
@@ -610,11 +659,11 @@ class CLIProxyEngineAdapter:
                 model_ids=tuple(models),
             )
 
-        if any(error.status_code in {401, 403} for error in failures):
+        if received_unproven_response:
             return SourceObservation(
-                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+                outcome=ObservationOutcome.AMBIGUOUS,
                 reachable=True,
-                authenticated=False,
+                authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 model_ids=(),

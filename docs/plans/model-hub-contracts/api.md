@@ -82,8 +82,12 @@ protocol for every later operation.
 
 The observation result has six terminal outcomes: `observed`, `ambiguous`,
 `unreachable`, `authentication_failed`, `adapter_error`, and `timeout`. Its
-`protocol` is non-null only when a real upstream response proves the transport;
-`ambiguous` is the sole outcome that asks for the one-time probe-order hint.
+`protocol` is non-null only when a real upstream response shape proves the
+transport. A bare HTTP status proves reachability, but proves neither protocol nor
+authentication. Consequently, `ambiguous` always has `reachable: true` and
+`protocol: null`, while `authenticated` is `authenticated` only when response shape
+proved acceptance and is `unknown` otherwise. `ambiguous` is the sole outcome that
+asks for the one-time probe-order hint.
 
 ## Identifier rules
 

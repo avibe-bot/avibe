@@ -39,6 +39,7 @@ from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
+    _await_owned_task_before_settling,
     _matching_v1_model_id,
 )
 from modules.agents.model_hub import ModelHubRuntimeRouter
@@ -1156,6 +1157,22 @@ def test_source_creation_cancellation_during_provision_revokes_owned_credential(
     assert store.load().sources == []
     assert adapter.revoked == ["cred_00000001"]
     assert service.revocations.list() == []
+
+
+def test_cancelled_owned_task_is_terminal_without_settlement_retry() -> None:
+    async def scenario() -> None:
+        async def cancelled_operation() -> None:
+            raise asyncio.CancelledError
+
+        task = asyncio.create_task(cancelled_operation())
+        await asyncio.sleep(0)
+        assert task.cancelled()
+        with patch("core.handlers.model_hub.service.asyncio.shield") as shield:
+            with pytest.raises(asyncio.CancelledError):
+                await _await_owned_task_before_settling(task)
+        shield.assert_not_called()
+
+    asyncio.run(scenario())
 
 
 def test_source_creation_cancellation_after_persist_keeps_source_and_credential(tmp_path):

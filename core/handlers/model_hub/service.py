@@ -305,12 +305,7 @@ async def _acquire_credential_ref_with_cancellation_ownership(
     except asyncio.CancelledError as cancelled:
         # The shield leaves provisioning alive; wait for its ref before settling
         # cancellation so the transient material can be journaled and revoked.
-        while True:
-            try:
-                transient_ref = await asyncio.shield(provision_task)
-                break
-            except asyncio.CancelledError:
-                continue
+        transient_ref = await _await_owned_task_before_settling(provision_task)
         await _rollback_credential_before_settling(
             service,
             rollback_source_id,
@@ -345,13 +340,23 @@ async def _rollback_credential_before_settling(
     try:
         await asyncio.shield(rollback_task)
     except asyncio.CancelledError as cancelled:
-        while True:
-            try:
-                await asyncio.shield(rollback_task)
-                break
-            except asyncio.CancelledError:
-                continue
+        await _await_owned_task_before_settling(rollback_task)
         raise cancelled
+
+
+async def _await_owned_task_before_settling(
+    task: asyncio.Task[Any],
+) -> Any:
+    """Wait through caller cancellation, but never retry a cancelled owned task."""
+
+    while True:
+        if task.cancelled():
+            raise asyncio.CancelledError
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
 
 
 async def _require_credential_cleanup(
@@ -384,12 +389,7 @@ async def _rollback_replacement_before_settling(
     try:
         await asyncio.shield(replacement_task)
     except asyncio.CancelledError as cancelled:
-        while True:
-            try:
-                await asyncio.shield(replacement_task)
-                break
-            except asyncio.CancelledError:
-                continue
+        await _await_owned_task_before_settling(replacement_task)
         raise cancelled
 
 
@@ -831,14 +831,32 @@ class ModelHubService:
         ) or len(set(observation.model_ids)) != len(observation.model_ids):
             raise ModelHubError("discovery_failed", status=502)
         expected = {
-            ObservationOutcome.OBSERVED: (True, True),
-            ObservationOutcome.AMBIGUOUS: (True, True),
-            ObservationOutcome.UNREACHABLE: (False, None),
-            ObservationOutcome.AUTHENTICATION_FAILED: (True, False),
-            ObservationOutcome.ADAPTER_ERROR: (None, None),
-            ObservationOutcome.TIMEOUT: (None, None),
+            ObservationOutcome.OBSERVED: (frozenset({True}), frozenset({True})),
+            ObservationOutcome.AMBIGUOUS: (
+                frozenset({True}),
+                frozenset({True, None}),
+            ),
+            ObservationOutcome.UNREACHABLE: (
+                frozenset({False}),
+                frozenset({None}),
+            ),
+            ObservationOutcome.AUTHENTICATION_FAILED: (
+                frozenset({True}),
+                frozenset({False}),
+            ),
+            ObservationOutcome.ADAPTER_ERROR: (
+                frozenset({None}),
+                frozenset({None}),
+            ),
+            ObservationOutcome.TIMEOUT: (
+                frozenset({None}),
+                frozenset({None}),
+            ),
         }[observation.outcome]
-        if observation.reachable is not expected[0] or observation.authenticated is not expected[1]:
+        if (
+            observation.reachable not in expected[0]
+            or observation.authenticated not in expected[1]
+        ):
             raise ModelHubError("discovery_failed", status=502)
         if observation.outcome is ObservationOutcome.OBSERVED and observation.protocol is None:
             raise ModelHubError("discovery_failed", status=502)

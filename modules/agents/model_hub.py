@@ -16,7 +16,12 @@ from typing import Any, Callable, Literal, Mapping, Optional, cast
 from config import paths
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
-from core.handlers.model_hub.events import EventAgent, EventReason
+from core.handlers.model_hub.events import (
+    EVENT_REASON_AUTHORITY,
+    EventAgent,
+    EventReason,
+    event_reason_label,
+)
 from core.handlers.model_hub.resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -258,15 +263,12 @@ def _localized_launch_error(
             source = str(blocker.get("source") or "")
             detail_key = str(blocker.get("detail_key") or "")
             blocker_reason = str(blocker.get("reason") or "")
-            if blocker_reason == "native_cli_unavailable":
-                detail = i18n_t(
-                    "modelHub.launch.native_cli_unavailable",
-                    language,
-                )
+            if blocker_reason in EVENT_REASON_AUTHORITY:
+                detail = event_reason_label(blocker_reason, language)
             else:
                 reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
                 detail = (
-                    i18n_t(f"modelHub.events.reason.{reason}", language)
+                    event_reason_label(reason, language)
                     if reason is not None
                     else str(blocker.get("status") or "")
                 )

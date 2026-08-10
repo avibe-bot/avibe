@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast, get_args
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
@@ -36,9 +37,11 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.events import (
     BoundedEventLog,
+    EVENT_REASON_AUTHORITY,
     EventKind,
     EventReason,
     build_resolution_event,
+    event_reason_label,
 )
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
@@ -65,7 +68,9 @@ from modules.agents.model_hub import (
 from storage.models import agent_sessions, messages, metadata
 from vibe.model_hub_runtime.adapter import (
     CLIProxyEngineAdapter,
+    _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
+    _ProtocolEvidence,
 )
 from vibe.model_hub_runtime.client import EngineClientError, probe_models
 from vibe.model_hub_runtime.state import EngineStateStore
@@ -120,6 +125,33 @@ def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
         assert rendered.detail == launch["route_unconfigured"].format(
             model="menu-model"
         )
+
+
+def test_structural_blocker_copy_uses_its_reason_instead_of_source_status() -> None:
+    failure = ModelHubError(
+        "no_candidate",
+        data={
+            "copy_key": "interrupted",
+            "model": "menu-model",
+            "blockers": [
+                {
+                    "source": "Exact source",
+                    "status": "standby",
+                    "reason": "model_unsupported",
+                }
+            ],
+        },
+    )
+
+    rendered = _localized_launch_error(
+        SimpleNamespace(config=SimpleNamespace(language="en")),
+        "claude",
+        "menu-model",
+        failure,
+    )
+
+    assert event_reason_label("model_unsupported", "en") in rendered.detail
+    assert "standby" not in rendered.detail
 
 
 class MemoryStore:
@@ -1347,8 +1379,8 @@ def test_source_observation_stops_at_the_first_response_backed_proof(
 
     hinted_order = tuple(reversed(SOURCE_PROTOCOLS))
 
-    async def every_candidate_is_supported(**_kwargs) -> bool:
-        return True
+    async def every_candidate_is_supported(**_kwargs) -> _ProtocolEvidence:
+        return _ProtocolEvidence.AUTHENTICATED
 
     with (
         patch(
@@ -1376,8 +1408,8 @@ def test_source_observation_stops_at_the_first_response_backed_proof(
     ]
     assert inventory_probe.await_args.kwargs["protocol"] == hinted_order[0]
 
-    async def indistinguishable_response(**_kwargs) -> bool:
-        return False
+    async def indistinguishable_response(**_kwargs) -> _ProtocolEvidence:
+        return _ProtocolEvidence.UNPROVEN
 
     with (
         patch(
@@ -1400,17 +1432,18 @@ def test_source_observation_stops_at_the_first_response_backed_proof(
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == [
-        hinted_order[0]
-    ]
+    assert ambiguous.authenticated is None
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
+        hinted_order
+    )
     inventory_probe.assert_not_awaited()
 
     proved_protocol = SOURCE_PROTOCOLS[1]
 
-    async def later_protocol_probe(**kwargs) -> bool:
+    async def later_protocol_probe(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] != proved_protocol:
             raise unsupported
-        return True
+        return _ProtocolEvidence.AUTHENTICATED
 
     with (
         patch(
@@ -1468,7 +1501,18 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
             }
         if path == "/api-call":
             api_calls.append(payload)
-            return {"status_code": 400, "header": {}, "body": "{}"}
+            return {
+                "status_code": 400,
+                "header": {},
+                "body": json.dumps(
+                    {
+                        "error": {
+                            "type": "invalid_request_error",
+                            "param": "input",
+                        }
+                    }
+                ),
+            }
         if path == "/auth-files/models":
             assert query == {"name": "codex-test.json"}
             return {"models": [{"id": "gpt-5.6"}]}
@@ -1518,6 +1562,95 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
+    assert ambiguous.authenticated is None
+
+
+@pytest.mark.parametrize(
+    ("protocol", "success_body", "error_body"),
+    [
+        (
+            "anthropic",
+            {"type": "message"},
+            {"type": "error", "error": {"type": "invalid_request_error"}},
+        ),
+        (
+            "openai_responses",
+            {"object": "response"},
+            {"error": {"type": "invalid_request_error", "param": "input"}},
+        ),
+        (
+            "openai_chat",
+            {"object": "chat.completion"},
+            {"error": {"type": "invalid_request_error", "param": "messages"}},
+        ),
+    ],
+)
+def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
+    protocol: str,
+    success_body: dict,
+    error_body: dict,
+) -> None:
+    assert (
+        _parse_protocol_authenticated_evidence(
+            protocol,
+            200,
+            json.dumps(success_body),
+        )
+        is _ProtocolEvidence.AUTHENTICATED
+    )
+    assert (
+        _parse_protocol_authenticated_evidence(
+            protocol,
+            400,
+            json.dumps(error_body),
+        )
+        is _ProtocolEvidence.AUTHENTICATED
+    )
+    assert (
+        _parse_protocol_authenticated_evidence(
+            protocol,
+            401,
+            json.dumps(error_body),
+        )
+        is _ProtocolEvidence.REJECTED
+    )
+    assert (
+        _parse_protocol_authenticated_evidence(protocol, 400, "{}")
+        is _ProtocolEvidence.UNPROVEN
+    )
+
+
+def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:
+    module_path = Path(__file__).parents[1] / "vibe/model_hub_runtime/adapter.py"
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    consumers = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in {"_probe_protocol_response", "_probe_oauth_protocol_response"}
+    }
+
+    assert consumers.keys() == {
+        "_probe_protocol_response",
+        "_probe_oauth_protocol_response",
+    }
+    for consumer in consumers.values():
+        calls = [node for node in ast.walk(consumer) if isinstance(node, ast.Call)]
+        assert any(
+            isinstance(call.func, ast.Name)
+            and call.func.id == "_parse_protocol_authenticated_evidence"
+            for call in calls
+        )
+        compared_statuses = {
+            constant.value
+            for compare in ast.walk(consumer)
+            if isinstance(compare, ast.Compare)
+            for constant in ast.walk(compare)
+            if isinstance(constant, ast.Constant)
+            and isinstance(constant.value, int)
+            and not isinstance(constant.value, bool)
+        }
+        assert not compared_statuses
 
 
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
@@ -2245,7 +2378,62 @@ def test_resolution_event_reason_contract_matches_runtime_vocabulary() -> None:
     schema = json.loads(
         (CONTRACTS / "resolution-event.schema.json").read_text(encoding="utf-8")
     )
-    assert tuple(schema["properties"]["reason"]["enum"]) == get_args(EventReason)
+    authority = tuple(EVENT_REASON_AUTHORITY)
+    assert tuple(schema["properties"]["reason"]["enum"]) == authority
+
+    locale_reasons = {
+        locale: json.loads(
+            (Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(
+                encoding="utf-8"
+            )
+        )["modelHub"]["events"]["reason"]
+        for locale in ("en", "zh")
+    }
+    assert all(tuple(reasons) == authority for reasons in locale_reasons.values())
+    assert all(
+        event_reason_label(reason, locale) != f"modelHub.events.reason.{reason}"
+        for locale in locale_reasons
+        for reason in authority
+    )
+
+
+@pytest.mark.parametrize("reason", tuple(EVENT_REASON_AUTHORITY))
+def test_every_authoritative_reason_has_an_event_emission_path(reason: EventReason) -> None:
+    reason_class = EVENT_REASON_AUTHORITY[reason]
+    fields: dict = {
+        "agent": "system",
+        "model_id": None,
+        "reason": reason,
+        "now": NOW,
+    }
+    if reason_class == "structural":
+        fields.update(agent="codex", kind="supply_interrupted", model_id="model")
+    elif reason_class == "self_healing":
+        fields.update(kind="cooldown", from_source="src_reason01")
+    elif reason_class == "non_self_healing":
+        fields.update(kind="needs_action", from_source="src_reason01")
+    elif reason_class == "request_scoped":
+        fields.update(
+            agent="codex",
+            kind="switch",
+            model_id="model",
+            from_source="src_reason01",
+            to_source="src_reason02",
+        )
+    elif reason == "recovery":
+        fields.update(kind="recover", to_source="src_reason01")
+    else:
+        fields.update(
+            kind="channel_switch",
+            from_source="src_reason01",
+            to_source="src_reason01",
+        )
+
+    event = build_resolution_event(**fields)
+
+    assert event.reason == reason
+    assert event.human_en
+    assert event.human_zh
 
 
 def test_shared_source_cooldown_emits_only_on_state_transition(
