@@ -1350,17 +1350,17 @@ class V2Config:
         memory_payload = payload.get("memory", {})
         if not isinstance(memory_payload, dict):
             raise ValueError("Config 'memory' must be an object")
-        memory_processing_payload = memory_payload.get("processing")
-        if memory_processing_payload is None:
-            memory_processing_payload = {}
+        # Default only when each nested block is absent. An explicitly null
+        # ``processing`` / ``llm`` / ``embedding`` block is malformed config,
+        # not an omission, and is rejected by the object checks below — the
+        # same contract the top-level ``memory`` block already enforces, so a
+        # corrupted ``"memory": {"processing": null}`` surfaces as an error
+        # instead of being silently normalized to empty endpoint defaults.
+        memory_processing_payload = memory_payload.get("processing", {})
         if not isinstance(memory_processing_payload, dict):
             raise ValueError("Config 'memory.processing' must be an object")
-        memory_llm_payload = memory_processing_payload.get("llm")
-        memory_embedding_payload = memory_processing_payload.get("embedding")
-        if memory_llm_payload is None:
-            memory_llm_payload = {}
-        if memory_embedding_payload is None:
-            memory_embedding_payload = {}
+        memory_llm_payload = memory_processing_payload.get("llm", {})
+        memory_embedding_payload = memory_processing_payload.get("embedding", {})
         if not isinstance(memory_llm_payload, dict):
             raise ValueError("Config 'memory.processing.llm' must be an object")
         if not isinstance(memory_embedding_payload, dict):
