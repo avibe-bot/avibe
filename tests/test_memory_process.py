@@ -2198,6 +2198,42 @@ async def test_rebuild_normalizes_relative_provider_root_before_launch(
     ).parent.parent == provider_parent
 
 
+def test_sidecar_and_rebuild_canonicalize_provider_root_symlink_alias(
+    tmp_path: Path,
+) -> None:
+    provider_parent = tmp_path / "provider-parent"
+    provider_parent.mkdir(mode=0o700)
+    alias_parent = tmp_path / "legacy-provider-parent"
+    alias_parent.symlink_to(provider_parent, target_is_directory=True)
+    expected_root = provider_parent / "everos-root"
+
+    sidecar = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=alias_parent / "everos-root",
+        settings=_settings(),
+    )
+    rebuild = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "rebuild-home",
+        provider_root=expected_root,
+        settings=_settings(),
+    )
+
+    assert sidecar.provider_root == expected_root
+    assert rebuild._provider_root == expected_root
+    assert sidecar._ownership._provider_root == expected_root
+    assert rebuild._ownership._provider_root == expected_root
+    assert sidecar._child_environment()["EVEROS_ROOT"] == str(expected_root)
+    sidecar._ownership.record_launch(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+        None,
+    )
+    record = json.loads(sidecar._ownership.record_path.read_text(encoding="utf-8"))
+    assert record["provider_root"] == str(expected_root)
+
+
 async def test_rebuild_normalizes_relative_interpreter_before_child_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3701,6 +3737,24 @@ def test_sidecar_root_discovery_requires_exact_uid_argv_root_and_role(
     assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {
         _ORPHAN_PID: _ORPHAN_CREATE_TIME
     }
+
+    canonical_root = tmp_path / "canonical-root"
+    canonical_root.mkdir()
+    legacy_root = tmp_path / "legacy-root"
+    legacy_root.symlink_to(canonical_root, target_is_directory=True)
+    symlink_spelling = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment={"EVEROS_ROOT": str(legacy_root)},
+    )
+    monkeypatch.setattr(
+        memory_process.psutil,
+        "process_iter",
+        lambda: [symlink_spelling],
+    )
+    assert memory_process._processes_serving_owned_root(
+        provider_root=canonical_root,
+    ) == {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
 
     rejected = [
         _RebuildDiscoveryCandidate(

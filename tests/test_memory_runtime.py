@@ -1275,25 +1275,85 @@ def _recording_ownership(
     *,
     failure: BaseException | None = None,
 ) -> list[dict[str, Path]]:
-    """Replace the runtime's ``SidecarOwnership`` with a recorder of reap calls."""
+    """Replace the runtime's locked recovery process with a reap recorder."""
 
     reaps: list[dict[str, Path]] = []
 
-    class _Ownership:
-        def __init__(self, *, record_path: Path, socket_path: Path, provider_root: Path, **_kwargs) -> None:
+    class _Recovery:
+        def __init__(
+            self,
+            python,
+            *,
+            effective_home: Path,
+            provider_root: Path,
+            **_kwargs,
+        ) -> None:
+            assert python is None
             self._inputs = {
-                "record_path": record_path,
-                "socket_path": socket_path,
+                "record_path": effective_home / "memory" / ".rt" / "everos.sidecar.json",
+                "socket_path": effective_home / "memory" / ".rt" / "everos.sock",
                 "provider_root": provider_root,
             }
 
-        async def reap(self) -> None:
+        async def reconcile_orphan(self) -> None:
             reaps.append(self._inputs)
             if failure is not None:
                 raise failure
 
-    monkeypatch.setattr(memory_runtime, "SidecarOwnership", _Ownership)
+    monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", _Recovery)
     return reaps
+
+
+async def test_recorded_orphan_recovery_routes_through_provider_root_exclusion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    recoveries: list[tuple[Path | None, Path]] = []
+
+    class _LockedRecovery:
+        def __init__(
+            self,
+            python,
+            *,
+            effective_home: Path,
+            provider_root: Path,
+            **_kwargs,
+        ) -> None:
+            assert python is None
+            self._inputs = (effective_home, provider_root)
+
+        async def reconcile_orphan(self) -> None:
+            recoveries.append(self._inputs)
+
+    class _UnlockedOwnership:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("runtime recovery bypassed provider-root exclusion")
+
+    monkeypatch.setattr(
+        memory_runtime,
+        "EverOSRebuildProcess",
+        _LockedRecovery,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        memory_runtime,
+        "SidecarOwnership",
+        _UnlockedOwnership,
+        raising=False,
+    )
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    assert await runtime.reconcile(MemoryConfig(enabled=False)) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert recoveries == [(tmp_path, tmp_path / "memory" / "everos-root")]
+    await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.parametrize("boot", ["disabled", "runtime_missing", "store_unavailable"])
@@ -1493,11 +1553,11 @@ async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
     factory = FakeEverOSProcessFactory()
     reaps = 0
 
-    class _Ownership:
-        def __init__(self, **_kwargs) -> None:
+    class _Recovery:
+        def __init__(self, _python, **_kwargs) -> None:
             return None
 
-        async def reap(self) -> None:
+        async def reconcile_orphan(self) -> None:
             nonlocal reaps
             reaps += 1
             if reaps == 1:
@@ -1505,7 +1565,7 @@ async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
                 started.set()
                 await release.wait()
 
-    monkeypatch.setattr(memory_runtime, "SidecarOwnership", _Ownership)
+    monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", _Recovery)
     config = MemoryConfig(
         enabled=True,
         processing=MemoryProcessingConfig(

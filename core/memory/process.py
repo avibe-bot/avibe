@@ -348,7 +348,7 @@ class EverOSProcess:
         provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
-        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
+        self._provider_root = _canonical_provider_root(provider_root_path)
         self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._host = _SystemProcessHost() if _host is None else _host
@@ -1095,7 +1095,7 @@ class EverOSRebuildProcess:
         provider_root_path = (
             Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         )
-        self._provider_root = Path(os.path.abspath(os.fspath(provider_root_path)))
+        self._provider_root = _canonical_provider_root(provider_root_path)
         self._socket_path = self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
         self._timeout_seconds = _positive_timeout(timeout_seconds, _REBUILD_TIMEOUT_SECONDS)
@@ -1293,14 +1293,29 @@ def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:
 def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
     """Bind coordination to the canonical root location, outside provider data."""
 
-    absolute_root = Path(os.path.abspath(os.fspath(provider_root)))
-    canonical_root = absolute_root.parent.resolve(strict=True) / absolute_root.name
+    canonical_root = _canonical_provider_root(provider_root)
+    canonical_root = canonical_root.parent.resolve(strict=True) / canonical_root.name
     root_identity = hashlib.sha256(os.fsencode(canonical_root)).hexdigest()
     return (
         canonical_root.parent
         / _REBUILD_LOCK_DIRECTORY
         / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
     )
+
+
+def _canonical_provider_root(provider_root: Path | str) -> Path:
+    """One physical provider-root spelling for locks, records, env, and scans."""
+
+    return Path(os.path.abspath(os.fspath(provider_root))).resolve(strict=False)
+
+
+def _provider_roots_match(value: object, expected: Path) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return _canonical_provider_root(value) == _canonical_provider_root(expected)
+    except (OSError, RuntimeError):
+        return False
 
 
 def sidecar_record_path(memory_dir: Path | str) -> Path:
@@ -1790,7 +1805,10 @@ class SidecarOwnership:
                     )
                     or (own_uid is not None and identity.uid != own_uid)
                     or identity.environment is None
-                    or identity.environment.get("EVEROS_ROOT") != str(self._provider_root)
+                    or not _provider_roots_match(
+                        identity.environment.get("EVEROS_ROOT"),
+                        self._provider_root,
+                    )
                     or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
                 ):
                     raise RuntimeError(
@@ -2269,7 +2287,10 @@ def _record_for_this_installation(
 
     if not isinstance(record, dict):
         return None
-    if record.get("socket_path") != str(socket_path) or record.get("provider_root") != str(provider_root):
+    if (
+        record.get("socket_path") != str(socket_path)
+        or not _provider_roots_match(record.get("provider_root"), provider_root)
+    ):
         return None
     return record
 
@@ -2382,7 +2403,10 @@ def _process_names_owned_runtime(
         # Includes the ``NoSuchProcess`` a field read re-raises: a process that is
         # gone needs no signal, and one that discloses nothing earns none.
         return False
-    if environment is None or environment.get("EVEROS_ROOT") != str(provider_root):
+    if environment is None or not _provider_roots_match(
+        environment.get("EVEROS_ROOT"),
+        provider_root,
+    ):
         return False
     return role is None or environment.get("AVIBE_MEMORY_CHILD_ROLE") == role.value
 
@@ -2483,7 +2507,10 @@ def _classify_recorded_child(
             return _RecordedSidecar.NOT_OURS
     if not legacy_sidecar and identity.environment is not None:
         if (
-            identity.environment.get("EVEROS_ROOT") != str(provider_root)
+            not _provider_roots_match(
+                identity.environment.get("EVEROS_ROOT"),
+                provider_root,
+            )
             or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
         ):
             return _RecordedSidecar.NOT_OURS
@@ -2619,7 +2646,10 @@ def _processes_serving_owned_root(*, provider_root: Path) -> dict[int, float]:
             raise RuntimeError(
                 f"sidecar identity could not be verified (pid {candidate.pid})"
             )
-        if environment.get("EVEROS_ROOT") != str(provider_root):
+        if not _provider_roots_match(
+            environment.get("EVEROS_ROOT"),
+            provider_root,
+        ):
             continue
         role = environment.get("AVIBE_MEMORY_CHILD_ROLE")
         if role not in (None, _MemoryChildRole.SIDECAR.value):
@@ -2668,7 +2698,10 @@ def _processes_rebuilding_owned_root(
         if created_at is None or environment is None:
             raise RuntimeError(f"rebuild child identity could not be verified (pid {candidate.pid})")
         if (
-            environment.get("EVEROS_ROOT") != str(provider_root)
+            not _provider_roots_match(
+                environment.get("EVEROS_ROOT"),
+                provider_root,
+            )
             or environment.get("AVIBE_MEMORY_CHILD_ROLE")
             != _MemoryChildRole.CASCADE_REBUILD.value
         ):
