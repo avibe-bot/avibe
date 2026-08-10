@@ -67,6 +67,64 @@ class EverOSProcessSettings:
     call_log_db_path: Path | None = None
 
 
+class _ProcessKind(Enum):
+    SIDECAR = "sidecar"
+    PROCESSING_PROBE = "processing_probe"
+
+
+@runtime_checkable
+class _ProcessHost(Protocol):
+    """Host capabilities needed to supervise one owned sidecar process tree."""
+
+    async def spawn(
+        self,
+        kind: _ProcessKind,
+        python: Path,
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        socket_path: Path | None = None,
+    ) -> asyncio.subprocess.Process: ...
+
+    def process_group(self, pid: int) -> int | None: ...
+
+    def inspect_identity(self, pid: int) -> _ProcessIdentity | None: ...
+
+    def snapshot_tree(self, pid: int, process_group: int | None) -> dict[int, float]: ...
+
+    def recorded_group_members(
+        self,
+        process_group: int,
+        *,
+        socket_path: Path,
+        provider_root: Path,
+    ) -> tuple[dict[int, float], list[int]]: ...
+
+    def find_sidecars(self, *, socket_path: Path) -> dict[int, float]: ...
+
+    def live(self, identities: Mapping[int, float]) -> dict[int, float]: ...
+
+    def signal(
+        self,
+        identities: Mapping[int, float],
+        signum: int,
+        *,
+        process_group: int | None = None,
+        process: asyncio.subprocess.Process | None = None,
+    ) -> None: ...
+
+    async def wait_for_exit(
+        self,
+        identities: dict[int, float],
+        timeout_seconds: float,
+        *,
+        process_group: int | None = None,
+        process: asyncio.subprocess.Process | None = None,
+    ) -> bool: ...
+
+    def has_tcp_listener(self, identities: Mapping[int, float]) -> bool: ...
+
+
 class EverOSProcess:
     """Launch, supervise, and reap one privately owned EverOS child tree."""
 
@@ -83,6 +141,7 @@ class EverOSProcess:
         on_ready: Callable[[], Awaitable[None] | None] | None = None,
         before_start: Callable[[], Awaitable[None] | None] | None = None,
         on_reaped: Callable[[], Awaitable[None] | None] | None = None,
+        _host: _ProcessHost | None = None,
     ) -> None:
         self._python = Path(python)
         self._effective_home = Path(effective_home) if effective_home is not None else paths.get_vibe_remote_dir()
@@ -91,11 +150,13 @@ class EverOSProcess:
         self._provider_root = Path(provider_root) if provider_root is not None else self._memory_dir / "everos-root"
         self._socket_path = Path(socket_path) if socket_path is not None else self._memory_dir / ".rt" / "everos.sock"
         self._settings = settings or EverOSProcessSettings()
+        self._host = _SystemProcessHost() if _host is None else _host
         self._ownership = SidecarOwnership(
             record_path=sidecar_record_path(self._memory_dir),
             socket_path=self._socket_path,
             provider_root=self._provider_root,
             stop_timeout_seconds=stop_timeout_seconds,
+            _host=self._host,
         )
         self._startup_timeout_seconds = _positive_timeout(startup_timeout_seconds, _STARTUP_TIMEOUT_SECONDS)
         self._stop_timeout_seconds = _positive_timeout(stop_timeout_seconds, _STOP_TIMEOUT_SECONDS)
@@ -224,24 +285,18 @@ class EverOSProcess:
         if not self._python.is_file() or not _settings_complete(self._settings):
             return False
         try:
-            probe = await asyncio.create_subprocess_exec(
-                str(self._python),
-                "-m",
-                "core.memory.sidecar",
-                "--probe-processing",
-                cwd=str(self._effective_home),
+            probe = await self._host.spawn(
+                _ProcessKind.PROCESSING_PROBE,
+                self._python,
+                cwd=self._effective_home,
                 env=self._child_environment(),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
             )
         except (OSError, ValueError):
             logger.warning("EverOS processing probe could not start")
             return False
 
-        process_group = _isolated_process_group(probe.pid)
-        owned_processes = _snapshot_owned_processes(probe.pid, process_group)
+        process_group = self._host.process_group(probe.pid)
+        owned_processes = self._host.snapshot_tree(probe.pid, process_group)
         try:
             await asyncio.wait_for(probe.wait(), timeout=_PROCESSING_PROBE_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
@@ -292,23 +347,17 @@ class EverOSProcess:
             self._write_generated_config()
             self._remove_owned_socket()
             child_env = self._child_environment()
-            process = await asyncio.create_subprocess_exec(
-                str(self._python),
-                "-m",
-                "core.memory.sidecar",
-                "--uds",
-                str(self._socket_path),
-                cwd=str(self._memory_dir),
+            process = await self._host.spawn(
+                _ProcessKind.SIDECAR,
+                self._python,
+                cwd=self._memory_dir,
                 env=child_env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True,
+                socket_path=self._socket_path,
             )
             self._process = process
-            self._process_group = _isolated_process_group(process.pid)
-            self._owned_processes = _snapshot_owned_processes(process.pid, self._process_group)
-            if not _owned_process_identity_is_live(process.pid, self._owned_processes):
+            self._process_group = self._host.process_group(process.pid)
+            self._owned_processes = self._host.snapshot_tree(process.pid, self._process_group)
+            if not _host_identity_is_live(self._host, process.pid, self._owned_processes):
                 raise RuntimeError("could not establish sidecar process ownership")
             self._ownership.record_launch(
                 process.pid,
@@ -387,11 +436,11 @@ class EverOSProcess:
         while time.monotonic() < deadline:
             if process.returncode is not None:
                 raise RuntimeError("sidecar exited before readiness")
-            if not _owned_process_identity_is_live(process.pid, self._owned_processes):
+            if not _host_identity_is_live(self._host, process.pid, self._owned_processes):
                 raise RuntimeError("sidecar ownership changed before readiness")
             _merge_owned_processes(
                 self._owned_processes,
-                _snapshot_owned_processes(process.pid, self._process_group),
+                self._host.snapshot_tree(process.pid, self._process_group),
             )
             if self._socket_path.exists():
                 self._secure_socket()
@@ -458,7 +507,7 @@ class EverOSProcess:
                         owned_processes=owned_processes,
                     )
                     next_tree_inspection = observed_at + _TREE_INSPECTION_INTERVAL_SECONDS
-                elif not _owned_process_identity_is_live(process.pid, self._owned_processes):
+                elif not _host_identity_is_live(self._host, process.pid, self._owned_processes):
                     raise RuntimeError("sidecar ownership changed during monitoring")
                 if observed_at >= next_health_observation:
                     self._record_health_observation(await client.health(), observed_at=observed_at)
@@ -655,14 +704,14 @@ class EverOSProcess:
     def _refresh_owned_processes(self, pid: int) -> dict[int, float]:
         _merge_owned_processes(
             self._owned_processes,
-            _snapshot_owned_processes(pid, self._process_group),
+            self._host.snapshot_tree(pid, self._process_group),
         )
         unverifiable = {
             process_id: created_at
             for process_id, created_at in self._owned_processes.items()
             if created_at < 0
         }
-        self._owned_processes = _live_owned_processes(self._owned_processes)
+        self._owned_processes = self._host.live(self._owned_processes)
         # AccessDenied group members use a negative identity sentinel. Retain
         # those for fail-closed group cleanup even though ordinary dead PIDs are
         # pruned from the hot monitor set.
@@ -684,15 +733,8 @@ class EverOSProcess:
         )
         if pid not in live_processes:
             raise RuntimeError("sidecar ownership changed during listener inspection")
-        for process_id in live_processes:
-            try:
-                connections = psutil.Process(process_id).net_connections(kind="inet")
-            except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                continue
-            except psutil.Error as exc:
-                raise RuntimeError("could not inspect sidecar listeners") from exc
-            if any(connection.status == psutil.CONN_LISTEN for connection in connections):
-                raise RuntimeError("sidecar opened a TCP listener")
+        if self._host.has_tcp_listener(live_processes):
+            raise RuntimeError("sidecar opened a TCP listener")
 
     async def _terminate_owned_tree(
         self,
@@ -702,28 +744,36 @@ class EverOSProcess:
         owned_processes: Mapping[int, float] | None = None,
     ) -> None:
         identities = dict(owned_processes or {})
-        if _owned_process_identity_is_live(process.pid, identities):
-            _merge_owned_processes(identities, _snapshot_owned_processes(process.pid, process_group))
-        _signal_owned_group_or_process(process, process_group, identities, signal.SIGTERM)
-        _signal_owned_processes(identities, signal.SIGTERM)
-        if await _wait_for_owned_exit(
-            process,
+        if _host_identity_is_live(self._host, process.pid, identities):
+            _merge_owned_processes(identities, self._host.snapshot_tree(process.pid, process_group))
+        self._host.signal(
+            identities,
+            signal.SIGTERM,
             process_group=process_group,
-            identities=identities,
-            timeout_seconds=self._stop_timeout_seconds,
+            process=process,
+        )
+        if await self._host.wait_for_exit(
+            identities,
+            self._stop_timeout_seconds,
+            process_group=process_group,
+            process=process,
         ):
             return
 
         kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-        if _owned_process_identity_is_live(process.pid, identities):
-            _merge_owned_processes(identities, _snapshot_owned_processes(process.pid, process_group))
-        _signal_owned_group_or_process(process, process_group, identities, kill_signal)
-        _signal_owned_processes(identities, kill_signal)
-        if await _wait_for_owned_exit(
-            process,
+        if _host_identity_is_live(self._host, process.pid, identities):
+            _merge_owned_processes(identities, self._host.snapshot_tree(process.pid, process_group))
+        self._host.signal(
+            identities,
+            kill_signal,
             process_group=process_group,
-            identities=identities,
-            timeout_seconds=min(self._stop_timeout_seconds, 3.0),
+            process=process,
+        )
+        if await self._host.wait_for_exit(
+            identities,
+            min(self._stop_timeout_seconds, 3.0),
+            process_group=process_group,
+            process=process,
         ):
             return
         raise RuntimeError("sidecar process tree did not exit")
@@ -824,11 +874,13 @@ class SidecarOwnership:
         socket_path: Path,
         provider_root: Path,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
+        _host: _ProcessHost | None = None,
     ) -> None:
         self.record_path = Path(record_path)
         self._socket_path = Path(socket_path)
         self._provider_root = Path(provider_root)
         self._stop_timeout_seconds = _positive_timeout(stop_timeout_seconds, _STOP_TIMEOUT_SECONDS)
+        self._host = _SystemProcessHost() if _host is None else _host
 
     def record_launch(self, pid: int, created_at: float, process_group: int | None) -> None:
         """Persist the launched child's identity so a later boot can reap an orphan.
@@ -893,7 +945,7 @@ class SidecarOwnership:
                 await self._reap_unidentified_sidecar()
             _remove_sidecar_record(self.record_path)
             return
-        identity = _inspect_process_identity(pid)
+        identity = self._host.inspect_identity(pid)
         verdict = _classify_recorded_sidecar(
             record,
             identity,
@@ -952,16 +1004,15 @@ class SidecarOwnership:
             (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
         )
         for signum, timeout_seconds in rounds:
-            if _owned_process_identity_is_live(pid, identities):
+            if _host_identity_is_live(self._host, pid, identities):
                 # Only rediscover while the recorded root is still the process we
                 # identified; a dead root's pid may already have been recycled.
-                process_group = _isolated_process_group(pid)
-                _merge_owned_processes(identities, _snapshot_owned_processes(pid, process_group))
+                process_group = self._host.process_group(pid)
+                _merge_owned_processes(identities, self._host.snapshot_tree(pid, process_group))
             else:
                 process_group = None
-            _signal_owned_group(process_group, identities, signum)
-            _signal_owned_processes(identities, signum)
-            if await _wait_for_identities_exit(identities, timeout_seconds):
+            self._host.signal(identities, signum, process_group=process_group)
+            if await self._host.wait_for_exit(identities, timeout_seconds):
                 return True
         return False
 
@@ -999,7 +1050,7 @@ class SidecarOwnership:
             # naming it was not written by a launch of ours.
             logger.warning("Ignoring a recorded sidecar group that is Avibe's own process group")
             return
-        owned, foreign = _recorded_group_members(
+        owned, foreign = self._host.recorded_group_members(
             group,
             socket_path=self._socket_path,
             provider_root=self._provider_root,
@@ -1046,7 +1097,7 @@ class SidecarOwnership:
         """
 
         if process_group is not None:
-            claimed, _foreign = _recorded_group_members(
+            claimed, _foreign = self._host.recorded_group_members(
                 process_group,
                 socket_path=self._socket_path,
                 provider_root=self._provider_root,
@@ -1080,7 +1131,7 @@ class SidecarOwnership:
         orphan, and a tree that will not exit fails the launch and keeps the record.
         """
 
-        anchors = _processes_serving_owned_socket(socket_path=self._socket_path)
+        anchors = self._host.find_sidecars(socket_path=self._socket_path)
         if not anchors:
             return
         logger.warning(
@@ -1092,9 +1143,9 @@ class SidecarOwnership:
             # Helpers are reached through the anchor's own group rather than by
             # widening the machine-wide test, because membership is what makes the
             # looser per-member claim safe.
-            group = _isolated_process_group(pid)
+            group = self._host.process_group(pid)
             if group is not None:
-                claimed, foreign = _recorded_group_members(
+                claimed, foreign = self._host.recorded_group_members(
                     group,
                     socket_path=self._socket_path,
                     provider_root=self._provider_root,
@@ -1128,16 +1179,15 @@ class SidecarOwnership:
             (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
         )
         for signum, timeout_seconds in rounds:
-            if process_group is not None and _live_owned_processes(identities):
-                discovered, _foreign = _recorded_group_members(
+            if process_group is not None and self._host.live(identities):
+                discovered, _foreign = self._host.recorded_group_members(
                     process_group,
                     socket_path=self._socket_path,
                     provider_root=self._provider_root,
                 )
                 _merge_owned_processes(identities, discovered)
-            _signal_owned_group(process_group, identities, signum)
-            _signal_owned_processes(identities, signum)
-            if await _wait_for_identities_exit(identities, timeout_seconds):
+            self._host.signal(identities, signum, process_group=process_group)
+            if await self._host.wait_for_exit(identities, timeout_seconds):
                 return True
         return False
 
@@ -1589,6 +1639,15 @@ def _merge_owned_processes(identities: dict[int, float], discovered: Mapping[int
         identities.setdefault(process_id, created_at)
 
 
+def _host_identity_is_live(
+    host: _ProcessHost,
+    process_id: int,
+    identities: Mapping[int, float],
+) -> bool:
+    created_at = identities.get(process_id)
+    return created_at is not None and process_id in host.live({process_id: created_at})
+
+
 def _owned_process_identity_is_live(process_id: int, identities: Mapping[int, float]) -> bool:
     created_at = identities.get(process_id)
     if created_at is None:
@@ -1838,6 +1897,107 @@ def _positive_timeout(value: float, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return parsed if parsed > 0 else fallback
+
+
+class _SystemProcessHost:
+    """Production adapter for the process capabilities the supervisor owns."""
+
+    async def spawn(
+        self,
+        kind: _ProcessKind,
+        python: Path,
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        socket_path: Path | None = None,
+    ) -> asyncio.subprocess.Process:
+        arguments = [str(python), "-m", _SIDECAR_ENTRYPOINT_MODULE]
+        if kind is _ProcessKind.SIDECAR:
+            if socket_path is None:
+                raise ValueError("sidecar launch requires a socket path")
+            arguments.extend(("--uds", str(socket_path)))
+        else:
+            arguments.append("--probe-processing")
+        return await asyncio.create_subprocess_exec(
+            *arguments,
+            cwd=str(cwd),
+            env=dict(env),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def process_group(self, pid: int) -> int | None:
+        return _isolated_process_group(pid)
+
+    def inspect_identity(self, pid: int) -> _ProcessIdentity | None:
+        return _inspect_process_identity(pid)
+
+    def snapshot_tree(self, pid: int, process_group: int | None) -> dict[int, float]:
+        return _snapshot_owned_processes(pid, process_group)
+
+    def recorded_group_members(
+        self,
+        process_group: int,
+        *,
+        socket_path: Path,
+        provider_root: Path,
+    ) -> tuple[dict[int, float], list[int]]:
+        return _recorded_group_members(
+            process_group,
+            socket_path=socket_path,
+            provider_root=provider_root,
+        )
+
+    def find_sidecars(self, *, socket_path: Path) -> dict[int, float]:
+        return _processes_serving_owned_socket(socket_path=socket_path)
+
+    def live(self, identities: Mapping[int, float]) -> dict[int, float]:
+        return _live_owned_processes(identities)
+
+    def signal(
+        self,
+        identities: Mapping[int, float],
+        signum: int,
+        *,
+        process_group: int | None = None,
+        process: asyncio.subprocess.Process | None = None,
+    ) -> None:
+        if process is None:
+            _signal_owned_group(process_group, identities, signum)
+        else:
+            _signal_owned_group_or_process(process, process_group, identities, signum)
+        _signal_owned_processes(identities, signum)
+
+    async def wait_for_exit(
+        self,
+        identities: dict[int, float],
+        timeout_seconds: float,
+        *,
+        process_group: int | None = None,
+        process: asyncio.subprocess.Process | None = None,
+    ) -> bool:
+        if process is None:
+            return await _wait_for_identities_exit(identities, timeout_seconds)
+        return await _wait_for_owned_exit(
+            process,
+            process_group=process_group,
+            identities=identities,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def has_tcp_listener(self, identities: Mapping[int, float]) -> bool:
+        for process_id in identities:
+            try:
+                connections = psutil.Process(process_id).net_connections(kind="inet")
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except psutil.Error as exc:
+                raise RuntimeError("could not inspect sidecar listeners") from exc
+            if any(connection.status == psutil.CONN_LISTEN for connection in connections):
+                return True
+        return False
 
 
 @runtime_checkable
