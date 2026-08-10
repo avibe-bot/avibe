@@ -528,7 +528,7 @@ def _test_remote_addr_from_scope(scope: Any) -> str | None:
 
 async def _read_json_payload(request: FastAPIRequest) -> Any:
     content_type = request.headers.get("content-type", "")
-    if not _is_json_content_type(content_type):
+    if not is_json_content_type(content_type):
         return None
     body = await request.body()
     if not body:
@@ -539,7 +539,7 @@ async def _read_json_payload(request: FastAPIRequest) -> Any:
         raise HTTPException(status_code=400, detail="Malformed JSON")
 
 
-def _is_json_content_type(content_type: str) -> bool:
+def is_json_content_type(content_type: str) -> bool:
     media_type = content_type.split(";", 1)[0].strip().lower()
     return media_type == "application/json" or (
         media_type.startswith("application/") and media_type.endswith("+json")

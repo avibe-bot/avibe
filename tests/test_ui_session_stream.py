@@ -1723,6 +1723,32 @@ def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatc
     assert decode_threads[0] != request_threads[0]
 
 
+def test_legacy_attachment_upload_accepts_structured_json_content_type(isolated_state, tmp_path):
+    import base64
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        content=json.dumps(
+            {
+                "name": "legacy.txt",
+                "mime": "text/plain",
+                "data": base64.b64encode(b"legacy upload").decode("ascii"),
+            }
+        ),
+        headers={
+            **csrf_headers(client),
+            "Content-Type": "application/vnd.avibe+json; charset=utf-8",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["size"] == len(b"legacy upload")
+
+
 def test_legacy_attachment_upload_rejects_invalid_base64(isolated_state, tmp_path):
     from vibe.ui_server import app
 

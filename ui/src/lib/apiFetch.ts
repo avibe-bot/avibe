@@ -73,12 +73,7 @@ const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Pr
   });
 };
 
-export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
-  const existing = readCookie(CSRF_COOKIE_NAME);
-  if (existing) {
-    return existing;
-  }
-
+async function acquireCsrfToken(signal?: AbortSignal): Promise<string> {
   if (!csrfTokenPromise) {
     startCsrfTokenFetch();
   }
@@ -95,6 +90,15 @@ export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
   }
 }
 
+export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
+  const existing = readCookie(CSRF_COOKIE_NAME);
+  if (existing) {
+    return existing;
+  }
+
+  return acquireCsrfToken(signal);
+}
+
 async function refreshRejectedCsrfToken(
   signal?: AbortSignal,
 ): Promise<string> {
@@ -104,10 +108,7 @@ async function refreshRejectedCsrfToken(
   // cookie here only creates another race with other tabs.
   if (current) return current;
 
-  if (!csrfTokenPromise) {
-    startCsrfTokenFetch();
-  }
-  const fetched = await waitForSignal(csrfTokenPromise!, signal);
+  const fetched = await acquireCsrfToken(signal);
   return readCookie(CSRF_COOKIE_NAME) || fetched;
 }
 

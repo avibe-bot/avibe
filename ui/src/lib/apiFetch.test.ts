@@ -266,4 +266,56 @@ describe('apiFetch remote auth recovery', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it('evicts a stalled shared CSRF refresh after a rejected mutation aborts', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    let tokenFetches = 0;
+    let mutationCalls = 0;
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        tokenFetches += 1;
+        if (tokenFetches === 1) {
+          return new Promise<Response>(() => undefined);
+        }
+        document.cookie = 'vibe_csrf_token=fresh-token; path=/';
+        return Response.json({ csrf_token: 'fresh-token' });
+      }
+
+      mutationCalls += 1;
+      if (mutationCalls === 1) {
+        cookie = '';
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      return Response.json({ ok: token === 'fresh-token' }, {
+        status: token === 'fresh-token' ? 200 : 403,
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const stalled = apiFetch('/api/attachments', {
+      method: 'POST',
+      body: new FormData(),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const stalledResult = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    controller.abort(new DOMException('upload timed out', 'TimeoutError'));
+
+    await stalledResult;
+    await expect(apiFetch('/api/settings', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(tokenFetches).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
 });

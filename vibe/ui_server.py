@@ -34,7 +34,17 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
+from vibe.ui_compat import (
+    CompatApp,
+    Response,
+    TEST_REMOTE_ADDR_HEADER,
+    g,
+    is_json_content_type,
+    jsonify,
+    redirect,
+    request,
+    send_file,
+)
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
@@ -8094,7 +8104,7 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                 name = upload.filename
                 mime = upload.content_type
                 upload_id = form.get("upload_id")
-            elif content_type == "application/json":
+            elif is_json_content_type(content_type):
                 payload = request.json or {}
                 data_b64 = payload.get("data") or ""
                 if not isinstance(data_b64, str) or not data_b64:
