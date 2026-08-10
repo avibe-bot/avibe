@@ -376,6 +376,7 @@ async def test_maintenance_refuses_clear_when_the_store_is_unavailable(
 async def test_unavailable_store_still_projects_durable_clear_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     operation = MemoryClearJournal(tmp_path).start(
         operation_id="clear-before-store-failure",
@@ -388,7 +389,7 @@ async def test_unavailable_store_still_projects_durable_clear_recovery(
         raise OSError("injected store initialization failure")
 
     monkeypatch.setattr("core.memory.runtime.MemoryStore", fail_initialization)
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     fence_entered = False
 
@@ -420,7 +421,7 @@ async def test_unavailable_store_still_projects_durable_clear_recovery(
     await asyncio.sleep(0)
     assert fence_entered is False
     assert await runtime.maintenance_payload(operator_ref="user:owner") == before
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.parametrize("failure_point", ("provider_root", "module"))
@@ -428,6 +429,7 @@ async def test_supplied_store_attaches_only_after_module_initialization(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     failure_point: str,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     operation = MemoryClearJournal(tmp_path).start(
@@ -447,7 +449,7 @@ async def test_supplied_store_attaches_only_after_module_initialization(
     else:
         monkeypatch.setattr("core.memory.runtime.MemoryModule", fail_initialization)
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(),
         store=store,
         artifact_manager=artifact,
@@ -477,7 +479,7 @@ async def test_supplied_store_attaches_only_after_module_initialization(
     await asyncio.sleep(0)
     assert fence_entered is False
     assert await runtime.maintenance_payload(operator_ref="user:owner") == before
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 def _enqueue(runtime: MemoryRuntime, source: str) -> None:
@@ -497,9 +499,10 @@ def _enqueue(runtime: MemoryRuntime, source: str) -> None:
 async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     manager = _maintenance(runtime)._snapshot_manager
     assert manager is not None
     provider_root = tmp_path / "memory/everos-root"
@@ -544,15 +547,16 @@ async def test_clear_converges_for_provider_tree_deeper_than_recursion_limit(
     assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     assert not leaf.exists()
     assert not manager.snapshot_path(result["operation_id"]).exists()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_clear_refuses_manual_required_fence_without_mutating_evidence(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(enabled=True), effective_home=tmp_path)
     worker = runtime.module._worker
 
     class RetainedProcess:
@@ -699,15 +703,16 @@ async def test_clear_refuses_manual_required_fence_without_mutating_evidence(
         assert path.read_bytes() == payload
     assert (await runtime.maintenance_payload())["can_clear"] is False
     monkeypatch.setattr(runtime, "_stop_worker", original_stop_worker)
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     owner = runtime.principal_for_user_key("avibe:local")
     other_operator = runtime.principal_for_user_key("avibe:remote:other-subject")
     _enqueue(runtime, "resume-source")
@@ -772,15 +777,16 @@ async def test_interrupted_queue_delete_requires_explicit_resume_at_target_epoch
     assert completed["epoch"] == pre_epoch + 1
     assert runtime._store.ensure_meta().epoch == pre_epoch + 1
     assert journal.get_open_operation() is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_attachment_clear_failure_does_not_record_surface_deleted(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     attachment_store = runtime.module._attachment_store
     outside = tmp_path / "outside-attachments"
     outside.mkdir(mode=0o700)
@@ -807,15 +813,16 @@ async def test_attachment_clear_failure_does_not_record_surface_deleted(
     assert surfaces["attachments"] == "snapshotted"
     assert unsafe.is_symlink()
     assert sentinel.read_bytes() == b"outside must remain"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_recovery_payload_disables_abort_before_initial_snapshot(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     operation = journal.start(
@@ -836,15 +843,16 @@ async def test_recovery_payload_disables_abort_before_initial_snapshot(
         "can_resume": True,
         "can_abort": False,
     }
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     start_entered = threading.Event()
@@ -920,15 +928,16 @@ async def test_cancelled_clear_start_and_resume_claim_settle_before_recovery(
     )
     assert completed["status"] == "completed"
     assert journal.get_open_operation() is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_completed_clear_resumes_runtime_once(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     journal = _maintenance(runtime)._clear_journal
     assert journal is not None
     completed_entered = threading.Event()
@@ -973,15 +982,16 @@ async def test_cancelled_completed_clear_resumes_runtime_once(
     assert completed.state == "completed"
     assert journal.get_open_operation() is None
     assert resume_calls == 1
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_post_terminal_resume_holds_lifecycle_fences(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(enabled=True), effective_home=tmp_path)
     resume_entered = asyncio.Event()
     resume_release = asyncio.Event()
 
@@ -1014,15 +1024,16 @@ async def test_cancelled_post_terminal_resume_holds_lifecycle_fences(
     assert runtime._reconcile_lock.locked() is False
     assert runtime.module._lifecycle_lock.locked() is False
     assert runtime.module._root_lifecycle_lock().locked() is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_abort_restores_all_surfaces_after_destructive_work(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "abort-source")
     pre_meta = runtime._store.ensure_meta()
     original_delete = _maintenance(runtime)._runtime.delete_surface
@@ -1056,15 +1067,16 @@ async def test_abort_restores_all_surfaces_after_destructive_work(
     assert operation is not None and operation.state == "aborted"
     assert _maintenance(runtime)._snapshot_manager is not None
     assert not _maintenance(runtime)._snapshot_manager.snapshot_path(recovery.operation_id).exists()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_clear_accepts_corrupt_diagnostic_call_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     call_log = tmp_path / "memory/call-log/call-log.db"
     call_log.parent.mkdir(parents=True, mode=0o700)
     call_log.parent.chmod(0o700)
@@ -1083,15 +1095,16 @@ async def test_clear_accepts_corrupt_diagnostic_call_log(
     assert result["status"] == "completed"
     assert all(not path.exists() for path in files)
     assert _maintenance(runtime)._clear_journal.get_open_operation() is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_abort_restores_exact_corrupt_call_log_files_after_deletion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     call_log = tmp_path / "memory/call-log/call-log.db"
     call_log.parent.mkdir(parents=True, mode=0o700)
     call_log.parent.chmod(0o700)
@@ -1140,15 +1153,16 @@ async def test_abort_restores_exact_corrupt_call_log_files_after_deletion(
         assert stat.S_IMODE(path.stat().st_mode) == expected_mode
         assert hashlib.sha256(restored_bytes).hexdigest() == expected_digest
     assert _maintenance(runtime)._clear_journal.get_open_operation() is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._snapshot_manager
     assert storage is not None
@@ -1181,9 +1195,9 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
     completed_before_restart = await _clear(runtime, operator_ref="user:owner")
     restart_snapshot_path = manager.snapshot_path(completed_before_restart["operation_id"])
     assert restart_snapshot_path.is_dir()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
-    restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    restarted = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     assert restart_snapshot_path.is_dir()
     assert _maintenance(restarted)._clear_journal is not None
@@ -1196,14 +1210,15 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
     assert restart_gc is not None
     await restart_gc
     assert not restart_snapshot_path.exists()
-    await restarted.close()
+    await memory_runtime_factory.close(restarted)
 
 
 async def _retain_terminal_clear_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     home: Path,
+    memory_runtime_factory,
 ) -> Path:
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=home)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=home)
     storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._snapshot_manager
     assert storage is not None
@@ -1217,18 +1232,23 @@ async def _retain_terminal_clear_snapshot(
     snapshot_path = manager.snapshot_path(completed["operation_id"])
     assert completed["status"] == "completed"
     assert snapshot_path.is_dir()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
     return snapshot_path
 
 
 async def test_terminal_snapshot_gc_is_scheduled_after_lifecycle_returns(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     entered = threading.Event()
     release = threading.Event()
     original_remove = MemoryClearSnapshotStorage.remove_terminal_snapshot
-    snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+    snapshot_path = await _retain_terminal_clear_snapshot(
+        monkeypatch,
+        tmp_path,
+        memory_runtime_factory,
+    )
 
     def blocking_remove(
         storage: MemoryClearSnapshotStorage,
@@ -1243,7 +1263,7 @@ async def test_terminal_snapshot_gc_is_scheduled_after_lifecycle_returns(
         "remove_terminal_snapshot",
         blocking_remove,
     )
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     assert await runtime.reconcile(MemoryConfig()) == {
         "ok": True,
@@ -1257,18 +1277,23 @@ async def test_terminal_snapshot_gc_is_scheduled_after_lifecycle_returns(
     release.set()
     await asyncio.wait_for(asyncio.shield(gc_task), timeout=1)
     assert not snapshot_path.exists()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_terminal_snapshot_gc_shutdown_joins_cancelled_io(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     entered = threading.Event()
     release = threading.Event()
     finished = threading.Event()
     original_remove = MemoryClearSnapshotStorage.remove_terminal_snapshot
-    snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
+    snapshot_path = await _retain_terminal_clear_snapshot(
+        monkeypatch,
+        tmp_path,
+        memory_runtime_factory,
+    )
 
     def blocking_remove(
         storage: MemoryClearSnapshotStorage,
@@ -1286,7 +1311,7 @@ async def test_terminal_snapshot_gc_shutdown_joins_cancelled_io(
         "remove_terminal_snapshot",
         blocking_remove,
     )
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     await runtime.reconcile(MemoryConfig())
     gc_task = _maintenance(runtime)._terminal_snapshot_gc_task
     assert gc_task is not None
@@ -1310,9 +1335,10 @@ async def test_terminal_snapshot_gc_shutdown_joins_cancelled_io(
 async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     journal = _maintenance(runtime)._clear_journal
     storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._snapshot_manager
@@ -1367,9 +1393,9 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
     aborted_before_restart = await abort_after_interrupted_clear()
     restart_snapshot_path = manager.snapshot_path(aborted_before_restart["operation_id"])
     assert restart_snapshot_path.is_dir()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
-    restarted = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    restarted = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     assert restart_snapshot_path.is_dir()
     assert _maintenance(restarted)._clear_journal is not None
@@ -1382,15 +1408,16 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
     assert restart_gc is not None
     await restart_gc
     assert not restart_snapshot_path.exists()
-    await restarted.close()
+    await memory_runtime_factory.close(restarted)
 
 
 async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fences(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -1490,15 +1517,16 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
     )
     completed = await _resume_clear(runtime, pending.operation_id, operator_ref="user:owner")
     assert completed["status"] == "completed"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_clear_waits_for_snapshot_verification_before_releasing_fences(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -1537,15 +1565,16 @@ async def test_cancelled_clear_waits_for_snapshot_verification_before_releasing_
     monkeypatch.setattr(MemorySnapshotManager, "verify", original_verify)
     completed = await _resume_clear(runtime, recovery.operation_id, operator_ref="user:owner")
     assert completed["status"] == "completed"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     runtime._provider_root_owner.ensure(
         runtime._store.ensure_meta(),
         runtime._active_provider_root_metadata(),
@@ -1598,15 +1627,16 @@ async def test_cancelled_clear_waits_for_provider_delete_before_releasing_fences
         operator_ref="user:owner",
     )
     assert completed["status"] == "completed"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "cancel-abort-source")
     original_delete = _maintenance(runtime)._runtime.delete_surface
 
@@ -1704,15 +1734,16 @@ async def test_cancelled_abort_waits_for_restore_before_releasing_fences(
     assert aborted.state == "aborted"
     assert _maintenance(runtime)._clear_journal.get_open_operation() is None
     assert resume_calls == 1
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_maintenance_backup_fences_capture_and_clear_for_the_full_copy(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(enabled=True), effective_home=tmp_path)
     enqueue_entered = threading.Event()
     release_enqueue = threading.Event()
     entered = threading.Event()
@@ -1789,15 +1820,16 @@ async def test_maintenance_backup_fences_capture_and_clear_for_the_full_copy(
         await creating
     assert (tmp_path / "state" / "memory" / "backups" / "runtime-fence").is_dir()
     assert _maintenance(runtime).is_open() is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_reconcile_schedules_auto_id_backup_stage_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     manager = _maintenance(runtime)._backup_manager
     assert manager is not None
     stage = manager.snapshot_root / f".{('a' * 32)}.tmp"
@@ -1816,15 +1848,16 @@ async def test_reconcile_schedules_auto_id_backup_stage_cleanup(
         await task
 
     assert not stage.exists()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_backup_stage_cleanup_waits_for_terminal_snapshot_gc(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._backup_manager
     assert storage is not None
@@ -1867,15 +1900,16 @@ async def test_backup_stage_cleanup_waits_for_terminal_snapshot_gc(
     await backup_reconcile
 
     assert backup_entered.is_set() is True
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     manager = _maintenance(runtime)._backup_manager
     assert manager is not None
     entered = threading.Event()
@@ -1894,7 +1928,7 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
     assert await asyncio.to_thread(entered.wait, 1)
     assert _maintenance(runtime).is_open() is False
 
-    closing = asyncio.create_task(runtime.close())
+    closing = asyncio.create_task(memory_runtime_factory.close(runtime))
     await asyncio.sleep(0)
     assert closing.done() is False
     release.set()
@@ -1905,9 +1939,10 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
 async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(enabled=True), effective_home=tmp_path)
     manager = _maintenance(runtime)._backup_manager
     assert manager is not None
     entered = threading.Event()
@@ -1948,12 +1983,13 @@ async def test_backup_stage_cleanup_queues_capture_without_global_maintenance_fe
     assert [row.payload_text for row in runtime._store.list_queue_rows()] == [
         "must be captured after cleanup"
     ]
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     install_entered = threading.Event()
     release_install = threading.Event()
@@ -1965,7 +2001,7 @@ async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
             release_install.wait(timeout=2)
             return dict(self.ensure_payload)
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=False),
         artifact_manager=BlockingArtifact(python=Path(sys.executable)),
         effective_home=tmp_path,
@@ -2006,15 +2042,16 @@ async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
     assert deferred_reconcile is not queued_reconcile
     await deferred_reconcile
     assert cleanup_calls == [False]
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_maintenance_backup_restore_round_trips_queue_state(
     monkeypatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "backup-source")
 
     backup = await _maintenance(runtime).create_backup("runtime-round-trip")
@@ -2032,7 +2069,7 @@ async def test_maintenance_backup_restore_round_trips_queue_state(
     rows = runtime._store.list_queue_rows()
     assert len(rows) == 1
     assert rows[0].source_message_digest
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.parametrize(
@@ -2049,9 +2086,10 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
     tmp_path: Path,
     crash_surface: str,
     crash_target: str,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "backup-queue")
 
     provider_marker = tmp_path / "memory/everos-root/generation.txt"
@@ -2129,7 +2167,7 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         )
     ] == ["started"]
 
-    restarted = MemoryRuntime(
+    restarted = memory_runtime_factory(
         MemoryConfig(enabled=True),
         effective_home=tmp_path,
     )
@@ -2196,5 +2234,5 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
     ] == ["started", "recovery_needed", "retry_started", "completed"]
     assert _maintenance(restarted).is_open() is False
 
-    await runtime.close()
-    await restarted.close()
+    await memory_runtime_factory.close(runtime)
+    await memory_runtime_factory.close(restarted)

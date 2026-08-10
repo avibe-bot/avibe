@@ -246,6 +246,16 @@ def _reset_memory_artifact_manager():
     set_memory_artifact_manager_for_tests(None)
 
 
+@pytest.fixture
+async def memory_runtime_factory():
+    """Own active Memory runtimes until their test has fully torn down."""
+
+    from tests.memory_runtime_factory import finalizing_memory_runtimes
+
+    async with finalizing_memory_runtimes() as factory:
+        yield factory
+
+
 @pytest.fixture(autouse=True)
 def _reset_oauth_runtime_state():
     """Reset module-level in-memory OAuth caches between tests.
