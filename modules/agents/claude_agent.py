@@ -1264,7 +1264,15 @@ class ClaudeAgent(BaseAgent):
         self._adopt_pending_turn_token(request.context, stopped_request)
         if stopped_request is not None:
             try:
-                await self._remove_specific_pending_reaction(composite_key, request.context, stopped_request)
+                # Registry only: ``finish()`` below owns removing the 👀 and
+                # putting ⏹️ in its place, and it can only do that if the
+                # reaction is still on the message when it runs.
+                await self._remove_specific_pending_reaction(
+                    composite_key,
+                    request.context,
+                    stopped_request,
+                    clear_on_platform=False,
+                )
                 await self._remove_ack_reaction(
                     stopped_request,
                     terminal_emoji=STOPPED_REACTION_EMOJI,
@@ -3835,11 +3843,23 @@ class ClaudeAgent(BaseAgent):
             self._pending_requests.pop(composite_key, None)
 
     async def _remove_specific_pending_reaction(
-        self, composite_key: str, context: MessageContext, request: AgentRequest
+        self,
+        composite_key: str,
+        context: MessageContext,
+        request: AgentRequest,
+        *,
+        clear_on_platform: bool = True,
     ) -> None:
         """Remove a specific reaction from the queue by matching message_id.
 
         Used on error paths to remove the current request's reaction instead of FIFO.
+
+        ``clear_on_platform=False`` forgets the REGISTRY entry only. The registry
+        and the processing indicator both point at the same platform reaction, so
+        a caller that then calls ``_remove_ack_reaction`` would otherwise remove
+        it twice — and the second removal reports failure (the reaction is
+        already gone), which is exactly what suppresses a terminal receipt. A
+        stop hands both platform operations to ``finish()`` instead.
         """
         target_id = getattr(request, "ack_reaction_message_id", None)
         target_emoji = getattr(request, "ack_reaction_emoji", None)
@@ -3854,6 +3874,8 @@ class ClaudeAgent(BaseAgent):
                 reactions.pop(i)
                 if not reactions:
                     self._pending_reactions.pop(composite_key, None)
+                if not clear_on_platform:
+                    return
                 try:
                     await self.im_client.remove_reaction(context, msg_id, emoji)
                 except Exception as err:

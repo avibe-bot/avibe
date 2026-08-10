@@ -20,6 +20,7 @@ import aiohttp
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import stop_output_for, terminal_output_for
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -533,6 +534,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._poll_loop = OpenCodePollLoop(self)
 
         self._active_requests: Dict[str, asyncio.Task] = {}
+        # Sessions whose in-flight task is being cancelled BY THE USER. The
+        # cancellation lands in the request coroutine, which cannot otherwise
+        # tell a /stop from any other teardown; see ``handle_stop``.
+        self._user_stopped_sessions: set[str] = set()
         self._session_last_activity: Dict[str, float] = {}
         self._steering_states: Dict[str, _OpenCodeSteerState] = {}
         self._restored_poll_servers: Dict[asyncio.Task, _SteeringAwareOpenCodeServer] = {}
@@ -1231,7 +1236,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         except asyncio.CancelledError:
             logger.info(f"OpenCode request cancelled for {request.base_session_id}")
-            await self._remove_ack_reaction(request)
+            # A /stop is silent by design, so the ⏹️ replacing the 👀 is the only
+            # thing that tells the user this turn ended on their command. Every
+            # other cancellation (shutdown, clear_sessions, supersede) leaves the
+            # plain removal, because none of those are the user's doing.
+            await self._remove_ack_reaction(
+                request,
+                terminal_emoji=(
+                    STOPPED_REACTION_EMOJI
+                    if request.base_session_id in self._user_stopped_sessions
+                    else None
+                ),
+            )
             if session_id:
                 self.sessions.remove_active_poll(session_id)
             raise
@@ -1628,16 +1644,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         opencode_session_id = None
         if req_info:
             opencode_session_id = req_info[0]
+        # Claimed BEFORE the abort: the request coroutine is what owns the 👀,
+        # and its cancellation handler is the only place that can trade it for
+        # the ⏹️ receipt. Without this it cannot tell a /stop from a shutdown.
+        self._user_stopped_sessions.add(request.base_session_id)
         try:
-            await self._abort_active_request(request.base_session_id, task, req_info)
-        except Exception as e:
-            logger.warning(f"Failed to abort OpenCode session: {e}")
+            try:
+                await self._abort_active_request(request.base_session_id, task, req_info)
+            except Exception as e:
+                logger.warning(f"Failed to abort OpenCode session: {e}")
 
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            self._user_stopped_sessions.discard(request.base_session_id)
 
         if opencode_session_id:
             self.sessions.remove_active_poll(opencode_session_id)

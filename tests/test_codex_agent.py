@@ -603,6 +603,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
         agent._turn_registry = _StubTurnRegistry()
         agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
         transport = SimpleNamespace(is_alive=True, send_request=AsyncMock(side_effect=RuntimeError("boom")))
         agent._transports = {"/tmp": transport}
         agent._event_handler = SimpleNamespace(clear_pending=Mock(return_value=SimpleNamespace()))
@@ -616,12 +617,15 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         agent._event_handler.clear_pending.assert_not_called()
         agent._remove_ack_reaction.assert_not_awaited()
+        # Nothing was stopped, so no later ending may inherit a stopped receipt.
+        self.assertEqual(agent._user_stopped_turn_ids, set())
 
     async def test_handle_stop_hides_turn_after_interrupt_succeeds(self):
         agent = object.__new__(CodexAgent)
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
         agent._turn_registry = _StubTurnRegistry()
         agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
 
         events = []
 

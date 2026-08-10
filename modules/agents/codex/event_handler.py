@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 
 if TYPE_CHECKING:
@@ -142,7 +143,16 @@ class CodexEventHandler:
                 return
             self._clear_generated_image_snapshot(params)
             self._agent._turn_registry.pop_turn(turn_id)
-            await self._agent._remove_ack_reaction(tracked_request)
+            # A turn is interrupted for two very different reasons: the user
+            # stopped it, or a newer turn superseded it. Only the first is owed a
+            # ⏹️, and only the first claimer of the intent stamps it — this may
+            # be running concurrently with the ``turn/interrupt`` RPC that caused
+            # the completion.
+            stopped_by_user = self._agent.consume_user_stop_intent(turn_id)
+            await self._agent._remove_ack_reaction(
+                tracked_request,
+                terminal_emoji=STOPPED_REACTION_EMOJI if stopped_by_user else None,
+            )
             # Turn ended without a result — release any web-Chat stream waiter
             # (token-guarded, so a superseded turn won't close a newer stream).
             self._release_stream_turn(tracked_request.context)

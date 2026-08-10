@@ -5420,12 +5420,12 @@ class SessionTurnManager:
         has to announce itself.
 
         Recovery runs from ``_on_runtime_ready``, which fires BEFORE an external
-        transport has necessarily connected, and the notify dispatcher turns a
-        send failure into a ``None`` this method cannot distinguish from success.
-        A turn is terminal once reported, so a lost report is lost for good —
-        hence the report is held until ``notify_transport_ready`` says that
-        platform can actually deliver. ``avibe`` is ready as soon as the runtime
-        is, so Workbench sessions still report inline.
+        transport has necessarily connected. A turn is terminal once reported, so
+        a lost report is lost for good — hence the report is held until
+        ``notify_transport_ready`` says that platform can actually deliver, and a
+        send that still fails goes back on the queue rather than being dropped.
+        ``avibe`` is ready as soon as the runtime is, so Workbench sessions
+        report inline.
         """
 
         if self.controller is None:
@@ -5440,17 +5440,18 @@ class SessionTurnManager:
             )
             return
         platform = str(getattr(context, "platform", "") or "")
-        if not self._transport_can_deliver(platform):
-            self._pending_lost_turn_reports.setdefault(platform, []).append(
-                (session_id, str(origin_native_message_id or ""))
-            )
-            logger.info(
-                "lost turn report deferred until %s transport is ready (session=%s)",
-                platform,
-                session_id,
-            )
+        if self._transport_can_deliver(platform) and await self._emit_lost_turn_report(
+            context, session_id, origin_native_message_id
+        ):
             return
-        await self._emit_lost_turn_report(context, session_id, origin_native_message_id)
+        self._pending_lost_turn_reports.setdefault(platform, []).append(
+            (session_id, str(origin_native_message_id or ""))
+        )
+        logger.info(
+            "lost turn report held until %s transport can deliver (session=%s)",
+            platform,
+            session_id,
+        )
 
     def _transport_can_deliver(self, platform: str) -> bool:
         """Whether ``platform`` can deliver right now.
@@ -5482,6 +5483,7 @@ class SessionTurnManager:
         if not pending or self.controller is None:
             return 0
         reported = 0
+        unsent: list[tuple[str, str]] = []
         for session_id, origin_native_message_id in pending:
             try:
                 context = self._delivery_context(session_id)
@@ -5496,6 +5498,20 @@ class SessionTurnManager:
                 context, session_id, origin_native_message_id
             ):
                 reported += 1
+            else:
+                # "Ready" is the transport's claim, not a delivered message: a
+                # transient API error still loses the notice. Popping happened
+                # first, so an unsent report has to be put BACK or the only
+                # record of the interruption is gone for the process's lifetime.
+                unsent.append((session_id, str(origin_native_message_id or "")))
+        if unsent:
+            self._pending_lost_turn_reports.setdefault(platform, []).extend(unsent)
+            logger.info(
+                "%d lost turn report(s) on %s still undelivered; retained for the "
+                "next transport-ready",
+                len(unsent),
+                platform,
+            )
         return reported
 
     async def _emit_lost_turn_report(
@@ -5504,8 +5520,17 @@ class SessionTurnManager:
         session_id: str,
         origin_native_message_id: str,
     ) -> bool:
+        """Emit one interruption notice. ``False`` means it did NOT reach the user.
+
+        The dispatcher returns the delivered message id, and ``None`` when every
+        send failed — so a falsy return is real evidence of loss, not merely an
+        absent receipt. Treating it as success would stamp a ⚠️ next to a notice
+        nobody got, on a turn that is already terminal and will never be retried
+        by anything else.
+        """
+
         try:
-            await self.controller.emit_agent_message(
+            delivered = await self.controller.emit_agent_message(
                 context,
                 "notify",
                 i18n_t("turn.interrupted.serviceRestart", self._controller_language()),
@@ -5515,6 +5540,12 @@ class SessionTurnManager:
                 "lost turn report: failed to notify session=%s",
                 session_id,
                 exc_info=True,
+            )
+            return False
+        if not delivered:
+            logger.warning(
+                "lost turn report: notify produced no delivery for session=%s",
+                session_id,
             )
             return False
         # The dead process could not clear its own 👀. Retire it here so the

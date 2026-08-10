@@ -152,6 +152,11 @@ class CodexAgent(BaseAgent):
         self._thread_caller_env_configs: Dict[str, tuple[str, dict[str, str]]] = {}
         # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
         self._thread_git_path_configs: Dict[str, tuple[str, str, bool]] = {}
+        # Turn ids the USER stopped. ``turn/interrupt`` and the ``turn/completed``
+        # notification it provokes race each other, and whichever arrives first
+        # clears the 👀 — so the stop intent has to outlive both and be consumed
+        # by the winner. See ``consume_user_stop_intent``.
+        self._user_stopped_turn_ids: set[str] = set()
         self._fork_correction_pending_base_sessions: set[str] = set()
         self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
         self._connection_probe_turns: Dict[str, str] = {}
@@ -629,13 +634,20 @@ class CodexAgent(BaseAgent):
             request.stop_failure_reason = "runtime_unavailable"
             return False
 
+        # Recorded BEFORE the RPC. Codex answers an interrupt with a
+        # ``turn/completed`` notification the event worker may process while this
+        # call is still awaiting its response; that handler pops the turn and
+        # clears its reaction, after which ``clear_pending`` here returns None.
+        # Whichever side gets there first consumes the intent and owes the
+        # receipt, so the race can no longer swallow it.
+        self._user_stopped_turn_ids.add(turn_id)
         try:
             await transport.send_request(
                 "turn/interrupt",
                 {"threadId": thread_id, "turnId": turn_id},
             )
             interrupted_request = self._event_handler.clear_pending(turn_id)
-            if interrupted_request:
+            if interrupted_request and self.consume_user_stop_intent(turn_id):
                 await self._remove_ack_reaction(
                     interrupted_request,
                     terminal_emoji=STOPPED_REACTION_EMOJI,
@@ -661,7 +673,23 @@ class CodexAgent(BaseAgent):
         except Exception as e:
             request.stop_failure_reason = "interrupt_failed"
             logger.error("Failed to interrupt Codex turn: %s", e)
+            # The turn was not stopped, so nothing is owed a stopped receipt;
+            # leaving the intent behind would mis-stamp a later ending.
+            self._user_stopped_turn_ids.discard(turn_id)
             return False
+
+    def consume_user_stop_intent(self, turn_id: str) -> bool:
+        """Claim the /stop intent for ``turn_id``; True for the first claimer only.
+
+        Both the interrupt RPC and the ``turn/completed`` notification it causes
+        want to retire the same reaction, and either may run first. Claiming the
+        intent makes the receipt exactly-once instead of dependent on that order.
+        """
+
+        if not turn_id or turn_id not in self._user_stopped_turn_ids:
+            return False
+        self._user_stopped_turn_ids.discard(turn_id)
+        return True
 
     async def clear_sessions(self, session_key: str) -> int:
         """Clear sessions scoped to a specific session_key."""

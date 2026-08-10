@@ -3191,6 +3191,9 @@ def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
 
     async def _emit(_context, kind, text, **_kwargs):
         emitted.append((kind, text))
+        # The dispatcher answers with the delivered message id; a falsy answer
+        # means the send failed, which the report path must not read as success.
+        return f"msg-{len(emitted)}"
 
     async def _stamp(_context, message_id, emoji):
         stamped.append((message_id, emoji))
@@ -3295,6 +3298,59 @@ def test_lost_im_turn_report_waits_for_its_transport(managers) -> None:
     # The queue is drained, not replayed: a second hook fires nothing.
     assert asyncio.run(restarted.notify_transport_ready("avibe")) == 0
     assert len(emitted) == 1
+
+
+def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
+    # "Transport ready" is the transport's claim, not a delivered message. The
+    # dispatcher swallows a send failure and answers None, and the turn is
+    # already terminal, so treating that as done would discard the only account
+    # of the interruption the user will ever get.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    delivers = False
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return "msg-1" if delivers else None
+
+    restarted.controller.emit_agent_message = _emit
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    # It was attempted and it failed: no ⚠️ next to a notice nobody received.
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == []
+
+    delivers = True
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 1
+    assert len(emitted) == 2
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
 
 
 def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
