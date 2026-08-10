@@ -114,7 +114,6 @@ WATCH_CIRCUIT_OUTPUT_LIMIT = 2000
 FOLLOW_UP_SLOT_READY = "ready"
 FOLLOW_UP_SLOT_STOPPED = "stopped"
 FOLLOW_UP_SLOT_LIFETIME_EXPIRED = "lifetime_expired"
-FOLLOW_UP_SLOT_LIFETIME_EXPIRED_ACTIVE = "lifetime_expired_active"
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -924,6 +923,12 @@ class _CycleResult:
     stdout: str
     stderr: str
     timed_out: bool
+
+
+@dataclass(frozen=True)
+class _FollowUpSlot:
+    state: str
+    blocking_run_id: str | None = None
 
 
 def _cycle_env(watch: ManagedWatch) -> dict[str, str]:
@@ -1887,23 +1892,23 @@ class ManagedWatchService:
         watch_id: str,
         *,
         lifetime_started: float,
-    ) -> str:
+    ) -> _FollowUpSlot:
         """Wait for the prior Agent work without letting Watch lifetime drift."""
 
         terminal_statuses = {"succeeded", "failed", "canceled"}
         future_completion_seen: tuple[str, float] | None = None
         while self._running:
             if not self._owns_service_instance():
-                return FOLLOW_UP_SLOT_STOPPED
+                return _FollowUpSlot(FOLLOW_UP_SLOT_STOPPED)
             if not await self._watch_store_call_async(
                 watch_id,
                 "reload before follow-up fence",
                 self.store.maybe_reload,
             ):
-                return FOLLOW_UP_SLOT_STOPPED
+                return _FollowUpSlot(FOLLOW_UP_SLOT_STOPPED)
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
-                return FOLLOW_UP_SLOT_STOPPED
+                return _FollowUpSlot(FOLLOW_UP_SLOT_STOPPED)
             lifetime_remaining = None
             if watch.lifetime_timeout_seconds > 0:
                 lifetime_remaining = watch.lifetime_timeout_seconds - (
@@ -1920,10 +1925,14 @@ class ManagedWatchService:
                     exc,
                     watch_id=watch_id,
                 )
-                return FOLLOW_UP_SLOT_STOPPED
+                return _FollowUpSlot(FOLLOW_UP_SLOT_STOPPED)
             if unsettled:
+                blocking_run_id = str(unsettled["id"])
                 if lifetime_remaining is not None and lifetime_remaining <= 0:
-                    return FOLLOW_UP_SLOT_LIFETIME_EXPIRED_ACTIVE
+                    return _FollowUpSlot(
+                        FOLLOW_UP_SLOT_LIFETIME_EXPIRED,
+                        blocking_run_id=blocking_run_id,
+                    )
                 delay = WATCH_FOLLOW_UP_POLL_SECONDS
                 if lifetime_remaining is not None:
                     delay = min(delay, lifetime_remaining)
@@ -1933,8 +1942,8 @@ class ManagedWatchService:
             run_id = str(watch.metadata.get(FOLLOW_UP_RUN_ID_METADATA_KEY) or "").strip()
             if not run_id:
                 if lifetime_remaining is not None and lifetime_remaining <= 0:
-                    return FOLLOW_UP_SLOT_LIFETIME_EXPIRED
-                return FOLLOW_UP_SLOT_READY
+                    return _FollowUpSlot(FOLLOW_UP_SLOT_LIFETIME_EXPIRED)
+                return _FollowUpSlot(FOLLOW_UP_SLOT_READY)
             try:
                 run = await self._run_runtime_sync(self.request_store.get_run, run_id)
             except Exception as exc:
@@ -1943,29 +1952,32 @@ class ManagedWatchService:
                     exc,
                     watch_id=watch_id,
                 )
-                return FOLLOW_UP_SLOT_STOPPED
+                return _FollowUpSlot(FOLLOW_UP_SLOT_STOPPED)
             if run is None:
                 if lifetime_remaining is not None and lifetime_remaining <= 0:
-                    return FOLLOW_UP_SLOT_LIFETIME_EXPIRED
-                return FOLLOW_UP_SLOT_READY
+                    return _FollowUpSlot(FOLLOW_UP_SLOT_LIFETIME_EXPIRED)
+                return _FollowUpSlot(FOLLOW_UP_SLOT_READY)
             status = str(run.get("status") or "").strip().lower()
             if status not in terminal_statuses:
                 if lifetime_remaining is not None and lifetime_remaining <= 0:
-                    return FOLLOW_UP_SLOT_LIFETIME_EXPIRED_ACTIVE
+                    return _FollowUpSlot(
+                        FOLLOW_UP_SLOT_LIFETIME_EXPIRED,
+                        blocking_run_id=run_id,
+                    )
                 delay = WATCH_FOLLOW_UP_POLL_SECONDS
                 if lifetime_remaining is not None:
                     delay = min(delay, lifetime_remaining)
                 await asyncio.sleep(delay)
                 continue
             if lifetime_remaining is not None and lifetime_remaining <= 0:
-                return FOLLOW_UP_SLOT_LIFETIME_EXPIRED
+                return _FollowUpSlot(FOLLOW_UP_SLOT_LIFETIME_EXPIRED)
             if watch.mode != "forever":
-                return FOLLOW_UP_SLOT_READY
+                return _FollowUpSlot(FOLLOW_UP_SLOT_READY)
             completed_at = _parse_utc_timestamp(
                 run.get("completed_at") or run.get("updated_at")
             )
             if completed_at is None:
-                return FOLLOW_UP_SLOT_READY
+                return _FollowUpSlot(FOLLOW_UP_SLOT_READY)
             wall_elapsed = (datetime.now(timezone.utc) - completed_at).total_seconds()
             if wall_elapsed >= 0:
                 elapsed = wall_elapsed
@@ -1976,36 +1988,35 @@ class ManagedWatchService:
                 elapsed = loop_now - future_completion_seen[1]
             remaining = WATCH_MIN_REARM_SECONDS - elapsed
             if remaining <= 0:
-                return FOLLOW_UP_SLOT_READY
+                return _FollowUpSlot(FOLLOW_UP_SLOT_READY)
             delay = min(remaining, WATCH_FOLLOW_UP_POLL_SECONDS)
             if lifetime_remaining is not None:
                 delay = min(delay, lifetime_remaining)
             await asyncio.sleep(delay)
-        return FOLLOW_UP_SLOT_STOPPED
+        return _FollowUpSlot(FOLLOW_UP_SLOT_STOPPED)
 
     async def _commit_lifetime_timeout_async(
         self,
         watch: ManagedWatch,
         *,
-        emit_follow_up: bool,
+        blocking_run_id: str | None = None,
     ) -> bool:
         kwargs: dict[str, Any] = {}
-        if emit_follow_up:
+        if blocking_run_id is None:
             kwargs = {
                 "prefix": watch.message
                 or watch.prefix
-                or "Watch stopped after reaching its lifetime timeout.",
-                "body": (
-                    f"Watch '{watch.name or watch.id}' reached its lifetime timeout after "
-                    f"{int(watch.lifetime_timeout_seconds)} second(s)."
+                or self._t("harness.watch.lifetimeTimeoutPrefix"),
+                "body": self._t(
+                    "harness.watch.lifetimeTimeoutBody",
+                    name=watch.name or watch.id,
+                    seconds=int(watch.lifetime_timeout_seconds),
                 ),
             }
         else:
             kwargs["error"] = self._t(
                 "harness.watch.lifetimeExpiredWithActiveFollowUp",
-                run_id=str(
-                    watch.metadata.get(FOLLOW_UP_RUN_ID_METADATA_KEY) or "unknown"
-                ),
+                run_id=blocking_run_id,
             )
         return await self._commit_cycle_result_async(
             watch,
@@ -2055,20 +2066,15 @@ class ManagedWatchService:
                 watch_id,
                 lifetime_started=lifetime_started,
             )
-            if follow_up_slot == FOLLOW_UP_SLOT_STOPPED:
+            if follow_up_slot.state == FOLLOW_UP_SLOT_STOPPED:
                 return
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
-            if follow_up_slot in {
-                FOLLOW_UP_SLOT_LIFETIME_EXPIRED,
-                FOLLOW_UP_SLOT_LIFETIME_EXPIRED_ACTIVE,
-            }:
+            if follow_up_slot.state == FOLLOW_UP_SLOT_LIFETIME_EXPIRED:
                 await self._commit_lifetime_timeout_async(
                     watch,
-                    emit_follow_up=(
-                        follow_up_slot == FOLLOW_UP_SLOT_LIFETIME_EXPIRED
-                    ),
+                    blocking_run_id=follow_up_slot.blocking_run_id,
                 )
                 return
 
@@ -2078,7 +2084,6 @@ class ManagedWatchService:
                 if remaining_lifetime <= 0:
                     await self._commit_lifetime_timeout_async(
                         watch,
-                        emit_follow_up=True,
                     )
                     return
                 cycle_timeout = watch.timeout_seconds

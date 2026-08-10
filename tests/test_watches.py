@@ -1243,9 +1243,27 @@ def test_managed_watch_service_once_retries_until_first_success(
     assert pending[0].prompt.endswith("ready")
 
 
+@pytest.mark.parametrize(
+    ("language", "expected_prefix", "expected_body"),
+    [
+        (
+            "en",
+            "Watch stopped after reaching its lifetime timeout.",
+            "Watch 'Bounded wait' reached its lifetime timeout after 0 second(s).",
+        ),
+        (
+            "zh",
+            "Watch 达到生命周期上限后已停止。",
+            "Watch「Bounded wait」已达到 0 秒的生命周期上限。",
+        ),
+    ],
+)
 def test_retrying_once_watch_lifetime_bounds_a_long_retry_delay(
     tmp_path: Path,
     monkeypatch,
+    language: str,
+    expected_prefix: str,
+    expected_body: str,
 ) -> None:
     """HFR-470: the overall lifetime truncates a once Watch retry delay."""
 
@@ -1256,7 +1274,7 @@ def test_retrying_once_watch_lifetime_bounds_a_long_retry_delay(
         session_key="slack::channel::C123",
         command=[sys.executable, "wait.py"],
         shell_command=None,
-        prefix="Continue after the event.",
+        prefix=None,
         cwd=None,
         mode="once",
         timeout_seconds=5,
@@ -1267,7 +1285,7 @@ def test_retrying_once_watch_lifetime_bounds_a_long_retry_delay(
         deliver_key=None,
     )
     service = ManagedWatchService(
-        controller=SimpleNamespace(),
+        controller=SimpleNamespace(config=SimpleNamespace(language=language)),
         store=store,
         request_store=request_store,
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
@@ -1289,14 +1307,17 @@ def test_retrying_once_watch_lifetime_bounds_a_long_retry_delay(
     assert saved.last_exit_code == 124
     pending = request_store.list_pending()
     assert len(pending) == 1
-    assert "reached its lifetime timeout" in pending[0].prompt
+    assert expected_prefix in pending[0].prompt
+    assert expected_body in pending[0].prompt
 
 
+@pytest.mark.parametrize("metadata_run_id", [None, "stale-run"])
 def test_watch_lifetime_retires_while_an_existing_follow_up_is_active(
     tmp_path: Path,
     monkeypatch,
+    metadata_run_id: str | None,
 ) -> None:
-    """A lifetime deadline stops monitoring without violating single-flight."""
+    """The actual queued Run owns expiry even when Watch metadata is absent or stale."""
 
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
@@ -1315,6 +1336,13 @@ def test_watch_lifetime_retires_while_an_existing_follow_up_is_active(
         post_to=None,
         deliver_key=None,
     )
+    if metadata_run_id is not None:
+        assert store.mark_cycle_result(
+            watch.id,
+            exit_code=None,
+            error=None,
+            metadata_updates={FOLLOW_UP_RUN_ID_METADATA_KEY: metadata_run_id},
+        )
     active = request_store.enqueue_hook_send(
         session_key=watch.session_key,
         prompt="existing event",
@@ -1344,6 +1372,7 @@ def test_watch_lifetime_retires_while_an_existing_follow_up_is_active(
     assert saved is not None and saved.enabled is False
     assert saved.last_exit_code == 124
     assert "retired without starting another Run" in str(saved.last_error)
+    assert active.id in str(saved.last_error)
     pending = request_store.list_pending()
     assert [request.id for request in pending] == [active.id]
 

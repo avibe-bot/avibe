@@ -26,7 +26,9 @@ event. The runtime currently loses both facts between cycles.
   for a `once` Watch that can now have multiple retry cycles.
 - The lifetime deadline also bounds time spent behind the follow-up fence. If an
   earlier Agent Run is still queued or running at the deadline, the Watch retires
-  immediately and records why, but does not create a second concurrent Run.
+  immediately and records that Run's actual ID, but does not create a second
+  concurrent Run. If no Run owns the slot, the timeout follow-up uses the configured
+  language.
 
 ## Runtime Invariants
 
@@ -66,9 +68,10 @@ No schema migration is required. Watch metadata owns:
 
 Existing Watches have none of these keys and continue normally. On upgrade, the
 runtime also queries queued/running Watch Runs by definition before starting a waiter,
-so legacy backlog drains without admitting another event. File-backed stores retain
-the same behavior for tests and legacy operation, without pretending to provide a
-cross-file transaction.
+so legacy backlog drains without admitting another event. That queried row, rather
+than possibly absent or stale Watch metadata, is also the source of the blocking Run
+ID recorded on lifetime expiry. File-backed stores retain the same behavior for tests
+and legacy operation, without pretending to provide a cross-file transaction.
 
 Changing the waiter command, shell command, mode, or cwd starts a new waiter lifecycle
 and clears the old burst window. Session routing and follow-up copy changes do not.
