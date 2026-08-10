@@ -20,6 +20,7 @@ from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -635,12 +636,15 @@ class CodexAgent(BaseAgent):
             )
             interrupted_request = self._event_handler.clear_pending(turn_id)
             if interrupted_request:
-                await self._remove_ack_reaction(interrupted_request)
+                await self._remove_ack_reaction(
+                    interrupted_request,
+                    terminal_emoji=STOPPED_REACTION_EMOJI,
+                )
             # A user-initiated stop is terminal but intentional, so it carries NO
             # user-facing message: a single SILENT result settles the dot to idle +
             # releases the SSE waiter through the outbound chokepoint without a
             # bubble. The user already knows they stopped it (avibe shows the dot go
-            # idle; IM shows the ack reaction removed above). ``level="silent"`` is
+            # idle; IM shows the ⏹️ receipt stamped above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
             # ``stop_output_for`` (not the terminal-turn default) keeps this empty body
             # out of the run's terminal state so the stop settles it ``canceled``

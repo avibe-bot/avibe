@@ -36,6 +36,15 @@ QUEUED_REACTION_EMOJI = "👌"
 STEERED_REACTION_EMOJI = "✍️"
 UNCONFIRMED_REACTION_EMOJI = "🤔"
 NOT_DELIVERED_REACTION_EMOJI = "🤷"
+# Terminal receipts that REPLACE the running 👀 instead of clearing it. Plain
+# removal is the right ending for a turn that produced its own result — the
+# result IS the receipt — but it is ambiguous for a turn that ended without one:
+# a stopped turn and a turn whose runtime died both leave a message that simply
+# stopped having a reaction, which is also what a healthy silent completion
+# looks like. These two say which happened, and they persist on the triggering
+# message rather than costing a line in the thread.
+STOPPED_REACTION_EMOJI = "⏹️"
+INTERRUPTED_REACTION_EMOJI = "⚠️"
 # Delivery state -> admission receipt. States that own a turn (``claimed``,
 # ``steering``, ``interrupt_waiting``) are absent on purpose: their feedback is
 # the turn's own processing indicator, and an ``accepted`` Delivery is only
@@ -521,6 +530,40 @@ class ProcessingIndicatorService:
         handle.ack_reaction_emoji = emoji
         return True
 
+    async def stamp_orphaned_terminal_reaction(
+        self,
+        context: MessageContext,
+        message_id: str,
+        terminal_emoji: str,
+    ) -> bool:
+        """Retire a running 👀 left behind by a runtime that died mid-turn.
+
+        The in-memory handle does NOT survive a service restart — only the
+        OpenCode poll loop snapshots one, and it restores after the promotion to
+        👀 — so a turn whose process disappeared leaves its running reaction on
+        the user's message with nothing left to clear it. Recovery recovers the
+        originating message id from the durable ledger, so it can finish the
+        lifecycle the dead process could not: drop the stale 👀 and leave the
+        terminal receipt in its place.
+
+        Both halves are best-effort and independent. A platform that already lost
+        the reaction (message deleted, history trimmed) must still get the
+        terminal receipt attempted, so the removal failing does not skip it.
+        """
+
+        if not message_id or not terminal_emoji:
+            return False
+        im_client = self._get_im_client(context)
+        try:
+            await im_client.remove_reaction(context, message_id, ACK_REACTION_EMOJI)
+        except Exception as err:
+            logger.debug("Failed to remove orphaned ack reaction: %s", err)
+        try:
+            return bool(await im_client.add_reaction(context, message_id, terminal_emoji))
+        except Exception as err:
+            logger.debug("Failed to stamp orphaned terminal reaction: %s", err)
+            return False
+
     def _resolve_handle(self, request_or_handle: Any) -> tuple[ProcessingIndicatorHandle, Optional[Any]]:
         if isinstance(request_or_handle, ProcessingIndicatorHandle):
             return request_or_handle, None
@@ -743,7 +786,23 @@ class ProcessingIndicatorService:
         if getattr(request, "processing_indicator", None) is None:
             request.processing_indicator = handle
 
-    async def finish(self, request_or_handle: Any) -> None:
+    async def finish(
+        self,
+        request_or_handle: Any,
+        *,
+        terminal_emoji: Optional[str] = None,
+    ) -> None:
+        """Clear the turn's indicator, optionally leaving a terminal receipt.
+
+        ``terminal_emoji`` replaces the running 👀 rather than clearing it, for
+        the endings that produce no result of their own (see
+        ``STOPPED_REACTION_EMOJI`` / ``INTERRUPTED_REACTION_EMOJI``). Omitting it
+        keeps the historical behavior — a turn that emitted a result needs no
+        second receipt. Adding the replacement is best-effort: the removal is
+        what the handle's bookkeeping is keyed on, so a platform that rejects the
+        new emoji still ends with a cleanly cleared indicator.
+        """
+
         if isinstance(request_or_handle, ProcessingIndicatorHandle):
             handle = request_or_handle
             request = None
@@ -779,6 +838,7 @@ class ProcessingIndicatorService:
                 request.typing_indicator_active = False
 
         if handle.ack_reaction_message_id and handle.ack_reaction_emoji:
+            reaction_message_id = handle.ack_reaction_message_id
             try:
                 await self._get_im_client(handle.context).remove_reaction(
                     handle.context,
@@ -787,6 +847,16 @@ class ProcessingIndicatorService:
                 )
             except Exception as err:
                 logger.debug("Failed to remove reaction ack: %s", err)
+            else:
+                if terminal_emoji:
+                    try:
+                        await self._get_im_client(handle.context).add_reaction(
+                            handle.context,
+                            reaction_message_id,
+                            terminal_emoji,
+                        )
+                    except Exception as err:
+                        logger.debug("Failed to add terminal reaction: %s", err)
             finally:
                 handle.ack_reaction_message_id = None
                 handle.ack_reaction_emoji = None

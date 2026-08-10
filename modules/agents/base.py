@@ -521,18 +521,26 @@ class BaseAgent(ABC):
             self._pin_agent_session_id(request.context, reserved_id)
         return ensured_id
 
-    async def _remove_ack_reaction(self, request: AgentRequest) -> None:
+    async def _remove_ack_reaction(
+        self,
+        request: AgentRequest,
+        *,
+        terminal_emoji: Optional[str] = None,
+    ) -> None:
         """Remove the acknowledgement reaction / typing indicator.
 
         Called after sending result message or on terminal error to clean up
         the 👀 reaction.  This is the **single** implementation — subclasses
         should NOT override it.  The guard (check-then-clear) is idempotent so
         calling it more than once is harmless.
+
+        ``terminal_emoji`` leaves a terminal receipt in place of the 👀 for an
+        ending that emits no result of its own; a stop is the live caller.
         """
         service = getattr(self.controller, "processing_indicator", None)
         if service is None:
             return
-        await service.finish(request)
+        await service.finish(request, terminal_emoji=terminal_emoji)
 
     async def emit_result_message(
         self,

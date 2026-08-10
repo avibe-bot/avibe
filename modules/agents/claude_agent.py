@@ -17,6 +17,7 @@ from core.message_output import (
     terminal_turn_output,
 )
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_work import RuntimeWorkLane
@@ -1264,7 +1265,10 @@ class ClaudeAgent(BaseAgent):
         if stopped_request is not None:
             try:
                 await self._remove_specific_pending_reaction(composite_key, request.context, stopped_request)
-                await self._remove_ack_reaction(stopped_request)
+                await self._remove_ack_reaction(
+                    stopped_request,
+                    terminal_emoji=STOPPED_REACTION_EMOJI,
+                )
             except Exception:
                 logger.debug("Failed to clear Claude stop processing indicator", exc_info=True)
 
@@ -1283,7 +1287,9 @@ class ClaudeAgent(BaseAgent):
             # A user-initiated stop is terminal but intentional, so it carries
             # NO user-facing message: a single SILENT result settles the dot to
             # idle + releases the SSE waiter through the outbound chokepoint
-            # WITHOUT a bubble. Emit only after cleanup so the next turn cannot
+            # WITHOUT a bubble. IM says it in the reaction instead — the ⏹️
+            # stamped above is the receipt, at no cost in thread noise. Emit
+            # only after cleanup so the next turn cannot
             # acquire the gate and reuse a client that this stop is still
             # disconnecting. ``stop_output_for`` (not the terminal-turn default) keeps
             # this empty body out of the run's terminal state so the stop settles it
