@@ -244,6 +244,62 @@ async def test_processing_probe_error_retries_on_tick_after_backoff(
     assert store.next_processing_action() is None
 
 
+async def test_add_settlement_does_not_bypass_processing_probe_backoff(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _open_store_processing_fault(
+        store,
+        "probe-before-add",
+        at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    current = [datetime(2026, 1, 1, tzinfo=UTC)]
+    health_attempts = 0
+    events: list[str] = []
+
+    class Provider(FakeMemoryProvider):
+        async def processing_healthy(self) -> bool:
+            nonlocal health_attempts
+            health_attempts += 1
+            if health_attempts == 1:
+                raise RuntimeError("health failed")
+            return True
+
+        async def add(self, capture):
+            self.captures.append(capture)
+            raise MemoryProviderFailure("memory_processing_failed", retryable=True)
+
+    async def notify(event, _kind, _occurred_at, _queued) -> bool:
+        events.append(event)
+        return True
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=Provider(),
+        enabled=lambda: True,
+        now=lambda: current[0],
+        processing_event=notify,
+    )
+    await coordinator.recover(lease_owner="next-boot")
+    _enqueue(store, "activity-before-probe-retry", session="activity")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:01.000Z",
+    )
+    assert claimed is not None
+
+    assert not await coordinator.deliver(claimed, lease_owner="worker")
+    assert health_attempts == 1
+    assert events == []
+    assert isinstance(store.next_processing_action(), ProcessingHealthProbe)
+
+    current[0] += timedelta(seconds=5)
+    assert await coordinator.run_due() == 0
+    assert health_attempts == 2
+    assert events == ["fault"]
+    assert store.next_processing_action() is None
+
+
 async def test_processing_probe_cancellation_does_not_schedule_retry(
     tmp_path: Path,
 ) -> None:
@@ -322,6 +378,70 @@ async def test_processing_notification_failure_retries_on_tick_after_backoff(
     current[0] += timedelta(seconds=5)
     assert await coordinator.run_due() == 0
     assert attempts == 2
+    assert store.next_processing_action() is None
+
+
+async def test_flush_settlement_does_not_bypass_processing_notification_backoff(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    row = _enqueue(store, "flush-before-notification-retry")
+    claimed = store.claim_due(
+        lease_owner="worker",
+        now="2026-01-01T00:00:00.000Z",
+    )
+    assert claimed is not None
+    assert store.settle_add_ack(
+        claimed,
+        AddAck("before-flush", "accumulated"),
+        lease_owner="worker",
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    ).settled
+    lease = store.begin_flush_attempt(
+        now="2026-01-01T00:00:01.000Z",
+        provider_session_ref=row.provider_session_ref,
+        force=True,
+    )
+    assert lease is not None
+    assert store.begin_flush_submission(
+        lease,
+        now="2026-01-01T00:00:02.000Z",
+    )
+    _open_store_processing_fault(
+        store,
+        "notification-before-flush",
+        at=datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+    )
+    probe = store.next_processing_action()
+    assert isinstance(probe, ProcessingHealthProbe)
+    assert store.record_processing_health(probe, healthy=True).committed
+    current = [datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC)]
+    notification_attempts = 0
+
+    async def notify(*_args) -> bool:
+        nonlocal notification_attempts
+        notification_attempts += 1
+        return notification_attempts > 1
+
+    coordinator = SessionFlushCoordinator(
+        store=store,
+        provider=FakeMemoryProvider(),
+        enabled=lambda: True,
+        now=lambda: current[0],
+        processing_event=notify,
+    )
+    await coordinator._reconcile_processing_events()
+
+    await coordinator._finalize_flush_outcome(
+        lease,
+        FlushUnknown(reason="transport"),
+    )
+    assert notification_attempts == 1
+    assert isinstance(store.next_processing_action(), ProcessingNotification)
+
+    current[0] += timedelta(seconds=5)
+    assert await coordinator.run_due() == 0
+    assert notification_attempts == 2
     assert store.next_processing_action() is None
 
 
@@ -670,16 +790,22 @@ async def test_notification_queue_count_is_live_and_not_durable_identity(
         queued_values.append(queued)
         return len(queued_values) > 1
 
+    current = [datetime(2026, 1, 1, tzinfo=UTC)]
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=FakeMemoryProvider(),
         enabled=lambda: True,
+        now=lambda: current[0],
         processing_event=notify,
     )
     await coordinator.recover(lease_owner="first-boot")
     _enqueue(store, "live-queued-2", session="live-queued-2")
     assert store.next_processing_action() == durable_event
     await coordinator.recover(lease_owner="second-boot")
+    assert queued_values == [1]
+
+    current[0] += timedelta(seconds=5)
+    assert await coordinator.run_due() == 0
 
     assert queued_values == [1, 2]
     assert store.next_processing_action() is None

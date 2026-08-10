@@ -208,10 +208,7 @@ class SessionFlushCoordinator:
         if self._paused or not self._enabled():
             return 0
         current_time = self._current_time()
-        if (
-            self._processing_retry_at is not None
-            and current_time >= self._processing_retry_at
-        ):
+        if self._processing_retry_at is not None:
             await self._reconcile_processing_events()
         now = _iso(current_time)
         refs = await self._store_call(
@@ -742,7 +739,10 @@ class SessionFlushCoordinator:
             await self._reconcile_processing_events_locked()
 
     async def _reconcile_processing_events_locked(self) -> None:
-        self._processing_retry_at = None
+        if self._processing_retry_at is not None:
+            if self._current_time() < self._processing_retry_at:
+                return
+            self._processing_retry_at = None
         for _ in range(MAX_PROCESSING_ACTIONS_PER_PASS):
             action = await self._store_call(self._store.next_processing_action)
             if action is None:
