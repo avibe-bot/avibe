@@ -167,6 +167,20 @@ def test_memory_config_rejects_invalid_diagnostics(diagnostics: object) -> None:
         )
 
 
+def test_memory_config_defaults_when_block_is_absent() -> None:
+    payload = _payload({})
+    payload.pop("memory")
+
+    config = V2Config.from_payload(payload)
+
+    assert config.memory == MemoryConfig()
+
+
+def test_memory_config_rejects_explicit_null_block() -> None:
+    with pytest.raises(ValueError, match="Config 'memory' must be an object"):
+        V2Config.from_payload(_payload(None))  # type: ignore[arg-type]
+
+
 def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     original = V2Config.from_payload(

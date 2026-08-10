@@ -1344,9 +1344,10 @@ class V2Config:
             avault=avault,
         )
 
-        memory_payload = payload.get("memory")
-        if memory_payload is None:
-            memory_payload = {}
+        # Default only when the block is absent. An explicitly supplied
+        # ``"memory": null`` is a malformed config file, not an omission, and
+        # must not silently start with a disabled default Memory config.
+        memory_payload = payload.get("memory", {})
         if not isinstance(memory_payload, dict):
             raise ValueError("Config 'memory' must be an object")
         memory_processing_payload = memory_payload.get("processing")
