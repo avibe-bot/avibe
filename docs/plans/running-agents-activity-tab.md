@@ -156,7 +156,8 @@ OpenCode 已是一等活后端（进程模型不同、无 pid）。
 带明确意图的入口（如 Chat Agent 选择器的"新建 Agent"、Harness 详情的
 "Open in Agents"）用 `/agents?tab=definitions` 指定落地 Tab，优先于记忆——
 它是目的地而不是用户的选择，因此**不写回**记忆；只有用户真的点 Tab 才会改变
-下次裸进 `/agents` 的落点。
+下次裸进 `/agents` 的落点。该参数消失（例如从带参 URL 再点侧边栏 Agents，
+路由只改 URL 不重挂组件）即视为回到裸导航，重新按记忆落地。
 
 ### 8-K. Running 子 Tab 计数 badge 口径（已定 K2）
 Running 子 Tab 的 badge **仅计 `active`（在途轮次）**；idle 实例仍在列表中可见但不计入 badge。须与 §6 口径统一：列表含 idle（D2），但所有"在跑计数"badge 一律只数 active。

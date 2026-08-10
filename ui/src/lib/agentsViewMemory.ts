@@ -55,6 +55,16 @@ export function agentsTabFromParam(param: string | null | undefined): AgentsTabK
   return (AGENTS_TAB_ORDER as string[]).includes(param ?? '') ? (param as AgentsTabKey) : null;
 }
 
+// Which tab the current URL should show: the ``?tab=`` destination while it is
+// there, the remembered tab otherwise. One function so the page resolves mount
+// and every later param change the same way — the param can disappear without a
+// remount (clicking the sidebar link from a pinned URL), and that is bare
+// navigation again, so it must go back to the remembered tab rather than keep
+// whatever the pinned one left on screen.
+export function resolveAgentsTab(param: string | null | undefined, storage?: ViewStorage): AgentsTabKey {
+  return agentsTabFromParam(param) ?? readAgentsTab(storage);
+}
+
 export function writeAgentsTab(tab: AgentsTabKey, storage?: ViewStorage): void {
   write(TAB_STORAGE_KEY, tab, storage);
 }

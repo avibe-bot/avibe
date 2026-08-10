@@ -55,8 +55,7 @@ import { errorMessage } from '@/lib/errorMessage';
 // never name a tab this page no longer renders (see agentsViewMemory).
 import {
   AGENTS_TAB_ORDER,
-  agentsTabFromParam,
-  readAgentsTab,
+  resolveAgentsTab,
   writeAgentsTab,
   type AgentsTabKey,
 } from '../../lib/agentsViewMemory';
@@ -76,14 +75,14 @@ export const AgentsPage: React.FC = () => {
   // NOT written back to the memory.
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>(
-    () => agentsTabFromParam(tabParam) ?? readAgentsTab(),
-  );
+  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>(() => resolveAgentsTab(tabParam));
   // One-way URL -> state, keyed on the param so a later user tab click isn't
-  // yanked back: a contextual link can arrive while this page is already mounted.
+  // yanked back: both a contextual link arriving while this page is already
+  // mounted, and that param going away again (the sidebar link from a pinned URL
+  // changes the URL without remounting) are param changes, and the second one is
+  // bare navigation — back to the remembered tab.
   useEffect(() => {
-    const requested = agentsTabFromParam(tabParam);
-    if (requested) setAgentsTab(requested);
+    setAgentsTab(resolveAgentsTab(tabParam));
   }, [tabParam]);
   const selectAgentsTab = useCallback((next: AgentsTabKey) => {
     setAgentsTab(next);

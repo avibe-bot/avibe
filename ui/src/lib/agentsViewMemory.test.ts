@@ -7,6 +7,7 @@ import {
   agentsTabFromParam,
   readAgentGraphMode,
   readAgentsTab,
+  resolveAgentsTab,
   writeAgentGraphMode,
   writeAgentsTab,
 } from './agentsViewMemory';
@@ -89,7 +90,21 @@ describe('agents view memory', () => {
     // Resolving an explicit destination is a pure read — only an actual tab
     // click (writeAgentsTab) may change what the next bare visit opens.
     expect(agentsTabFromParam('definitions')).toBe('definitions');
+    expect(resolveAgentsTab('definitions', memory.storage)).toBe('definitions');
     expect(readAgentsTab(memory.storage)).toBe('running');
+  });
+
+  it('resolves ?tab= while present and the remembered tab the moment it is gone', () => {
+    const memory = memoryStorage();
+    writeAgentsTab('running', memory.storage);
+
+    // A pinned destination, then the same URL without it (the sidebar link from a
+    // pinned URL) — the second resolution is bare navigation again, so the
+    // remembered tab comes back instead of the destination sticking.
+    expect(resolveAgentsTab('definitions', memory.storage)).toBe('definitions');
+    expect(resolveAgentsTab(null, memory.storage)).toBe('running');
+    // An unknown value is no intent at all, so it resumes the memory too.
+    expect(resolveAgentsTab('webhooks', memory.storage)).toBe('running');
   });
 
   it('tolerates blocked storage', () => {
