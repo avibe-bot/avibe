@@ -1064,9 +1064,8 @@ class ModelHubRuntimeRouter:
                 else None
             )
             if inspection is None:
-                # Keep a cooling/error route's public identifier stable in the
-                # overlay. Per-turn resolution still rejects that requested
-                # route, while unrelated checked models remain usable.
+                # Keep every configured route's public identifier stable in the
+                # overlay. Per-turn resolution still rejects unavailable hops.
                 inspection = (
                     resolution.projectable_hops[0]
                     if resolution.projectable_hops
@@ -1076,7 +1075,6 @@ class ModelHubRuntimeRouter:
                 inspection is None
                 or inspection.source is None
                 or inspection.model_id is None
-                or not inspection.inventory_member
             ):
                 continue
             source = inspection.source
@@ -1092,14 +1090,21 @@ class ModelHubRuntimeRouter:
                     "models": {},
                 },
             )
-            model = next(item for item in source.models if item.id == exact_model_id)
+            model = next(
+                (item for item in source.models if item.id == exact_model_id),
+                None,
+            )
             runtime_model = identifier
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{exact_model_id}"
             provider["models"][menu_model_id] = {
                 "id": runtime_model,
-                "name": model.display_name or menu_model_id,
+                "name": (
+                    model.display_name
+                    if model is not None and model.display_name
+                    else menu_model_id
+                ),
             }
             projected_identifiers.append(identifier)
             if resolution.candidate_hops:

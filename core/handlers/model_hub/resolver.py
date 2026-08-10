@@ -478,7 +478,14 @@ def resolve_model_hub_turn(
     projectable_hops = tuple(
         inspection
         for inspection in matching_inspections
-        if inspection.supply_eligible
+        if inspection.configuration_eligible
+        and (
+            supply_channel is None
+            or (
+                inspection.source is not None
+                and inspection.source.supply_channel == supply_channel
+            )
+        )
     )
     recoverable = tuple(
         source.id

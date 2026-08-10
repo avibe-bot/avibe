@@ -546,6 +546,7 @@ def test_resolution_marks_stale_exact_hop_unsupported():
     assert resolution.matching_sources == (source,)
     assert resolution.candidates == ()
     assert resolution.unsupported_source_ids == (source.id,)
+    assert resolution.projectable_hops == resolution.inspected_hops
 
 
 def test_launch_failure_reports_unsupported_exact_hop():
@@ -1323,6 +1324,56 @@ def test_unsaved_observation_revoke_failure_is_journaled_and_reconciled(tmp_path
     asyncio.run(repaired._ensure_engine_synced())
     assert repaired.revocations.list() == []
     assert adapter.revoked == ["cred_00000001"]
+
+
+def test_unsaved_observation_fails_when_cleanup_is_not_durable(tmp_path):
+    adapter = FakeAdapter()
+    adapter.revoke_error = True
+    service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    def fail_journal_write(*_args, **_kwargs):
+        raise OSError("journal is unavailable")
+
+    service.revocations.add = fail_journal_write
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.observe_source(
+                {
+                    "vendor": "anthropic",
+                    "base_url": None,
+                    "key": "sk-test-observation-cleanup-failure",
+                }
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert store.load().sources == []
+    assert service.revocations.list() == []
+
+
+def test_credential_cleanup_settlement_has_one_durable_boundary():
+    from ast import AsyncFunctionDef, Attribute, Call, parse, walk
+    from pathlib import Path
+
+    tree = parse(
+        (Path(__file__).parents[1] / "core/handlers/model_hub/service.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    raw_cleanup_callers = {
+        function.name
+        for function in walk(tree)
+        if isinstance(function, AsyncFunctionDef)
+        and any(
+            isinstance(node, Call)
+            and isinstance(node.func, Attribute)
+            and node.func.attr == "_rollback_credential"
+            for node in walk(function)
+        )
+    }
+
+    assert raw_cleanup_callers == {"_require_credential_cleanup"}
 
 
 def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):

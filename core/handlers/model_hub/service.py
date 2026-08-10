@@ -321,14 +321,14 @@ async def _rollback_credential_before_settling(
     service: "ModelHubService",
     source_id: str,
     credential_ref: str,
-) -> bool:
+) -> None:
     """Finish transient cleanup before propagating a cancellation."""
 
     rollback_task = asyncio.create_task(
-        service._rollback_credential(source_id, credential_ref)
+        _require_credential_cleanup(service, source_id, credential_ref)
     )
     try:
-        return await asyncio.shield(rollback_task)
+        await asyncio.shield(rollback_task)
     except asyncio.CancelledError as cancelled:
         while True:
             try:
@@ -337,6 +337,17 @@ async def _rollback_credential_before_settling(
             except asyncio.CancelledError:
                 continue
         raise cancelled
+
+
+async def _require_credential_cleanup(
+    service: "ModelHubService",
+    source_id: str,
+    credential_ref: str,
+) -> None:
+    """Refuse to settle when cleanup is neither complete nor durable."""
+
+    if not await service._rollback_credential(source_id, credential_ref):
+        raise ModelHubError("engine_down", status=503)
 
 
 async def _rollback_replacement_before_settling(
@@ -948,7 +959,11 @@ class ModelHubService:
             except OSError:
                 pass
         if replacement_ref != old_credential_ref:
-            await self._rollback_credential(source_id, replacement_ref)
+            await _require_credential_cleanup(
+                self,
+                source_id,
+                replacement_ref,
+            )
 
     async def _cleanup_orphaned_hub_material(
         self,
@@ -998,7 +1013,11 @@ class ModelHubService:
 
     async def _discard_unbound_hub_flow(self, flow: OAuthFlowState) -> None:
         if flow.credential_ref:
-            await self._rollback_credential(flow.source_id, flow.credential_ref)
+            await _require_credential_cleanup(
+                self,
+                flow.source_id,
+                flow.credential_ref,
+            )
             return
         try:
             await self.adapter.cancel_oauth(flow.flow_id)
@@ -1238,7 +1257,11 @@ class ModelHubService:
                 raise
             except Exception:
                 if rollback_credential_ref is not None and not persisted:
-                    await self._rollback_credential(source.id, rollback_credential_ref)
+                    await _require_credential_cleanup(
+                        self,
+                        source.id,
+                        rollback_credential_ref,
+                    )
                     try:
                         self.oauth_flows.forget(oauth_ref)
                     except OSError:
@@ -1516,7 +1539,8 @@ class ModelHubService:
                 if not committed:
                     try:
                         if source is None:
-                            await self._rollback_credential(
+                            await _require_credential_cleanup(
+                                self,
                                 binding.source_id,
                                 replacement_ref,
                             )
@@ -1668,12 +1692,11 @@ class ModelHubService:
                 or flow.retained_credential_ref is None
             ):
                 raise ModelHubError("engine_down", status=503)
-            cleanup_secured = await self._rollback_credential(
+            await _require_credential_cleanup(
+                self,
                 binding.source_id,
                 flow.retained_credential_ref,
             )
-            if not cleanup_secured:
-                raise ModelHubError("engine_down", status=503)
             return config
         if (
             flow.retained_material_disposition
@@ -1943,7 +1966,11 @@ class ModelHubService:
             raise
         except Exception:
             if not persisted:
-                await self._rollback_credential(source.id, rollback_credential_ref)
+                await _require_credential_cleanup(
+                    self,
+                    source.id,
+                    rollback_credential_ref,
+                )
             raise
 
     async def replace_credential(self, source_id: str, payload: object) -> dict:

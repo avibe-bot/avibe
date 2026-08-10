@@ -1163,32 +1163,6 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     }
 
 
-def test_opencode_overlay_rejects_wrong_exact_hop_identity(tmp_path: Path) -> None:
-    source = _source("src_overlay02", "Overlay", model_id="upstream-model")
-    config = _config([source])
-    agent = config.agents["opencode"]
-    agent.routes.pop("openai/shared-model")
-    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "wrong-model"),)
-    )
-    agent.menu.checked = ["openai/menu-model"]
-    service = _service(tmp_path, sources=[source])
-    service.store.config = config
-    gateway = SimpleNamespace(
-        endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "gateway-token")),
-    )
-    router = ModelHubRuntimeRouter(
-        service=service,
-        turn_gateway=gateway,
-        overlay_path=tmp_path / "overlay.json",
-    )
-
-    with pytest.raises(ModelHubError) as exc:
-        asyncio.run(router.prepare_opencode_overlay())
-
-    assert exc.value.code == "mapping_target_unavailable"
-
-
 def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path) -> None:
     source = _source(
         "src_overlay03",
@@ -1223,6 +1197,48 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
     assert [launch.target_model for launch in overlay.launches] == [
         "supported-model"
     ]
+
+
+def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
+    tmp_path: Path,
+) -> None:
+    source = _source(
+        "src_overlay04",
+        "Overlay",
+        model_id="current-model",
+    )
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes.pop("openai/shared-model")
+    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "stale-model"),)
+    )
+    agent.menu.checked = ["openai/menu-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000", "gateway-token")
+            ),
+        ),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+
+    assert overlay is not None
+    provider = json.loads(overlay.content)["provider"]["openai"]
+    assert provider["models"] == {
+        "menu-model": {
+            "id": "openai/menu-model",
+            "name": "menu-model",
+        }
+    }
+    assert overlay.checked_identifiers == ("openai/menu-model",)
+    assert overlay.available_identifiers == ()
+    assert overlay.launches == ()
 
 
 def test_source_observation_requires_distinct_protocol_probes_and_never_infers_from_order(
