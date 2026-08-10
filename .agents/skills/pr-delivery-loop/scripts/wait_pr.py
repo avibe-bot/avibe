@@ -30,10 +30,12 @@ from _github_wait_common import (  # noqa: E402
     filter_new,
     get_token,
     GitHubProtocolError,
+    GitHubRequestError,
     GitHubRequestResult,
     github_get,
     github_graphql,
     github_request,
+    InitialRequestRetriesExhausted,
     LAST_DELIVERY_ENV,
     list_paginated,
     list_paginated_with_count,
@@ -43,6 +45,7 @@ from _github_wait_common import (  # noqa: E402
     requests_per_poll,
     resolve_authenticated_login,
     ResponseCache,
+    RETRY_EXIT_CODE,
     retry_initial_request,
     squash,
     WATCH_ID_ENV,
@@ -878,6 +881,21 @@ def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
         json.dump({"pr_cursor": pr_cursor}, handle)
 
 
+def _startup_failure_exit_code(error: GitHubRequestError) -> int:
+    """How a failure *before* the first poll should end this run.
+
+    Nothing has been observed yet, so no activity is lost by ending the run early.
+    A transient failure that merely outlasted the bounded startup retries -- a
+    truncated body on a large PR, a blip in the network -- must therefore exit
+    ``RETRY_EXIT_CODE`` so a ``--forever`` watch re-arms itself instead of dying
+    and leaving the PR unwatched until somebody notices. Genuinely terminal
+    failures (a bad token, a PR that does not exist) still exit 1: retrying those
+    would poll forever without ever succeeding.
+    """
+
+    return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else 1
+
+
 def _watch_identity(args: argparse.Namespace) -> str:
     """A stable digest of the options that decide what this watch reports.
 
@@ -1710,7 +1728,7 @@ def main() -> int:
             )
             if viewer_result.error is not None:
                 print(f"GitHub viewer lookup failed: {viewer_result.error}", file=sys.stderr)
-                return 1
+                return _startup_failure_exit_code(viewer_result.error)
             viewer_login = viewer_result.value
         if not viewer_login:
             print(
@@ -1725,7 +1743,7 @@ def main() -> int:
     )
     if target_result.error is not None:
         print(f"GitHub target validation failed: {target_result.error}", file=sys.stderr)
-        return 1
+        return _startup_failure_exit_code(target_result.error)
     if target_result.value is None:
         print("GitHub target validation completed without a result", file=sys.stderr)
         return 1
@@ -1819,7 +1837,7 @@ def main() -> int:
         )
     if initial_request.error is not None:
         print(f"Failed to fetch initial PR state: {initial_request.error}", file=sys.stderr)
-        return 1
+        return _startup_failure_exit_code(initial_request.error)
     if initial_request.value is None:
         print("Initial GitHub request completed without a result", file=sys.stderr)
         return 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import http.client
 import importlib.util
 import json
 import sys
@@ -1069,3 +1070,43 @@ def test_github_request_taxonomy_is_the_only_exception_boundary():
 
     assert violations == []
     assert urlopen_sites == [(COMMON_SCRIPT.name, "_read_github_json")]
+
+
+def test_a_truncated_response_body_is_classified_transient() -> None:
+    """`http.client` failures are not `OSError`, and a large PR truncates mid-body.
+
+    Classifying `IncompleteRead` terminal killed a `--forever` watch on a
+    connection glitch it should have re-polled through.
+    """
+
+    error = github_wait_common._classify_github_exception(
+        http.client.IncompleteRead(b"partial", 64785)
+    )
+
+    assert error.retryable is True
+    assert "IncompleteRead" in str(error)
+
+
+def test_a_protocol_violation_stays_terminal() -> None:
+    error = github_wait_common._classify_github_exception(ValueError("not json"))
+
+    assert error.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (github_wait_common.InitialRequestRetriesExhausted("network kept failing"), 75),
+        (github_wait_common.GitHubTerminalError("GitHub HTTP 404 Not Found"), 1),
+        (github_wait_common.GitHubProtocolError("unexpected payload"), 1),
+    ],
+)
+def test_startup_failures_only_re_arm_a_forever_watch_when_transient(error, expected: int) -> None:
+    """Nothing was observed yet, so exiting early loses no activity.
+
+    A transient failure that outlasted the bounded startup retries has to exit
+    ``RETRY_EXIT_CODE`` or the watch dies and leaves the PR unwatched; a bad token
+    or a missing PR must still exit 1 rather than poll forever.
+    """
+
+    assert wait_pr._startup_failure_exit_code(error) == expected
