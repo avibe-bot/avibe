@@ -22,9 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.processing_indicator import (
     _ADMISSION_ACK_REGISTRY_LIMIT,
     ACK_REACTION_EMOJI,
+    INTERRUPTED_REACTION_EMOJI,
     NOT_DELIVERED_REACTION_EMOJI,
     QUEUED_REACTION_EMOJI,
     STEERED_REACTION_EMOJI,
+    STOPPED_REACTION_EMOJI,
     UNCONFIRMED_REACTION_EMOJI,
     ProcessingIndicatorService,
 )
@@ -477,6 +479,39 @@ class ReceiptEmojiMappingTests(unittest.TestCase):
             with self.subTest(emoji=emoji):
                 normalized = TelegramBot._normalize_reaction_emoji(None, emoji)
                 self.assertIn(normalized, allowed)
+
+
+class TerminalReceiptEmojiMappingTests(unittest.TestCase):
+    """⏹️/⚠️ are newer than the receipts above and are NOT mapped everywhere.
+
+    Slack is where the fix was needed and verified. Telegram publishes a fixed
+    reaction set that contains neither symbol, so the receipt degrades to no
+    reaction there — recorded rather than fixed, because the interruption
+    NOTICE is a real message and carries the meaning on its own.
+    """
+
+    receipts = (STOPPED_REACTION_EMOJI, INTERRUPTED_REACTION_EMOJI)
+
+    def test_slack_maps_both_forms_to_short_names(self):
+        from modules.im.slack import SlackBot
+
+        for emoji in self.receipts:
+            for form in (emoji, emoji.replace("️", "")):
+                with self.subTest(emoji=form):
+                    name = SlackBot._slack_reaction_name(form)
+                    # Unmapped codepoints fall through raw and reactions.add
+                    # rejects them with ``invalid_name``.
+                    self.assertTrue(name.isascii(), name)
+
+    def test_telegram_degrades_to_an_unsupported_reaction(self):
+        from modules.im.telegram import TelegramBot
+
+        allowed = {"✍", "👌", "🤔", "🤷", "👀", "🤖"}
+        for emoji in self.receipts:
+            with self.subTest(emoji=emoji):
+                self.assertNotIn(
+                    TelegramBot._normalize_reaction_emoji(None, emoji), allowed
+                )
 
 
 class DeliveryAdmissionContractTests(unittest.TestCase):

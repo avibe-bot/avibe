@@ -111,6 +111,20 @@ class TerminalReactionOnFinishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
         self.assertIsNone(handle.ack_reaction_emoji)
 
+    async def test_receipt_is_skipped_when_removal_reports_failure(self):
+        # Slack, Discord, Telegram and Feishu all report a refused removal by
+        # RETURNING False rather than raising, and promote_reaction_to_running
+        # already treats that value as authoritative. A silent False must gate
+        # the receipt exactly like a raise does.
+        im = _FakeIM(remove_ok=False)
+        svc = _svc(im)
+        handle = await _running(svc, im)
+
+        await svc.finish(handle, terminal_emoji=STOPPED_REACTION_EMOJI)
+
+        self.assertEqual(im.calls, [("remove", "m1", ACK_REACTION_EMOJI)])
+        self.assertIsNone(handle.ack_reaction_emoji)
+
     async def test_receipt_rejected_by_platform_still_clears_cleanly(self):
         # WeChat-like: the terminal emoji is unsupported. The removal is what the
         # bookkeeping is keyed on, so the indicator still ends cleared.

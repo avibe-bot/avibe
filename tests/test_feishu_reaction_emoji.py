@@ -17,9 +17,11 @@ sys.path.insert(0, str(ROOT))
 
 from core.processing_indicator import (  # noqa: E402
     ACK_REACTION_EMOJI,
+    INTERRUPTED_REACTION_EMOJI,
     NOT_DELIVERED_REACTION_EMOJI,
     QUEUED_REACTION_EMOJI,
     STEERED_REACTION_EMOJI,
+    STOPPED_REACTION_EMOJI,
     UNCONFIRMED_REACTION_EMOJI,
 )
 from core.handlers.message_handler import SUBAGENT_REACTION_EMOJI  # noqa: E402
@@ -73,6 +75,22 @@ class FeishuReactionEmojiTests(unittest.TestCase):
             with self.subTest(emoji=emoji):
                 self.assertIn(emoji, _EMOJI_MAP)
                 self.assertTrue(_normalize_emoji(emoji).isascii())
+
+    def test_terminal_receipts_are_knowingly_unmapped(self):
+        """⏹️/⚠️ degrade to no reaction on Lark, on purpose, for now.
+
+        The module docstring's rule is that every key is read off the published
+        table, never guessed, and that table was not reachable when the receipts
+        landed. An unmapped emoji is the safe failure: ``add_reaction`` warns and
+        the user loses only the receipt, whereas a guessed ``STOP`` would be
+        rejected wholesale. The interruption NOTICE is a real message and is
+        unaffected either way. Delete this test and add the two rows to
+        ``VERIFIED_EMOJI_TYPES`` once the keys are confirmed.
+        """
+
+        for emoji in (STOPPED_REACTION_EMOJI, INTERRUPTED_REACTION_EMOJI):
+            with self.subTest(emoji=emoji):
+                self.assertNotIn(emoji, _EMOJI_MAP)
 
     def test_variation_selector_forms_share_one_mapping(self):
         """``_normalize_emoji`` strips colons and whitespace, not U+FE0F."""

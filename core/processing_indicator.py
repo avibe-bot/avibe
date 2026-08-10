@@ -839,16 +839,25 @@ class ProcessingIndicatorService:
 
         if handle.ack_reaction_message_id and handle.ack_reaction_emoji:
             reaction_message_id = handle.ack_reaction_message_id
+            removed = False
             try:
-                await self._get_im_client(handle.context).remove_reaction(
-                    handle.context,
-                    handle.ack_reaction_message_id,
-                    handle.ack_reaction_emoji,
+                removed = bool(
+                    await self._get_im_client(handle.context).remove_reaction(
+                        handle.context,
+                        handle.ack_reaction_message_id,
+                        handle.ack_reaction_emoji,
+                    )
                 )
             except Exception as err:
                 logger.debug("Failed to remove reaction ack: %s", err)
             else:
-                if terminal_emoji:
+                # Adapters report a failed removal by RETURNING False (Slack,
+                # Discord, Telegram, Feishu) as often as by raising, and
+                # ``promote_reaction_to_running`` already treats that value as
+                # authoritative. Stamping on an unremoved 👀 would leave the
+                # message showing running AND stopped at once, so the receipt is
+                # owed only to a removal that actually happened.
+                if terminal_emoji and removed:
                     try:
                         await self._get_im_client(handle.context).add_reaction(
                             handle.context,

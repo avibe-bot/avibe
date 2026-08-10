@@ -3247,6 +3247,56 @@ def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
     assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
 
 
+def test_lost_im_turn_report_waits_for_its_transport(managers) -> None:
+    # Recovery runs at startup, BEFORE the IM transports finish connecting.
+    # Emitting then would drop the notice into a client that cannot send, so the
+    # report is held and flushed from the transport-ready hook instead.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed before the transport came up",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    ready: set[str] = set()
+    restarted._transport_can_deliver = lambda platform: platform in ready
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert emitted == [] and stamped == []
+
+    ready.add("avibe")
+    reported = asyncio.run(restarted.notify_transport_ready("avibe"))
+
+    assert reported == 1
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+    # The queue is drained, not replayed: a second hook fires nothing.
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 0
+    assert len(emitted) == 1
+
+
 def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
     # A Harness turn already gets harness.run.interrupted.* stamped on its Run.
     # Reporting again here would double-notify the same interruption.

@@ -528,6 +528,9 @@ class SessionTurnManager:
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
+        # Interruption reports owed to turns whose platform was not connected yet
+        # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
+        self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -5415,6 +5418,14 @@ class SessionTurnManager:
         This is deliberately NOT the shape of a Stop, which stays silent because
         the user caused it and already knows. Nobody asked for this ending, so it
         has to announce itself.
+
+        Recovery runs from ``_on_runtime_ready``, which fires BEFORE an external
+        transport has necessarily connected, and the notify dispatcher turns a
+        send failure into a ``None`` this method cannot distinguish from success.
+        A turn is terminal once reported, so a lost report is lost for good —
+        hence the report is held until ``notify_transport_ready`` says that
+        platform can actually deliver. ``avibe`` is ready as soon as the runtime
+        is, so Workbench sessions still report inline.
         """
 
         if self.controller is None:
@@ -5428,6 +5439,71 @@ class SessionTurnManager:
                 exc_info=True,
             )
             return
+        platform = str(getattr(context, "platform", "") or "")
+        if not self._transport_can_deliver(platform):
+            self._pending_lost_turn_reports.setdefault(platform, []).append(
+                (session_id, str(origin_native_message_id or ""))
+            )
+            logger.info(
+                "lost turn report deferred until %s transport is ready (session=%s)",
+                platform,
+                session_id,
+            )
+            return
+        await self._emit_lost_turn_report(context, session_id, origin_native_message_id)
+
+    def _transport_can_deliver(self, platform: str) -> bool:
+        """Whether ``platform`` can deliver right now.
+
+        Unknown readiness is treated as ready: a controller that does not expose
+        the probe (tests, embedded runners) must not silently swallow reports.
+        """
+
+        probe = getattr(self.controller, "is_im_transport_ready", None)
+        if not callable(probe) or not platform:
+            return True
+        try:
+            return bool(probe(platform))
+        except Exception:
+            logger.debug(
+                "transport readiness probe failed for %s", platform, exc_info=True
+            )
+            return True
+
+    async def notify_transport_ready(self, platform: str) -> int:
+        """Flush the interruption reports held for one platform.
+
+        Held in memory only: the turn is already terminal, so a report that never
+        drains (transport disabled before it connects) is dropped rather than
+        replayed on the next start, where it would be stale news.
+        """
+
+        pending = self._pending_lost_turn_reports.pop(platform, [])
+        if not pending or self.controller is None:
+            return 0
+        reported = 0
+        for session_id, origin_native_message_id in pending:
+            try:
+                context = self._delivery_context(session_id)
+            except Exception:
+                logger.debug(
+                    "deferred lost turn report: no delivery context for session=%s",
+                    session_id,
+                    exc_info=True,
+                )
+                continue
+            if await self._emit_lost_turn_report(
+                context, session_id, origin_native_message_id
+            ):
+                reported += 1
+        return reported
+
+    async def _emit_lost_turn_report(
+        self,
+        context: "MessageContext",
+        session_id: str,
+        origin_native_message_id: str,
+    ) -> bool:
         try:
             await self.controller.emit_agent_message(
                 context,
@@ -5440,14 +5516,14 @@ class SessionTurnManager:
                 session_id,
                 exc_info=True,
             )
-            return
+            return False
         # The dead process could not clear its own 👀. Retire it here so the
         # triggering message stops claiming the turn is still running.
         native_message_id = str(origin_native_message_id or "")
         service = getattr(self.controller, "processing_indicator", None)
         stamp = getattr(service, "stamp_orphaned_terminal_reaction", None)
         if not native_message_id or not callable(stamp):
-            return
+            return True
         try:
             await stamp(context, native_message_id, INTERRUPTED_REACTION_EMOJI)
         except Exception:
@@ -5456,6 +5532,7 @@ class SessionTurnManager:
                 session_id,
                 exc_info=True,
             )
+        return True
 
     async def recover_durable_delivery_state(
         self,

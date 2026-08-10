@@ -12,6 +12,7 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.runtime_activation import RuntimeActivationRegistry
 
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
@@ -634,7 +635,9 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         agent._transports = {"/tmp": SimpleNamespace(is_alive=True, send_request=send_request)}
         agent._event_handler = SimpleNamespace(clear_pending=clear_pending)
-        agent._remove_ack_reaction = AsyncMock(side_effect=lambda request: events.append(("ack", None)))
+        agent._remove_ack_reaction = AsyncMock(
+            side_effect=lambda request, *, terminal_emoji=None: events.append(("ack", terminal_emoji))
+        )
         agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
 
         request = SimpleNamespace(base_session_id="session-1", working_path="/tmp", context=object())
@@ -644,6 +647,9 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(events[0][0], "send")
         self.assertEqual(events[1][0], "clear")
+        # The stop is silent, so the ⏹️ receipt replacing the running 👀 is the
+        # only thing that tells the user the turn ended on their command.
+        self.assertEqual(events[2], ("ack", STOPPED_REACTION_EMOJI))
 
     async def test_refresh_auth_state_stops_transports_and_invalidates_threads(self):
         agent = object.__new__(CodexAgent)
