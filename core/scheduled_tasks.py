@@ -113,6 +113,7 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
@@ -2664,6 +2665,23 @@ class TaskExecutionStore:
         if self._sqlite is not None:
             return self._sqlite.list_runs(status=status)
         return self._list_file_runs(status=status)
+
+    def get_unsettled_watch_run(self, definition_id: str) -> Optional[dict[str, Any]]:
+        """Return the oldest queued/running Watch follow-up for the admission fence."""
+
+        if self._sqlite is not None:
+            return self._sqlite.get_unsettled_watch_run(definition_id)
+        for run in self._list_file_runs():
+            if str(run.get("task_id") or run.get("definition_id") or "") != str(
+                definition_id
+            ):
+                continue
+            if str(run.get("request_type") or run.get("run_type") or "") != "watch":
+                continue
+            status = _normalize_requested_run_status(run.get("status"))
+            if status in {"queued", "running"}:
+                return run
+        return None
 
     def consecutive_definition_failures_with_code(
         self,
@@ -6701,6 +6719,10 @@ class ScheduledTaskService:
                 name=name,
                 reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
             )
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR:
+            headline = self._t("harness.notice.watchCircuitRepairFailed", name=name)
         elif is_watch and str(
             ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
         ).strip() == WATCH_HOOK_OUTCOME_EVENT:

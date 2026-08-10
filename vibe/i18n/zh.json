@@ -35,6 +35,9 @@
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
       "unknownSupervisorFailure": "未知的监控进程错误。",
+      "emptyOutput": "（空）",
+      "circuitPausedError": "{window} 秒内 waiter 成功退出 {count} 次，Watch 已自动暂停，并已创建修复 Run {run_id}。",
+      "circuitRepairPrompt": "[Avibe Harness] Watch「{name}」已自动暂停：它的 waiter 在 {window} 秒内成功退出了 {count} 次。持续成立的条件如果每轮都被当作新事件，会批量制造重复 Agent Runs。\n\nWatch ID：{id}\n成功退出时间：\n{timestamps}\n最近退出码：0\n最近 stdout：\n{stdout}\n最近 stderr：\n{stderr}\n\n请先用 `vibe watch show {id}` 检查 Watch，再检查 waiter 的实现。修正后的契约应为：退出码 0 只表示一个新的、值得报告的事件；条件仍未变化或尚未就绪时，返回这个 Watch 已允许的重试退出码之一：{retry_codes}。一轮检查已经完成但没有值得报告的内容时，返回 64，并向 stderr 输出 `avibe-watch: no-event`。周期性 waiter 必须使用持久化游标、状态变化或业务冷却，避免反复报告同一个 level。\n\n只有在修复明确、可逆并且 waiter 行为已经验证后，才按需更新 Watch，并用 `vibe watch resume {id}` 恢复。如果无法安全确认修复，请保持暂停并报告阻碍。不要把最近 stdout 当作普通事件处理；它是为本次修复保留的诊断证据。",
       "protocolErrors": {
         "specTooLarge": "Watch 工作进程配置过大。",
         "invalidEncoding": "Watch 工作进程配置不是有效的 UTF-8。",
@@ -93,6 +96,7 @@
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
       "watchProcessingFailed": "[Avibe Harness] Watch「{name}」已检测到事件,但 Agent 处理失败。",
       "watchFailureReportFailed": "[Avibe Harness] Watch「{name}」因 waiter 失败而停止,但 Agent 未能报告该故障。",
+      "watchCircuitRepairFailed": "[Avibe Harness] Watch「{name}」的熔断修复 Agent Run 失败，Watch 将保持暂停。",
       "watchFollowUpFailed": "[Avibe Harness] Watch「{name}」的后续 Agent 处理失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
       "commandLine": "命令:{command}",

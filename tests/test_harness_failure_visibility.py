@@ -2057,6 +2057,7 @@ def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
     [
         ("event", "harness.notice.watchProcessingFailed"),
         ("waiter_failure", "harness.notice.watchFailureReportFailed"),
+        ("circuit_repair", "harness.notice.watchCircuitRepairFailed"),
     ],
 )
 def test_watch_notice_copy_preserves_the_waiter_outcome(
@@ -12287,17 +12288,56 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
         runtime_store=runtime_store,
     )
 
+    # HFR-464 serializes Watch follow-ups. This scenario is about failure-notice
+    # deduplication, so settle each event Run before allowing the next event and
+    # remove the unrelated five-second production cooldown from the test clock.
+    monkeypatch.setattr("core.watches.WATCH_MIN_REARM_SECONDS", 0)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    executor = _execution_service(tmp_path, controller, sqlite, requests)
+
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: len(_watch_hook_runs(requests)) == 1,
+        )
+    )
+    first_hook = _watch_hook_runs(requests)[0]
+    first_claim = requests.claim(first_hook.id)
+    assert first_claim is not None
+    asyncio.run(executor._execute_claimed_request(first_claim))
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: len(_watch_hook_runs(requests)) == 1,
+        )
+    )
+    second_hook = _watch_hook_runs(requests)[0]
+    second_claim = requests.claim(second_hook.id)
+    assert second_claim is not None
+    asyncio.run(executor._execute_claimed_request(second_claim))
+
     def _ready() -> bool:
         row = watch_store.get_watch(watch.id)
-        return (
-            len(_watch_hook_runs(requests)) >= 2
-            and row is not None
-            and row.last_exit_code == 75
-        )
+        return row is not None and row.last_exit_code == 75
 
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
     asyncio.run(_drive_watch_service(service, watch.id, until=_ready, limit=800))
 
-    hooks = sorted(_watch_hook_runs(requests), key=lambda row: (row.created_at, row.id))
+    hooks = [first_hook, second_hook]
     assert len(hooks) == 2, f"two events must queue two follow-up deliveries: {hooks}"
 
     saved = watch_store.get_watch(watch.id)
@@ -12312,13 +12352,6 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert saved.last_error == sentinel and saved.last_exit_code == 75, (
         f"the premise for the last assertion below — the last cycle was a retry: {saved}"
     )
-
-    controller, _dispatcher, _touched = _live_turn_dispatcher()
-    executor = _execution_service(tmp_path, controller, sqlite, requests)
-    for hook in hooks:
-        claimed = requests.claim(hook.id)
-        assert claimed is not None
-        asyncio.run(executor._execute_claimed_request(claimed))
 
     for hook in hooks:
         run = sqlite.get_run(hook.id)

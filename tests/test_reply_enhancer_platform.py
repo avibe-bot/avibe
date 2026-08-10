@@ -1619,6 +1619,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Watches created from an Avibe Agent shell follow up in this conversation by default", prompt)
         self.assertIn("`vibe watch add` creates a managed monitor", prompt)
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
+        self.assertIn("exit `0` only for one NEW reportable event", prompt)
+        self.assertIn("default `75`) keeps either a once or forever Watch waiting", prompt)
+        self.assertIn("waits five seconds after a follow-up settles before re-arming", prompt)
+        self.assertIn("six successful events within 60 seconds", prompt)
         delegate_guidance = (
             "Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. "
             "By default this creates a background Session in the caller's scope and returns immediately; when the run "

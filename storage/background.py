@@ -1479,6 +1479,31 @@ HEALTH_UNKNOWN = "unknown"
 WATCH_HOOK_OUTCOME_METADATA_KEY = "watch_hook_outcome"
 WATCH_HOOK_OUTCOME_EVENT = "event"
 WATCH_HOOK_OUTCOME_WAITER_FAILURE = "waiter_failure"
+WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR = "circuit_repair"
+# Durable Watch admission state. These values move with the Agent Run outbox row,
+# so the definition owns them instead of the in-memory supervisor.
+WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"
+WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY = "watch_recent_event_timestamps"
+WATCH_CIRCUIT_BREAKER_METADATA_KEY = "watch_circuit_breaker"
+
+
+def watch_metadata_after_resume(
+    metadata: dict[str, Any],
+    *,
+    resumed_at: str,
+) -> dict[str, Any]:
+    """Reset live circuit state while retaining the repair Run admission fence."""
+
+    updated = dict(metadata)
+    updated.pop(WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+    incident = updated.get(WATCH_CIRCUIT_BREAKER_METADATA_KEY)
+    if isinstance(incident, dict) and incident.get("status") == "tripped":
+        updated[WATCH_CIRCUIT_BREAKER_METADATA_KEY] = {
+            **incident,
+            "status": "resumed",
+            "resumed_at": resumed_at,
+        }
+    return updated
 
 #: The health window: the last N verdicts OR the last T hours, whichever is
 #: shorter. Both bounds live in the ``WHERE``/``LIMIT`` of one query rather than
@@ -2880,6 +2905,7 @@ class SQLiteBackgroundTaskStore:
                             run_definitions.c.definition_type,
                             run_definitions.c.mode,
                             run_definitions.c.enabled,
+                            run_definitions.c.metadata_json,
                         )
                         .where(run_definitions.c.id == definition_id)
                         .where(run_definitions.c.deleted_at.is_(None))
@@ -2892,6 +2918,15 @@ class SQLiteBackgroundTaskStore:
                         current["definition_type"], current["mode"]
                     )
                     values.update(dict.fromkeys(clear_columns, None))
+                    if current["definition_type"] == "watch":
+                        metadata = _json_loads(current["metadata_json"], None)
+                        if isinstance(metadata, dict):
+                            values["metadata_json"] = _json_dumps(
+                                watch_metadata_after_resume(
+                                    metadata,
+                                    resumed_at=values["updated_at"],
+                                )
+                            )
             stmt = (
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)
@@ -3055,6 +3090,20 @@ class SQLiteBackgroundTaskStore:
         run_values = self._run_values(run_payload)
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
+            unsettled = conn.execute(
+                select(agent_runs.c.id)
+                .where(agent_runs.c.definition_id == values["id"])
+                .where(agent_runs.c.run_type == "watch")
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued")
+                        + _status_query_values("running")
+                    )
+                )
+                .limit(1)
+            ).first()
+            if unsettled is not None:
+                return False
             if not upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type="watch"
             ):
@@ -3766,6 +3815,25 @@ class SQLiteBackgroundTaskStore:
             if row is None:
                 return None
             return self._enrich_runs([self._run_from_row(row)], conn)[0]
+
+    def get_unsettled_watch_run(self, definition_id: str) -> Optional[dict[str, Any]]:
+        """Return the oldest queued/running Agent follow-up owned by one Watch."""
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.definition_id == definition_id)
+                .where(agent_runs.c.run_type == "watch")
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued")
+                        + _status_query_values("running")
+                    )
+                )
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).mappings().first()
+            return self._run_from_row(row) if row is not None else None
 
     def list_deferred_runs(self) -> list[dict[str, Any]]:
         """Return non-terminal Runs carrying a durable terminal intent."""

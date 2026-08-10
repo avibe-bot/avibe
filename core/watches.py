@@ -40,13 +40,18 @@ from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
     NO_EVENT_EXIT_CODE,
+    WATCH_CIRCUIT_BREAKER_METADATA_KEY as CIRCUIT_BREAKER_METADATA_KEY,
+    WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY as FOLLOW_UP_RUN_ID_METADATA_KEY,
+    WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
+    WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY as RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
     definition_resume_clear_columns,
+    watch_metadata_after_resume,
 )
 from vibe import runtime
 from vibe.i18n import t as i18n_t
@@ -101,6 +106,11 @@ LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
 #: waiter needs is the one fact a resume must NOT rewrite: that the earlier report
 #: left. This count only ever moves forward, for the life of the watch.
 DELIVERY_ACK_METADATA_KEY = "delivered_reports"
+WATCH_MIN_REARM_SECONDS = 5.0
+WATCH_FOLLOW_UP_POLL_SECONDS = 2.0
+WATCH_EVENT_BURST_WINDOW_SECONDS = 60.0
+WATCH_EVENT_BURST_LIMIT = 5
+WATCH_CIRCUIT_OUTPUT_LIMIT = 2000
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -117,6 +127,36 @@ def _publish_watch_definitions_updated() -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _recent_event_timestamps(
+    metadata: dict[str, Any],
+    *,
+    now: datetime,
+) -> list[str]:
+    values = metadata.get(RECENT_EVENT_TIMESTAMPS_METADATA_KEY)
+    if not isinstance(values, list):
+        return []
+    cutoff = now.timestamp() - WATCH_EVENT_BURST_WINDOW_SECONDS
+    recent: list[tuple[datetime, str]] = []
+    for value in values:
+        parsed = _parse_utc_timestamp(value)
+        if parsed is not None and cutoff <= parsed.timestamp() <= now.timestamp():
+            recent.append((parsed, str(value)))
+    recent.sort(key=lambda item: item[0])
+    return [value for _parsed, value in recent[-WATCH_EVENT_BURST_LIMIT:]]
 
 
 def _path_signature(path: Path) -> Optional[tuple[int, int, int]]:
@@ -627,6 +667,10 @@ class ManagedWatchStore:
                 watch,
                 definition_resume_clear_columns("watch", watch.mode),
             )
+            watch.metadata = watch_metadata_after_resume(
+                watch.metadata,
+                resumed_at=_utc_now_iso(),
+            )
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
         if not self._write_watch(watch, expect):
@@ -665,6 +709,11 @@ class ManagedWatchStore:
         # Captured before the first mutation: the state ``vibe watch update`` read and
         # resolved its payload from.
         expect = self._read_state(watch)
+        waiter_lifecycle_changed = (
+            mode != watch.mode
+            or command != watch.command
+            or shell_command != watch.shell_command
+        )
         if mode != watch.mode:
             # A mode change starts a new lifecycle. Completion and failure
             # metadata from the old mode remains available in run history, but
@@ -691,6 +740,9 @@ class ManagedWatchStore:
         watch.deliver_key = deliver_key
         if metadata is not None:
             watch.metadata = dict(metadata)
+        if waiter_lifecycle_changed:
+            watch.metadata = dict(watch.metadata)
+            watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
         watch.updated_at = _utc_now_iso()
         if not self._write_watch(
             watch,
@@ -733,7 +785,10 @@ class ManagedWatchStore:
         exit_code: Optional[int],
         error: Optional[str],
         event_detected: bool = False,
+        acknowledge_event: bool = True,
         disable: bool = False,
+        pause: bool = False,
+        metadata_updates: Optional[dict[str, Any]] = None,
         queued_run: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Stamp a cycle's outcome; ``False`` means the store refused the write.
@@ -744,6 +799,8 @@ class ManagedWatchStore:
         ``once`` watch while losing the hook that tells the user it finished.
         """
 
+        if disable and pause:
+            raise ValueError("a watch cycle cannot retire and pause at the same time")
         self.maybe_reload()
         watch = self._watches.get(watch_id)
         if watch is None:
@@ -756,19 +813,22 @@ class ManagedWatchStore:
         # must likewise not erase a genuine earlier retirement.
         was_enabled = watch.enabled
         if was_enabled:
-            watch.last_finished_at = now if disable else None
+            watch.last_finished_at = now if disable or pause else None
             watch.retired_at = now if disable else None
         watch.last_exit_code = exit_code
         watch.last_error = error
         if event_detected:
             watch.last_event_at = now
+        if metadata_updates or (event_detected and acknowledge_event):
             # A NEW dict: ``expect`` above was derived from the stored one and has to
             # keep describing the row as it was read.
             watch.metadata = {
                 **watch.metadata,
-                DELIVERY_ACK_METADATA_KEY: _delivered_reports(watch) + 1,
+                **(metadata_updates or {}),
             }
-        if disable:
+            if event_detected and acknowledge_event:
+                watch.metadata[DELIVERY_ACK_METADATA_KEY] = _delivered_reports(watch) + 1
+        if disable or pause:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
         # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
@@ -1657,8 +1717,8 @@ class ManagedWatchService:
             # concurrent lifecycle change. Fusing would disable reconciliation for a
             # healthy database, so the watch is stopped and the store left alone.
             logger.warning(
-                "Watch %s stopping: the store refused %s because the definition's "
-                "Session binding, enabled state, deletion or reclaim snapshot changed",
+                "Watch %s stopping: the store refused %s because a guarded lifecycle "
+                "or follow-up admission prerequisite changed",
                 watch_id,
                 operation,
             )
@@ -1714,6 +1774,196 @@ class ManagedWatchService:
         self._begin_stop()
         return False
 
+    def _circuit_repair_prompt(
+        self,
+        watch: ManagedWatch,
+        result: _CycleResult,
+        event_timestamps: list[str],
+    ) -> str:
+        return self._t(
+            "harness.watch.circuitRepairPrompt",
+            name=watch.name or watch.id,
+            id=watch.id,
+            count=len(event_timestamps),
+            window=int(WATCH_EVENT_BURST_WINDOW_SECONDS),
+            timestamps="\n".join(f"- {value}" for value in event_timestamps),
+            stdout=_squash_tail(result.stdout, limit=WATCH_CIRCUIT_OUTPUT_LIMIT)
+            or self._t("harness.watch.emptyOutput"),
+            stderr=_squash_tail(result.stderr, limit=WATCH_CIRCUIT_OUTPUT_LIMIT)
+            or self._t("harness.watch.emptyOutput"),
+            retry_codes=", ".join(str(code) for code in watch.retry_exit_codes),
+        )
+
+    def _commit_success_cycle(
+        self,
+        watch: ManagedWatch,
+        result: _CycleResult,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        recent = _recent_event_timestamps(watch.metadata, now=now)
+        observed = [*recent, now_iso]
+        if watch.mode == "forever" and len(observed) > WATCH_EVENT_BURST_LIMIT:
+            stdout = _squash_tail(result.stdout, limit=WATCH_CIRCUIT_OUTPUT_LIMIT)
+            stderr = _squash_tail(result.stderr, limit=WATCH_CIRCUIT_OUTPUT_LIMIT)
+            request = self._hook_request(
+                watch,
+                event_detected=True,
+                hook_outcome=WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
+                prompt=self._circuit_repair_prompt(watch, result, observed),
+            )
+            if request is None:
+                return False
+            incident = {
+                "status": "tripped",
+                "triggered_at": now_iso,
+                "event_timestamps": observed,
+                "exit_code": 0,
+                "stdout": stdout,
+                "stderr": stderr,
+                "repair_run_id": request.id,
+            }
+            return self._persist_cycle_result(
+                watch,
+                request=request,
+                exit_code=0,
+                error=self._t(
+                    "harness.watch.circuitPausedError",
+                    count=len(observed),
+                    window=int(WATCH_EVENT_BURST_WINDOW_SECONDS),
+                    run_id=request.id,
+                ),
+                event_detected=True,
+                acknowledge_event=False,
+                disable=False,
+                pause=True,
+                metadata_updates={
+                    RECENT_EVENT_TIMESTAMPS_METADATA_KEY: observed,
+                    CIRCUIT_BREAKER_METADATA_KEY: incident,
+                },
+            )
+
+        metadata_updates = (
+            {RECENT_EVENT_TIMESTAMPS_METADATA_KEY: observed}
+            if watch.mode == "forever"
+            else None
+        )
+        return self._commit_cycle_result(
+            watch,
+            exit_code=0,
+            error=None,
+            event_detected=True,
+            disable=watch.mode == "once",
+            prompt=_build_prompt(watch.message or watch.prefix, result.stdout),
+            metadata_updates=metadata_updates,
+        )
+
+    async def _commit_success_cycle_async(
+        self,
+        watch: ManagedWatch,
+        result: _CycleResult,
+    ) -> bool:
+        try:
+            return await self._run_runtime_sync(
+                self._commit_success_cycle,
+                watch,
+                result,
+            )
+        except Exception as exc:
+            self._fuse_store_after_error(
+                "commit successful watch cycle",
+                exc,
+                watch_id=watch.id,
+            )
+            return False
+
+    async def _wait_for_follow_up_slot(self, watch_id: str) -> bool:
+        """Hold the waiter closed until this Watch's previous Agent work settles."""
+
+        terminal_statuses = {"succeeded", "failed", "canceled"}
+        future_completion_seen: tuple[str, float] | None = None
+        while self._running:
+            if not self._owns_service_instance():
+                return False
+            if not await self._watch_store_call_async(
+                watch_id,
+                "reload before follow-up fence",
+                self.store.maybe_reload,
+            ):
+                return False
+            watch = self.store.get_watch(watch_id)
+            if watch is None or not watch.enabled:
+                return False
+            try:
+                unsettled = await self._run_runtime_sync(
+                    self.request_store.get_unsettled_watch_run,
+                    watch_id,
+                )
+            except Exception as exc:
+                self._fuse_store_after_error(
+                    "read follow-up fence",
+                    exc,
+                    watch_id=watch_id,
+                )
+                return False
+            if unsettled:
+                await asyncio.sleep(WATCH_FOLLOW_UP_POLL_SECONDS)
+                continue
+
+            run_id = str(watch.metadata.get(FOLLOW_UP_RUN_ID_METADATA_KEY) or "").strip()
+            if not run_id:
+                return True
+            try:
+                run = await self._run_runtime_sync(self.request_store.get_run, run_id)
+            except Exception as exc:
+                self._fuse_store_after_error(
+                    "read previous follow-up",
+                    exc,
+                    watch_id=watch_id,
+                )
+                return False
+            if run is None:
+                return True
+            status = str(run.get("status") or "").strip().lower()
+            if status not in terminal_statuses:
+                await asyncio.sleep(WATCH_FOLLOW_UP_POLL_SECONDS)
+                continue
+            if watch.mode != "forever":
+                return True
+            completed_at = _parse_utc_timestamp(
+                run.get("completed_at") or run.get("updated_at")
+            )
+            if completed_at is None:
+                return True
+            wall_elapsed = (datetime.now(timezone.utc) - completed_at).total_seconds()
+            if wall_elapsed >= 0:
+                elapsed = wall_elapsed
+            else:
+                loop_now = asyncio.get_running_loop().time()
+                if future_completion_seen is None or future_completion_seen[0] != run_id:
+                    future_completion_seen = (run_id, loop_now)
+                elapsed = loop_now - future_completion_seen[1]
+            remaining = WATCH_MIN_REARM_SECONDS - elapsed
+            if remaining <= 0:
+                return True
+            await asyncio.sleep(min(remaining, WATCH_FOLLOW_UP_POLL_SECONDS))
+        return False
+
+    async def _sleep_before_retry(
+        self,
+        watch: ManagedWatch,
+        *,
+        lifetime_started: float,
+    ) -> None:
+        delay = watch.retry_delay_seconds
+        if watch.lifetime_timeout_seconds > 0:
+            elapsed = asyncio.get_running_loop().time() - lifetime_started
+            delay = min(
+                delay,
+                max(0.0, watch.lifetime_timeout_seconds - elapsed),
+            )
+        await asyncio.sleep(delay)
+
     async def _run_watch(self, watch_id: str) -> None:
         lifetime_started = asyncio.get_running_loop().time()
         self._watch_started_at[watch_id] = _utc_now_iso()
@@ -1735,7 +1985,13 @@ class ManagedWatchService:
             if watch is None or not watch.enabled:
                 return
 
-            if watch.mode == "forever" and watch.lifetime_timeout_seconds > 0:
+            if not await self._wait_for_follow_up_slot(watch_id):
+                return
+            watch = self.store.get_watch(watch_id)
+            if watch is None or not watch.enabled:
+                return
+
+            if watch.lifetime_timeout_seconds > 0:
                 elapsed = asyncio.get_running_loop().time() - lifetime_started
                 remaining_lifetime = watch.lifetime_timeout_seconds - elapsed
                 if remaining_lifetime <= 0:
@@ -1808,16 +2064,7 @@ class ManagedWatchService:
                 return
 
             if result.exit_code == 0:
-                # Building the prompt is pure; the stamp and the hook it authorises are
-                # committed together (HFR-269).
-                if not await self._commit_cycle_result_async(
-                    watch,
-                    exit_code=0,
-                    error=None,
-                    event_detected=True,
-                    disable=watch.mode == "once",
-                    prompt=_build_prompt(watch.message or watch.prefix, result.stdout),
-                ):
+                if not await self._commit_success_cycle_async(watch, result):
                     return
                 # The delivery count moved in the same transaction as the hook, so the
                 # report is durable and every later cycle can see that it was -- after a
@@ -1863,12 +2110,15 @@ class ManagedWatchService:
                     return
                 # The waiter decides its own polling cadence; the retry delay only
                 # keeps a waiter that returns immediately from spinning the cycle loop.
-                await asyncio.sleep(watch.retry_delay_seconds)
+                await self._sleep_before_retry(
+                    watch,
+                    lifetime_started=lifetime_started,
+                )
                 continue
 
             if result.timed_out or result.exit_code == 124:
                 error_text = "timed out"
-                if watch.mode == "forever" and 124 in set(watch.retry_exit_codes):
+                if 124 in set(watch.retry_exit_codes):
                     # A retry authorises no hook: the watch keeps running, and there is
                     # nothing to tell the user yet.
                     if not await self._commit_cycle_result_async(
@@ -1878,7 +2128,10 @@ class ManagedWatchService:
                         disable=False,
                     ):
                         return
-                    await asyncio.sleep(watch.retry_delay_seconds)
+                    await self._sleep_before_retry(
+                        watch,
+                        lifetime_started=lifetime_started,
+                    )
                     continue
                 await self._commit_cycle_result_async(
                     watch,
@@ -1895,7 +2148,7 @@ class ManagedWatchService:
                 return
 
             error_text = _squash_error(result.stderr) or f"watch command exited with status {result.exit_code}"
-            if watch.mode == "forever" and result.exit_code in set(watch.retry_exit_codes):
+            if result.exit_code in set(watch.retry_exit_codes):
                 if not await self._commit_cycle_result_async(
                     watch,
                     exit_code=result.exit_code,
@@ -1903,7 +2156,10 @@ class ManagedWatchService:
                     disable=False,
                 ):
                     return
-                await asyncio.sleep(watch.retry_delay_seconds)
+                await self._sleep_before_retry(
+                    watch,
+                    lifetime_started=lifetime_started,
+                )
                 continue
 
             await self._commit_cycle_result_async(
@@ -1991,6 +2247,7 @@ class ManagedWatchService:
         watch: ManagedWatch,
         *,
         event_detected: bool = False,
+        hook_outcome: Optional[str] = None,
         prompt: Optional[str] = None,
         prefix: Optional[str] = None,
         body: Optional[str] = None,
@@ -2017,13 +2274,64 @@ class ManagedWatchService:
             source_kind="watch",
             metadata={
                 **watch.metadata,
-                WATCH_HOOK_OUTCOME_METADATA_KEY: (
+                WATCH_HOOK_OUTCOME_METADATA_KEY: hook_outcome
+                or (
                     WATCH_HOOK_OUTCOME_EVENT
                     if event_detected
                     else WATCH_HOOK_OUTCOME_WAITER_FAILURE
                 ),
             },
         )
+
+    def _persist_cycle_result(
+        self,
+        watch: ManagedWatch,
+        *,
+        request: Optional[TaskExecutionRequest],
+        exit_code: Optional[int],
+        error: Optional[str],
+        event_detected: bool,
+        acknowledge_event: bool,
+        disable: bool,
+        pause: bool,
+        metadata_updates: Optional[dict[str, Any]],
+    ) -> bool:
+        updates = dict(metadata_updates or {})
+        if request is not None:
+            updates[FOLLOW_UP_RUN_ID_METADATA_KEY] = request.id
+            request.metadata = {
+                **watch.metadata,
+                **updates,
+                WATCH_HOOK_OUTCOME_METADATA_KEY: request.metadata.get(
+                    WATCH_HOOK_OUTCOME_METADATA_KEY
+                ),
+            }
+            if event_detected and acknowledge_event:
+                request.metadata[DELIVERY_ACK_METADATA_KEY] = _delivered_reports(watch) + 1
+        atomic = request is not None and _shared_run_ledger_backend(
+            self.store, self.request_store
+        ) is not None
+        queued_run = self.request_store.queued_run_payload(request) if atomic and request else None
+        if not self._watch_store_call(
+            watch.id,
+            "mark_cycle_result",
+            lambda: self.store.mark_cycle_result(
+                watch.id,
+                exit_code=exit_code,
+                error=error,
+                event_detected=event_detected,
+                acknowledge_event=acknowledge_event,
+                disable=disable,
+                pause=pause,
+                metadata_updates=updates,
+                queued_run=queued_run,
+            ),
+            guarded=True,
+        ):
+            return False
+        if request is not None and queued_run is None:
+            self.request_store.enqueue(request)
+        return True
 
     def _commit_cycle_result(
         self,
@@ -2032,7 +2340,11 @@ class ManagedWatchService:
         exit_code: Optional[int],
         error: Optional[str],
         event_detected: bool = False,
+        acknowledge_event: bool = True,
         disable: bool = False,
+        pause: bool = False,
+        metadata_updates: Optional[dict[str, Any]] = None,
+        hook_outcome: Optional[str] = None,
         prompt: Optional[str] = None,
         prefix: Optional[str] = None,
         body: Optional[str] = None,
@@ -2069,29 +2381,22 @@ class ManagedWatchService:
         request = self._hook_request(
             watch,
             event_detected=event_detected,
+            hook_outcome=hook_outcome,
             prompt=prompt,
             prefix=prefix,
             body=body,
         )
-        atomic = request is not None and _shared_run_ledger_backend(self.store, self.request_store) is not None
-        queued_run = self.request_store.queued_run_payload(request) if atomic and request else None
-        if not self._watch_store_call(
-            watch.id,
-            "mark_cycle_result",
-            lambda: self.store.mark_cycle_result(
-                watch.id,
-                exit_code=exit_code,
-                error=error,
-                event_detected=event_detected,
-                disable=disable,
-                queued_run=queued_run,
-            ),
-            guarded=True,
-        ):
-            return False
-        if request is not None and queued_run is None:
-            self.request_store.enqueue(request)
-        return True
+        return self._persist_cycle_result(
+            watch,
+            request=request,
+            exit_code=exit_code,
+            error=error,
+            event_detected=event_detected,
+            acknowledge_event=acknowledge_event,
+            disable=disable,
+            pause=pause,
+            metadata_updates=metadata_updates,
+        )
 
     async def _commit_cycle_result_async(
         self,

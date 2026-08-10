@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.13.0
+version: 0.14.0
 ---
 
 # Background Watch Hook
@@ -159,10 +159,23 @@ For `vibe watch add`:
 - default is `21600` seconds
 - `0` means no per-cycle timeout
 - `--forever` means re-arm after each detected event
-- forever retries only when the waiter exits with an allowed `--retry-exit-code`; other failures stop the watch and send a failure follow-up
+- an allowed `--retry-exit-code` keeps either mode waiting; a once Watch stops after its first event
 - `--lifetime-timeout` limits the whole long-running watch; default is `0` meaning run until killed
 
-This separation matters: a forever watch can still use a bounded timeout for each cycle.
+This separation matters: a once Watch may now have several retry cycles, and a forever
+Watch can still use a bounded timeout for each cycle.
+
+Exit `0` means one new reportable event, never merely that a condition remains true.
+For a persistent level, return an allowed retry code (default `75`) until a new edge is
+observed. Exit `64` plus `avibe-watch: no-event` on stderr is a completed cycle with
+nothing worth reporting. A forever waiter must keep a durable cursor, state transition,
+or domain cooldown so it cannot emit the same level repeatedly.
+
+Avibe admits only one queued/running follow-up per Watch. A forever Watch re-arms after
+that Agent Run settles and a five-second safety delay. If the waiter still produces six
+successful events within 60 seconds, Avibe pauses the Watch and sends the target Agent
+one repair message containing the bounded latest waiter output. The Agent should inspect
+and fix the waiter, and resume only after verifying an unambiguous, reversible fix.
 
 ## Bundled Waiter Example
 
