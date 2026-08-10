@@ -144,3 +144,20 @@ def test_background_watch_skill_defaults_to_current_session() -> None:
     assert "each follow-up should run in a visible sibling Session" not in body
     assert '  --session-id "sesk8m4q2p7x"' not in body
     assert "`--prefix`" not in body
+
+
+def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:
+    body = _read(".agents/skills/pr-delivery-loop/SKILL.md")
+    agents = _read("AGENTS.md")
+
+    assert "## Dependency boundary" in body
+    assert "Use the `background-watch-hook` skill for every managed wait." in body
+    assert "Do not copy watcher implementations" in body
+    assert ".agents/skills/pr-delivery-loop/scripts/" not in body
+    assert not (ROOT / ".agents/skills/pr-delivery-loop/scripts").exists()
+    assert not (ROOT / ".agents/skills/pr-delivery-loop/tests").exists()
+
+    assert "the `pr-delivery-loop` skill for every implementation task" in agents
+    assert "use the `background-watch-hook` skill" in agents
+    assert (ROOT / "skills/background-watch-hook/scripts/wait_pr.py").is_file()
+    assert (ROOT / "skills/background-watch-hook/scripts/wait_action.py").is_file()
