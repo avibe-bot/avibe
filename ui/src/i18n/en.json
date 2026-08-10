@@ -2550,6 +2550,8 @@
   "agents": {
     "title": "Agents",
     "subtitle": "{{count}} agents registered across all backends.",
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "Agent definitions are read-only over remote access. Open Avibe on the machine to edit them.",
     "tabs": {
       "definitions": "Definitions",
       "running": "Runs"

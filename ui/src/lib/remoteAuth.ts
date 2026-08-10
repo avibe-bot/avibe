@@ -28,6 +28,18 @@ export function isSetupCheckBypassed(path: string): boolean {
   return SETUP_CHECK_BYPASS_PATHS.has(path);
 }
 
+/**
+ * Agent definition editing is local-only. The remote HTTP policy permits Agent
+ * detail reads and organization onboarding, and `/api/global-prompts` is local
+ * only, so create / import / edit / enable / set-default / run / delete would
+ * all dead-end in `remote_execution_disabled`. Remote instances therefore get a
+ * read-only Agent catalog; onboarding stays available because it is separately
+ * permitted.
+ */
+export function canEditAgentDefinitions(context: { remote: boolean }): boolean {
+  return !context.remote;
+}
+
 export async function checkRemoteAuthForPath<Session extends RemoteSession>(
   path: string,
   getSession: () => Promise<Session>,

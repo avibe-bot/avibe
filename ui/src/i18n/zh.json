@@ -2550,6 +2550,8 @@
   "agents": {
     "title": "Agents",
     "subtitle": "已登记 {{count}} 个 Agent。",
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程访问下 Agent 定义为只读。请在运行 Avibe 的机器上打开以进行编辑。",
     "tabs": {
       "definitions": "定义",
       "running": "运行"

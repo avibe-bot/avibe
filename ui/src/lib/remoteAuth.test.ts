@@ -8,12 +8,23 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  canEditAgentDefinitions,
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
   REMOTE_AUTH_REQUIRED_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
+
+describe('agent definition editing', () => {
+  it('keeps the Agent editor available on a local instance', () => {
+    expect(canEditAgentDefinitions({ remote: false })).toBe(true);
+  });
+
+  it('renders a read-only catalog on a remote instance', () => {
+    expect(canEditAgentDefinitions({ remote: true })).toBe(false);
+  });
+});
 
 describe('remote auth navigation', () => {
   beforeEach(() => {
