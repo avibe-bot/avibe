@@ -115,7 +115,7 @@ def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
     return FakeMemoryArtifactManager(**defaults)
 
 
-def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
+async def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -143,17 +143,14 @@ def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     monkeypatch.setattr(runtime.module._worker, "drain", drain)
     monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
 
-    async def run() -> None:
-        runtime._ensure_worker()
-        assert runtime._worker_task is not None
-        await runtime._worker_task
-
-    asyncio.run(run())
+    runtime._ensure_worker()
+    assert runtime._worker_task is not None
+    await runtime._worker_task
     assert drain_calls == 2
     assert runtime.module._worker._boot_id != initial_boot_id
 
 
-def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
+async def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -190,82 +187,79 @@ def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
         idle_timeout=timedelta(0),
     ).settled
 
-    async def run() -> None:
-        loop = asyncio.get_running_loop()
-        flush_entered = threading.Event()
-        flush_finished = threading.Event()
-        release_flush = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    flush_entered = threading.Event()
+    flush_finished = threading.Event()
+    release_flush = asyncio.Event()
 
-        class BlockingProvider(FakeMemoryProvider):
-            async def flush(self, session_ref: ProviderSessionRef):
-                self.flushes.append(session_ref)
-                flush_entered.set()
-                await release_flush.wait()
-                flush_finished.set()
-                return FlushSucceeded(request_id="exact-flush", status="extracted")
+    class BlockingProvider(FakeMemoryProvider):
+        async def flush(self, session_ref: ProviderSessionRef):
+            self.flushes.append(session_ref)
+            flush_entered.set()
+            await release_flush.wait()
+            flush_finished.set()
+            return FlushSucceeded(request_id="exact-flush", status="extracted")
 
-        provider = BlockingProvider()
-        runtime._provider = provider
-        runtime.module._replace_provider(provider)
-        worker = runtime.module._worker
-        coordinator = worker.coordinator
+    provider = BlockingProvider()
+    runtime._provider = provider
+    runtime.module._replace_provider(provider)
+    worker = runtime.module._worker
+    coordinator = worker.coordinator
 
-        original_claim_due = store.claim_due
-        claim_failures = 0
+    original_claim_due = store.claim_due
+    claim_failures = 0
 
-        def fail_foreground_claim_once(*, lease_owner: str, now: str):
-            nonlocal claim_failures
-            claim_failures += 1
-            if claim_failures == 1:
-                assert flush_entered.wait(timeout=1.0)
-                raise OSError("transient foreground store failure")
-            return original_claim_due(lease_owner=lease_owner, now=now)
+    def fail_foreground_claim_once(*, lease_owner: str, now: str):
+        nonlocal claim_failures
+        claim_failures += 1
+        if claim_failures == 1:
+            assert flush_entered.wait(timeout=1.0)
+            raise OSError("transient foreground store failure")
+        return original_claim_due(lease_owner=lease_owner, now=now)
 
-        monkeypatch.setattr(store, "claim_due", fail_foreground_claim_once)
+    monkeypatch.setattr(store, "claim_due", fail_foreground_claim_once)
 
-        original_recovery = store.recover_after_boot
-        recovery_calls = 0
-        recovery_overlapped_flush: list[bool] = []
+    original_recovery = store.recover_after_boot
+    recovery_calls = 0
+    recovery_overlapped_flush: list[bool] = []
 
-        def observe_recovery(*, lease_owner: str, clock):
-            nonlocal recovery_calls
-            recovery_calls += 1
-            result = original_recovery(lease_owner=lease_owner, clock=clock)
-            if recovery_calls == 2:
-                recovery_overlapped_flush.append(not flush_finished.is_set())
-                runtime._config = replace(runtime._config, enabled=False)
-                loop.call_soon_threadsafe(release_flush.set)
-            return result
+    def observe_recovery(*, lease_owner: str, clock):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        result = original_recovery(lease_owner=lease_owner, clock=clock)
+        if recovery_calls == 2:
+            recovery_overlapped_flush.append(not flush_finished.is_set())
+            runtime._config = replace(runtime._config, enabled=False)
+            loop.call_soon_threadsafe(release_flush.set)
+        return result
 
-        monkeypatch.setattr(store, "recover_after_boot", observe_recovery)
+    monkeypatch.setattr(store, "recover_after_boot", observe_recovery)
 
-        original_pause_and_wait = worker.pause_and_wait
+    original_pause_and_wait = worker.pause_and_wait
 
-        async def release_during_quiesce(*, timeout_seconds: float = 30.0) -> bool:
-            release_flush.set()
-            return await original_pause_and_wait(timeout_seconds=timeout_seconds)
+    async def release_during_quiesce(*, timeout_seconds: float = 30.0) -> bool:
+        release_flush.set()
+        return await original_pause_and_wait(timeout_seconds=timeout_seconds)
 
-        monkeypatch.setattr(worker, "pause_and_wait", release_during_quiesce)
+    monkeypatch.setattr(worker, "pause_and_wait", release_during_quiesce)
 
-        async def no_wait(_seconds: float) -> None:
-            return None
+    async def no_wait(_seconds: float) -> None:
+        return None
 
-        monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
-        runtime._ensure_worker()
-        assert runtime._worker_task is not None
-        await asyncio.wait_for(runtime._worker_task, timeout=2.0)
-        assert await coordinator.pause_and_wait(timeout_seconds=1.0)
+    monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
+    runtime._ensure_worker()
+    assert runtime._worker_task is not None
+    await asyncio.wait_for(runtime._worker_task, timeout=2.0)
+    assert await coordinator.pause_and_wait(timeout_seconds=1.0)
 
-        state = store.get_session_flush_state(accepted.row.provider_session_ref)
-        assert recovery_calls == 2
-        assert recovery_overlapped_flush == [False]
-        assert provider.flushes == [accepted.row.provider_session_ref]
-        assert state is not None
-        assert (state.state, state.unflushed_count) == ("idle", 0)
-        assert store.has_manual_required_fence() is False
-        await runtime.close()
-
-    asyncio.run(run())
+    state = store.get_session_flush_state(accepted.row.provider_session_ref)
+    assert recovery_calls == 2
+    assert recovery_overlapped_flush == [False]
+    assert provider.flushes == [accepted.row.provider_session_ref]
+    assert state is not None
+    assert (state.state, state.unflushed_count) == ("idle", 0)
+    assert store.has_manual_required_fence() is False
+    await runtime.close()
 
 
 def _settings() -> EverOSProcessSettings:
@@ -759,7 +753,7 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
     assert manager.provider_root_format() == "everos-1.0"
 
 
-def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_path: Path) -> None:
+async def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_path: Path) -> None:
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
         offline=True,
@@ -823,21 +817,18 @@ def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_pa
     )
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            MemoryConfig(enabled=True, processing=processing),
-            artifact_manager=manager,
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(runtime._config))["ok"] is True
-        assert [process.python for process in factory.supervised] == [old_binary]
-        await runtime.close()
-
-    asyncio.run(run())
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=processing),
+        artifact_manager=manager,
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(runtime._config))["ok"] is True
+    assert [process.python for process in factory.supervised] == [old_binary]
+    await runtime.close()
 
 
-def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: Path) -> None:
+async def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: Path) -> None:
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
@@ -850,13 +841,10 @@ def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: P
     assert runtime._provider._llm_api_key is None
     assert runtime._provider._embedding_api_key is None
 
-    async def run() -> None:
-        assert await runtime.reconcile(MemoryConfig(enabled=False, processing=processing)) == {
-            "ok": True,
-            "state": "disabled",
-        }
-
-    asyncio.run(run())
+    assert await runtime.reconcile(MemoryConfig(enabled=False, processing=processing)) == {
+        "ok": True,
+        "state": "disabled",
+    }
     assert runtime._provider._llm_api_key is None
     assert runtime._provider._embedding_api_key is None
 
@@ -865,7 +853,7 @@ def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: P
     "journal_attribute",
     ["_clear_journal", "_backup_restore_journal"],
 )
-def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
+async def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     journal_attribute: str,
@@ -882,81 +870,78 @@ def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable(
     disabled = replace(enabled, enabled=False)
     factory = FakeEverOSProcessFactory()
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            enabled,
-            artifact_manager=_installed_artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert await runtime.reconcile(enabled) == {"ok": True, "state": "ready"}
-        sidecar = factory.supervised[0]
-        assert runtime._worker_task is not None
-        assert runtime._process_records_calls is True
+    runtime = MemoryRuntime(
+        enabled,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert await runtime.reconcile(enabled) == {"ok": True, "state": "ready"}
+    sidecar = factory.supervised[0]
+    assert runtime._worker_task is not None
+    assert runtime._process_records_calls is True
 
-        terminal_gc = _maintenance(runtime)._terminal_snapshot_gc_task
-        backup_reconcile = _maintenance(runtime)._backup_stage_reconcile_task
-        if terminal_gc is not None:
-            await terminal_gc
-        if backup_reconcile is not None:
-            await backup_reconcile
+    terminal_gc = _maintenance(runtime)._terminal_snapshot_gc_task
+    backup_reconcile = _maintenance(runtime)._backup_stage_reconcile_task
+    if terminal_gc is not None:
+        await terminal_gc
+    if backup_reconcile is not None:
+        await backup_reconcile
 
-        journal = getattr(_maintenance(runtime), journal_attribute)
-        assert journal is not None
+    journal = getattr(_maintenance(runtime), journal_attribute)
+    assert journal is not None
 
-        def unreadable_journal() -> None:
-            raise OSError("maintenance journal is unreadable")
+    def unreadable_journal() -> None:
+        raise OSError("maintenance journal is unreadable")
 
-        async def recovery_must_not_run() -> bool:
-            raise AssertionError("disable must not mutate an unreadable journal")
+    async def recovery_must_not_run() -> bool:
+        raise AssertionError("disable must not mutate an unreadable journal")
 
-        monkeypatch.setattr(journal, "get_open_operation", unreadable_journal)
-        monkeypatch.setattr(_maintenance(runtime), "recover_boot", recovery_must_not_run)
+    monkeypatch.setattr(journal, "get_open_operation", unreadable_journal)
+    monkeypatch.setattr(_maintenance(runtime), "recover_boot", recovery_must_not_run)
 
-        changed = replace(
-            enabled,
-            processing=replace(
-                processing,
-                llm=replace(processing.llm, model="changed-while-unreadable"),
-            ),
-        )
-        assert await runtime.reconcile(changed) == {
-            "ok": False,
-            "error": "memory_clear_failed",
-        }
-        assert await runtime.restart() == {
-            "ok": False,
-            "error": "memory_clear_failed",
-        }
-        assert runtime._worker_task is not None
-        assert sidecar.stopped is False
+    changed = replace(
+        enabled,
+        processing=replace(
+            processing,
+            llm=replace(processing.llm, model="changed-while-unreadable"),
+        ),
+    )
+    assert await runtime.reconcile(changed) == {
+        "ok": False,
+        "error": "memory_clear_failed",
+    }
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_clear_failed",
+    }
+    assert runtime._worker_task is not None
+    assert sidecar.stopped is False
 
-        from core.controller import Controller
+    from core.controller import Controller
 
-        controller = Controller.__new__(Controller)
-        controller.config = SimpleNamespace(memory=enabled)
-        controller.memory_runtime = runtime
-        controller.memory_module = runtime.module
-        assert await controller.reconcile_memory(disabled) == {
-            "ok": True,
-            "state": "disabled",
-        }
-        assert controller.config.memory is disabled
-        assert runtime._config is disabled
-        assert runtime._restart_config == disabled
-        assert runtime.module._worker._claims_paused is True
-        assert runtime._worker_task is None
-        assert runtime._process is None
-        assert runtime._process_records_calls is False
-        assert sidecar.stopped is True
-        assert sidecar.running is False
-        assert len(factory.supervised) == 1
-        await runtime.close()
-
-    asyncio.run(run())
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=enabled)
+    controller.memory_runtime = runtime
+    controller.memory_module = runtime.module
+    assert await controller.reconcile_memory(disabled) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert controller.config.memory is disabled
+    assert runtime._config is disabled
+    assert runtime._restart_config == disabled
+    assert runtime.module._worker._claims_paused is True
+    assert runtime._worker_task is None
+    assert runtime._process is None
+    assert runtime._process_records_calls is False
+    assert sidecar.stopped is True
+    assert sidecar.running is False
+    assert len(factory.supervised) == 1
+    await runtime.close()
 
 
-def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
+async def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
     def _artifact() -> FakeMemoryArtifactManager:
         return FakeMemoryArtifactManager(
             python=None,
@@ -979,17 +964,14 @@ def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
         effective_home=tmp_path / "enabled",
     )
 
-    async def run() -> None:
-        assert await disabled.reconcile(MemoryConfig(enabled=False)) == {
-            "ok": True,
-            "state": "disabled",
-        }
-        assert await enabled.reconcile(MemoryConfig(enabled=True)) == {
-            "ok": False,
-            "error": "memory_runtime_missing",
-        }
-
-    asyncio.run(run())
+    assert await disabled.reconcile(MemoryConfig(enabled=False)) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert await enabled.reconcile(MemoryConfig(enabled=True)) == {
+        "ok": False,
+        "error": "memory_runtime_missing",
+    }
 
 
 def _recording_ownership(
@@ -1065,7 +1047,7 @@ def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
     ]
 
 
-def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
+async def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1083,22 +1065,19 @@ def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
     _recording_ownership(monkeypatch)
     config = MemoryConfig(enabled=True)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(config, effective_home=tmp_path)
-        runtime._module = None
-        monkeypatch.setattr(runtime, "_open_store", lambda: False)
+    runtime = MemoryRuntime(config, effective_home=tmp_path)
+    runtime._module = None
+    monkeypatch.setattr(runtime, "_open_store", lambda: False)
 
-        assert await runtime.reconcile(config) == {
-            "ok": False,
-            "error": "memory_store_unavailable",
-        }
-        assert await asyncio.to_thread(maintained.wait, 1)
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.reconcile(config) == {
+        "ok": False,
+        "error": "memory_store_unavailable",
+    }
+    assert await asyncio.to_thread(maintained.wait, 1)
+    await runtime.close()
 
 
-def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_orphan(
+async def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_orphan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1109,19 +1088,16 @@ def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_orphan(
     _recording_ownership(monkeypatch, failure=RuntimeError("orphan still owns call log"))
     config = MemoryConfig(enabled=True)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(config, effective_home=tmp_path)
-        runtime._module = None
-        monkeypatch.setattr(runtime, "_open_store", lambda: False)
+    runtime = MemoryRuntime(config, effective_home=tmp_path)
+    runtime._module = None
+    monkeypatch.setattr(runtime, "_open_store", lambda: False)
 
-        assert await runtime.reconcile(config) == {
-            "ok": False,
-            "error": "memory_store_unavailable",
-        }
-        assert runtime._call_log_retention_task is None
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.reconcile(config) == {
+        "ok": False,
+        "error": "memory_store_unavailable",
+    }
+    assert runtime._call_log_retention_task is None
+    await runtime.close()
 
 
 def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
@@ -1159,7 +1135,7 @@ def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
     assert not record_path.exists()
 
 
-def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
+async def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The one way this fix could be worse than the bug it closes.
@@ -1181,24 +1157,21 @@ def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
         ),
     )
 
-    async def run() -> None:
-        runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
-        # First reconciliation: no child exists yet, so recovery is free to run.
+    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
+    # First reconciliation: no child exists yet, so recovery is free to run.
+    assert (await runtime.reconcile(config))["ok"] is True
+    assert len(reaps) == 1
+    assert runtime._process is not None
+
+    # Every later settings save finds a child of ours, and must leave it be.
+    for _ in range(2):
         assert (await runtime.reconcile(config))["ok"] is True
-        assert len(reaps) == 1
-        assert runtime._process is not None
-
-        # Every later settings save finds a child of ours, and must leave it be.
-        for _ in range(2):
-            assert (await runtime.reconcile(config))["ok"] is True
-        assert len(reaps) == 1
-        assert factory.supervised[-1].stopped is False
-        await runtime.close()
-
-    asyncio.run(run())
+    assert len(reaps) == 1
+    assert factory.supervised[-1].stopped is False
+    await runtime.close()
 
 
-def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
+async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reap in flight must not be able to retire a record a launch just wrote.
@@ -1237,32 +1210,28 @@ def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
         ),
     )
 
-    async def run() -> tuple[list[object], list[dict]]:
-        runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
-        try:
-            reaping = asyncio.create_task(runtime.reconcile(config))
-            await started.wait()
-            launching = asyncio.create_task(runtime.reconcile(config))
-            # Real time, not bare yields: a reconciliation reaches its launch
-            # through `asyncio.to_thread` hops, which bare yields never let
-            # finish, so yielding alone would hold whether or not the two are
-            # serialized. Breaks early on the failure, so only the passing case
-            # waits out the whole window.
-            for _ in range(40):
-                await asyncio.sleep(0.01)
-                if factory.supervised:
-                    break
-            overlapped = list(factory.supervised)
-            release.set()
-            results = list(await asyncio.gather(reaping, launching))
-        finally:
-            # Nothing is asserted while those tasks are in flight: a failure has
-            # to leave a closed runtime behind, not a hung event loop.
-            release.set()
-            await runtime.close()
-        return overlapped, results
-
-    overlapped, results = asyncio.run(run())
+    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
+    try:
+        reaping = asyncio.create_task(runtime.reconcile(config))
+        await started.wait()
+        launching = asyncio.create_task(runtime.reconcile(config))
+        # Real time, not bare yields: a reconciliation reaches its launch
+        # through `asyncio.to_thread` hops, which bare yields never let
+        # finish, so yielding alone would hold whether or not the two are
+        # serialized. Breaks early on the failure, so only the passing case
+        # waits out the whole window.
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            if factory.supervised:
+                break
+        overlapped = list(factory.supervised)
+        release.set()
+        results = list(await asyncio.gather(reaping, launching))
+    finally:
+        # Nothing is asserted while those tasks are in flight: a failure has
+        # to leave a closed runtime behind, not a hung event loop.
+        release.set()
+        await runtime.close()
 
     assert overlapped == [], "a launch overlapped a reap that was still running"
     assert [result["ok"] for result in results] == [True, True]
@@ -1423,7 +1392,7 @@ def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
     )
 
 
-def test_runtime_effective_home_owns_the_attachment_pipeline(
+async def test_runtime_effective_home_owns_the_attachment_pipeline(
     monkeypatch, tmp_path: Path
 ) -> None:
     global_home = tmp_path / "global-home"
@@ -1465,38 +1434,36 @@ def test_runtime_effective_home_owns_the_attachment_pipeline(
         expected_pin_root
     )
 
-    async def run() -> object:
-        try:
-            return await runtime.module.capture(
-                CaptureRequest(
-                    source_message_id="source-1",
-                    session_id="session-1",
-                    principal_id="u-11111111111111111111111111111111",
-                    project_id=PROJECT,
-                    provenance="user_input",
-                    text="remember the notes",
-                    occurred_at_ms=1_725_000_001_234,
-                    attachments=(
-                        CaptureAttachment(
-                            kind="doc",
-                            name=source.name,
-                            uri=source.as_uri(),
-                            ext="txt",
-                        ),
+    try:
+        result = await runtime.module.capture(
+            CaptureRequest(
+                source_message_id="source-1",
+                session_id="session-1",
+                principal_id="u-11111111111111111111111111111111",
+                project_id=PROJECT,
+                provenance="user_input",
+                text="remember the notes",
+                occurred_at_ms=1_725_000_001_234,
+                attachments=(
+                    CaptureAttachment(
+                        kind="doc",
+                        name=source.name,
+                        uri=source.as_uri(),
+                        ext="txt",
                     ),
-                )
+                ),
             )
-        finally:
-            await runtime.close()
-
-    assert isinstance(asyncio.run(run()), CaptureAccepted)
+        )
+    finally:
+        await runtime.close()
+    assert isinstance(result, CaptureAccepted)
     pinned_files = tuple((expected_pin_root / "bundles").glob("*/*"))
     assert len(pinned_files) == 1
     assert pinned_files[0].read_bytes() == b"runtime-owned attachment"
     assert not attachment_pin_root(global_home).exists()
 
 
-def test_final_flush_fences_capture_before_queue_visibility(
+async def test_final_flush_fences_capture_before_queue_visibility(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1564,58 +1531,55 @@ def test_final_flush_fences_capture_before_queue_visibility(
 
     monkeypatch.setattr(runtime.module._attachment_store, "pin", blocking_pin)
 
-    async def run() -> None:
-        old_capture = asyncio.create_task(runtime.module.capture(old_request))
-        assert await asyncio.to_thread(pin_entered.wait, 1.0)
+    old_capture = asyncio.create_task(runtime.module.capture(old_request))
+    assert await asyncio.to_thread(pin_entered.wait, 1.0)
 
-        final_flush = asyncio.create_task(
-            runtime.final_flush(
-                principal_id=old_request.principal_id,
-                project_id=old_request.project_id,
-                raw_session_id=old_request.session_id,
-                deadline_seconds=2.0,
-            )
+    final_flush = asyncio.create_task(
+        runtime.final_flush(
+            principal_id=old_request.principal_id,
+            project_id=old_request.project_id,
+            raw_session_id=old_request.session_id,
+            deadline_seconds=2.0,
         )
-        await asyncio.sleep(0)
-        later_capture = asyncio.create_task(runtime.module.capture(later_request))
-        await asyncio.sleep(0)
-        assert not final_flush.done()
-        assert not later_capture.done()
+    )
+    await asyncio.sleep(0)
+    later_capture = asyncio.create_task(runtime.module.capture(later_request))
+    await asyncio.sleep(0)
+    assert not final_flush.done()
+    assert not later_capture.done()
 
-        release_pin.set()
-        assert isinstance(await old_capture, CaptureAccepted)
-        drain = asyncio.create_task(runtime.module._worker.drain())
+    release_pin.set()
+    assert isinstance(await old_capture, CaptureAccepted)
+    drain = asyncio.create_task(runtime.module._worker.drain_once())
 
-        assert await asyncio.to_thread(flush_entered.wait, 1.0)
-        assert [capture.text for capture in provider.captures] == [
-            "old session message"
-        ]
-        assert len(provider.flushes) == 1
-        assert not final_flush.done()
-        assert not later_capture.done()
-        assert all(
-            row.payload_text != "later session message"
-            for row in store.list_queue_rows()
-        )
+    assert await asyncio.to_thread(flush_entered.wait, 1.0)
+    assert [capture.text for capture in provider.captures] == [
+        "old session message"
+    ]
+    assert len(provider.flushes) == 1
+    assert not final_flush.done()
+    assert not later_capture.done()
+    assert all(
+        row.payload_text != "later session message"
+        for row in store.list_queue_rows()
+    )
 
-        release_flush.set()
-        assert await final_flush
+    release_flush.set()
+    assert await final_flush
 
-        assert isinstance(await later_capture, CaptureAccepted)
-        await drain
-        later_rows = [
-            row
-            for row in store.list_queue_rows()
-            if row.payload_text == "later session message"
-        ]
-        assert len(later_rows) == 1
-        assert later_rows[0].state == "pending"
-        await runtime.close()
-
-    asyncio.run(run())
+    assert isinstance(await later_capture, CaptureAccepted)
+    await drain
+    later_rows = [
+        row
+        for row in store.list_queue_rows()
+        if row.payload_text == "later session message"
+    ]
+    assert len(later_rows) == 1
+    assert later_rows[0].state == "pending"
+    await runtime.close()
 
 
-def test_session_lifecycle_fences_capture_through_reset(
+async def test_session_lifecycle_fences_capture_through_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1654,52 +1618,49 @@ def test_session_lifecycle_fences_capture_through_reset(
         attachments=(),
     )
 
-    async def run() -> None:
-        reset_entered = asyncio.Event()
-        release_reset = asyncio.Event()
-        order: list[str] = []
+    reset_entered = asyncio.Event()
+    release_reset = asyncio.Event()
+    order: list[str] = []
 
-        async def reset_session() -> str:
-            order.append("reset-entered")
-            reset_entered.set()
-            await release_reset.wait()
-            order.append("reset-committed")
-            return "reset-complete"
+    async def reset_session() -> str:
+        order.append("reset-entered")
+        reset_entered.set()
+        await release_reset.wait()
+        order.append("reset-committed")
+        return "reset-complete"
 
-        lifecycle = asyncio.create_task(
-            runtime.run_session_lifecycle(
-                principal_id=principal_id,
-                project_id=PROJECT,
-                raw_session_id=session_id,
-                operation=reset_session,
-                deadline_seconds=2.0,
-            )
+    lifecycle = asyncio.create_task(
+        runtime.run_session_lifecycle(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            raw_session_id=session_id,
+            operation=reset_session,
+            deadline_seconds=2.0,
         )
-        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
-        capture = asyncio.create_task(runtime.module.capture(request))
-        await asyncio.sleep(0)
+    )
+    await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+    capture = asyncio.create_task(runtime.module.capture(request))
+    await asyncio.sleep(0)
 
-        assert not capture.done()
-        assert all(
-            row.payload_text != request.text
-            for row in store.list_queue_rows()
-        )
+    assert not capture.done()
+    assert all(
+        row.payload_text != request.text
+        for row in store.list_queue_rows()
+    )
 
-        release_reset.set()
-        assert await lifecycle == "reset-complete"
-        assert isinstance(await capture, CaptureAccepted)
-        order.append("capture-enqueued")
-        assert order == [
-            "reset-entered",
-            "reset-committed",
-            "capture-enqueued",
-        ]
-        await runtime.close()
-
-    asyncio.run(run())
+    release_reset.set()
+    assert await lifecycle == "reset-complete"
+    assert isinstance(await capture, CaptureAccepted)
+    order.append("capture-enqueued")
+    assert order == [
+        "reset-entered",
+        "reset-committed",
+        "capture-enqueued",
+    ]
+    await runtime.close()
 
 
-def test_multi_scope_session_lifecycle_holds_every_fence_through_operation(
+async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1736,25 +1697,22 @@ def test_multi_scope_session_lifecycle_holds_every_fence_through_operation(
 
     monkeypatch.setattr(runtime, "_final_flush_under_admission", flush_under_fence)
 
-    async def run() -> None:
-        async def archive_session() -> str:
-            assert all(lock.locked() for lock in locks)
-            return "archived"
+    async def archive_session() -> str:
+        assert all(lock.locked() for lock in locks)
+        return "archived"
 
-        assert await runtime.run_session_scopes_lifecycle(
-            scopes=(second_scope, first_scope, second_scope),
-            raw_session_id=session_id,
-            operation=archive_session,
-            deadline_seconds=2.0,
-        ) == "archived"
-        assert flushes == [first_scope, second_scope]
-        assert all(not lock.locked() for lock in locks)
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.run_session_scopes_lifecycle(
+        scopes=(second_scope, first_scope, second_scope),
+        raw_session_id=session_id,
+        operation=archive_session,
+        deadline_seconds=2.0,
+    ) == "archived"
+    assert flushes == [first_scope, second_scope]
+    assert all(not lock.locked() for lock in locks)
+    await runtime.close()
 
 
-def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
+async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1777,50 +1735,47 @@ def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
     )
     session_id = "cancelled-multi-scope-lifecycle"
 
-    async def run() -> None:
-        first_lock, second_lock = [
-            runtime.module._capture_admission_lock(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=session_id,
-            )
-            for principal_id, project_id in scopes
-        ]
-        await second_lock.acquire()
-
-        async def archive_session() -> None:
-            raise AssertionError("archive must not run before every fence is held")
-
-        lifecycle = asyncio.create_task(
-            runtime.run_session_scopes_lifecycle(
-                scopes=scopes,
-                raw_session_id=session_id,
-                operation=archive_session,
-                deadline_seconds=2.0,
-            )
+    first_lock, second_lock = [
+        runtime.module._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=session_id,
         )
-        for _ in range(20):
-            if first_lock.locked():
-                break
-            await asyncio.sleep(0)
-        assert first_lock.locked()
-        # Let ``wait_for`` return the acquired first lock and enter the wait for
-        # the already-held second lock before cancelling the outer lifecycle.
+        for principal_id, project_id in scopes
+    ]
+    await second_lock.acquire()
+
+    async def archive_session() -> None:
+        raise AssertionError("archive must not run before every fence is held")
+
+    lifecycle = asyncio.create_task(
+        runtime.run_session_scopes_lifecycle(
+            scopes=scopes,
+            raw_session_id=session_id,
+            operation=archive_session,
+            deadline_seconds=2.0,
+        )
+    )
+    for _ in range(20):
+        if first_lock.locked():
+            break
         await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert not lifecycle.done()
+    assert first_lock.locked()
+    # Let ``wait_for`` return the acquired first lock and enter the wait for
+    # the already-held second lock before cancelling the outer lifecycle.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not lifecycle.done()
 
-        lifecycle.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await lifecycle
-        assert not first_lock.locked()
-        second_lock.release()
-        await runtime.close()
-
-    asyncio.run(run())
+    lifecycle.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await lifecycle
+    assert not first_lock.locked()
+    second_lock.release()
+    await runtime.close()
 
 
-def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
+async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1834,41 +1789,38 @@ def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
     principal_id = "u-11111111111111111111111111111111"
     session_id = "busy-lifecycle-session"
 
-    async def run() -> None:
-        admission_lock = runtime.module._capture_admission_lock(
-            principal_id=principal_id,
-            project_id=PROJECT,
-            session_id=session_id,
-        )
-        await admission_lock.acquire()
-        operation_called = False
+    admission_lock = runtime.module._capture_admission_lock(
+        principal_id=principal_id,
+        project_id=PROJECT,
+        session_id=session_id,
+    )
+    await admission_lock.acquire()
+    operation_called = False
 
-        async def reset_session() -> None:
-            nonlocal operation_called
-            operation_called = True
+    async def reset_session() -> None:
+        nonlocal operation_called
+        operation_called = True
 
-        try:
-            with pytest.raises(
-                MemorySessionLifecycleBusyError,
-                match="did not quiesce",
-            ):
-                await runtime.run_session_lifecycle(
-                    principal_id=principal_id,
-                    project_id=PROJECT,
-                    raw_session_id=session_id,
-                    operation=reset_session,
-                    deadline_seconds=0.01,
-                )
-            assert operation_called is False
-        finally:
-            admission_lock.release()
-            await runtime.close()
-
-    asyncio.run(run())
+    try:
+        with pytest.raises(
+            MemorySessionLifecycleBusyError,
+            match="did not quiesce",
+        ):
+            await runtime.run_session_lifecycle(
+                principal_id=principal_id,
+                project_id=PROJECT,
+                raw_session_id=session_id,
+                operation=reset_session,
+                deadline_seconds=0.01,
+            )
+        assert operation_called is False
+    finally:
+        admission_lock.release()
+        await runtime.close()
 
 
 @pytest.mark.parametrize("outcome", ["exception", "cancellation"])
-def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
+async def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     outcome: str,
@@ -1896,42 +1848,39 @@ def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
         attachments=(),
     )
 
-    async def run() -> None:
-        reset_entered = asyncio.Event()
-        keep_reset_open = asyncio.Event()
+    reset_entered = asyncio.Event()
+    keep_reset_open = asyncio.Event()
 
-        async def abort_reset() -> None:
-            reset_entered.set()
-            if outcome == "exception":
-                raise RuntimeError("reset failed")
-            await keep_reset_open.wait()
-
-        lifecycle = asyncio.create_task(
-            runtime.run_session_lifecycle(
-                principal_id=principal_id,
-                project_id=PROJECT,
-                raw_session_id=session_id,
-                operation=abort_reset,
-                deadline_seconds=2.0,
-            )
-        )
-        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+    async def abort_reset() -> None:
+        reset_entered.set()
         if outcome == "exception":
-            with pytest.raises(RuntimeError, match="reset failed"):
-                await lifecycle
-        else:
-            lifecycle.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await lifecycle
+            raise RuntimeError("reset failed")
+        await keep_reset_open.wait()
 
-        receipt = await asyncio.wait_for(runtime.module.capture(request), timeout=1.0)
-        assert isinstance(receipt, CaptureAccepted)
-        await runtime.close()
+    lifecycle = asyncio.create_task(
+        runtime.run_session_lifecycle(
+            principal_id=principal_id,
+            project_id=PROJECT,
+            raw_session_id=session_id,
+            operation=abort_reset,
+            deadline_seconds=2.0,
+        )
+    )
+    await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+    if outcome == "exception":
+        with pytest.raises(RuntimeError, match="reset failed"):
+            await lifecycle
+    else:
+        lifecycle.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lifecycle
 
-    asyncio.run(run())
+    receipt = await asyncio.wait_for(runtime.module.capture(request), timeout=1.0)
+    assert isinstance(receipt, CaptureAccepted)
+    await runtime.close()
 
 
-def test_final_flush_deadline_includes_capture_admission_wait(
+async def test_final_flush_deadline_includes_capture_admission_wait(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1945,27 +1894,24 @@ def test_final_flush_deadline_includes_capture_admission_wait(
     principal_id = "u-11111111111111111111111111111111"
     session_id = "deadline-session"
 
-    async def run() -> None:
-        admission_lock = runtime.module._capture_admission_lock(
+    admission_lock = runtime.module._capture_admission_lock(
+        principal_id=principal_id,
+        project_id=PROJECT,
+        session_id=session_id,
+    )
+    await admission_lock.acquire()
+    try:
+        started = asyncio.get_running_loop().time()
+        assert not await runtime.final_flush(
             principal_id=principal_id,
             project_id=PROJECT,
-            session_id=session_id,
+            raw_session_id=session_id,
+            deadline_seconds=0.02,
         )
-        await admission_lock.acquire()
-        try:
-            started = asyncio.get_running_loop().time()
-            assert not await runtime.final_flush(
-                principal_id=principal_id,
-                project_id=PROJECT,
-                raw_session_id=session_id,
-                deadline_seconds=0.02,
-            )
-            assert asyncio.get_running_loop().time() - started < 0.5
-        finally:
-            admission_lock.release()
-            await runtime.close()
-
-    asyncio.run(run())
+        assert asyncio.get_running_loop().time() - started < 0.5
+    finally:
+        admission_lock.release()
+        await runtime.close()
 
 
 def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_path: Path) -> None:
@@ -1983,7 +1929,7 @@ def test_sidecar_child_environment_includes_only_the_configured_call_log(tmp_pat
     assert stat.S_IMODE(call_log.parent.stat().st_mode) == 0o700
 
 
-def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:
+async def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Path) -> None:
     socket_path = tmp_path / ("a" * 180) / "everos.sock"
     process = EverOSProcess(
         sys.executable,
@@ -1992,16 +1938,13 @@ def test_sidecar_rejects_sun_path_overflow_without_launching_child(tmp_path: Pat
         settings=_settings(),
     )
 
-    async def run() -> None:
-        assert await process.start() is False
-        assert process.last_error == "memory_sidecar_unavailable"
-        assert process.consecutive_failures == 1
-        await process.stop()
-
-    asyncio.run(run())
+    assert await process.start() is False
+    assert process.last_error == "memory_sidecar_unavailable"
+    assert process.consecutive_failures == 1
+    await process.stop()
 
 
-def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(monkeypatch, tmp_path: Path) -> None:
+async def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(monkeypatch, tmp_path: Path) -> None:
     class _Child:
         pid = 999_999
         returncode = None
@@ -2038,18 +1981,15 @@ def test_sidecar_start_failure_never_relaunches_beside_an_unreaped_child(monkeyp
     monkeypatch.setattr(process, "_wait_for_ready", readiness_failure)
     monkeypatch.setattr(process, "_terminate_owned_tree", cleanup_failure)
 
-    async def run() -> None:
-        assert await process.start() is False
-        assert process.down is True
-        assert process._process is launches[0]
-        assert process._restart_task is None
-        assert await process.start() is False
-        assert len(launches) == 1
-
-    asyncio.run(run())
+    assert await process.start() is False
+    assert process.down is True
+    assert process._process is launches[0]
+    assert process._restart_task is None
+    assert await process.start() is False
+    assert len(launches) == 1
 
 
-def test_processing_probe_reaps_child_when_its_caller_is_cancelled(monkeypatch, tmp_path: Path) -> None:
+async def test_processing_probe_reaps_child_when_its_caller_is_cancelled(monkeypatch, tmp_path: Path) -> None:
     started = asyncio.Event()
     cleanup_calls: list[object] = []
 
@@ -2075,22 +2015,19 @@ def test_processing_probe_reaps_child_when_its_caller_is_cancelled(monkeypatch, 
     monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
     monkeypatch.setattr(process, "_terminate_owned_tree", cleanup)
 
-    async def run() -> None:
-        task = asyncio.create_task(process.processing_healthy())
-        await started.wait()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        else:
-            raise AssertionError("processing probe cancellation was swallowed")
-
-    asyncio.run(run())
+    task = asyncio.create_task(process.processing_healthy())
+    await started.wait()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("processing probe cancellation was swallowed")
     assert cleanup_calls
 
 
-def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
+async def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"
     script = (
         "import pathlib, subprocess, sys, time; "
@@ -2098,24 +2035,21 @@ def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
         f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); time.sleep(60)"
     )
 
-    async def run() -> tuple[int, int]:
-        child = await asyncio.create_subprocess_exec(sys.executable, "-c", script, start_new_session=True)
-        deadline = time.monotonic() + 3
-        while not child_pid_path.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        assert child_pid_path.exists()
-        descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
-        process._process_group = os.getpgid(child.pid)
-        owned_processes = _snapshot_owned_processes(child.pid, process._process_group)
-        await process._terminate_owned_tree(
-            child,
-            process_group=process._process_group,
-            owned_processes=owned_processes,
-        )
-        return child.pid, descendant_pid
-
-    parent_pid, descendant_pid = asyncio.run(run())
+    child = await asyncio.create_subprocess_exec(sys.executable, "-c", script, start_new_session=True)
+    deadline = time.monotonic() + 3
+    while not child_pid_path.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert child_pid_path.exists()
+    descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+    process._process_group = os.getpgid(child.pid)
+    owned_processes = _snapshot_owned_processes(child.pid, process._process_group)
+    await process._terminate_owned_tree(
+        child,
+        process_group=process._process_group,
+        owned_processes=owned_processes,
+    )
+    parent_pid = child.pid
     assert not _pid_exists(parent_pid)
     assert not _pid_exists(descendant_pid)
 
@@ -2137,7 +2071,7 @@ def test_sidecar_safety_monitor_ignores_expected_shutdown(monkeypatch, tmp_path:
     assert process._process is child
 
 
-def test_sidecar_stop_reaps_a_descendant_that_leaves_the_child_group(tmp_path: Path) -> None:
+async def test_sidecar_stop_reaps_a_descendant_that_leaves_the_child_group(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "detached-child.pid"
     script = (
         "import pathlib, subprocess, sys, time; "
@@ -2145,24 +2079,21 @@ def test_sidecar_stop_reaps_a_descendant_that_leaves_the_child_group(tmp_path: P
         f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid)); time.sleep(60)"
     )
 
-    async def run() -> tuple[int, int]:
-        child = await asyncio.create_subprocess_exec(sys.executable, "-c", script, start_new_session=True)
-        deadline = time.monotonic() + 3
-        while not child_pid_path.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
-        assert child_pid_path.exists()
-        descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
-        process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
-        process._process_group = os.getpgid(child.pid)
-        owned_processes = _snapshot_owned_processes(child.pid, process._process_group)
-        await process._terminate_owned_tree(
-            child,
-            process_group=process._process_group,
-            owned_processes=owned_processes,
-        )
-        return child.pid, descendant_pid
-
-    parent_pid, descendant_pid = asyncio.run(run())
+    child = await asyncio.create_subprocess_exec(sys.executable, "-c", script, start_new_session=True)
+    deadline = time.monotonic() + 3
+    while not child_pid_path.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert child_pid_path.exists()
+    descendant_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+    process._process_group = os.getpgid(child.pid)
+    owned_processes = _snapshot_owned_processes(child.pid, process._process_group)
+    await process._terminate_owned_tree(
+        child,
+        process_group=process._process_group,
+        owned_processes=owned_processes,
+    )
+    parent_pid = child.pid
     assert not _pid_exists(parent_pid)
     assert not _pid_exists(descendant_pid)
 
@@ -2198,7 +2129,7 @@ def test_sidecar_cleanup_skips_a_reused_pid_identity(monkeypatch, tmp_path: Path
     assert signals == []
 
 
-def test_sidecar_cleanup_never_signals_spawned_pid_after_identity_changes(monkeypatch, tmp_path: Path) -> None:
+async def test_sidecar_cleanup_never_signals_spawned_pid_after_identity_changes(monkeypatch, tmp_path: Path) -> None:
     signals: list[tuple[str, int]] = []
 
     class _TrackedChild:
@@ -2210,50 +2141,47 @@ def test_sidecar_cleanup_never_signals_spawned_pid_after_identity_changes(monkey
         def send_signal(self, signum: int) -> None:
             signals.append(("child", signum))
 
-    async def run() -> None:
-        child = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-c",
-            "import time; time.sleep(60)",
-            start_new_session=True,
-        )
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(60)",
+        start_new_session=True,
+    )
+    try:
+        identities = _snapshot_owned_processes(child.pid, None)
+        captured_at = identities[child.pid]
+        original_process = memory_process.psutil.Process
+
+        class _ReusedProcess:
+            def __init__(self, process_id: int) -> None:
+                assert process_id == child.pid
+                self.pid = process_id
+
+            def create_time(self) -> float:
+                return captured_at + 1.0
+
+            def status(self) -> str:
+                return psutil.STATUS_SLEEPING
+
+            def send_signal(self, signum: int) -> None:
+                signals.append(("psutil", signum))
+
+        monkeypatch.setattr(memory_process.psutil, "Process", _ReusedProcess)
         try:
-            identities = _snapshot_owned_processes(child.pid, None)
-            captured_at = identities[child.pid]
-            original_process = memory_process.psutil.Process
-
-            class _ReusedProcess:
-                def __init__(self, process_id: int) -> None:
-                    assert process_id == child.pid
-                    self.pid = process_id
-
-                def create_time(self) -> float:
-                    return captured_at + 1.0
-
-                def status(self) -> str:
-                    return psutil.STATUS_SLEEPING
-
-                def send_signal(self, signum: int) -> None:
-                    signals.append(("psutil", signum))
-
-            monkeypatch.setattr(memory_process.psutil, "Process", _ReusedProcess)
-            try:
-                _signal_owned_processes(identities, signal.SIGTERM)
-                _signal_owned_group_or_process(_TrackedChild(child.pid), None, identities, signal.SIGTERM)
-            finally:
-                monkeypatch.setattr(memory_process.psutil, "Process", original_process)
-
-            assert signals == []
+            _signal_owned_processes(identities, signal.SIGTERM)
+            _signal_owned_group_or_process(_TrackedChild(child.pid), None, identities, signal.SIGTERM)
         finally:
-            if child.returncode is None:
-                child.terminate()
-                try:
-                    await asyncio.wait_for(child.wait(), timeout=3.0)
-                except TimeoutError:
-                    child.kill()
-                    await child.wait()
+            monkeypatch.setattr(memory_process.psutil, "Process", original_process)
 
-    asyncio.run(run())
+        assert signals == []
+    finally:
+        if child.returncode is None:
+            child.terminate()
+            try:
+                await asyncio.wait_for(child.wait(), timeout=3.0)
+            except TimeoutError:
+                child.kill()
+                await child.wait()
 
 
 def test_sidecar_cleanup_does_not_group_signal_an_unconfirmed_member(monkeypatch) -> None:
@@ -2378,7 +2306,7 @@ def test_explicit_sidecar_retry_keeps_crash_budget_until_observed_health(monkeyp
     assert process.consecutive_failures == 5
 
 
-def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Path) -> None:
+async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Path) -> None:
     started: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2405,10 +2333,7 @@ def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Pa
         effective_home=tmp_path,
     )
 
-    async def run() -> None:
-        assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
-
-    asyncio.run(run())
+    assert await runtime.reconcile(runtime._config) == {"ok": False, "error": "memory_clear_failed"}
     assert started == []
     recovery = _maintenance(runtime)._clear_journal.get_open_operation()
     assert recovery is not None
@@ -2416,7 +2341,7 @@ def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Pa
     assert recovery.state == "recovery_needed"
 
 
-def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
+async def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
     calls: list[bool] = []
 
     artifact = FakeMemoryArtifactManager(
@@ -2428,20 +2353,17 @@ def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) 
     calls = artifact.ensure_calls
     runtime = MemoryRuntime(MemoryConfig(enabled=False), artifact_manager=artifact, effective_home=tmp_path)
 
-    async def run() -> None:
-        assert await runtime.install_artifact() == {
-            "ok": False,
-            "reason": "memory_runtime_unpublished",
-            "download_error": None,
-        }
-
-    asyncio.run(run())
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_runtime_unpublished",
+        "download_error": None,
+    }
     assert callable(artifact.activation_coordinator)
     assert calls == [True]
     assert runtime._config.enabled is False
 
 
-def test_runtime_install_artifact_converts_background_ensure_exception(
+async def test_runtime_install_artifact_converts_background_ensure_exception(
     tmp_path: Path,
 ) -> None:
     artifact = _installed_artifact(ensure_failure=RuntimeError("install failed"))
@@ -2450,15 +2372,12 @@ def test_runtime_install_artifact_converts_background_ensure_exception(
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
-    async def run() -> None:
-        assert await runtime.install_artifact() == {
-            "ok": False,
-            "reason": "memory_runtime_install_failed",
-            "download_error": None,
-        }
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
+    await runtime.close()
 
 
 def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> None:
@@ -2578,54 +2497,51 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
     assert runtime._process is not None
 
 
-def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
-    async def run() -> None:
-        cleanup_started = asyncio.Event()
-        allow_cleanup_to_finish = asyncio.Event()
-        runtime = MemoryRuntime(
-            MemoryConfig(enabled=False),
-            artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
-            effective_home=tmp_path,
+async def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
+    cleanup_started = asyncio.Event()
+    allow_cleanup_to_finish = asyncio.Event()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=False),
+        artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
+        effective_home=tmp_path,
+    )
+    runtime._activation_loop = asyncio.get_running_loop()
+
+    async def activation_with_slow_cancellation(*_args) -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await allow_cleanup_to_finish.wait()
+            raise
+
+    monkeypatch.setattr(runtime, "_activate_artifact_candidate", activation_with_slow_cancellation)
+    monkeypatch.setattr("core.memory.runtime.ARTIFACT_ACTIVATION_TIMEOUT_SECONDS", 0.01)
+
+    coordinate = asyncio.create_task(
+        asyncio.to_thread(
+            runtime._coordinate_artifact_activation,
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="candidate-artifact",
+            ),
+            MemoryProviderRootState(exists=False),
+            lambda: None,
+            lambda: None,
         )
-        runtime._activation_loop = asyncio.get_running_loop()
+    )
 
-        async def activation_with_slow_cancellation(*_args) -> None:
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                cleanup_started.set()
-                await allow_cleanup_to_finish.wait()
-                raise
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+    await asyncio.sleep(0.02)
+    assert coordinate.done() is False
 
-        monkeypatch.setattr(runtime, "_activate_artifact_candidate", activation_with_slow_cancellation)
-        monkeypatch.setattr("core.memory.runtime.ARTIFACT_ACTIVATION_TIMEOUT_SECONDS", 0.01)
-
-        coordinate = asyncio.create_task(
-            asyncio.to_thread(
-                runtime._coordinate_artifact_activation,
-                MemoryArtifactCandidate(
-                    provider_root_format="everos-1.2.3",
-                    compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
-                    artifact_fingerprint="candidate-artifact",
-                ),
-                MemoryProviderRootState(exists=False),
-                lambda: None,
-                lambda: None,
-            )
-        )
-
-        await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
-        await asyncio.sleep(0.02)
-        assert coordinate.done() is False
-
-        allow_cleanup_to_finish.set()
-        with pytest.raises(MemoryRuntimeActivationError, match="timed out"):
-            await asyncio.wait_for(coordinate, timeout=1.0)
-
-    asyncio.run(run())
+    allow_cleanup_to_finish.set()
+    with pytest.raises(MemoryRuntimeActivationError, match="timed out"):
+        await asyncio.wait_for(coordinate, timeout=1.0)
 
 
-def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifecycle_lock(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifecycle_lock(monkeypatch, tmp_path: Path) -> None:
     instances: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2640,41 +2556,38 @@ def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifec
     )
     initial = MemoryConfig(enabled=True, processing=processing)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            initial,
-            artifact_manager=_Artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(initial))["ok"] is True
-        lifecycle_lock_states: list[bool] = []
+    runtime = MemoryRuntime(
+        initial,
+        artifact_manager=_Artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(initial))["ok"] is True
+    lifecycle_lock_states: list[bool] = []
 
-        def inspection_failure() -> bool:
-            lifecycle_lock_states.append(runtime.module._lifecycle_lock.locked())
-            raise OSError("root inspection unavailable")
+    def inspection_failure() -> bool:
+        lifecycle_lock_states.append(runtime.module._lifecycle_lock.locked())
+        raise OSError("root inspection unavailable")
 
-        monkeypatch.setattr(runtime, "_provider_data_exists_strict", inspection_failure, raising=False)
-        updated = replace(
-            initial,
-            processing=replace(
-                processing,
-                embedding=replace(processing.embedding, model="embed-v2"),
-            ),
-        )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", inspection_failure, raising=False)
+    updated = replace(
+        initial,
+        processing=replace(
+            processing,
+            embedding=replace(processing.embedding, model="embed-v2"),
+        ),
+    )
 
-        assert await runtime.reconcile(updated) == {"ok": False, "error": "memory_clear_failed"}
-        assert lifecycle_lock_states == [True]
-        assert len(instances) == 1
-        assert instances[0].stopped is False
-        assert runtime._config is initial
-        assert runtime.module._worker._claims_paused is False
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.reconcile(updated) == {"ok": False, "error": "memory_clear_failed"}
+    assert lifecycle_lock_states == [True]
+    assert len(instances) == 1
+    assert instances[0].stopped is False
+    assert runtime._config is initial
+    assert runtime.module._worker._claims_paused is False
+    await runtime.close()
 
 
-def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2700,31 +2613,28 @@ def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp
     inspected: list[bool] = []
     factory = FakeEverOSProcessFactory()
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            restarted,
-            artifact_manager=_Artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
+    runtime = MemoryRuntime(
+        restarted,
+        artifact_manager=_Artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
 
-        def existing_vectors() -> bool:
-            inspected.append(runtime.module._lifecycle_lock.locked())
-            return True
+    def existing_vectors() -> bool:
+        inspected.append(runtime.module._lifecycle_lock.locked())
+        return True
 
-        monkeypatch.setattr(runtime, "_provider_data_exists_strict", existing_vectors, raising=False)
-        assert await runtime.reconcile(restarted) == {"ok": False, "error": "memory_clear_failed"}
-        assert runtime._config is restarted
-        assert runtime.module._worker._claims_paused is False
-        await runtime.close()
-
-    asyncio.run(run())
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", existing_vectors, raising=False)
+    assert await runtime.reconcile(restarted) == {"ok": False, "error": "memory_clear_failed"}
+    assert runtime._config is restarted
+    assert runtime.module._worker._claims_paused is False
+    await runtime.close()
     assert inspected == [True]
     # The rejection must land before any child is launched.
     assert factory.created == []
 
 
-def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2766,26 +2676,22 @@ def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch,
     ).save()
     restarted = V2Config.load().memory
 
-    async def run() -> None:
-        nonlocal runtime
-        runtime = MemoryRuntime(
-            restarted,
-            artifact_manager=_Artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False, raising=False)
-        assert (await runtime.reconcile(restarted))["ok"] is True
-        assert runtime._config.embedding_change_pending is False
-        assert runtime.module._worker._claims_paused is False
-        await runtime.close()
-
-    asyncio.run(run())
+    runtime = MemoryRuntime(
+        restarted,
+        artifact_manager=_Artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False, raising=False)
+    assert (await runtime.reconcile(restarted))["ok"] is True
+    assert runtime._config.embedding_change_pending is False
+    assert runtime.module._worker._claims_paused is False
+    await runtime.close()
     assert observed_before_ready == [(False, True)]
     assert V2Config.load().memory.embedding_change_pending is False
 
 
-def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tmp_path: Path) -> None:
     instances: list[object] = []
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
@@ -2829,36 +2735,33 @@ def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tm
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            initial,
-            store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
-            artifact_manager=manager,
-            process_factory=factory,
+    runtime = MemoryRuntime(
+        initial,
+        store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+        artifact_manager=manager,
+        process_factory=factory,
+    )
+    assert (await runtime.reconcile(initial))["ok"] is True
+
+    with pytest.raises(MemoryRuntimeActivationError):
+        await asyncio.to_thread(
+            manager._write_current_pointer,
+            manager.runtime_dir / "versions" / "candidate",
+            _artifact_manifest("everos-2.0", compatible_formats=[]),
+            _artifact_archive(),
         )
-        assert (await runtime.reconcile(initial))["ok"] is True
 
-        with pytest.raises(MemoryRuntimeActivationError):
-            await asyncio.to_thread(
-                manager._write_current_pointer,
-                manager.runtime_dir / "versions" / "candidate",
-                _artifact_manifest("everos-2.0", compatible_formats=[]),
-                _artifact_archive(),
-            )
-
-        assert manager._active_pointer() == previous_pointer
-        assert manager.provider_root_format() == "everos-1.0"
-        assert len(instances) == 3
-        assert instances[0].stopped is True
-        assert instances[1].stopped is True
-        assert instances[2].stopped is False
-        assert runtime.module._worker._claims_paused is False
-        await runtime.close()
-
-    asyncio.run(run())
+    assert manager._active_pointer() == previous_pointer
+    assert manager.provider_root_format() == "everos-1.0"
+    assert len(instances) == 3
+    assert instances[0].stopped is True
+    assert instances[1].stopped is True
+    assert instances[2].stopped is False
+    assert runtime.module._worker._claims_paused is False
+    await runtime.close()
 
 
-def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatch, tmp_path: Path) -> None:
     instances: list[object] = []
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
@@ -2894,33 +2797,30 @@ def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatc
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            initial,
-            store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
-            artifact_manager=manager,
-            process_factory=factory,
-        )
-        assert (await runtime.reconcile(initial))["ok"] is True
+    runtime = MemoryRuntime(
+        initial,
+        store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
+        artifact_manager=manager,
+        process_factory=factory,
+    )
+    assert (await runtime.reconcile(initial))["ok"] is True
 
-        await asyncio.to_thread(
-            manager._write_current_pointer,
-            manager.runtime_dir / "versions" / "candidate",
-            _artifact_manifest("everos-2.0", compatible_formats=[]),
-            _artifact_archive(),
-        )
+    await asyncio.to_thread(
+        manager._write_current_pointer,
+        manager.runtime_dir / "versions" / "candidate",
+        _artifact_manifest("everos-2.0", compatible_formats=[]),
+        _artifact_archive(),
+    )
 
-        assert manager.provider_root_format() == "everos-2.0"
-        assert len(instances) == 2
-        assert instances[0].stopped is True
-        assert instances[1].stopped is False
-        assert runtime.module._worker._claims_paused is False
-        await runtime.close()
-
-    asyncio.run(run())
+    assert manager.provider_root_format() == "everos-2.0"
+    assert len(instances) == 2
+    assert instances[0].stopped is True
+    assert instances[1].stopped is False
+    assert runtime.module._worker._claims_paused is False
+    await runtime.close()
 
 
-def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(monkeypatch) -> None:
+async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(monkeypatch) -> None:
     instances: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2935,26 +2835,23 @@ def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(monke
     )
     initial = MemoryConfig(enabled=True, processing=processing)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
-        assert (await runtime.reconcile(initial))["ok"] is True
-        updated = replace(
-            initial,
-            processing=replace(
-                processing,
-                llm=replace(processing.llm, model="chat-v2"),
-            ),
-        )
-        assert (await runtime.reconcile(updated))["ok"] is True
-        assert len(instances) == 2
-        assert instances[0].stopped is True
-        assert runtime.module._worker._provider is runtime._provider
-        await runtime.close()
-
-    asyncio.run(run())
+    runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
+    assert (await runtime.reconcile(initial))["ok"] is True
+    updated = replace(
+        initial,
+        processing=replace(
+            processing,
+            llm=replace(processing.llm, model="chat-v2"),
+        ),
+    )
+    assert (await runtime.reconcile(updated))["ok"] is True
+    assert len(instances) == 2
+    assert instances[0].stopped is True
+    assert runtime.module._worker._provider is runtime._provider
+    await runtime.close()
 
 
-def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypatch) -> None:
+async def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypatch) -> None:
     instances: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2975,23 +2872,20 @@ def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypatch) -
     )
     initial = MemoryConfig(enabled=True, processing=processing)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
-        assert (await runtime.reconcile(initial))["ok"] is True
-        rejected = replace(
-            initial,
-            processing=replace(processing, llm=replace(processing.llm, model="unhealthy")),
-        )
-        assert await runtime.reconcile(rejected) == {"ok": False, "error": "memory_processing_failed"}
-        assert len(instances) == 1
-        assert instances[0].stopped is False
-        assert runtime._config is initial
-        await runtime.close()
-
-    asyncio.run(run())
+    runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
+    assert (await runtime.reconcile(initial))["ok"] is True
+    rejected = replace(
+        initial,
+        processing=replace(processing, llm=replace(processing.llm, model="unhealthy")),
+    )
+    assert await runtime.reconcile(rejected) == {"ok": False, "error": "memory_processing_failed"}
+    assert len(instances) == 1
+    assert instances[0].stopped is False
+    assert runtime._config is initial
+    await runtime.close()
 
 
-def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
+async def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3003,27 +2897,24 @@ def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            config,
-            artifact_manager=_installed_artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(config))["ok"] is True
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
 
-        assert len(factory.created) == 2
-        probe, supervised = factory.created
-        assert probe.settings.call_log_db_path is None
-        assert supervised.settings.call_log_db_path == (
-            tmp_path / "memory" / "call-log" / "call-log.db"
-        )
-        await runtime.close()
-
-    asyncio.run(run())
+    assert len(factory.created) == 2
+    probe, supervised = factory.created
+    assert probe.settings.call_log_db_path is None
+    assert supervised.settings.call_log_db_path == (
+        tmp_path / "memory" / "call-log" / "call-log.db"
+    )
+    await runtime.close()
 
 
-def test_legacy_disabled_diagnostics_still_records_provider_calls(
+async def test_legacy_disabled_diagnostics_still_records_provider_calls(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3035,25 +2926,22 @@ def test_legacy_disabled_diagnostics_still_records_provider_calls(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=False),
     )
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            config,
-            artifact_manager=_installed_artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(config))["ok"] is True
-        expected = tmp_path / "memory" / "call-log" / "call-log.db"
-        assert factory.supervised[-1].settings.call_log_db_path == expected
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
+    expected = tmp_path / "memory" / "call-log" / "call-log.db"
+    assert factory.supervised[-1].settings.call_log_db_path == expected
 
-        assert await runtime.restart() == {"ok": True, "state": "ready"}
-        assert factory.supervised[-1].settings.call_log_db_path == expected
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert factory.supervised[-1].settings.call_log_db_path == expected
+    await runtime.close()
 
 
-def test_status_preserves_everos_disabled_recorder_state(
+async def test_status_preserves_everos_disabled_recorder_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3064,44 +2952,41 @@ def test_status_preserves_everos_disabled_recorder_state(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            config,
-            artifact_manager=_installed_artifact(),
-            process_factory=FakeEverOSProcessFactory(),
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(config))["ok"] is True
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
 
-        snapshot = ProviderHealthSnapshot(
-            status="ok",
-            version="1.2.3",
-            capabilities={
-                "llm": True,
-                "embed": True,
-                "rerank": True,
-                "multimodal_llm": True,
-                "parser": True,
-            },
-            disabled_features=(),
-            cascade=None,
-            recorder={"state": "disabled", "reason": None},
-        )
+    snapshot = ProviderHealthSnapshot(
+        status="ok",
+        version="1.2.3",
+        capabilities={
+            "llm": True,
+            "embed": True,
+            "rerank": True,
+            "multimodal_llm": True,
+            "parser": True,
+        },
+        disabled_features=(),
+        cascade=None,
+        recorder={"state": "disabled", "reason": None},
+    )
 
-        async def health_snapshot() -> ProviderHealthSnapshot:
-            return snapshot
+    async def health_snapshot() -> ProviderHealthSnapshot:
+        return snapshot
 
-        monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
-        assert (await runtime.status_payload())["health"]["recorder"] == {
-            "state": "disabled",
-            "reason": None,
-        }
-        await runtime.close()
-
-    asyncio.run(run())
+    monkeypatch.setattr(runtime._provider, "health_snapshot", health_snapshot)
+    assert (await runtime.status_payload())["health"]["recorder"] == {
+        "state": "disabled",
+        "reason": None,
+    }
+    await runtime.close()
 
 
-def test_recorder_reap_hands_call_log_to_host_until_restart(
+async def test_recorder_reap_hands_call_log_to_host_until_restart(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3128,47 +3013,44 @@ def test_recorder_reap_hands_call_log_to_host_until_restart(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            config,
-            artifact_manager=_installed_artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(config))["ok"] is True
-        db_path.parent.mkdir(parents=True, mode=0o700)
-        initialize_call_log(db_path)
-        recorder = factory.supervised[0]
-        assert recorder.on_reaped is not None
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
+    db_path.parent.mkdir(parents=True, mode=0o700)
+    initialize_call_log(db_path)
+    recorder = factory.supervised[0]
+    assert recorder.on_reaped is not None
 
-        # This is the supervisor's post-reap notification at the beginning of
-        # its crash-backoff window, before it schedules the restart attempt.
-        recorder._running = False
-        result = recorder.on_reaped()
-        if inspect.isawaitable(result):
-            await result
-        assert await asyncio.to_thread(maintenance_entered.wait, 1)
-        assert runtime._process_records_calls is False
+    # This is the supervisor's post-reap notification at the beginning of
+    # its crash-backoff window, before it schedules the restart attempt.
+    recorder._running = False
+    result = recorder.on_reaped()
+    if inspect.isawaitable(result):
+        await result
+    assert await asyncio.to_thread(maintenance_entered.wait, 1)
+    assert runtime._process_records_calls is False
 
-        restarting = asyncio.create_task(recorder.start())
-        await asyncio.sleep(0)
-        assert not restarting.done()
-        assert not maintenance_finished.is_set()
+    restarting = asyncio.create_task(recorder.start())
+    await asyncio.sleep(0)
+    assert not restarting.done()
+    assert not maintenance_finished.is_set()
 
-        maintenance_release.set()
-        assert await asyncio.wait_for(restarting, timeout=1)
-        assert maintenance_finished.is_set()
-        async with asyncio.timeout(1):
-            while not runtime._process_records_calls:
-                await asyncio.sleep(0)
-        assert runtime._process_records_calls is True
-        assert runtime._call_log_retention_task is None
-        await runtime.close()
-
-    asyncio.run(run())
+    maintenance_release.set()
+    assert await asyncio.wait_for(restarting, timeout=1)
+    assert maintenance_finished.is_set()
+    async with asyncio.timeout(1):
+        while not runtime._process_records_calls:
+            await asyncio.sleep(0)
+    assert runtime._process_records_calls is True
+    assert runtime._call_log_retention_task is None
+    await runtime.close()
 
 
-def test_stale_recorder_supervisor_cannot_release_host_ownership(
+async def test_stale_recorder_supervisor_cannot_release_host_ownership(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3180,25 +3062,22 @@ def test_stale_recorder_supervisor_cannot_release_host_ownership(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    async def run() -> None:
-        runtime = MemoryRuntime(
-            config,
-            artifact_manager=_installed_artifact(),
-            process_factory=factory,
-            effective_home=tmp_path,
-        )
-        assert (await runtime.reconcile(config))["ok"] is True
-        stale = factory.supervised[0]
-        assert stale.before_start is not None
-        runtime._process = FakeEverOSProcess()
-        with pytest.raises(RuntimeError, match="stale EverOS recorder supervisor"):
-            await stale.before_start()
-        await runtime.close()
-
-    asyncio.run(run())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert (await runtime.reconcile(config))["ok"] is True
+    stale = factory.supervised[0]
+    assert stale.before_start is not None
+    runtime._process = FakeEverOSProcess()
+    with pytest.raises(RuntimeError, match="stale EverOS recorder supervisor"):
+        await stale.before_start()
+    await runtime.close()
 
 
-def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
+async def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3220,37 +3099,34 @@ def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
 
     monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-        assert await runtime.reconcile(MemoryConfig()) == {
-            "ok": True,
-            "state": "disabled",
-        }
-        assert await asyncio.to_thread(maintained.wait, 1)
-        task = runtime._call_log_retention_task
-        assert task is not None
-        assert not task.done()
-        release_maintenance.set()
-        for _ in range(20):
-            if runtime._recorder_health["reason"] == "call_log_corrupt":
-                break
-            await asyncio.sleep(0)
-        payload = await runtime.status_payload()
-        assert payload["health"] is None
-        assert payload["source"]["reason"] == "memory_disabled"
-        await asyncio.wait_for(asyncio.shield(task), timeout=1)
-        assert maintenance_calls == 1
-        assert runtime._call_log_retention_task is None
-        runtime._ensure_call_log_retention()
-        assert runtime._call_log_retention_task is None
-        assert maintenance_calls == 1
-        await runtime.close()
-        assert task.done()
-
-    asyncio.run(run())
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    assert await runtime.reconcile(MemoryConfig()) == {
+        "ok": True,
+        "state": "disabled",
+    }
+    assert await asyncio.to_thread(maintained.wait, 1)
+    task = runtime._call_log_retention_task
+    assert task is not None
+    assert not task.done()
+    release_maintenance.set()
+    for _ in range(20):
+        if runtime._recorder_health["reason"] == "call_log_corrupt":
+            break
+        await asyncio.sleep(0)
+    payload = await runtime.status_payload()
+    assert payload["health"] is None
+    assert payload["source"]["reason"] == "memory_disabled"
+    await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    assert maintenance_calls == 1
+    assert runtime._call_log_retention_task is None
+    runtime._ensure_call_log_retention()
+    assert runtime._call_log_retention_task is None
+    assert maintenance_calls == 1
+    await runtime.close()
+    assert task.done()
 
 
-def test_runtime_close_waits_for_active_call_log_maintenance(
+async def test_runtime_close_waits_for_active_call_log_maintenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3268,21 +3144,18 @@ def test_runtime_close_waits_for_active_call_log_maintenance(
 
     monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-        await runtime.reconcile(MemoryConfig())
-        assert await asyncio.to_thread(entered.wait, 1)
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    await runtime.reconcile(MemoryConfig())
+    assert await asyncio.to_thread(entered.wait, 1)
 
-        closing = asyncio.create_task(runtime.close())
-        await asyncio.sleep(0)
-        assert not closing.done()
-        release.set()
-        await asyncio.wait_for(closing, timeout=1)
-
-    asyncio.run(run())
+    closing = asyncio.create_task(runtime.close())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release.set()
+    await asyncio.wait_for(closing, timeout=1)
 
 
-def test_clear_quiesce_does_not_delete_call_log_files(
+async def test_clear_quiesce_does_not_delete_call_log_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3294,16 +3167,13 @@ def test_clear_quiesce_does_not_delete_call_log_files(
     unexpected.write_text("keep", encoding="utf-8")
     os.chmod(unexpected, 0o600)
 
-    async def run() -> None:
-        runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-        await runtime._stop_sidecar_for_clear()
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    await runtime._stop_sidecar_for_clear()
 
-        assert db_path.exists()
-        assert unexpected.read_text(encoding="utf-8") == "keep"
-        assert runtime._recorder_health == {"state": "disabled", "reason": None}
-        await runtime.close()
-
-    asyncio.run(run())
+    assert db_path.exists()
+    assert unexpected.read_text(encoding="utf-8") == "keep"
+    assert runtime._recorder_health == {"state": "disabled", "reason": None}
+    await runtime.close()
 
 
 def test_generated_timezone_stays_with_existing_provider_root(tmp_path: Path) -> None:
@@ -3362,7 +3232,7 @@ def _artifact_archive() -> ManagedRuntimeArchive:
     )
 
 
-def test_profile_payload_reports_only_its_own_principal_emptiness(
+async def test_profile_payload_reports_only_its_own_principal_emptiness(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3394,13 +3264,10 @@ def test_profile_payload_reports_only_its_own_principal_emptiness(
 
     runtime._module = _InterleavingModule()
 
-    async def run():
-        return await asyncio.gather(
-            runtime.profile_payload(populated_principal, PROJECT),
-            runtime.profile_payload(empty_principal, PROJECT),
-        )
-
-    populated, empty = asyncio.run(run())
+    populated, empty = await asyncio.gather(
+        runtime.profile_payload(populated_principal, PROJECT),
+        runtime.profile_payload(empty_principal, PROJECT),
+    )
 
     assert populated["profile_warning"] is None
     assert empty["profile_warning"] == "empty"
@@ -3461,7 +3328,7 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     assert "profile_warning" not in payload
 
 
-def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
+async def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3472,12 +3339,9 @@ def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
     initialize_call_log(db_path)
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
-    async def run() -> None:
-        assert (await runtime.maintenance_payload())["data_exists"] is False
-        assert "data_exists" not in await runtime.status_payload()
-        await runtime.close()
-
-    asyncio.run(run())
+    assert (await runtime.maintenance_payload())["data_exists"] is False
+    assert "data_exists" not in await runtime.status_payload()
+    await runtime.close()
 
 
 def test_runtime_builds_insight_reader_from_injected_paths(
@@ -3517,7 +3381,7 @@ def test_runtime_builds_insight_reader_from_injected_paths(
     }
 
 
-def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(
+async def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3542,31 +3406,28 @@ def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(
         insight_reader=BlockingReader(),
     )
 
-    async def run() -> None:
-        reading = asyncio.create_task(
-            runtime.log_entries_payload(principal_id, PROJECT, "cursor", 7)
-        )
-        assert await asyncio.to_thread(started.wait, 2)
-        reading.cancel()
-        await asyncio.sleep(0)
-        assert runtime.module._lifecycle_lock.locked()
-        acquired = asyncio.Event()
+    reading = asyncio.create_task(
+        runtime.log_entries_payload(principal_id, PROJECT, "cursor", 7)
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    reading.cancel()
+    await asyncio.sleep(0)
+    assert runtime.module._lifecycle_lock.locked()
+    acquired = asyncio.Event()
 
-        async def wait_for_lifecycle() -> None:
-            async with runtime.module._lifecycle_lock:
-                acquired.set()
+    async def wait_for_lifecycle() -> None:
+        async with runtime.module._lifecycle_lock:
+            acquired.set()
 
-        waiter = asyncio.create_task(wait_for_lifecycle())
-        await asyncio.sleep(0)
-        assert not acquired.is_set()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await reading
-        await asyncio.wait_for(acquired.wait(), timeout=1)
-        await waiter
-        await runtime.close()
-
-    asyncio.run(run())
+    waiter = asyncio.create_task(wait_for_lifecycle())
+    await asyncio.sleep(0)
+    assert not acquired.is_set()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    await asyncio.wait_for(acquired.wait(), timeout=1)
+    await waiter
+    await runtime.close()
 
 
 def test_runtime_forwards_scoped_insight_detail(
@@ -3633,7 +3494,7 @@ def _processing_config() -> MemoryProcessingConfig:
     )
 
 
-def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:
+async def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:
     factory = FakeEverOSProcessFactory()
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True, processing=_processing_config()),
@@ -3644,17 +3505,14 @@ def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path:
     old = FakeEverOSProcess()
     runtime._process = old
 
-    async def run() -> None:
-        assert await runtime.restart() == {"ok": True, "state": "ready"}
-        assert old.stops == 1
-        assert len(factory.created) == 1
-        assert factory.supervised[0].starts == 1
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert old.stops == 1
+    assert len(factory.created) == 1
+    assert factory.supervised[0].starts == 1
+    await runtime.close()
 
 
-def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path: Path) -> None:
+async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path: Path) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -3676,26 +3534,23 @@ def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path: Path
     old = BlockingStop()
     runtime._process = old
 
-    async def run() -> None:
-        detached = asyncio.create_task(runtime.restart())
-        await entered.wait()
-        detached.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await detached
+    detached = asyncio.create_task(runtime.restart())
+    await entered.wait()
+    detached.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await detached
 
-        joined = asyncio.create_task(runtime.restart())
-        await asyncio.sleep(0)
-        assert joined.done() is False
-        release.set()
-        assert await joined == {"ok": True, "state": "ready"}
-        assert old.stops == 1
-        assert len(factory.created) == 1
-        await runtime.close()
-
-    asyncio.run(run())
+    joined = asyncio.create_task(runtime.restart())
+    await asyncio.sleep(0)
+    assert joined.done() is False
+    release.set()
+    assert await joined == {"ok": True, "state": "ready"}
+    assert old.stops == 1
+    assert len(factory.created) == 1
+    await runtime.close()
 
 
-def test_stop_worker_supports_python_310_task_api(
+async def test_stop_worker_supports_python_310_task_api(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3705,35 +3560,32 @@ def test_stop_worker_supports_python_310_task_api(
         effective_home=tmp_path,
     )
 
-    async def run() -> None:
-        started = asyncio.Event()
+    started = asyncio.Event()
 
-        async def worker() -> None:
-            started.set()
-            await asyncio.Event().wait()
+    async def worker() -> None:
+        started.set()
+        await asyncio.Event().wait()
 
-        task = asyncio.create_task(worker())
-        runtime._worker_task = task
-        await started.wait()
+    task = asyncio.create_task(worker())
+    runtime._worker_task = task
+    await started.wait()
 
-        class Python310Task:
-            """Python 3.10 tasks do not expose ``Task.cancelling()``."""
+    class Python310Task:
+        """Python 3.10 tasks do not expose ``Task.cancelling()``."""
 
-        try:
-            with monkeypatch.context() as patcher:
-                patcher.setattr(memory_runtime.asyncio, "current_task", lambda: Python310Task())
-                await runtime._stop_worker()
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(memory_runtime.asyncio, "current_task", lambda: Python310Task())
+            await runtime._stop_worker()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
-        assert task.cancelled()
-        assert runtime._worker_task is None
-
-    asyncio.run(run())
+    assert task.cancelled()
+    assert runtime._worker_task is None
 
 
-def test_stop_worker_settles_worker_before_propagating_caller_cancellation(
+async def test_stop_worker_settles_worker_before_propagating_caller_cancellation(
     tmp_path: Path,
 ) -> None:
     runtime = MemoryRuntime(
@@ -3742,72 +3594,66 @@ def test_stop_worker_settles_worker_before_propagating_caller_cancellation(
         effective_home=tmp_path,
     )
 
-    async def run() -> None:
-        started = asyncio.Event()
-        cancellation_started = asyncio.Event()
-        release_cancellation = asyncio.Event()
+    started = asyncio.Event()
+    cancellation_started = asyncio.Event()
+    release_cancellation = asyncio.Event()
 
-        async def worker() -> None:
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                cancellation_started.set()
-                await release_cancellation.wait()
-                raise
+    async def worker() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_started.set()
+            await release_cancellation.wait()
+            raise
 
-        worker_task = asyncio.create_task(worker())
-        runtime._worker_task = worker_task
-        await started.wait()
+    worker_task = asyncio.create_task(worker())
+    runtime._worker_task = worker_task
+    await started.wait()
 
-        stopping = asyncio.create_task(runtime._stop_worker())
-        await cancellation_started.wait()
-        stopping.cancel()
-        await asyncio.sleep(0)
+    stopping = asyncio.create_task(runtime._stop_worker())
+    await cancellation_started.wait()
+    stopping.cancel()
+    await asyncio.sleep(0)
 
-        assert stopping.done() is False
-        assert runtime._worker_task is worker_task
+    assert stopping.done() is False
+    assert runtime._worker_task is worker_task
 
-        release_cancellation.set()
-        with pytest.raises(asyncio.CancelledError):
-            await stopping
+    release_cancellation.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
 
-        assert worker_task.cancelled()
-        assert runtime._worker_task is None
-
-    asyncio.run(run())
+    assert worker_task.cancelled()
+    assert runtime._worker_task is None
 
 
-def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
+async def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
     runtime = MemoryRuntime(
         MemoryConfig(enabled=True),
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path,
     )
 
-    async def run() -> None:
-        started = asyncio.Event()
+    started = asyncio.Event()
 
-        async def worker() -> None:
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                raise RuntimeError("worker cleanup failed")
+    async def worker() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("worker cleanup failed")
 
-        worker_task = asyncio.create_task(worker())
-        runtime._worker_task = worker_task
-        await started.wait()
+    worker_task = asyncio.create_task(worker())
+    runtime._worker_task = worker_task
+    await started.wait()
 
-        with pytest.raises(RuntimeError, match="worker cleanup failed"):
-            await runtime._stop_worker()
+    with pytest.raises(RuntimeError, match="worker cleanup failed"):
+        await runtime._stop_worker()
 
-        assert runtime._worker_task is None
-
-    asyncio.run(run())
+    assert runtime._worker_task is None
 
 
-def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
+async def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3860,31 +3706,28 @@ def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     monkeypatch.setattr(worker, "pause_and_wait", no_grace_wait)
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: None)
 
-    async def run() -> None:
-        runtime._worker_task = asyncio.create_task(worker.drain_once())
-        assert await asyncio.to_thread(entered.wait, 1.0)
-        assert await runtime.restart() == {
-            "ok": False,
-            "error": "memory_restart_failed",
-        }
-        assert old.stops == 0
-        assert runtime._process is old
-        assert runtime._provider is old_provider
-        assert factory.created == []
-        assert worker._claims_paused is False
+    runtime._worker_task = asyncio.create_task(worker.drain_once())
+    assert await asyncio.to_thread(entered.wait, 1.0)
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_restart_failed",
+    }
+    assert old.stops == 0
+    assert runtime._process is old
+    assert runtime._provider is old_provider
+    assert factory.created == []
+    assert worker._claims_paused is False
 
-        release.set()
-        assert await runtime._worker_task == 0
-        assert old.stops == 0
-        assert factory.created == []
-        assert worker._boot_id == old_lease
-        assert store.list_queue_rows()[0].state == "processing"
-        await runtime.close()
-
-    asyncio.run(run())
+    release.set()
+    assert await runtime._worker_task == 0
+    assert old.stops == 0
+    assert factory.created == []
+    assert worker._boot_id == old_lease
+    assert store.list_queue_rows()[0].state == "processing"
+    await runtime.close()
 
 
-def test_runtime_restart_preserves_drain_completed_inside_grace_window(
+async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3932,26 +3775,23 @@ def test_runtime_restart_preserves_drain_completed_inside_grace_window(
 
     monkeypatch.setattr(worker, "pause_and_wait", tracked_pause)
 
-    async def run() -> None:
-        runtime._worker_task = asyncio.create_task(worker.drain_once())
-        await asyncio.wait_for(add_entered.wait(), timeout=1.0)
-        restarting = asyncio.create_task(runtime.restart())
-        await asyncio.sleep(0)
-        assert old.stops == 0
+    runtime._worker_task = asyncio.create_task(worker.drain_once())
+    await asyncio.wait_for(add_entered.wait(), timeout=1.0)
+    restarting = asyncio.create_task(runtime.restart())
+    await asyncio.sleep(0)
+    assert old.stops == 0
 
-        release_add.set()
-        assert await restarting == {"ok": True, "state": "ready"}
-        assert pause_timeouts == [5.0]
-        assert old.stops == 1
-        row = store.list_queue_rows()[0]
-        assert row.state == "delivered"
-        assert row.payload_text is None
-        await runtime.close()
-
-    asyncio.run(run())
+    release_add.set()
+    assert await restarting == {"ok": True, "state": "ready"}
+    assert pause_timeouts == [5.0]
+    assert old.stops == 1
+    row = store.list_queue_rows()[0]
+    assert row.state == "delivered"
+    assert row.payload_text is None
+    await runtime.close()
 
 
-def test_runtime_restart_returns_closed_errors_when_not_eligible(
+async def test_runtime_restart_returns_closed_errors_when_not_eligible(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3973,22 +3813,19 @@ def test_runtime_restart_returns_closed_errors_when_not_eligible(
         effective_home=tmp_path / "unavailable",
     )
 
-    async def run() -> None:
-        assert await disabled.restart() == {
-            "ok": False,
-            "error": "memory_disabled",
-        }
-        assert await unavailable.restart() == {
-            "ok": False,
-            "error": "memory_store_unavailable",
-        }
-        await disabled.close()
-        await unavailable.close()
-
-    asyncio.run(run())
+    assert await disabled.restart() == {
+        "ok": False,
+        "error": "memory_disabled",
+    }
+    assert await unavailable.restart() == {
+        "ok": False,
+        "error": "memory_store_unavailable",
+    }
+    await disabled.close()
+    await unavailable.close()
 
 
-def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_path: Path) -> None:
+async def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_path: Path) -> None:
     class ConfigAwareProcess(FakeEverOSProcess):
         async def processing_healthy(self) -> bool:
             return self.settings is not None and self.settings.llm_model != "rejected"
@@ -4009,21 +3846,18 @@ def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_path: P
         effective_home=tmp_path,
     )
 
-    async def run() -> None:
-        assert await runtime.reconcile(applied) == {"ok": True, "state": "ready"}
-        assert await runtime.reconcile(rejected) == {
-            "ok": False,
-            "error": "memory_processing_failed",
-        }
-        assert await runtime.restart() == {"ok": True, "state": "ready"}
-        assert factory.supervised[-1].settings is not None
-        assert factory.supervised[-1].settings.llm_model == "chat"
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.reconcile(applied) == {"ok": True, "state": "ready"}
+    assert await runtime.reconcile(rejected) == {
+        "ok": False,
+        "error": "memory_processing_failed",
+    }
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert factory.supervised[-1].settings is not None
+    assert factory.supervised[-1].settings.llm_model == "chat"
+    await runtime.close()
 
 
-def test_marker_settlement_updates_only_replay_marker_after_candidate_failure(
+async def test_marker_settlement_updates_only_replay_marker_after_candidate_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4065,28 +3899,25 @@ def test_marker_settlement_updates_only_replay_marker_after_candidate_failure(
     runtime._process = old
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
-    async def run() -> None:
-        assert await runtime.reconcile(candidate) == {
-            "ok": False,
-            "error": "memory_processing_failed",
-        }
-        settled = V2Config.load().memory
-        assert settled.embedding_change_pending is False
-        assert settled.processing.llm.model == "rejected"
-        persisted_after_failure = (tmp_path / "config" / "config.json").read_bytes()
+    assert await runtime.reconcile(candidate) == {
+        "ok": False,
+        "error": "memory_processing_failed",
+    }
+    settled = V2Config.load().memory
+    assert settled.embedding_change_pending is False
+    assert settled.processing.llm.model == "rejected"
+    persisted_after_failure = (tmp_path / "config" / "config.json").read_bytes()
 
-        assert await runtime.restart() == {"ok": True, "state": "ready"}
-        replacement = factory.supervised[-1]
-        assert replacement.settings is not None
-        assert replacement.settings.llm_model == "chat"
-        assert replacement.settings.embedding_model == "embed"
-        assert (tmp_path / "config" / "config.json").read_bytes() == persisted_after_failure
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    replacement = factory.supervised[-1]
+    assert replacement.settings is not None
+    assert replacement.settings.llm_model == "chat"
+    assert replacement.settings.embedding_model == "embed"
+    assert (tmp_path / "config" / "config.json").read_bytes() == persisted_after_failure
+    await runtime.close()
 
 
-def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
+async def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
     tmp_path: Path,
 ) -> None:
     factory = FakeEverOSProcessFactory()
@@ -4099,21 +3930,18 @@ def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
     old = FakeEverOSProcess(stop_failure=RuntimeError("still owned"))
     runtime._process = old
 
-    async def run() -> None:
-        assert await runtime.restart() == {
-            "ok": False,
-            "error": "memory_restart_failed",
-        }
-        assert runtime._process is old
-        assert factory.created == []
-        assert runtime.module._worker._claims_paused is True
-        old.stop_failure = None
-        await runtime.close()
-
-    asyncio.run(run())
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_restart_failed",
+    }
+    assert runtime._process is old
+    assert factory.created == []
+    assert runtime.module._worker._claims_paused is True
+    old.stop_failure = None
+    await runtime.close()
 
 
-def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
+async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
     tmp_path: Path,
 ) -> None:
     marked_factory = FakeEverOSProcessFactory()
@@ -4143,24 +3971,21 @@ def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery
         target_epoch=meta.epoch + 1,
     )
 
-    async def run() -> None:
-        assert await marked.restart() == {
-            "ok": False,
-            "error": "memory_clear_failed",
-        }
-        assert await recovering.restart() == {
-            "ok": False,
-            "error": "memory_clear_failed",
-        }
-        assert marked_factory.created == []
-        assert recovery_factory.created == []
-        await marked.close()
-        await recovering.close()
-
-    asyncio.run(run())
+    assert await marked.restart() == {
+        "ok": False,
+        "error": "memory_clear_failed",
+    }
+    assert await recovering.restart() == {
+        "ok": False,
+        "error": "memory_clear_failed",
+    }
+    assert marked_factory.created == []
+    assert recovery_factory.created == []
+    await marked.close()
+    await recovering.close()
 
 
-def test_ready_callback_activates_only_the_current_process(
+async def test_ready_callback_activates_only_the_current_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4185,31 +4010,28 @@ def test_ready_callback_activates_only_the_current_process(
 
     monkeypatch.setattr(runtime, "_ensure_worker", record_activation)
 
-    async def run() -> None:
-        assert await runtime.restart() == {
-            "ok": False,
-            "error": "memory_sidecar_unavailable",
-        }
-        recovering = factory.supervised[0]
-        recovering._running = True
-        await recovering.ready()
-        await asyncio.wait_for(activated.wait(), timeout=1.0)
-        assert len(activations) == 1
-        assert runtime.module._worker._claims_paused is False
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_sidecar_unavailable",
+    }
+    recovering = factory.supervised[0]
+    recovering._running = True
+    await recovering.ready()
+    await asyncio.wait_for(activated.wait(), timeout=1.0)
+    assert len(activations) == 1
+    assert runtime.module._worker._claims_paused is False
 
-        activated.clear()
-        assert await runtime.restart() == {"ok": True, "state": "ready"}
-        assert len(activations) == 2
-        recovering._running = True
-        await recovering.ready()
-        await asyncio.sleep(0.05)
-        assert len(activations) == 2
-        await runtime.close()
-
-    asyncio.run(run())
+    activated.clear()
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert len(activations) == 2
+    recovering._running = True
+    await recovering.ready()
+    await asyncio.sleep(0.05)
+    assert len(activations) == 2
+    await runtime.close()
 
 
-def test_ready_callback_survives_rejected_artifact_install(
+async def test_ready_callback_survives_rejected_artifact_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4224,26 +4046,23 @@ def test_ready_callback_survives_rejected_artifact_install(
     activated = asyncio.Event()
     monkeypatch.setattr(runtime, "_ensure_worker", activated.set)
 
-    async def run() -> None:
-        runtime._activation_loop = asyncio.get_running_loop()
-        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+    runtime._activation_loop = asyncio.get_running_loop()
+    process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
-        await process.ready()
-        assert await runtime.install_artifact() == {
-            "ok": False,
-            "reason": "memory_runtime_install_requires_disabled_memory",
-            "download_error": None,
-        }
+    await process.ready()
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_runtime_install_requires_disabled_memory",
+        "download_error": None,
+    }
 
-        await asyncio.wait_for(activated.wait(), timeout=1.0)
-        assert runtime.module._worker._claims_paused is False
-        await runtime.close()
-
-    asyncio.run(run())
+    await asyncio.wait_for(activated.wait(), timeout=1.0)
+    assert runtime.module._worker._claims_paused is False
+    await runtime.close()
 
 
 @pytest.mark.parametrize("lifecycle", ["clear", "reconcile", "artifact"])
-def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
+async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     lifecycle: str,
@@ -4261,69 +4080,66 @@ def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_process(
     activations: list[None] = []
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
 
-    async def run() -> None:
-        runtime._activation_loop = asyncio.get_running_loop()
-        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+    runtime._activation_loop = asyncio.get_running_loop()
+    process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
 
-        if lifecycle == "clear":
-            async def blocked_prepare(_operation, **_kwargs):
-                entered.set()
-                await release.wait()
-                raise RuntimeError("injected clear pause")
+    if lifecycle == "clear":
+        async def blocked_prepare(_operation, **_kwargs):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("injected clear pause")
 
-            monkeypatch.setattr(_maintenance(runtime), "_prepare_clear", blocked_prepare)
-            operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
-        elif lifecycle == "reconcile":
-            async def blocked_reconcile(*_args, **_kwargs):
-                entered.set()
-                await release.wait()
-                return {"ok": False, "error": "memory_processing_failed"}
+        monkeypatch.setattr(_maintenance(runtime), "_prepare_clear", blocked_prepare)
+        operation = asyncio.create_task(runtime.clear(operator_ref="user:owner"))
+    elif lifecycle == "reconcile":
+        async def blocked_reconcile(*_args, **_kwargs):
+            entered.set()
+            await release.wait()
+            return {"ok": False, "error": "memory_processing_failed"}
 
-            monkeypatch.setattr(runtime, "_reconcile_locked", blocked_reconcile)
-            operation = asyncio.create_task(runtime.reconcile(config))
-        else:
-            worker = runtime.module._worker
+        monkeypatch.setattr(runtime, "_reconcile_locked", blocked_reconcile)
+        operation = asyncio.create_task(runtime.reconcile(config))
+    else:
+        worker = runtime.module._worker
 
-            async def blocked_pause(**_kwargs):
-                worker.pause_claims()
-                entered.set()
-                await release.wait()
-                return True
+        async def blocked_pause(**_kwargs):
+            worker.pause_claims()
+            entered.set()
+            await release.wait()
+            return True
 
-            async def accepted_reconcile(*_args, **_kwargs):
-                return {"ok": True, "state": "ready"}
+        async def accepted_reconcile(*_args, **_kwargs):
+            return {"ok": True, "state": "ready"}
 
-            monkeypatch.setattr(worker, "pause_and_wait", blocked_pause)
-            monkeypatch.setattr(runtime, "_reconcile_locked", accepted_reconcile)
-            operation = asyncio.create_task(
-                runtime._activate_artifact_candidate(
-                    MemoryArtifactCandidate(
-                        provider_root_format="everos-test-next",
-                        compatible_provider_root_formats=frozenset(),
-                        artifact_fingerprint="next-artifact",
-                    ),
-                    MemoryProviderRootState(exists=False),
-                    lambda: None,
-                    lambda: None,
-                )
+        monkeypatch.setattr(worker, "pause_and_wait", blocked_pause)
+        monkeypatch.setattr(runtime, "_reconcile_locked", accepted_reconcile)
+        operation = asyncio.create_task(
+            runtime._activate_artifact_candidate(
+                MemoryArtifactCandidate(
+                    provider_root_format="everos-test-next",
+                    compatible_provider_root_formats=frozenset(),
+                    artifact_fingerprint="next-artifact",
+                ),
+                MemoryProviderRootState(exists=False),
+                lambda: None,
+                lambda: None,
             )
+        )
 
-        await entered.wait()
-        await process.ready()
-        await asyncio.sleep(0)
-        assert activations == []
-        release.set()
-        await operation
-        ready_task = runtime._ready_activation_task
-        if ready_task is not None:
-            await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
-        assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
-        await runtime.close()
-
-    asyncio.run(run())
+    await entered.wait()
+    await process.ready()
+    await asyncio.sleep(0)
+    assert activations == []
+    release.set()
+    await operation
+    ready_task = runtime._ready_activation_task
+    if ready_task is not None:
+        await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
+    assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
+    await runtime.close()
 
 
-def test_runtime_close_rejects_ready_callback_during_process_shutdown(
+async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4348,24 +4164,21 @@ def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     activations: list[None] = []
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
 
-    async def run() -> None:
-        runtime._activation_loop = asyncio.get_running_loop()
-        process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
-        closing = asyncio.create_task(runtime.close())
-        await stop_entered.wait()
+    runtime._activation_loop = asyncio.get_running_loop()
+    process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
+    closing = asyncio.create_task(runtime.close())
+    await stop_entered.wait()
 
-        await process.ready()
-        await asyncio.sleep(0.01)
-        assert activations == []
+    await process.ready()
+    await asyncio.sleep(0.01)
+    assert activations == []
 
-        release_stop.set()
-        await closing
-        assert activations == []
-
-    asyncio.run(run())
+    release_stop.set()
+    await closing
+    assert activations == []
 
 
-def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
+async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4388,40 +4201,37 @@ def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     )
     activations: list[None] = []
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
-    async def run() -> None:
-        installing = asyncio.create_task(runtime.install_artifact())
-        assert await asyncio.to_thread(entered.wait, 1.0)
-        candidate = FakeEverOSProcess()
-        candidate.on_ready = lambda: runtime._schedule_sidecar_ready(candidate)
-        runtime._process = candidate
-        await candidate.ready()
-        await asyncio.sleep(0)
-        assert activations == []
+    installing = asyncio.create_task(runtime.install_artifact())
+    assert await asyncio.to_thread(entered.wait, 1.0)
+    candidate = FakeEverOSProcess()
+    candidate.on_ready = lambda: runtime._schedule_sidecar_ready(candidate)
+    runtime._process = candidate
+    await candidate.ready()
+    await asyncio.sleep(0)
+    assert activations == []
 
-        installing.cancel()
-        await asyncio.sleep(0)
-        assert await runtime.restart() == {
-            "ok": False,
-            "error": "memory_restart_failed",
-        }
-        await asyncio.sleep(0)
-        assert installing.done() is False
-        installing.cancel()
-        await asyncio.sleep(0)
-        assert installing.done() is False
-        assert await runtime.restart() == {
-            "ok": False,
-            "error": "memory_restart_failed",
-        }
+    installing.cancel()
+    await asyncio.sleep(0)
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_restart_failed",
+    }
+    await asyncio.sleep(0)
+    assert installing.done() is False
+    installing.cancel()
+    await asyncio.sleep(0)
+    assert installing.done() is False
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_restart_failed",
+    }
 
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await installing
-        assert await runtime.restart() == {"ok": True, "state": "ready"}
-        assert activations == [None]
-        await runtime.close()
-
-    asyncio.run(run())
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await installing
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert activations == [None]
+    await runtime.close()
 
 
 class _BlockingProbeProcess:
@@ -4453,7 +4263,7 @@ class _BlockingProbeProcess:
         return True
 
 
-def test_drain_health_gate_never_waits_on_an_in_flight_reconcile_probe(
+async def test_drain_health_gate_never_waits_on_an_in_flight_reconcile_probe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4484,17 +4294,14 @@ def test_drain_health_gate_never_waits_on_an_in_flight_reconcile_probe(
     )
     runtime._process = supervised
 
-    async def run() -> None:
-        probe = asyncio.create_task(runtime._probe_processing(Path(sys.executable), config))
-        await entered.wait()
-        assert await asyncio.wait_for(runtime._processing_healthy(), timeout=2.0) is True
-        release.set()
-        assert await probe is True
-
-    asyncio.run(run())
+    probe = asyncio.create_task(runtime._probe_processing(Path(sys.executable), config))
+    await entered.wait()
+    assert await asyncio.wait_for(runtime._processing_healthy(), timeout=2.0) is True
+    release.set()
+    assert await probe is True
 
 
-def test_reconcile_probe_never_waits_on_an_in_flight_drain_health_gate(
+async def test_reconcile_probe_never_waits_on_an_in_flight_drain_health_gate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4523,21 +4330,18 @@ def test_reconcile_probe_never_waits_on_an_in_flight_drain_health_gate(
     )
     runtime._process = supervised
 
-    async def run() -> None:
-        gate = asyncio.create_task(runtime._processing_healthy())
-        await entered.wait()
-        probed = await asyncio.wait_for(
-            runtime._probe_processing(Path(sys.executable), config),
-            timeout=2.0,
-        )
-        assert probed is True
-        release.set()
-        assert await gate is True
-
-    asyncio.run(run())
+    gate = asyncio.create_task(runtime._processing_healthy())
+    await entered.wait()
+    probed = await asyncio.wait_for(
+        runtime._probe_processing(Path(sys.executable), config),
+        timeout=2.0,
+    )
+    assert probed is True
+    release.set()
+    assert await gate is True
 
 
-def test_drain_health_gate_reuses_the_last_verdict_instead_of_queueing(
+async def test_drain_health_gate_reuses_the_last_verdict_instead_of_queueing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4556,19 +4360,16 @@ def test_drain_health_gate_reuses_the_last_verdict_instead_of_queueing(
     )
     runtime._process = FakeEverOSProcess()
 
-    async def run() -> None:
-        assert await runtime._processing_healthy() is True
-        runtime._process = blocking
-        first = asyncio.create_task(runtime._processing_healthy())
-        await entered.wait()
-        assert await asyncio.wait_for(runtime._processing_healthy(), timeout=2.0) is True
-        # The second caller answered from the published verdict rather than
-        # starting — or waiting for — a second child probe.
-        assert blocking.probe_calls == 1
-        release.set()
-        assert await first is True
-
-    asyncio.run(run())
+    assert await runtime._processing_healthy() is True
+    runtime._process = blocking
+    first = asyncio.create_task(runtime._processing_healthy())
+    await entered.wait()
+    assert await asyncio.wait_for(runtime._processing_healthy(), timeout=2.0) is True
+    # The second caller answered from the published verdict rather than
+    # starting — or waiting for — a second child probe.
+    assert blocking.probe_calls == 1
+    release.set()
+    assert await first is True
 
 
 @pytest.mark.parametrize("changes_embedding", [False, True])
@@ -5800,7 +5601,7 @@ def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path
     assert process._restart_task is None
 
 
-def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
+async def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -5829,17 +5630,14 @@ def test_sidecar_restart_releases_process_lock_while_host_handoff_waits(
 
     monkeypatch.setattr(process, "_start_locked", start_locked)
 
-    async def run() -> None:
-        restarting = asyncio.create_task(process._restart_after(0))
-        await asyncio.wait_for(callback_entered.wait(), timeout=1)
+    restarting = asyncio.create_task(process._restart_after(0))
+    await asyncio.wait_for(callback_entered.wait(), timeout=1)
 
-        # This models a callback already in flight when Stop begins. It must
-        # not retain the process lock while waiting on controller ownership.
-        await asyncio.wait_for(process.stop(), timeout=1)
-        release_callback.set()
-        await asyncio.wait_for(restarting, timeout=1)
-
-    asyncio.run(run())
+    # This models a callback already in flight when Stop begins. It must
+    # not retain the process lock while waiting on controller ownership.
+    await asyncio.wait_for(process.stop(), timeout=1)
+    release_callback.set()
+    await asyncio.wait_for(restarting, timeout=1)
     assert launches == 0
 
 
