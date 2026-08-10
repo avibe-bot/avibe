@@ -8023,18 +8023,18 @@ _WORKBENCH_ATTACHMENT_ERROR_CODES = {
 }
 
 
-def _workbench_attachment_error(code: str, status: int):
+async def _workbench_attachment_error(code: str, status: int):
     from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES
     from core.services import settings as settings_service
 
     message_code = code if code in _WORKBENCH_ATTACHMENT_ERROR_CODES else "invalid_upload"
-    lang = settings_service.load_config_or_default().language
+    config = await asyncio.to_thread(settings_service.load_config_or_default)
     extra: dict[str, Any] = {}
     if code == "too_large":
         extra["max_file_bytes"] = MAX_WORKBENCH_ATTACHMENT_BYTES
     return _coded_error_response(
         code,
-        t(f"error.workbenchAttachment.{message_code}", lang),
+        t(f"error.workbenchAttachment.{message_code}", config.language),
         status,
         **extra,
     )
@@ -8075,12 +8075,16 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
         from core.file_browser_service import FileBrowserError
         from core.services import sessions as workbench_sessions_service
 
-        engine = _projects_engine()
-        try:
+        def load_session():
+            engine = _projects_engine()
             with engine.connect() as conn:
                 session = workbench_sessions_service.get_session(conn, session_id)
+            return engine, session
+
+        try:
+            engine, session = await asyncio.to_thread(load_session)
         except LookupError:
-            return _workbench_attachment_error("session_not_found", 404)
+            return await _workbench_attachment_error("session_not_found", 404)
 
         form = None
         try:
@@ -8098,7 +8102,7 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                 )
                 upload = form.get("file")
                 if not isinstance(upload, StarletteUploadFile):
-                    return _workbench_attachment_error("file_required", 400)
+                    return await _workbench_attachment_error("file_required", 400)
                 await upload.seek(0)
                 source = upload.file
                 name = upload.filename
@@ -8108,18 +8112,13 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                 payload = request.json or {}
                 data_b64 = payload.get("data") or ""
                 if not isinstance(data_b64, str) or not data_b64:
-                    return _workbench_attachment_error("file_required", 400)
-                if data_b64.startswith("data:") and "," in data_b64:
-                    data_b64 = data_b64.split(",", 1)[1]
-                max_encoded_bytes = ((workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3) * 4
-                if len(data_b64) > max_encoded_bytes:
-                    return _workbench_attachment_error("too_large", 413)
+                    return await _workbench_attachment_error("file_required", 400)
                 legacy_data_b64 = data_b64
                 name = payload.get("name")
                 mime = payload.get("mime") or payload.get("content_type")
                 upload_id = payload.get("upload_id")
             else:
-                return _workbench_attachment_error("invalid_upload", 415)
+                return await _workbench_attachment_error("invalid_upload", 415)
 
             stable_upload_id = workbench_media.normalize_workbench_upload_id(upload_id)
 
@@ -8128,9 +8127,21 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                 result = None
                 try:
                     if legacy_data_b64 is not None:
+                        encoded_data = legacy_data_b64
+                        if encoded_data.startswith("data:") and "," in encoded_data:
+                            encoded_data = encoded_data.split(",", 1)[1]
+                        max_encoded_bytes = (
+                            (workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3
+                        ) * 4
+                        if len(encoded_data) > max_encoded_bytes:
+                            raise workbench_media.WorkbenchAttachmentUploadError(
+                                "too_large",
+                                "Attachment exceeds the size limit",
+                                413,
+                            )
                         try:
                             attachment_source = io.BytesIO(
-                                base64.b64decode(legacy_data_b64, validate=True)
+                                base64.b64decode(encoded_data, validate=True)
                             )
                         except (binascii.Error, ValueError) as exc:
                             raise workbench_media.WorkbenchAttachmentUploadError(
@@ -8168,19 +8179,19 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
             result = await asyncio.to_thread(persist_attachment)
             return _workbench_attachment_response(result)
         except workbench_media.WorkbenchAttachmentUploadError as exc:
-            return _workbench_attachment_error(exc.code, exc.status)
+            return await _workbench_attachment_error(exc.code, exc.status)
         except MultiPartException as exc:
             if "too large" in str(exc).lower():
-                return _workbench_attachment_error("too_large", 413)
-            return _workbench_attachment_error("invalid_upload", 400)
+                return await _workbench_attachment_error("too_large", 413)
+            return await _workbench_attachment_error("invalid_upload", 400)
         except FileBrowserError as exc:
             code = "too_large" if exc.code == "too_large" else "invalid_upload"
-            return _workbench_attachment_error(code, exc.status_code)
+            return await _workbench_attachment_error(code, exc.status_code)
         except StarletteHTTPException:
-            return _workbench_attachment_error("invalid_upload", 400)
+            return await _workbench_attachment_error("invalid_upload", 400)
         except Exception:
             logger.exception("workbench attachment upload failed for session %s", session_id)
-            return _workbench_attachment_error("upload_failed", 500)
+            return await _workbench_attachment_error("upload_failed", 500)
         finally:
             if form is not None:
                 await form.close()

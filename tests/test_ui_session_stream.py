@@ -1672,7 +1672,7 @@ def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatc
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from storage.models import media_objects
-    from vibe.ui_server import app
+    from vibe import ui_server
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1683,29 +1683,44 @@ def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatc
             visibility="foreground",
         )
 
-    request_threads: list[int] = []
+    loop_threads: list[int] = []
+    engine_threads: list[int] = []
+    session_threads: list[int] = []
     decode_threads: list[int] = []
+    original_dispatch = ui_server._dispatch_native_ui_request
+    original_projects_engine = ui_server._projects_engine
     original_get_session = sessions_service.get_session
     original_b64decode = base64.b64decode
 
+    async def tracked_dispatch(starlette_request, handler):
+        loop_threads.append(threading.get_ident())
+        return await original_dispatch(starlette_request, handler)
+
+    def tracked_projects_engine():
+        engine_threads.append(threading.get_ident())
+        return original_projects_engine()
+
     def tracked_get_session(*args, **kwargs):
-        request_threads.append(threading.get_ident())
+        session_threads.append(threading.get_ident())
         return original_get_session(*args, **kwargs)
 
     def tracked_b64decode(*args, **kwargs):
         decode_threads.append(threading.get_ident())
         return original_b64decode(*args, **kwargs)
 
+    monkeypatch.setattr(ui_server, "_dispatch_native_ui_request", tracked_dispatch)
+    monkeypatch.setattr(ui_server, "_projects_engine", tracked_projects_engine)
     monkeypatch.setattr(sessions_service, "get_session", tracked_get_session)
     monkeypatch.setattr(base64, "b64decode", tracked_b64decode)
 
-    client = app.test_client()
+    client = ui_server.app.test_client()
     response = client.post(
         f"/api/sessions/{session['id']}/attachments",
         json={
             "name": "standalone.txt",
             "mime": "text/plain",
-            "data": base64.b64encode(b"standalone upload").decode("ascii"),
+            "data": "data:text/plain;base64,"
+            + base64.b64encode(b"standalone upload").decode("ascii"),
         },
         headers=csrf_headers(client),
     )
@@ -1718,9 +1733,14 @@ def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatc
         ).mappings().one()
     assert row["scope_id"] is None
     assert row["session_id"] == session["id"]
+    assert len(loop_threads) == 1
+    assert engine_threads
+    assert session_threads
     assert decode_threads
-    assert request_threads
-    assert decode_threads[0] != request_threads[0]
+    assert all(
+        thread_id != loop_threads[0]
+        for thread_id in (*engine_threads, *session_threads, *decode_threads)
+    )
 
 
 def test_legacy_attachment_upload_accepts_structured_json_content_type(isolated_state, tmp_path):
@@ -1762,6 +1782,30 @@ def test_legacy_attachment_upload_rejects_invalid_base64(isolated_state, tmp_pat
 
     assert response.status_code == 400
     assert response.get_json()["code"] == "invalid_upload"
+
+
+def test_legacy_attachment_upload_rejects_oversized_base64(isolated_state, tmp_path, monkeypatch):
+    import base64
+
+    from core import workbench_media
+    from vibe.ui_server import app
+
+    monkeypatch.setattr(workbench_media, "MAX_WORKBENCH_ATTACHMENT_BYTES", 4)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        json={
+            "name": "large.txt",
+            "mime": "text/plain",
+            "data": base64.b64encode(b"1234567").decode("ascii"),
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["code"] == "too_large"
+    assert response.get_json()["max_file_bytes"] == 4
 
 
 def test_attachment_upload_preserves_unicode_name_and_binary_body(isolated_state, tmp_path):
@@ -1895,15 +1939,30 @@ def test_attachment_upload_retry_reuses_committed_file_and_token(isolated_state,
 
 
 def test_attachment_upload_errors_follow_configured_language(isolated_state, monkeypatch):
-    from core.services import settings as settings_service
-    from vibe.ui_server import app
+    import threading
 
+    from core.services import settings as settings_service
+    from vibe import ui_server
+
+    loop_threads: list[int] = []
+    config_threads: list[int] = []
+    original_dispatch = ui_server._dispatch_native_ui_request
+
+    async def tracked_dispatch(starlette_request, handler):
+        loop_threads.append(threading.get_ident())
+        return await original_dispatch(starlette_request, handler)
+
+    def load_config():
+        config_threads.append(threading.get_ident())
+        return SimpleNamespace(language="zh")
+
+    monkeypatch.setattr(ui_server, "_dispatch_native_ui_request", tracked_dispatch)
     monkeypatch.setattr(
         settings_service,
         "load_config_or_default",
-        lambda: SimpleNamespace(language="zh"),
+        load_config,
     )
-    client = app.test_client()
+    client = ui_server.app.test_client()
 
     response = client.post(
         "/api/sessions/ses_missing/attachments",
@@ -1917,6 +1976,9 @@ def test_attachment_upload_errors_follow_configured_language(isolated_state, mon
         "code": "session_not_found",
         "message": "当前会话已不可用。",
     }
+    assert len(loop_threads) == 1
+    assert config_threads
+    assert all(thread_id != loop_threads[0] for thread_id in config_threads)
 
 
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
