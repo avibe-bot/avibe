@@ -2591,7 +2591,7 @@ async def test_runtime_close_waits_for_active_call_log_maintenance(
     closing = asyncio.create_task(memory_runtime_factory.close(runtime))
     close_results: list[object] = []
     try:
-        await retention_stop_entered.wait()
+        await asyncio.wait_for(retention_stop_entered.wait(), timeout=1.0)
         assert not closing.done()
     finally:
         release.set()
@@ -3080,7 +3080,7 @@ async def test_stop_worker_settles_worker_before_propagating_caller_cancellation
 
     stopping = asyncio.create_task(runtime._stop_worker())
     try:
-        await cancellation_started.wait()
+        await asyncio.wait_for(cancellation_started.wait(), timeout=1.0)
         stopping.cancel()
         await asyncio.sleep(0)
 
@@ -3666,7 +3666,7 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
 
     async def verify_readiness_stays_closed() -> None:
         try:
-            await stop_entered.wait()
+            await asyncio.wait_for(stop_entered.wait(), timeout=1.0)
             await process.ready()
             await asyncio.sleep(0.01)
             if unexpected_activation:

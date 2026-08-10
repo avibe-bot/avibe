@@ -1940,7 +1940,7 @@ async def test_backup_stage_cleanup_cancellation_joins_filesystem_io(
     closing = asyncio.create_task(memory_runtime_factory.close(runtime))
     close_results: list[object] = []
     try:
-        await maintenance_close_entered.wait()
+        await asyncio.wait_for(maintenance_close_entered.wait(), timeout=1.0)
         assert closing.done() is False
     finally:
         release.set()

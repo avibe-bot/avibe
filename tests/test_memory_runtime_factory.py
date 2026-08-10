@@ -103,10 +103,15 @@ async def test_factory_finalizes_when_the_owned_scope_is_cancelled(tmp_path: Pat
             await asyncio.Event().wait()
 
     task = asyncio.create_task(run(), name="cancelled-runtime-owner")
-    await entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     assert closed.is_set()
     assert task.done()
@@ -143,17 +148,21 @@ async def test_factory_teardown_joins_a_blocked_explicit_close(tmp_path: Path) -
 
     runtime.close = close
     explicit_close = asyncio.create_task(factory.close(runtime))
-    await close_entered.wait()
-    teardown = asyncio.create_task(factory.close_all())
+    teardown: asyncio.Task[None] | None = None
+    results: list[object] = []
     try:
+        await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+        teardown = asyncio.create_task(factory.close_all())
         await asyncio.sleep(0)
         assert close_calls == 1
     finally:
         release_close.set()
-        results = await asyncio.gather(
-            explicit_close,
-            teardown,
-            return_exceptions=True,
+        results.extend(
+            await asyncio.gather(
+                explicit_close,
+                *(() if teardown is None else (teardown,)),
+                return_exceptions=True,
+            )
         )
 
     assert results == [None, None]
@@ -178,19 +187,29 @@ async def test_factory_teardown_joins_close_after_explicit_caller_cancellation(
 
     runtime.close = close
     explicit_close = asyncio.create_task(factory.close(runtime))
-    await close_entered.wait()
-    explicit_close.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await explicit_close
-
-    teardown = asyncio.create_task(factory.close_all())
+    teardown: asyncio.Task[None] | None = None
+    results: list[object] = []
     try:
+        await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+        explicit_close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await explicit_close
+
+        teardown = asyncio.create_task(factory.close_all())
         await asyncio.sleep(0)
         assert close_calls == 1
     finally:
         release_close.set()
-        await teardown
+        results.extend(
+            await asyncio.gather(
+                explicit_close,
+                *(() if teardown is None else (teardown,)),
+                return_exceptions=True,
+            )
+        )
 
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1:] == [None]
     await factory.close(runtime)
     assert close_calls == 1
 
@@ -213,17 +232,21 @@ async def test_factory_shares_an_in_flight_close_failure_with_teardown_and_repea
 
     runtime.close = close
     explicit_close = asyncio.create_task(factory.close(runtime))
-    await close_entered.wait()
-    teardown = asyncio.create_task(factory.close_all())
+    teardown: asyncio.Task[None] | None = None
+    results: list[object] = []
     try:
+        await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+        teardown = asyncio.create_task(factory.close_all())
         await asyncio.sleep(0)
         assert close_calls == 1
     finally:
         release_close.set()
-        results = await asyncio.gather(
-            explicit_close,
-            teardown,
-            return_exceptions=True,
+        results.extend(
+            await asyncio.gather(
+                explicit_close,
+                *(() if teardown is None else (teardown,)),
+                return_exceptions=True,
+            )
         )
 
     assert len(results) == 2
