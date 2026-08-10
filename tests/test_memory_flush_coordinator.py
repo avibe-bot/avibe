@@ -48,6 +48,19 @@ PROJECT = "p-22222222222222222222222222222222"
 TEST_BUNDLE_ID = "a" * 32
 
 
+class _Gate:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def __call__(self, *_args: object) -> None:
+        self.entered.set()
+        await self._release.wait()
+
+    def open(self) -> None:
+        self._release.set()
+
+
 def _store(tmp_path: Path) -> MemoryStore:
     return MemoryStore(paths.get_state_dir() / "coordinator-tests" / tmp_path.name / "memory.sqlite")
 
@@ -1492,17 +1505,8 @@ async def test_cancelled_server_rejection_commit_is_completed_once_after_restart
 
 async def test_fence_routes_new_capture_to_next_generation(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    class Provider(FakeMemoryProvider):
-        async def flush(self, session_ref):
-            self.flushes.append(session_ref)
-            entered.set()
-            await release.wait()
-            return FlushSucceeded("flush", "extracted")
-
-    provider = Provider()
+    flush = _Gate()
+    provider = FakeMemoryProvider(flush_hook=flush)
     current = [datetime(2026, 1, 1, tzinfo=UTC)]
     worker = MemoryWorker(
         store=store,
@@ -1514,13 +1518,13 @@ async def test_fence_routes_new_capture_to_next_generation(tmp_path: Path) -> No
     assert await worker.drain_once() == 1
     current[0] += timedelta(minutes=5)
     assert await worker.coordinator.run_due() == 1
-    await asyncio.wait_for(entered.wait(), timeout=1)
+    await asyncio.wait_for(flush.entered.wait(), timeout=1)
 
     second = _enqueue(store, "second")
     assert second.generation == first.generation + 1
     assert store.claim_due(lease_owner="raced", now="2026-01-01T00:05:01.000Z") is None
 
-    release.set()
+    flush.open()
     await _wait_for_scheduled_flush(worker.coordinator, first.provider_session_ref)
     claimed = store.claim_due(lease_owner="next", now="2026-01-01T00:05:01.000Z")
     assert claimed is not None and claimed.source_message_digest == second.source_message_digest
@@ -2153,21 +2157,13 @@ async def test_message_bound_makes_generation_immediately_due(
 
 async def test_same_session_serializes_while_another_session_continues(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    first_entered = asyncio.Event()
-    release_first = asyncio.Event()
+    first_add = _Gate()
 
-    class Provider(FakeMemoryProvider):
-        async def add(self, capture):
-            self.captures.append(capture)
-            if capture.text == "payload-same-first":
-                first_entered.set()
-                await release_first.wait()
-            return AddAck(
-                request_id=f"add-{capture.text}",
-                status="accumulated",
-            )
+    async def block_first(capture) -> None:
+        if capture.text == "payload-same-first":
+            await first_add(capture)
 
-    provider = Provider()
+    provider = FakeMemoryProvider(add_hook=block_first)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -2188,7 +2184,7 @@ async def test_same_session_serializes_while_another_session_continues(tmp_path:
             lease_owner="parallel",
         )
     )
-    await asyncio.wait_for(first_entered.wait(), timeout=1)
+    await asyncio.wait_for(first_add.entered.wait(), timeout=1)
     same_second = asyncio.create_task(
         coordinator.deliver(
             claimed["payload-same-second"],
@@ -2209,7 +2205,7 @@ async def test_same_session_serializes_while_another_session_continues(tmp_path:
         "payload-other",
     ]
 
-    release_first.set()
+    first_add.open()
     assert await asyncio.wait_for(first, timeout=1)
     assert await asyncio.wait_for(same_second, timeout=1)
     assert [capture.text for capture in provider.captures] == [
@@ -2524,16 +2520,15 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
             flush_entered.set()
             await asyncio.Event().wait()
 
-        async def processing_healthy(self) -> bool:
-            nonlocal health_calls
-            health_calls += 1
-            if health_calls == 1:
-                health_entered.set()
-                try:
-                    await release_health.wait()
-                finally:
-                    health_finished.set()
-            return True
+    async def block_first_health_probe() -> None:
+        nonlocal health_calls
+        health_calls += 1
+        if health_calls == 1:
+            health_entered.set()
+            try:
+                await release_health.wait()
+            finally:
+                health_finished.set()
 
     async def record_event(
         event: str,
@@ -2544,7 +2539,7 @@ async def test_shutdown_joins_post_entry_flush_classification_and_boot_recovers(
         events.append((event, kind, occurred_at, queued))
         return True
 
-    provider = Provider()
+    provider = Provider(processing_healthy_hook=block_first_health_probe)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -2624,10 +2619,9 @@ async def test_shutdown_drains_local_flush_commit_then_boot_alerts(
             flush_entered.set()
             await asyncio.Event().wait()
 
-        async def processing_healthy(self) -> bool:
-            nonlocal health_calls
-            health_calls += 1
-            return True
+    async def record_health_probe() -> None:
+        nonlocal health_calls
+        health_calls += 1
 
     async def record_event(
         event: str,
@@ -2646,7 +2640,7 @@ async def test_shutdown_drains_local_flush_commit_then_boot_alerts(
         return original_settle(lease, result, now=now)
 
     monkeypatch.setattr(store, "settle_flush", blocking_settle)
-    provider = Provider()
+    provider = Provider(processing_healthy_hook=record_health_probe)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -2718,13 +2712,12 @@ async def test_shutdown_local_flush_phase_does_not_wait_for_classification_lock(
             flush_entered.set()
             await asyncio.Event().wait()
 
-        async def processing_healthy(self) -> bool:
-            nonlocal health_calls
-            health_calls += 1
-            if health_calls == 1:
-                old_health_entered.set()
-                await release_old_health.wait()
-            return True
+    async def block_first_health_probe() -> None:
+        nonlocal health_calls
+        health_calls += 1
+        if health_calls == 1:
+            old_health_entered.set()
+            await release_old_health.wait()
 
     async def record_event(
         event: str,
@@ -2735,7 +2728,7 @@ async def test_shutdown_local_flush_phase_does_not_wait_for_classification_lock(
         events.append((event, kind, occurred_at, queued))
         return True
 
-    provider = Provider()
+    provider = Provider(processing_healthy_hook=block_first_health_probe)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -3236,18 +3229,8 @@ async def test_attachment_preflight_classifies_local_failures_without_ambiguity(
 
 async def test_stale_add_waiter_does_not_resubmit_after_flush_reclaims_it(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    first_add_entered = asyncio.Event()
-    release_first_add = asyncio.Event()
-
-    class Provider(FakeMemoryProvider):
-        async def add(self, capture):
-            self.captures.append(capture)
-            if len(self.captures) == 1:
-                first_add_entered.set()
-                await release_first_add.wait()
-            return AddAck(f"add-{len(self.captures)}", "accumulated")
-
-    provider = Provider()
+    first_add = _Gate()
+    provider = FakeMemoryProvider(add_hook=first_add)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -3263,14 +3246,14 @@ async def test_stale_add_waiter_does_not_resubmit_after_flush_reclaims_it(tmp_pa
     flush_call = asyncio.create_task(
         coordinator.final_flush(row.provider_session_ref, deadline_seconds=2)
     )
-    await asyncio.wait_for(first_add_entered.wait(), timeout=1)
+    await asyncio.wait_for(first_add.entered.wait(), timeout=1)
     stale_call = asyncio.create_task(
         coordinator.deliver(stale_claim, lease_owner="ordinary-worker")
     )
     await asyncio.sleep(0)
     assert stale_call.done() is False
 
-    release_first_add.set()
+    first_add.open()
     assert await flush_call
     assert await stale_call is False
     assert [capture.text for capture in provider.captures] == [
@@ -3432,18 +3415,8 @@ async def test_cancelled_fenced_claim_acquisition_returns_exact_claim(
 
 async def test_session_lock_is_shared_with_waiters_then_reclaimed(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    first_add_entered = asyncio.Event()
-    release_first_add = asyncio.Event()
-
-    class Provider(FakeMemoryProvider):
-        async def add(self, capture):
-            self.captures.append(capture)
-            if len(self.captures) == 1:
-                first_add_entered.set()
-                await release_first_add.wait()
-            return AddAck(f"add-{len(self.captures)}", "accumulated")
-
-    provider = Provider()
+    first_add = _Gate()
+    provider = FakeMemoryProvider(add_hook=first_add)
     coordinator = SessionFlushCoordinator(
         store=store,
         provider=provider,
@@ -3462,14 +3435,14 @@ async def test_session_lock_is_shared_with_waiters_then_reclaimed(tmp_path: Path
     key = claimed[0].provider_session_ref.serialize()
 
     owner = asyncio.create_task(coordinator.deliver(claimed[0], lease_owner="worker"))
-    await asyncio.wait_for(first_add_entered.wait(), timeout=1)
+    await asyncio.wait_for(first_add.entered.wait(), timeout=1)
     waiter = asyncio.create_task(coordinator.deliver(claimed[1], lease_owner="worker"))
     await asyncio.sleep(0)
     assert waiter.done() is False
     assert len(coordinator._session_locks) == 1
     shared_lock = coordinator._session_locks[key]
 
-    release_first_add.set()
+    first_add.open()
     assert await asyncio.wait_for(owner, timeout=1)
     assert await asyncio.wait_for(waiter, timeout=1)
     assert [capture.text for capture in provider.captures] == [

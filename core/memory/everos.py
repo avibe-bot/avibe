@@ -1110,17 +1110,24 @@ class FakeMemoryProvider:
             recorder={"state": "disabled", "reason": None},
         )
     )
+    add_hook: Callable[[ProviderCapture], Awaitable[None]] | None = None
+    flush_hook: Callable[[ProviderSessionRef], Awaitable[None]] | None = None
+    processing_healthy_hook: Callable[[], Awaitable[None]] | None = None
 
     async def add(self, capture: ProviderCapture) -> AddResult:
         if self.ingest_failures:
             raise self.ingest_failures.popleft()
         self.captures.append(capture)
+        if self.add_hook is not None:
+            await self.add_hook(capture)
         if self.add_results:
             return self.add_results.popleft()
         return AddAck(request_id=f"fake-add-{len(self.captures)}", status="accumulated")
 
     async def flush(self, session_ref: ProviderSessionRef) -> FlushResult:
         self.flushes.append(session_ref)
+        if self.flush_hook is not None:
+            await self.flush_hook(session_ref)
         if self.flush_results:
             return self.flush_results.popleft()
         return FlushSucceeded(request_id=f"fake-flush-{len(self.flushes)}", status="extracted")
@@ -1173,6 +1180,8 @@ class FakeMemoryProvider:
         real EverOS adapter performs bounded authenticated LLM+embedding
         probes.
         """
+        if self.processing_healthy_hook is not None:
+            await self.processing_healthy_hook()
         if self.processing_health_failure is not None:
             raise self.processing_health_failure
         return self.processing_healthy_flag
