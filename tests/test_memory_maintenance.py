@@ -18,6 +18,7 @@ import core.memory.snapshot as snapshot_module
 from config.v2_config import MemoryConfig
 from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.clear_journal import MemoryClearJournal
+from core.memory.clear_snapshot_storage import MemoryClearSnapshotStorage
 from core.memory.process import SidecarOwnership
 from core.memory.maintenance import (
     ClearRecoveryResult,
@@ -1148,18 +1149,20 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._snapshot_manager
+    assert storage is not None
     assert manager is not None
-    original_remove = manager.remove
+    original_remove = storage.remove_terminal_snapshot
     removal_attempts: list[str] = []
 
-    def fail_removal(permit) -> None:
-        if manager.snapshot_path(permit.snapshot_id).exists():
-            removal_attempts.append(permit.snapshot_id)
+    def fail_removal(operation_id: str) -> None:
+        if manager.snapshot_path(operation_id).exists():
+            removal_attempts.append(operation_id)
             raise OSError("injected snapshot removal failure")
-        original_remove(permit)
+        original_remove(operation_id)
 
-    monkeypatch.setattr(manager, "remove", fail_removal)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", fail_removal)
     completed = await _clear(runtime, operator_ref="user:owner")
     snapshot_path = manager.snapshot_path(completed["operation_id"])
 
@@ -1167,14 +1170,14 @@ async def test_completed_clear_snapshot_removal_retries_on_reconcile_and_restart
     assert removal_attempts == [completed["operation_id"]]
     assert snapshot_path.is_dir()
 
-    monkeypatch.setattr(manager, "remove", original_remove)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", original_remove)
     assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
     reconcile_gc = _maintenance(runtime)._terminal_snapshot_gc_task
     assert reconcile_gc is not None
     await reconcile_gc
     assert not snapshot_path.exists()
 
-    monkeypatch.setattr(manager, "remove", fail_removal)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", fail_removal)
     completed_before_restart = await _clear(runtime, operator_ref="user:owner")
     restart_snapshot_path = manager.snapshot_path(completed_before_restart["operation_id"])
     assert restart_snapshot_path.is_dir()
@@ -1201,13 +1204,15 @@ async def _retain_terminal_clear_snapshot(
     home: Path,
 ) -> Path:
     runtime = MemoryRuntime(MemoryConfig(), effective_home=home)
+    storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._snapshot_manager
+    assert storage is not None
     assert manager is not None
 
-    def retain(_permit) -> None:
+    def retain(_operation_id: str) -> None:
         raise OSError("retain terminal snapshot for startup GC")
 
-    monkeypatch.setattr(manager, "remove", retain)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", retain)
     completed = await _clear(runtime, operator_ref="user:owner")
     snapshot_path = manager.snapshot_path(completed["operation_id"])
     assert completed["status"] == "completed"
@@ -1222,15 +1227,22 @@ async def test_terminal_snapshot_gc_is_scheduled_after_lifecycle_returns(
 ) -> None:
     entered = threading.Event()
     release = threading.Event()
-    original_remove = MemorySnapshotManager.remove
+    original_remove = MemoryClearSnapshotStorage.remove_terminal_snapshot
     snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
 
-    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+    def blocking_remove(
+        storage: MemoryClearSnapshotStorage,
+        operation_id: str,
+    ) -> None:
         entered.set()
         assert release.wait(timeout=2)
-        original_remove(manager, permit)
+        original_remove(storage, operation_id)
 
-    monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+    monkeypatch.setattr(
+        MemoryClearSnapshotStorage,
+        "remove_terminal_snapshot",
+        blocking_remove,
+    )
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
     assert await runtime.reconcile(MemoryConfig()) == {
@@ -1255,18 +1267,25 @@ async def test_terminal_snapshot_gc_shutdown_joins_cancelled_io(
     entered = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    original_remove = MemorySnapshotManager.remove
+    original_remove = MemoryClearSnapshotStorage.remove_terminal_snapshot
     snapshot_path = await _retain_terminal_clear_snapshot(monkeypatch, tmp_path)
 
-    def blocking_remove(manager: MemorySnapshotManager, permit) -> None:
+    def blocking_remove(
+        storage: MemoryClearSnapshotStorage,
+        operation_id: str,
+    ) -> None:
         entered.set()
         assert release.wait(timeout=2)
         try:
-            original_remove(manager, permit)
+            original_remove(storage, operation_id)
         finally:
             finished.set()
 
-    monkeypatch.setattr(MemorySnapshotManager, "remove", blocking_remove)
+    monkeypatch.setattr(
+        MemoryClearSnapshotStorage,
+        "remove_terminal_snapshot",
+        blocking_remove,
+    )
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
     await runtime.reconcile(MemoryConfig())
     gc_task = _maintenance(runtime)._terminal_snapshot_gc_task
@@ -1295,11 +1314,13 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
     journal = _maintenance(runtime)._clear_journal
+    storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._snapshot_manager
     assert journal is not None
+    assert storage is not None
     assert manager is not None
     original_delete = _maintenance(runtime)._runtime.delete_surface
-    original_remove = manager.remove
+    original_remove = storage.remove_terminal_snapshot
     removal_attempts: list[str] = []
 
     async def interrupt_provider(surface, target_epoch):
@@ -1307,11 +1328,11 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
             raise OSError("injected provider delete failure")
         await original_delete(surface, target_epoch)
 
-    def fail_removal(permit) -> None:
-        if manager.snapshot_path(permit.snapshot_id).exists():
-            removal_attempts.append(permit.snapshot_id)
+    def fail_removal(operation_id: str) -> None:
+        if manager.snapshot_path(operation_id).exists():
+            removal_attempts.append(operation_id)
             raise OSError("injected snapshot removal failure")
-        original_remove(permit)
+        original_remove(operation_id)
 
     async def abort_after_interrupted_clear() -> dict:
         _replace_runtime_port(runtime, delete_surface=interrupt_provider)
@@ -1325,7 +1346,7 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
             operator_ref="user:owner",
         )
 
-    monkeypatch.setattr(manager, "remove", fail_removal)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", fail_removal)
     aborted = await abort_after_interrupted_clear()
     snapshot_path = manager.snapshot_path(aborted["operation_id"])
 
@@ -1335,14 +1356,14 @@ async def test_aborted_clear_snapshot_removal_retries_on_reconcile_and_restart(
     terminal = journal.get_operation(aborted["operation_id"])
     assert terminal is not None and terminal.state == "aborted"
 
-    monkeypatch.setattr(manager, "remove", original_remove)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", original_remove)
     assert await runtime.reconcile(MemoryConfig()) == {"ok": True, "state": "disabled"}
     reconcile_gc = _maintenance(runtime)._terminal_snapshot_gc_task
     assert reconcile_gc is not None
     await reconcile_gc
     assert not snapshot_path.exists()
 
-    monkeypatch.setattr(manager, "remove", fail_removal)
+    monkeypatch.setattr(storage, "remove_terminal_snapshot", fail_removal)
     aborted_before_restart = await abort_after_interrupted_clear()
     restart_snapshot_path = manager.snapshot_path(aborted_before_restart["operation_id"])
     assert restart_snapshot_path.is_dir()
@@ -1419,19 +1440,29 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
     discard_started = threading.Event()
     discard_release = threading.Event()
     discard_finished = threading.Event()
-    original_discard = MemorySnapshotManager.discard_unrecorded
+    original_discard = (
+        MemoryClearSnapshotStorage.discard_unrecorded_preparing_snapshot
+    )
 
-    def blocking_discard(manager: MemorySnapshotManager, permit) -> None:
-        if manager is _maintenance(runtime)._snapshot_manager:
+    def blocking_discard(
+        storage: MemoryClearSnapshotStorage,
+        operation_id: str,
+        **kwargs,
+    ):
+        if storage is _maintenance(runtime)._clear_snapshot_storage:
             discard_started.set()
             assert discard_release.wait(2)
         try:
-            original_discard(manager, permit)
+            return original_discard(storage, operation_id, **kwargs)
         finally:
-            if manager is _maintenance(runtime)._snapshot_manager:
+            if storage is _maintenance(runtime)._clear_snapshot_storage:
                 discard_finished.set()
 
-    monkeypatch.setattr(MemorySnapshotManager, "discard_unrecorded", blocking_discard)
+    monkeypatch.setattr(
+        MemoryClearSnapshotStorage,
+        "discard_unrecorded_preparing_snapshot",
+        blocking_discard,
+    )
     resuming = asyncio.create_task(
         _resume_clear(runtime, recovery.operation_id, operator_ref="user:owner")
     )
@@ -1452,7 +1483,11 @@ async def test_cancelled_clear_waits_for_snapshot_creation_before_releasing_fenc
     assert pending.state == "recovery_needed"
     assert pending.resolution == "resume"
 
-    monkeypatch.setattr(MemorySnapshotManager, "discard_unrecorded", original_discard)
+    monkeypatch.setattr(
+        MemoryClearSnapshotStorage,
+        "discard_unrecorded_preparing_snapshot",
+        original_discard,
+    )
     completed = await _resume_clear(runtime, pending.operation_id, operator_ref="user:owner")
     assert completed["status"] == "completed"
     await runtime.close()
@@ -1790,25 +1825,25 @@ async def test_backup_stage_cleanup_waits_for_terminal_snapshot_gc(
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
-    journal = _maintenance(runtime)._clear_journal
+    storage = _maintenance(runtime)._clear_snapshot_storage
     manager = _maintenance(runtime)._backup_manager
-    assert journal is not None
+    assert storage is not None
     assert manager is not None
     terminal_entered = threading.Event()
     terminal_release = threading.Event()
     backup_entered = threading.Event()
-    original_permits = journal.terminal_snapshot_permits
+    original_ids = storage.eligible_terminal_snapshot_ids
 
-    def blocking_permits():
+    def blocking_ids():
         terminal_entered.set()
         assert terminal_release.wait(2)
-        return original_permits()
+        return original_ids()
 
     def observe_backup_cleanup() -> tuple[str, ...]:
         backup_entered.set()
         return ()
 
-    monkeypatch.setattr(journal, "terminal_snapshot_permits", blocking_permits)
+    monkeypatch.setattr(storage, "eligible_terminal_snapshot_ids", blocking_ids)
     monkeypatch.setattr(
         manager,
         "reconcile_unpublished_backup_stages",

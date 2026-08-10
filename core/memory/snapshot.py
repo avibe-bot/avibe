@@ -47,10 +47,6 @@ _DIRECTORY_DESCRIPTOR_CACHE_SIZE = 48
 _SNAPSHOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _AUTOMATIC_BACKUP_STAGE_RE = re.compile(r"\.([0-9a-f]{32})\.tmp\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-_TERMINAL_PERMIT_AUTHORITY = object()
-_PREPARING_DISCARD_PERMIT_AUTHORITY = object()
-_ACTIVE_PREPARING_DISCARD_LEASES: set[object] = set()
-_SUCCEEDED_PREPARING_DISCARD_LEASES: set[object] = set()
 _CALL_LOG_FILESET: tuple[tuple[str, str], ...] = (
     ("database", ""),
     ("journal", "-journal"),
@@ -171,88 +167,6 @@ class MemorySnapshot:
         """Return the journal-persisted snapshot digest for every surface."""
 
         return {receipt.path: receipt.snapshot_digest for receipt in self.surface_receipts}
-
-
-@dataclass(frozen=True, slots=True)
-class _TerminalSnapshotPermit:
-    """Journal-issued capability for garbage-collecting a terminal snapshot."""
-
-    snapshot_id: str
-    relative_path: str
-    manifest_sha256: str
-    surface_digests: tuple[tuple[str, str | None], ...]
-    _authority: object
-
-    def __post_init__(self) -> None:
-        if self._authority is not _TERMINAL_PERMIT_AUTHORITY:
-            raise TypeError("terminal Memory snapshot permits are journal-issued")
-        _validated_snapshot_id(self.snapshot_id)
-        object.__setattr__(self, "relative_path", _validated_relative_path(self.relative_path))
-        _validated_sha256(self.manifest_sha256)
-        normalized: list[tuple[str, str | None]] = []
-        for path, digest in self.surface_digests:
-            canonical = _validated_relative_path(path)
-            normalized.append((canonical, None if digest is None else _validated_sha256(digest)))
-        if len({path for path, _digest in normalized}) != len(normalized):
-            raise ValueError("terminal Memory snapshot permit has duplicate surfaces")
-        object.__setattr__(self, "surface_digests", tuple(normalized))
-
-
-def _issue_terminal_snapshot_permit(
-    *,
-    snapshot_id: str,
-    relative_path: str,
-    manifest_sha256: str,
-    surface_digests: tuple[tuple[str, str | None], ...],
-) -> _TerminalSnapshotPermit:
-    """Issue the opaque capability used by an eligible terminal journal row."""
-
-    return _TerminalSnapshotPermit(
-        snapshot_id=snapshot_id,
-        relative_path=relative_path,
-        manifest_sha256=manifest_sha256,
-        surface_digests=surface_digests,
-        _authority=_TERMINAL_PERMIT_AUTHORITY,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparingSnapshotDiscardPermit:
-    snapshot_id: str
-    relative_path: str
-    _lease: object
-    _authority: object
-
-    def __post_init__(self) -> None:
-        if self._authority is not _PREPARING_DISCARD_PERMIT_AUTHORITY:
-            raise TypeError("preparing Memory snapshot discard permits are journal-issued")
-        _validated_snapshot_id(self.snapshot_id)
-        object.__setattr__(self, "relative_path", _validated_relative_path(self.relative_path))
-
-
-def _issue_preparing_snapshot_discard_permit(
-    *,
-    snapshot_id: str,
-    relative_path: str,
-) -> _PreparingSnapshotDiscardPermit:
-    lease = object()
-    permit = _PreparingSnapshotDiscardPermit(
-        snapshot_id=snapshot_id,
-        relative_path=relative_path,
-        _lease=lease,
-        _authority=_PREPARING_DISCARD_PERMIT_AUTHORITY,
-    )
-    _ACTIVE_PREPARING_DISCARD_LEASES.add(lease)
-    return permit
-
-
-def _preparing_snapshot_discard_succeeded(permit: _PreparingSnapshotDiscardPermit) -> bool:
-    return permit._lease in _SUCCEEDED_PREPARING_DISCARD_LEASES
-
-
-def _revoke_preparing_snapshot_discard_permit(permit: _PreparingSnapshotDiscardPermit) -> None:
-    _ACTIVE_PREPARING_DISCARD_LEASES.discard(permit._lease)
-    _SUCCEEDED_PREPARING_DISCARD_LEASES.discard(permit._lease)
 
 
 @dataclass(slots=True)
@@ -1097,19 +1011,26 @@ class MemorySnapshotManager:
         if self._operation_guard is not None:
             self._operation_guard()
 
-    def remove(self, permit: _TerminalSnapshotPermit) -> None:
-        """Remove only a snapshot authorized by an eligible terminal journal row."""
+    def _remove_clear_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        expected_relative_path: str,
+        expected_manifest_sha256: str,
+        expected_surface_digests: Mapping[str, str | None],
+    ) -> None:
+        """Remove one journal-authorized clear snapshot."""
 
-        if (
-            not isinstance(permit, _TerminalSnapshotPermit)
-            or permit._authority is not _TERMINAL_PERMIT_AUTHORITY
-        ):
-            raise TypeError("Memory snapshot removal requires a terminal journal permit")
-        directory = self.snapshot_path(permit.snapshot_id)
-        tombstone = self._snapshot_root / f".{permit.snapshot_id}.gc"
-        expected_relative = (PurePosixPath(self._snapshot_root_relative) / permit.snapshot_id).as_posix()
-        if permit.relative_path != expected_relative:
-            raise MemorySnapshotVerificationError("Memory snapshot removal permit path is invalid")
+        identifier = _validated_snapshot_id(snapshot_id)
+        directory = self.snapshot_path(identifier)
+        tombstone = self._snapshot_root / f".{identifier}.gc"
+        expected_relative = (
+            PurePosixPath(self._snapshot_root_relative) / identifier
+        ).as_posix()
+        if expected_relative_path != expected_relative:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot removal path is invalid"
+            )
 
         # A prior removal may have crashed after the verified snapshot was
         # renamed.  The deterministic tombstone is already authorized by this
@@ -1123,37 +1044,37 @@ class MemorySnapshotManager:
             return
         _require_directory_private(info, "Memory snapshot directory")
         self.verify(
-            permit.snapshot_id,
-            expected_manifest_sha256=permit.manifest_sha256,
-            expected_surface_digests=dict(permit.surface_digests),
+            identifier,
+            expected_manifest_sha256=expected_manifest_sha256,
+            expected_surface_digests=expected_surface_digests,
         )
         os.replace(directory, tombstone)
         _fsync_directory(self._snapshot_root)
         _remove_safe_path(self._effective_home, tombstone)
         _fsync_directory(self._snapshot_root)
 
-    def discard_unrecorded(self, permit: _PreparingSnapshotDiscardPermit) -> None:
-        """Discard an untrusted published snapshot under a live journal lease."""
+    def _discard_unrecorded_clear_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        expected_relative_path: str,
+    ) -> None:
+        """Discard one storage-authorized unrecorded clear snapshot."""
 
-        if (
-            not isinstance(permit, _PreparingSnapshotDiscardPermit)
-            or permit._authority is not _PREPARING_DISCARD_PERMIT_AUTHORITY
-            or permit._lease not in _ACTIVE_PREPARING_DISCARD_LEASES
-        ):
-            raise TypeError("Memory snapshot discard requires an active preparing journal permit")
+        identifier = _validated_snapshot_id(snapshot_id)
         expected_relative = (
-            PurePosixPath(self._snapshot_root_relative) / permit.snapshot_id
+            PurePosixPath(self._snapshot_root_relative) / identifier
         ).as_posix()
-        if permit.relative_path != expected_relative:
-            raise MemorySnapshotVerificationError("Memory snapshot discard permit path is invalid")
-        _ACTIVE_PREPARING_DISCARD_LEASES.remove(permit._lease)
-        directory = self.snapshot_path(permit.snapshot_id)
+        if expected_relative_path != expected_relative:
+            raise MemorySnapshotVerificationError(
+                "Memory snapshot discard path is invalid"
+            )
+        directory = self.snapshot_path(identifier)
         _remove_safe_path(self._effective_home, directory)
         root_info = _managed_source_info(self._effective_home, self._snapshot_root)
         if root_info is not None:
             _require_directory_private(root_info, "Memory snapshot root")
             _fsync_directory(self._snapshot_root)
-        _SUCCEEDED_PREPARING_DISCARD_LEASES.add(permit._lease)
 
     def _validate_surface_layout(self) -> None:
         paths = [PurePosixPath(surface.path) for surface in self._surfaces]
