@@ -235,6 +235,57 @@ def open_confined_regular_file(home: Path, path: Path) -> int:
         os.close(root)
 
 
+def open_and_harden_confined_regular_file(
+    home: Path,
+    path: Path,
+    *,
+    mode: int = 0o600,
+) -> int:
+    """Open and harden one owned, single-link regular file through its parent."""
+
+    relative = _relative_to_home(path, home)
+    if not relative.parts:
+        raise ConfinedFilesystemError("confined file must be below the confinement root")
+    root = _open_confined_directory(home, ())
+    parent: int | None = None
+    descriptor: int | None = None
+    try:
+        parent = _open_descendant_directory(root, relative.parts[:-1])
+        try:
+            descriptor = os.open(
+                relative.parts[-1],
+                strict_file_read_flags(),
+                dir_fd=parent,
+            )
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confined file cannot be opened safely"
+            ) from error
+        try:
+            _require_private_regular(
+                os.fstat(descriptor),
+                "confined file",
+                require_mode=False,
+            )
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
+            _require_private_regular(os.fstat(descriptor), "confined file")
+            os.fsync(parent)
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confined file cannot be hardened safely"
+            ) from error
+        result = descriptor
+        descriptor = None
+        return result
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent is not None:
+            os.close(parent)
+        os.close(root)
+
+
 def open_confined_directory(home: Path, path: Path) -> int:
     """Open one owner-private directory beneath a pinned confinement root."""
 
@@ -319,7 +370,6 @@ class PrivateSqliteDatabase:
     """Prepare and validate one owner-private SQLite database and its sidecars."""
 
     def __init__(self, home: Path, path: Path) -> None:
-        required_no_follow_flag()
         self._home = home
         self._path = path
 
@@ -656,7 +706,7 @@ def remove_confined_path(
     current: int | None = None
     try:
         current = os.open(home, strict_directory_open_flags())
-        _require_private_directory(os.fstat(current), "confinement root")
+        _require_exact_private_directory(os.fstat(current), "confinement root")
         for component in relative.parts[:-1]:
             try:
                 next_descriptor = os.open(
@@ -727,10 +777,7 @@ def _remove_entry_at(
                     if (
                         item is root_node
                         and expected_identity is not None
-                        and (
-                            not stat.S_ISDIR(before.st_mode)
-                            or (before.st_dev, before.st_ino) != expected_identity
-                        )
+                        and (before.st_dev, before.st_ino) != expected_identity
                     ):
                         raise ConfinedFilesystemError(
                             "confined entry changed during removal"
@@ -757,6 +804,10 @@ def _remove_entry_at(
                             raise ConfinedFilesystemError(
                                 "confined directory changed during removal"
                             )
+                        _harden_private_directory_fd(
+                            child_fd,
+                            "confined removal directory",
+                        )
                         child_order = orders.scan(child_fd)
                     finally:
                         os.close(child_fd)
@@ -845,8 +896,14 @@ def _require_directory(info: os.stat_result, label: str) -> None:
 
 def _require_private_directory(info: os.stat_result, label: str) -> None:
     _require_directory(info, label)
-    if stat.S_IMODE(info.st_mode) != 0o700:
+    if stat.S_IMODE(info.st_mode) & 0o077:
         raise ConfinedFilesystemError(f"{label} is not private")
+
+
+def _require_exact_private_directory(info: os.stat_result, label: str) -> None:
+    _require_private_directory(info, label)
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise ConfinedFilesystemError(f"{label} mode mismatch")
 
 
 def _harden_private_directory_fd(descriptor: int, label: str) -> None:
@@ -856,7 +913,7 @@ def _harden_private_directory_fd(descriptor: int, label: str) -> None:
         os.fsync(descriptor)
     except OSError as error:
         raise ConfinedFilesystemError(f"{label} cannot be hardened safely") from error
-    _require_private_directory(os.fstat(descriptor), label)
+    _require_exact_private_directory(os.fstat(descriptor), label)
 
 
 def _open_confined_directory(home: Path, components: Sequence[str]) -> int:
@@ -867,7 +924,7 @@ def _open_confined_directory(home: Path, components: Sequence[str]) -> int:
             "confinement root cannot be opened safely"
         ) from error
     try:
-        _require_private_directory(os.fstat(current), "confinement root")
+        _require_exact_private_directory(os.fstat(current), "confinement root")
         descendant = _open_descendant_directory(current, components)
         os.close(current)
         return descendant

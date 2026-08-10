@@ -26,6 +26,7 @@ def test_memory_persistence_fails_closed_without_no_follow_before_touching_path(
     script = """
 import os
 import sys
+import asyncio
 from pathlib import Path
 
 delattr(os, "O_NOFOLLOW")
@@ -35,11 +36,15 @@ delattr(os, "O_NOFOLLOW")
 import core.controller  # noqa: F401
 from core.memory.attachments import AttachmentPinError, AttachmentPinStore
 from core.memory.confined_filesystem import ConfinedFilesystemError, PrivateSqliteDatabase
+from config.v2_config import MemoryConfig
+from core.memory.artifact import MemoryArtifactManager
+from core.memory.runtime import create_memory_runtime
 from core.memory.snapshot import MemorySnapshotManager, MemorySnapshotUnsafePathError
 
 home = Path(sys.argv[1])
+snapshot_manager = MemorySnapshotManager(home)
 try:
-    MemorySnapshotManager(home)
+    snapshot_manager.create("unsupported")
 except MemorySnapshotUnsafePathError:
     pass
 else:
@@ -56,6 +61,27 @@ except ConfinedFilesystemError as error:
     assert "no-follow" in str(error)
 else:
     raise AssertionError("Memory persistence accepted a host without O_NOFOLLOW")
+
+for enabled in (False, True):
+    runtime_home = home / ("enabled" if enabled else "disabled")
+    artifact = MemoryArtifactManager(
+        runtime_dir=runtime_home / "runtime" / "memory",
+        provider_root=runtime_home / "memory" / "everos-root",
+        offline=True,
+    )
+    runtime = create_memory_runtime(
+        MemoryConfig(enabled=enabled),
+        artifact_manager=artifact,
+        effective_home=runtime_home,
+    )
+    assert runtime.available is False
+    result = asyncio.run(runtime.reconcile(MemoryConfig(enabled=enabled)))
+    if enabled:
+        assert result == {"ok": False, "error": "memory_store_unavailable"}
+    else:
+        assert result == {"ok": True, "state": "disabled"}
+    asyncio.run(runtime.close())
+    assert not runtime_home.exists()
 assert not home.exists()
 """
 
@@ -263,6 +289,64 @@ def test_confined_atomic_replace_stays_on_pinned_parent_during_directory_swap(
     assert swapped
     assert (held / "target").read_text(encoding="utf-8") == "published"
     assert sentinel.read_text(encoding="utf-8") == "outside survives"
+
+
+@pytest.mark.parametrize("replacement_type", ["regular", "symlink"])
+def test_confined_atomic_replace_cleans_a_source_replaced_during_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_type: str,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    stage = home / "stage"
+    stage.write_text("original", encoding="utf-8")
+    stage.chmod(0o600)
+    target = home / "target"
+    held = home / "held"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside survives", encoding="utf-8")
+
+    from core.memory import confined_filesystem
+
+    real_replace = confined_filesystem.os.replace
+
+    def swap_source_before_replace(source, destination, *args, **kwargs):
+        stage.rename(held)
+        if replacement_type == "regular":
+            stage.write_text("raced", encoding="utf-8")
+            stage.chmod(0o600)
+        else:
+            stage.symlink_to(outside)
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "replace", swap_source_before_replace)
+
+    with pytest.raises(ConfinedFilesystemError):
+        replace_confined(home, stage, target)
+
+    assert not target.exists()
+    assert not target.is_symlink()
+    assert held.read_text(encoding="utf-8") == "original"
+    assert outside.read_text(encoding="utf-8") == "outside survives"
+
+
+def test_confined_replace_and_cleanup_accept_owner_only_directory_modes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    stage = home / "stage"
+    stage.mkdir(mode=0o700)
+    (stage / "value.txt").write_text("preserved", encoding="utf-8")
+    stage.chmod(0o500)
+    target = home / "target"
+
+    replace_confined(home, stage, target)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o500
+    remove_confined_path(home, target)
+    assert not target.exists()
 
 
 def test_private_sqlite_database_prepares_and_hardens_owned_files(tmp_path: Path) -> None:

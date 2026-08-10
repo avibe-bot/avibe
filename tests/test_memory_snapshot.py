@@ -24,6 +24,7 @@ from core.memory.snapshot import (
     MemorySnapshotManager,
     MemorySnapshotUnsafePathError,
     MemorySnapshotVerificationError,
+    SnapshotSurface,
 )
 
 
@@ -362,6 +363,37 @@ def test_snapshot_restore_relocates_and_restores_missing_as_absent(tmp_path: Pat
     assert not (relocated_home / "memory/call-log/call-log.db").exists()
     assert not (relocated_home / "memory/attachments").exists()
     assert source_home / "state/memory/memory.sqlite" != relocated_home / "state/memory/memory.sqlite"
+
+
+def test_snapshot_restore_preserves_and_cleans_owner_only_tree_modes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    target = _private_directory(home / "memory/everos-root", home)
+    original = _private_file(target / "profile.json", b"before", home)
+    target.chmod(0o500)
+    manager = MemorySnapshotManager(
+        home,
+        surfaces=(SnapshotSurface("memory/everos-root", "tree"),),
+    )
+    snapshot = manager.create("owner-only-tree")
+
+    target.chmod(0o700)
+    original.write_bytes(b"after")
+    original.chmod(0o600)
+    target.chmod(0o500)
+
+    restored = manager.restore(
+        snapshot.snapshot_id,
+        expected_manifest_sha256=snapshot.manifest_sha256,
+        expected_surface_digests=snapshot.surface_digests(),
+    )
+
+    assert restored == snapshot
+    assert stat.S_IMODE(target.stat().st_mode) == 0o500
+    assert original.read_bytes() == b"before"
+    assert not list(home.rglob("*.before-restore-*"))
+    assert not list(home.rglob("*.restore-*"))
 
 
 def test_streaming_manifest_crosses_batches_and_restores_exact_tree(

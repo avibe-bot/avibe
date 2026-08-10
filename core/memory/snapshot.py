@@ -626,12 +626,6 @@ class MemorySnapshotManager:
         surfaces: Sequence[SnapshotSurface] = DEFAULT_MEMORY_SNAPSHOT_SURFACES,
         operation_guard: Callable[[], None] | None = None,
     ) -> None:
-        try:
-            required_no_follow_flag()
-        except ConfinedFilesystemError as error:
-            raise MemorySnapshotUnsafePathError(
-                "Memory snapshots require no-follow filesystem support"
-            ) from error
         self._effective_home = _absolute_without_resolve(effective_home)
         root_value = Path(snapshot_root)
         if root_value.is_absolute():
@@ -803,6 +797,7 @@ class MemorySnapshotManager:
     ) -> MemorySnapshot:
         """Verify the manifest, every byte, every mode, and every tree digest."""
 
+        self._require_no_follow()
         identifier = _validated_snapshot_id(snapshot_id)
         directory = self.snapshot_path(identifier)
         with self._verified_directory(identifier, directory) as (snapshot, _index):
@@ -949,8 +944,18 @@ class MemorySnapshotManager:
             return snapshot
 
     def _assert_operation_allowed(self) -> None:
+        self._require_no_follow()
         if self._operation_guard is not None:
             self._operation_guard()
+
+    @staticmethod
+    def _require_no_follow() -> None:
+        try:
+            required_no_follow_flag()
+        except ConfinedFilesystemError as error:
+            raise MemorySnapshotUnsafePathError(
+                "Memory snapshots require no-follow filesystem support"
+            ) from error
 
     def _remove_clear_snapshot(
         self,
@@ -962,6 +967,7 @@ class MemorySnapshotManager:
     ) -> None:
         """Remove one journal-authorized clear snapshot."""
 
+        self._require_no_follow()
         identifier = _validated_snapshot_id(snapshot_id)
         directory = self.snapshot_path(identifier)
         tombstone = self._snapshot_root / f".{identifier}.gc"
@@ -1002,6 +1008,7 @@ class MemorySnapshotManager:
     ) -> None:
         """Discard one storage-authorized unrecorded clear snapshot."""
 
+        self._require_no_follow()
         identifier = _validated_snapshot_id(snapshot_id)
         expected_relative = (
             PurePosixPath(self._snapshot_root_relative) / identifier

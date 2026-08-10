@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -527,6 +528,37 @@ def test_memory_artifact_status_marks_unreadable_active_pointer_as_error(tmp_pat
     assert status["installed"] is False
     assert status["status"] == "error"
     assert status["reason"] == "memory_runtime_install_failed"
+    assert stat.S_IMODE(manager.runtime_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((manager.runtime_dir / "current.json").stat().st_mode) == 0o600
+
+
+def test_memory_artifact_hardens_a_valid_legacy_active_pointer(tmp_path: Path) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    manager.runtime_dir.mkdir(parents=True, mode=0o755)
+    manager.runtime_dir.chmod(0o755)
+    current = manager.runtime_dir / "current.json"
+    current.write_text(json.dumps({"legacy": True}), encoding="utf-8")
+    current.chmod(0o644)
+
+    assert manager._read_active_pointer() == ({"legacy": True}, False)
+    assert stat.S_IMODE(manager.runtime_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(current.stat().st_mode) == 0o600
+
+
+def test_memory_artifact_refuses_to_harden_a_hardlinked_legacy_pointer(
+    tmp_path: Path,
+) -> None:
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    manager.runtime_dir.mkdir(parents=True, mode=0o755)
+    manager.runtime_dir.chmod(0o755)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"outside": True}), encoding="utf-8")
+    outside.chmod(0o644)
+    os.link(outside, manager.runtime_dir / "current.json")
+
+    assert manager._read_active_pointer() == (None, True)
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+    assert json.loads(outside.read_text(encoding="utf-8")) == {"outside": True}
 
 
 @pytest.mark.parametrize("binary_state", ["missing", "tampered"])

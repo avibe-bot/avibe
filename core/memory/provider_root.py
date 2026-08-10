@@ -82,12 +82,6 @@ class ProviderRoot:
     """Own all synchronous security, format, and transition policy for one root."""
 
     def __init__(self, path: Path | str, *, effective_home: Path | str) -> None:
-        try:
-            required_no_follow_flag()
-        except ConfinedFilesystemError as error:
-            raise ProviderRootError(
-                "memory provider root requires no-follow filesystem support"
-            ) from error
         self.path = Path(path)
         self._effective_home = Path(effective_home)
 
@@ -171,6 +165,7 @@ class ProviderRoot:
     ) -> ProviderRootRollback | None:
         """Rewrite an owned empty root for a candidate and return its rollback."""
 
+        self._require_no_follow()
         try:
             self.path.lstat()
         except FileNotFoundError:
@@ -266,6 +261,7 @@ class ProviderRoot:
             raise ProviderRootError("memory provider root still contains data")
 
     def _read_sentinel(self) -> dict[str, str | int]:
+        self._require_no_follow()
         path = self.path / ROOT_SENTINEL_FILENAME
         expected = self._lstat(path, "memory provider root sentinel")
         if (
@@ -338,6 +334,7 @@ class ProviderRoot:
         meta: ProviderRootMeta,
         metadata: ProviderRootMetadata,
     ) -> None:
+        self._require_no_follow()
         if not (
             _is_metadata_value(meta.provider_root_id)
             and _is_metadata_value(metadata.provider_root_format)
@@ -422,6 +419,7 @@ class ProviderRoot:
                 os.close(descriptor)
 
     def _ensure_chain_safe(self) -> None:
+        self._require_no_follow()
         home = Path(os.path.abspath(os.fspath(self._effective_home)))
         current = Path(os.path.abspath(os.fspath(self.path)))
         while True:
@@ -441,6 +439,15 @@ class ProviderRoot:
             if current == current.parent or current == home:
                 break
             current = current.parent
+
+    @staticmethod
+    def _require_no_follow() -> None:
+        try:
+            required_no_follow_flag()
+        except ConfinedFilesystemError as error:
+            raise ProviderRootError(
+                "memory provider root requires no-follow filesystem support"
+            ) from error
 
     @staticmethod
     def _lstat(path: Path, label: str) -> os.stat_result:

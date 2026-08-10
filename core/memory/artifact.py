@@ -35,6 +35,7 @@ from core.memory.confined_filesystem import (
     create_confined_file,
     ensure_private_directory,
     fsync_directory,
+    open_and_harden_confined_regular_file,
     open_confined_regular_file,
     remove_confined_path,
     replace_confined,
@@ -415,7 +416,8 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return None, True
 
         try:
-            descriptor = open_confined_regular_file(self.runtime_dir, path)
+            ensure_private_directory(self.runtime_dir, self.runtime_dir)
+            descriptor = open_and_harden_confined_regular_file(self.runtime_dir, path)
         except (ConfinedFilesystemError, OSError):
             return None, True
         try:
