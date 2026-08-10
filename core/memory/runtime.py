@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config
+from config.v2_config import MemoryConfig, V2Config, config_write_transaction
 from core.memory.artifact import (
     EVEROS_VERSION,
     MemoryArtifactCandidate,
@@ -2057,13 +2057,13 @@ class MemoryRuntime:
         """Clear a persisted candidate marker only when its full config still matches."""
 
         try:
-            with CONFIG_LOCK:
+            with config_write_transaction():
                 persisted = V2Config.load()
                 if not _same_memory_configuration(persisted.memory, config):
                     return False
                 if persisted.memory.embedding_change_pending:
                     persisted.memory.embedding_change_pending = False
-                    persisted.save()
+                    persisted.save(preserve_memory=False)
                 config.embedding_change_pending = False
             return True
         except Exception:

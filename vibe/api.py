@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config, config_write_transaction
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -929,7 +929,7 @@ def save_config(
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
 
-    with CONFIG_LOCK:
+    with config_write_transaction():
         base_payload: dict = {}
         base_config: Optional[V2Config] = None
         try:
@@ -995,7 +995,7 @@ def save_config(
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store)
-        config.save()
+        config.save(preserve_memory=not allow_memory)
         # The activity-streaming gate (ui.show_agent_activity) is cached in-process
         # by the message mirror; a save that flips it must take effect immediately,
         # not after the cache TTL. Reset it here (same process) — best-effort.

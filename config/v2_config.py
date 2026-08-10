@@ -5,10 +5,11 @@ import os
 import re
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Mapping, Optional, Union
+from typing import Iterator, List, Literal, Mapping, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 from config import paths
@@ -28,6 +29,47 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
+_CONFIG_WRITE_TRANSACTION = threading.local()
+CONFIG_WRITE_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+@contextmanager
+def config_write_transaction(
+    config_path: Optional[Path] = None,
+) -> Iterator[Path]:
+    """Serialize config RMW with process-first ordering and bounded file locking.
+
+    Same-path nesting reuses the outer file lock; different-path nesting is
+    rejected so callers cannot introduce a cross-file lock-order inversion.
+    """
+
+    paths.ensure_data_dirs()
+    path = config_path or paths.get_config_path()
+    transaction_key = path.resolve(strict=False)
+    lock_path = transaction_key.with_name(f".{transaction_key.name}.lock")
+
+    with CONFIG_LOCK:
+        active_key = getattr(_CONFIG_WRITE_TRANSACTION, "key", None)
+        if active_key is not None:
+            if active_key != transaction_key:
+                raise RuntimeError(
+                    "Cannot nest config write transactions for different paths: "
+                    f"{active_key} and {transaction_key}"
+                )
+            yield path
+            return
+
+        from storage.lock import MigrationFileLock
+
+        with MigrationFileLock(
+            lock_path,
+            timeout_seconds=CONFIG_WRITE_LOCK_TIMEOUT_SECONDS,
+        ):
+            _CONFIG_WRITE_TRANSACTION.key = transaction_key
+            try:
+                yield path
+            finally:
+                del _CONFIG_WRITE_TRANSACTION.key
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 
@@ -1593,7 +1635,12 @@ class V2Config:
 
         return config
 
-    def save(self, config_path: Optional[Path] = None) -> None:
+    def save(
+        self,
+        config_path: Optional[Path] = None,
+        *,
+        preserve_memory: bool = True,
+    ) -> None:
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         self.platforms.validate()
@@ -1659,9 +1706,19 @@ class V2Config:
             "agent_status_no_output_ms": self.agent_status_no_output_ms,
             "setup_completed": self.setup_completed,
         }
-        content = json.dumps(payload, indent=2)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with CONFIG_LOCK:
+        with config_write_transaction(path):
+            if preserve_memory and path.exists():
+                current_payload = json.loads(path.read_text(encoding="utf-8"))
+                current_memory = (
+                    current_payload.get("memory")
+                    if isinstance(current_payload, dict)
+                    else None
+                )
+                if isinstance(current_memory, dict):
+                    payload["memory"] = current_memory
+                    self.memory = V2Config.from_payload(current_payload).memory
+            content = json.dumps(payload, indent=2)
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
                 tmp.write(content)
                 tmp.flush()
