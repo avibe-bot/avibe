@@ -135,12 +135,16 @@ def test_settings_language_save_stays_responsive_and_settles_on_cancellation(
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
         release_lock.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(exercise())
     assert V2Config.load().language == "zh"
+    assert handler.config.language == "zh"
 
 
 class _FlatScopeSessions:

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from core.blocking import CancellationSettlement
 from core.memory.blocking import run_blocking
 
 
@@ -121,5 +122,55 @@ def test_run_blocking_completed_result_is_not_changed_by_late_cancellation() -> 
         assert await call == "settled"
         assert call.cancel("too late") is False
         assert call.result() == "settled"
+
+    asyncio.run(run())
+
+
+def test_cancellation_settlement_runs_followup_before_rethrowing_first_cancel() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    events: list[str] = []
+
+    def commit() -> str:
+        entered.set()
+        assert release.wait(timeout=2)
+        events.append("commit")
+        return "committed"
+
+    async def reconcile(value: str) -> None:
+        events.append(f"reconcile:{value}")
+
+    async def run() -> None:
+        async def operation() -> None:
+            settlement = CancellationSettlement()
+            committed = await settlement.run_blocking(commit)
+            await settlement.wait(reconcile(committed))
+            settlement.raise_if_cancelled()
+
+        call = asyncio.create_task(operation())
+        assert await asyncio.to_thread(entered.wait, 1)
+        call.cancel("first")
+        await asyncio.sleep(0)
+        call.cancel("second")
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await call
+        assert raised.value.args == ("first",)
+
+    asyncio.run(run())
+    assert events == ["commit", "reconcile:committed"]
+
+
+def test_cancellation_settlement_propagates_child_cancellation_without_retaining_it() -> None:
+    async def child() -> None:
+        raise asyncio.CancelledError("child stopped")
+
+    async def run() -> None:
+        settlement = CancellationSettlement()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await settlement.wait(child())
+        assert raised.value.args == ("child stopped",)
+        assert not settlement.cancelled
 
     asyncio.run(run())

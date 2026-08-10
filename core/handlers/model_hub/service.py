@@ -28,7 +28,7 @@ from config.v2_config import (
     config_write_transaction,
 )
 from core.services.settings import default_config
-from core.memory.blocking import run_blocking
+from core.blocking import CancellationSettlement, run_blocking
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
 from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
@@ -514,8 +514,16 @@ class ModelHubService:
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
         return ModelHubConfig.from_payload(config.to_payload())
 
-    async def _save_store(self, config: ModelHubConfig) -> None:
-        await run_blocking(self.store.save, config)
+    async def _save_store(
+        self,
+        config: ModelHubConfig,
+        *,
+        settlement: CancellationSettlement | None = None,
+    ) -> None:
+        if settlement is None:
+            await run_blocking(self.store.save, config)
+        else:
+            await settlement.run_blocking(self.store.save, config)
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
@@ -534,19 +542,30 @@ class ModelHubService:
         self._engine_synced = False
         previous_bindings = self._bindings(previous)
         updated_bindings = self._bindings(updated)
-        await self._save_store(updated)
+        settlement = CancellationSettlement()
         try:
-            await self._sync_sources(updated, force_empty=bool(previous_bindings))
+            await self._save_store(updated, settlement=settlement)
         except Exception:
-            await self._save_store(previous)
+            settlement.raise_if_cancelled()
+            raise
+        try:
+            await settlement.wait(
+                self._sync_sources(updated, force_empty=bool(previous_bindings))
+            )
+        except (Exception, asyncio.CancelledError):
+            await self._save_store(previous, settlement=settlement)
             try:
-                await self._sync_sources(previous, force_empty=bool(updated_bindings))
+                await settlement.wait(
+                    self._sync_sources(previous, force_empty=bool(updated_bindings))
+                )
             except ModelHubError:
                 self._engine_synced = False
             else:
                 self._engine_synced = True
+            settlement.raise_if_cancelled()
             raise
         self._engine_synced = True
+        settlement.raise_if_cancelled()
 
     async def _ensure_engine_synced(self) -> None:
         pending_revocations = self.revocations.list()

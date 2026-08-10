@@ -49,7 +49,7 @@ from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureRequest
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
-from core.memory.blocking import run_blocking
+from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)

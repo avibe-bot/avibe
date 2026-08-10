@@ -6,7 +6,7 @@ from typing import Optional
 
 from modules.agents import get_agent_display_name
 from modules.im import MessageContext, InlineKeyboard, InlineButton
-from core.memory.blocking import run_blocking
+from core.blocking import CancellationSettlement
 from core.modals import RoutingModalData, RoutingModalSelection
 from vibe import backend_model_catalog
 
@@ -706,6 +706,7 @@ class SettingsHandler(BaseHandler):
 
             language_saved = True
             if language is not None and language != self.config.language:
+                settlement = CancellationSettlement()
                 try:
                     from config.v2_config import V2Config, config_write_transaction
 
@@ -715,11 +716,13 @@ class SettingsHandler(BaseHandler):
                             v2_config.language = language
                             v2_config.save()
 
-                    await run_blocking(persist_language)
+                    await settlement.run_blocking(persist_language)
                     self.config.language = language
+                    settlement.raise_if_cancelled()
                 except Exception as err:
                     language_saved = False
                     logger.error(f"Failed to persist language setting: {err}")
+                    settlement.raise_if_cancelled()
 
             logger.info(
                 f"Updated settings for {settings_key}: show types = {show_message_types}, "

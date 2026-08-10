@@ -272,7 +272,7 @@ def test_post_web_success_hook_invocation_when_set(
     monkeypatch.setattr(service, "_persist_backend_auth_mode", persist)
     service._post_web_success_hook = hook
     _run(service._invoke_post_web_success_hook("codex"))
-    persist.assert_awaited_once_with("codex", "oauth")
+    persist.assert_awaited_once_with("codex", "oauth", settlement=ANY)
     assert calls == ["codex"]
 
 
@@ -1284,6 +1284,60 @@ def test_remove_web_auth_fresh_loads_config_and_saves_off_loop(
     assert save_threads and all(
         thread_id != event_loop_thread for thread_id in save_threads
     )
+
+
+def test_remove_web_auth_settles_live_state_and_hook_before_cancellation(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.agents.codex.base_url = "https://old.example.test/v1"
+    config.save()
+    service.controller.config = V2Config.load()
+    service._run_utility_command = AsyncMock(return_value=(True, None))
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    hook_calls: list[str] = []
+    original_save = V2Config.save
+
+    def blocking_save(config, *args, **kwargs):
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        return original_save(config, *args, **kwargs)
+
+    monkeypatch.setattr(V2Config, "save", blocking_save)
+    service._post_web_success_hook = hook_calls.append
+
+    async def exercise() -> None:
+        task = asyncio.create_task(service.remove_web_auth("codex"))
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(exercise())
+
+    persisted = V2Config.load().agents.codex
+    live = service.controller.config.agents.codex
+    assert persisted.auth_mode == "oauth"
+    assert persisted.api_key is None
+    assert persisted.base_url is None
+    assert live.auth_mode == "oauth"
+    assert live.api_key is None
+    assert live.base_url is None
+    assert hook_calls == ["codex"]
 
 
 def test_remove_web_auth_surfaces_logout_failure(

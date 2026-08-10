@@ -38,7 +38,7 @@ from modules.agents.opencode.utils import (
     resolve_opencode_reasoning_effort,
 )
 from modules.im import InlineButton, InlineKeyboard, MessageContext
-from core.memory.blocking import run_blocking
+from core.blocking import CancellationSettlement, run_blocking
 from core.resource_governance import governor_from_controller
 from core.message_output import MessageOutput, terminal_turn_output
 from vibe.i18n import t as i18n_t
@@ -1472,9 +1472,15 @@ class AgentAuthService:
             await flow.reader_task
             ok, detail = await self._verify_login(flow)
             if ok:
+                settlement = CancellationSettlement()
                 if flow.backend == "codex":
-                    await self._persist_backend_auth_mode(flow.backend, "oauth")
-                await self._refresh_backend_runtime(flow.backend)
+                    await self._persist_backend_auth_mode(
+                        flow.backend,
+                        "oauth",
+                        settlement=settlement,
+                    )
+                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                settlement.raise_if_cancelled()
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
@@ -1524,9 +1530,20 @@ class AgentAuthService:
             flow.force_oauth = True
             ok, detail = await self._verify_login(flow)
             if ok:
-                await self._persist_backend_auth_mode(flow.backend, "oauth")
-                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
-                await self._refresh_backend_runtime(flow.backend)
+                settlement = CancellationSettlement()
+                await self._persist_backend_auth_mode(
+                    flow.backend,
+                    "oauth",
+                    settlement=settlement,
+                )
+                await settlement.wait(
+                    self._finish_claude_oauth_attempt(
+                        flow.claude_oauth_attempt,
+                        succeeded=True,
+                    )
+                )
+                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                settlement.raise_if_cancelled()
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
@@ -2180,12 +2197,14 @@ class AgentAuthService:
                     env=self._build_claude_full_subprocess_env(force_oauth=True),
                 )
 
+        settlement = CancellationSettlement()
         try:
             await self._save_backend_auth_fields(
                 backend,
                 "oauth",
                 clear_credentials=True,
                 mark_mode_explicit=backend == "claude",
+                settlement=settlement,
             )
         except Exception as err:  # noqa: BLE001
             # Disk state has already been cleared; surface the V2Config
@@ -2199,9 +2218,10 @@ class AgentAuthService:
         hook = self._post_web_success_hook
         if callable(hook):
             try:
-                await asyncio.to_thread(hook, backend)
+                await settlement.run_blocking(hook, backend)
             except Exception as err:  # noqa: BLE001
                 logger.warning("post_web_success_hook failed after remove for %s: %s", backend, err)
+        settlement.raise_if_cancelled()
         # Surface logout failures even though V2Config was cleared. The
         # on-disk credentials may still be intact (e.g. ``codex logout``
         # missing, exited non-zero, or timed out), and the user needs
@@ -3117,8 +3137,13 @@ class AgentAuthService:
             flow.state = "verifying"
             ok, detail = await self._verify_web_login(flow.backend, force_oauth=flow.backend == "claude")
             if ok:
-                await self._invoke_post_web_success_hook(flow.backend)
-                await self._refresh_backend_runtime(flow.backend)
+                settlement = CancellationSettlement()
+                await self._invoke_post_web_success_hook(
+                    flow.backend,
+                    settlement=settlement,
+                )
+                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                settlement.raise_if_cancelled()
                 flow.state = "success"
             else:
                 flow.state = "failed"
@@ -3151,9 +3176,19 @@ class AgentAuthService:
                 claude_oauth_attempt=flow.claude_oauth_attempt,
             )
             if ok:
-                await self._invoke_post_web_success_hook(flow.backend)
-                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
-                await self._refresh_backend_runtime(flow.backend)
+                settlement = CancellationSettlement()
+                await self._invoke_post_web_success_hook(
+                    flow.backend,
+                    settlement=settlement,
+                )
+                await settlement.wait(
+                    self._finish_claude_oauth_attempt(
+                        flow.claude_oauth_attempt,
+                        succeeded=True,
+                    )
+                )
+                await settlement.wait(self._refresh_backend_runtime(flow.backend))
+                settlement.raise_if_cancelled()
                 flow.state = "success"
             else:
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3209,7 +3244,12 @@ class AgentAuthService:
                 if task and not task.done():
                     task.cancel()
 
-    async def _invoke_post_web_success_hook(self, backend: str) -> None:
+    async def _invoke_post_web_success_hook(
+        self,
+        backend: str,
+        *,
+        settlement: CancellationSettlement | None = None,
+    ) -> None:
         # OAuth completed via the web UI implies the user wants
         # ``auth_mode = "oauth"``. Persist it before the controller-refresh
         # hook fires so the live agent reloads with the right mode rather
@@ -3222,15 +3262,25 @@ class AgentAuthService:
         # Skipped for opencode: ``OpenCodeConfig`` has no ``auth_mode``
         # field (auth is per-provider, not global), so persisting one
         # would add a stray attribute and could mislead future readers.
+        owns_settlement = settlement is None
+        settlement = settlement or CancellationSettlement()
         if backend != "opencode":
-            await self._persist_backend_auth_mode(backend, "oauth")
+            await self._persist_backend_auth_mode(
+                backend,
+                "oauth",
+                settlement=settlement,
+            )
         hook = self._post_web_success_hook
         if not callable(hook):
+            if owns_settlement:
+                settlement.raise_if_cancelled()
             return
         try:
-            await asyncio.to_thread(hook, backend)
+            await settlement.run_blocking(hook, backend)
         except Exception as err:  # noqa: BLE001
             logger.warning("post_web_success_hook failed for %s: %s", backend, err)
+        if owns_settlement:
+            settlement.raise_if_cancelled()
 
     async def _clear_claude_settings_env_for_oauth(self) -> None:
         try:
@@ -3533,24 +3583,35 @@ class AgentAuthService:
         """Backward-compatible name for API-key save cleanup."""
         return await self.clear_claude_oauth_credentials_only()
 
-    async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
+    async def _persist_backend_auth_mode(
+        self,
+        backend: str,
+        auth_mode: str,
+        *,
+        settlement: CancellationSettlement | None = None,
+    ) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
+        owns_settlement = settlement is None
+        settlement = settlement or CancellationSettlement()
         if backend == "claude" and auth_mode == "oauth":
-            await self._clear_claude_settings_env_for_oauth()
+            await settlement.wait(self._clear_claude_settings_env_for_oauth())
         if backend == "codex" and auth_mode == "oauth":
-            await self._clear_codex_api_key_for_oauth()
+            await settlement.wait(self._clear_codex_api_key_for_oauth())
         try:
             await self._save_backend_auth_fields(
                 backend,
                 auth_mode,
                 clear_credentials=backend == "codex" and auth_mode == "oauth",
                 mark_mode_explicit=backend == "claude",
+                settlement=settlement,
             )
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
                 auth_mode, backend, err,
             )
+        if owns_settlement:
+            settlement.raise_if_cancelled()
 
     async def _save_backend_auth_fields(
         self,
@@ -3559,6 +3620,7 @@ class AgentAuthService:
         *,
         clear_credentials: bool,
         mark_mode_explicit: bool,
+        settlement: CancellationSettlement | None = None,
     ) -> None:
         """Fresh-load and persist backend auth fields without blocking the loop."""
 
@@ -3584,21 +3646,26 @@ class AgentAuthService:
         def persist() -> dict[str, Any] | None:
             from config.v2_config import V2Config, config_write_transaction
 
-            if isinstance(controller_config, V2Config):
-                with config_write_transaction():
-                    try:
-                        config = V2Config.load()
-                    except FileNotFoundError:
-                        config = controller_config
+            with config_write_transaction():
+                try:
+                    config = V2Config.load()
+                except FileNotFoundError:
+                    config = controller_config if isinstance(controller_config, V2Config) else None
+
+                if config is not None:
                     target = getattr(config.agents, backend, None)
-                    if target is None:
-                        return None
-                    if update_target(target):
-                        config.save()
-            else:
-                config = controller_config
-                target = getattr(getattr(config, "agents", None), backend, None)
-                saver = getattr(config, "save", None) if config is not None else None
+                    saver = config.save
+                else:
+                    target = getattr(
+                        getattr(controller_config, "agents", None),
+                        backend,
+                        None,
+                    ) or getattr(controller_config, backend, None)
+                    saver = (
+                        getattr(controller_config, "save", None)
+                        if controller_config is not None
+                        else None
+                    )
                 if target is None or not callable(saver):
                     return None
                 if update_target(target):
@@ -3610,17 +3677,28 @@ class AgentAuthService:
                 "auth_mode_set": getattr(target, "auth_mode_set", None),
             }
 
-        persisted = await run_blocking(persist)
+        owns_settlement = settlement is None
+        settlement = settlement or CancellationSettlement()
+        try:
+            persisted = await settlement.run_blocking(persist)
+        except Exception:
+            if owns_settlement:
+                settlement.raise_if_cancelled()
+            raise
         live_target = getattr(
             getattr(controller_config, "agents", None),
             backend,
             None,
-        )
+        ) or getattr(controller_config, backend, None)
         if persisted is None or live_target is None:
+            if owns_settlement:
+                settlement.raise_if_cancelled()
             return
         for field, value in persisted.items():
             if field != "auth_mode_set" or value is not None:
                 setattr(live_target, field, value)
+        if owns_settlement:
+            settlement.raise_if_cancelled()
 
     async def _terminate_web_flow(
         self,

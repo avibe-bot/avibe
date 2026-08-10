@@ -1420,6 +1420,73 @@ def test_async_mutation_settles_config_save_before_propagating_cancellation(tmp_
     assert service.store.load().agents["claude"].mode == "direct"
 
 
+def test_synced_mutation_settles_engine_projection_before_cancellation(tmp_path):
+    adapter = FakeAdapter([])
+    service = _service(tmp_path, adapter)
+    original_save = service.store.save
+    save_entered = threading.Event()
+    release_save = threading.Event()
+
+    def blocking_save(config):
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        original_save(config)
+
+    service.store.save = blocking_save
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            service.create_source(
+                {
+                    "kind": "api_key",
+                    "vendor": "anthropic",
+                    "display_name": "Cancellation-safe source",
+                    "key": "sk-test-settlement-only",
+                }
+            )
+        )
+        assert await asyncio.to_thread(save_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_save.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    persisted = service.store.load()
+    assert persisted.sources[-1].display_name == "Cancellation-safe source"
+    assert adapter.synced
+    assert adapter.synced[-1][-1].source_id == persisted.sources[-1].id
+
+
+def test_synced_mutation_rolls_back_when_engine_awaitable_cancels_itself(tmp_path):
+    class SelfCancellingAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            self.synced.append(tuple(bindings))
+            if len(self.synced) == 1:
+                raise asyncio.CancelledError("engine sync stopped")
+
+    adapter = SelfCancellingAdapter([])
+    service = _service(tmp_path, adapter)
+
+    async def exercise() -> None:
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await service.patch_source(
+                "src_primary01",
+                {"base_url": "https://new.example.test"},
+            )
+        assert raised.value.args == ("engine sync stopped",)
+
+    asyncio.run(exercise())
+
+    assert service.store.load().sources[0].base_url is None
+    assert len(adapter.synced) == 2
+
+
 def test_source_creation_revokes_credential_when_persist_fails(tmp_path):
     adapter = FakeAdapter([])
     service = _service(tmp_path, adapter)

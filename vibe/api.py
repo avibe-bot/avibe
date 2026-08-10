@@ -42,7 +42,7 @@ from config.v2_settings import (
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
-from core.memory.blocking import run_blocking
+from core.blocking import CancellationSettlement, run_blocking
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -10557,21 +10557,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         logger.warning("OpenCode custom provider delete failed for %s: %s", pid, exc, exc_info=True)
         return {"ok": False, "message": str(exc)}
 
-    try:
-        await run_blocking(_clear_opencode_default_provider_if, pid)
-    except Exception as exc:
-        logger.warning(
-            "Failed to revalidate opencode.default_provider after custom provider delete for %s: %s",
-            pid,
-            exc,
-        )
-
-    _OPENCODE_OPTIONS_CACHE.clear()
-    try:
-        restart = restart_backend("opencode")
-    except Exception as exc:
-        restart = {"ok": False, "message": str(exc)}
-    _OPENCODE_OPTIONS_CACHE.clear()
+    restart = await _settle_opencode_delete_runtime(pid, clear_default=True)
     return {"ok": True, "provider_id": pid, "restart": restart}
 
 
@@ -10979,6 +10965,37 @@ def _clear_opencode_default_provider_if(provider_id: str) -> None:
             )
 
 
+async def _settle_opencode_delete_runtime(
+    provider_id: str,
+    *,
+    clear_default: bool,
+) -> dict:
+    """Settle persisted delete state into the live OpenCode projection."""
+
+    settlement = CancellationSettlement()
+    if clear_default:
+        try:
+            await settlement.run_blocking(
+                _clear_opencode_default_provider_if,
+                provider_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to revalidate opencode.default_provider after delete for %s: %s",
+                provider_id,
+                exc,
+            )
+
+    _OPENCODE_OPTIONS_CACHE.clear()
+    try:
+        restart = await settlement.run_blocking(restart_backend, "opencode")
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
+    _OPENCODE_OPTIONS_CACHE.clear()
+    settlement.raise_if_cancelled()
+    return restart
+
+
 def delete_opencode_provider_auth(provider_id: str) -> dict:
     from vibe.async_bridge import run_coroutine_blocking
 
@@ -11036,21 +11053,15 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     # credential, but log it so the user can investigate if the
     # default sticks around after a "Remove key" click.
     if removed_auth:
-        _OPENCODE_OPTIONS_CACHE.clear()
-        try:
-            await run_blocking(_clear_opencode_default_provider_if, pid)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to revalidate opencode.default_provider after delete for %s: %s",
-                pid,
-                exc,
-            )
-
-    try:
-        result["restart"] = restart_backend("opencode")
-    except Exception as exc:
-        logger.warning("OpenCode auto-restart after delete failed for %s: %s", provider_id, exc)
-        result["restart"] = {"ok": False, "message": str(exc)}
+        result["restart"] = await _settle_opencode_delete_runtime(
+            pid,
+            clear_default=True,
+        )
+    else:
+        result["restart"] = await _settle_opencode_delete_runtime(
+            pid,
+            clear_default=False,
+        )
     return result
 
 

@@ -184,6 +184,7 @@ def test_delete_provider_auth_settles_default_clear_on_cancellation(
     clear_entered = threading.Event()
     release_clear = threading.Event()
     clear_finished = threading.Event()
+    restart_calls: list[str] = []
 
     def blocking_clear(provider_id: str) -> None:
         assert provider_id == "deepseek"
@@ -198,10 +199,19 @@ def test_delete_provider_auth_settles_default_clear_on_cancellation(
     )
     monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", no_config_keys)
     monkeypatch.setattr(api, "_clear_opencode_default_provider_if", blocking_clear)
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
 
     async def exercise() -> None:
         task = asyncio.create_task(api.delete_opencode_provider_auth_async("deepseek"))
         assert await asyncio.to_thread(clear_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
@@ -212,6 +222,60 @@ def test_delete_provider_auth_settles_default_clear_on_cancellation(
     asyncio.run(exercise())
 
     assert clear_finished.is_set()
+    assert restart_calls == ["opencode"]
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+
+
+def test_delete_custom_provider_settles_live_restart_on_cancellation(
+    monkeypatch,
+) -> None:
+    clear_entered = threading.Event()
+    release_clear = threading.Event()
+    restart_calls: list[str] = []
+
+    def blocking_clear(provider_id: str) -> None:
+        assert provider_id == "custom"
+        clear_entered.set()
+        assert release_clear.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_opencode_custom_provider",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.remove_opencode_custom_provider",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(api, "_clear_opencode_default_provider_if", blocking_clear)
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            api.delete_opencode_custom_provider_async("custom")
+        )
+        assert await asyncio.to_thread(clear_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_clear.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert restart_calls == ["opencode"]
+    assert api._OPENCODE_OPTIONS_CACHE == {}
 
 
 def test_base_url_absent_leaves_existing_value_untouched(fake_save_env) -> None:
