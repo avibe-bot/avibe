@@ -34,6 +34,17 @@ There is no 07: it was removed during the design pass and the remaining frames
 were deliberately **not** renumbered, so that every existing reference to "08"
 keeps pointing at the same picture.
 
+**Nine frames are covered; eight are specified.** Frame 02's interaction contract is
+not in this file `[contract-gap]` G-32. Its drawing is merged and §1.2 records the
+decisions behind it, but the mutation the editor owns has no state in §0.8, and request
+sequencing, guard refusal, lost-response reconciliation and failure copy are exactly the
+class of fact a drawing cannot carry (§0.2 item 5). Rather than half-cover it, 02 is
+stated as excluded: the route sits in §0.4's table with that reason, the debt sits in
+§0.5 as G-32, and a separate round writes the section under the same register-and-gate
+discipline as the rest. Everything this file says about *the nine* — geometry, page
+furniture, the shared shell — still includes 02, because those are readings of a drawing
+and the drawing is there.
+
 All nine frames are 1440×1100 Dark. Light and mobile variants are not drawn yet, so
 every geometric statement in this file is a statement about Dark desktop until they are.
 
@@ -193,25 +204,34 @@ frames surfaced a *missing* behaviour invariant, it is listed in the PR
 description under 「建议移交 AC 账本」 for routing — not written here, and not
 written into §8 by this lane.
 
-**Contracted mutations these ten frames do not draw.** `api.md`'s route table
+**Contracted mutations these nine frames do not specify.** `api.md`'s route table
 carries twenty non-`GET` rows and **nineteen** state-changing routes: `POST
 /api/models/migration/scan` is declared 「Read-only.」 in that same table, so it is
 a read that takes a body, and counting by HTTP method rather than by declared
 semantics would put it on the mutation side of this section. This document reaches
 most of the nineteen and states an absence in §0.5 for the ones whose affordance
-is missing. The four below are neither:
-they belong to a surface outside this frame set, so silence about them here is a
-boundary, not an omission. The distinction matters because the two are fixed
-differently — a §0.5 row is work someone still owes, a row here is work that
-lives somewhere else — and because leaving either unwritten reads identically
-from inside this file: a capability the product has and nobody can find.
+is missing. The five below are neither.
 
-| Contracted route | Where it is drawn instead |
+Four of them belong to a surface outside this frame set, so silence about them here is
+a boundary, not an omission. The fifth is a different kind of row and its own cell says
+so: the route-chain `PUT` is drawn **inside** this frame set, by frame 02, and is
+excluded anyway, because 02's interaction contract has not been written and a separate
+round takes it. The distinction matters because the two kinds are fixed differently —
+a §0.5 row is work someone still owes, a row here is normally work that lives somewhere
+else — and because leaving any of them unwritten reads identically from inside this
+file: a capability the product has and nobody can find. The chain `PUT` is the case
+where both are true at once, so it is written in both places: excluded here so this
+document's accounting is complete, and registered as G-32 so the debt has an owner.
+A row here is therefore not a claim that nobody owes the work; it is a claim that this
+document is not where the work lands.
+
+| Contracted route | Where it lives instead |
 | --- | --- |
-| `POST /api/models/migration/scan` | The migration surface. Neither of these ten frames offers an import, and a scan with nothing to show it is not a screen. This is also the one row here that is not a mutation — the read-only `POST` counted out above — and it is listed anyway, because the question this table answers is 「where is this route drawn」 and not 「what does it write」 |
+| `POST /api/models/migration/scan` | The migration surface. Neither of these nine frames offers an import, and a scan with nothing to show it is not a screen. This is also the one row here that is not a mutation — the read-only `POST` counted out above — and it is listed anyway, because the question this table answers is 「where is this route drawn」 and not 「what does it write」 |
 | `POST /api/models/migration/apply` | The migration surface, following its own scan |
 | `PUT /api/models/agents/opencode/menu` | The open-menu configuration surface, which is where a menu is chosen; frame 01 renders the resulting supply and never edits the menu behind it |
-| `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these ten frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
+| `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these nine frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
+| `PUT /api/models/agents/<backend>/chain` | Frame 02 draws the editor that owns it and a later round specifies it; this document does neither. This is the one row in this table excluded from *inside* the frame set: §1.2 records the decisions behind the redrawn editor and states no build requirement, so this document holds no state for the mutation, no reading of its guarded `409`, no lost-response reconciliation and no failure copy. Excluded because 02's interaction contract has not been written and a separate round takes it, not because it lives on another surface; the debt is G-32 |
 
 ### 0.5 Contract-gap registry
 
@@ -237,7 +257,7 @@ than in a moving one.
 | G-13 | 03 order drawer, chains that already exist | an action that re-applies the current order to chains built before it, and the route behind it | `api.md` contracts `PUT /api/models/agents/<backend>/sources` for the order itself and `PUT /api/models/agents/<backend>/chain` for one model's hops; nothing bulk-rewrites stored chains, and `model-hub.md`'s `placement-v1` runs "only during Add Source". So the order genuinely cannot reach an existing chain, and §1.3 says that rather than implying the drawer keeps chains in sync |
 | G-14 | 08 adopt-gateway confirm, `effects.1` | the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source | `core/handlers/model_hub/service.py:set_agent_mode` (`ceace07f:2197`) validates the mode, assigns `agent.mode`, saves, and returns the payload — it creates no Source, writes no order, and has no other caller that does. The promise is a product decision and stays, because a switch that silently drops the user's working login is not a switch anybody would accept; what is missing is the code that keeps it |
 | G-15 | 06 source detail, a source's own name and Base URL | any affordance that edits them | `api.md` contracts `PATCH /api/models/sources/<id>` with `{display_name?, base_url?}`, and no frame draws a control that sends it: 06's inventory edits model rows only, and 05 sets both fields at creation and never again. So the route is named in §1.5 as evidence of what it *cannot* carry, never as a call this spec places on a screen |
-| G-16 | 01 upstream card and 06 source detail | any affordance that removes a **source** | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除 any of these ten frames draws is 06's row menu, which sends `DELETE /api/models/sources/<id>/models/<model_id>` — one manual model, not the source. So a source added by mistake, or left behind by a flow the user abandoned, can be seen on 01 and not removed from it. §1.4 said the opposite until this round: it told the reader 移除 was one press away, which was reading the model-row menu as if it removed the source |
+| G-16 | 01 upstream card and 06 source detail | any affordance that removes a **source** | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除 any of these nine frames draws is 06's row menu, which sends `DELETE /api/models/sources/<id>/models/<model_id>` — one manual model, not the source. So a source added by mistake, or left behind by a flow the user abandoned, can be seen on 01 and not removed from it. §1.4 said the opposite until this round: it told the reader 移除 was one press away, which was reading the model-row menu as if it removed the source |
 | G-17 | 04 add-subscription, a flow that expects something pasted back | the field that takes it, and the control that sends it | `oauth-flow.schema.json`'s `presentation.expects` runs `none · paste_code · paste_callback_url`, and `api.md` contracts `POST /api/models/oauth/submit` with `{flow_id, value}` for the second and third. Frame 04's foot is 取消 / 去登录 and draws no input, so only `expects: none` — the browser round trip — has a surface. §1.4 states the declaration rather than the browser assumption it carried before, and states this absence rather than describing a field no frame draws |
 | G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves | the route that carries a non-persisting observation of a source that does not exist yet | **The behaviour is contracted and the route is not**, so this row registers a gap *inside* the contract rather than an undecided question. AC-26 states the operation outright — 「Add Source exposes one non-persisting submission that combines connectivity classification with response-backed protocol observation」, returning classified reachability, authentication and a protocol 「without persisting a Source」 — and `model-hub.md`'s protocol-observation ruling of 2026-08-09 requires every stored `protocol` to trace back to a real response taken *before* Save, so an observation that saves nothing is not optional to the design. None of `api.md`'s 28 route rows accepts one: `POST /api/models/agents/<backend>/probe` is backend-scoped (`{model?}`) and reports on the configured chain, `POST /api/models/sources/<id>/refresh` needs an `id` only Save produces, and `POST /api/models/sources` persists on success. §1.5 keeps every Pull-origin state, because the operation is contracted and 05 draws it; what is missing is the way to invoke it |
 | G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight | what the server is left holding when the cancel lands after the transient phase | **Cancellation is contracted everywhere except the persisting half.** AC-26 requires an API-key test's success, authentication failure, adapter error, timeout **and cancellation** each to 「revoke the transient provisioned ref before the operation settles」, with a durable pending-revocation record and reconciliation behind a fault-injected revoke failure, and repeats that guarantee for unsaved model discovery; `api.md` contracts `POST /api/models/oauth/cancel` for the subscription branch. No artefact states the outcome once `POST /api/models/sources` has crossed out of that transient phase into persistence — whether a cancel there yields a Source or nothing. §1.5 states the guarantee for the phase that has one and stops at that seam rather than extending AC-26 over a boundary AC-26 does not cross |
@@ -253,6 +273,8 @@ than in a moving one.
 | G-29 | 05 add-by-key, ⑦'s 重试 — the re-read F1 requires of a `POST /api/models/sources` that may have committed unseen | anything the client holds *before* the send that the committed Source can afterwards be recognized by | **The repair is contracted and its input is not.** F1 has a create whose response was lost re-read before it is re-sent, and `GET /api/models/sources` is the only read that answers `[contract]` — but nothing the dialog sent survives into what comes back. `Source.id` matches `^src_[a-z0-9]{8,}$` and is server-assigned, so it existed only in the response that died; `source.schema.json` returns no plaintext credential; and neither `base_url` nor `display_name` is declared unique in `api.md` or `model-hub.md`, so two Sources may legitimately carry both. No route in `api.md` takes an idempotency key, and G-27 leaves `SourceCreate`'s body unspecified, so this file cannot even say the client *could* supply one. The read therefore answers 「what is in the list」 and never 「whether this create is in it」, and §1.5's ⑦ states that instead of picking a Source out of an unordered list by resemblance |
 | G-30 | 04 add-subscription, *Start failed* entered by a lost response | a way to reach a flow whose `flow_id` never arrived | **A start that was accepted and not answered leaves a flow the client cannot name.** `api.md` contracts exactly four OAuth routes — `POST /api/models/oauth/start`, `GET /api/models/oauth/status/<flow_id>`, `POST /api/models/oauth/submit`, `POST /api/models/oauth/cancel` — and the last three all take the `flow_id` the lost response was carrying. There is no flow-list read, and `oauth-flow.schema.json` carries no property that would let one be found from what the dialog does hold: the vendor and the channel it sent are what *every* start for that backend sends. So 重试 can start a second flow beside a first that is still live, and the first ends only by expiring — `expires_at`, when the provider supplies one `[contract]`. §1.4's *Start failed* states that rather than asserting the call never reached the provider, which is the reading this row replaced |
 | G-31 | 01/08 model rows — the 当前 line (`gateway.row.current`, `gateway.row.currentTakeover`), the violet reroute, and §1.1's *Takeover active* entry and exit | the chain's **current** hop, on the one read that is supposed to carry it | **The behaviour spec puts it in the read projection and the wire shape closes the object without it.** `model-hub.md` §4.3 states 「the read projection is `C` with live annotations plus `current`, never a reconstructed provider list」, writes takeover on that field — 「the current hop is not `C[0]` and `C[0]` is unavailable for a recoverable quota/cooldown reason」 — and then fixes the timing: 「recovery changes current execution position **on the next turn** without changing `C`」. The read that would deliver it is `GET /api/models/agents/<backend>/chain?model=<id>` → `{chain: AgentChain}`, and `agent-chain.schema.json` is `additionalProperties: false` over exactly `contract_version`, `backend`, `model_id`, `chain` and `supply_state`, and each hop inside `chain` is closed the same way with no `current` among the keys it does carry. The substitute is the schema's own sentence — 「the next turn uses the FIRST item with `runnable: true`」 — and it agrees with `current` everywhere except the interval §4.3 legislates: from the moment a cooling head is reported runnable again until the next turn actually moves back, the derivation names the head and `current` still names the later hop. That interval is this row's entire content, and it is why the gap is narrow rather than structural: everything else the 当前 line and the takeover visuals need is on the wire. `model-hub-implementation.md` books the missing piece as AC-30's own lane I2, 「live current-hop input」, so what is absent is the field and not the decision. This is G-20's shape — one contract file naming a value another file must carry — on a different value, a different read and a different repair, so it is registered beside it rather than folded into it |
+| G-32 | 02 route-chain editor — the frame this document points at and does not specify | the editor's interaction contract: how it sequences a save, what it does with a guarded refusal, what it reconciles against when the response is lost, and what the failure line reads | **The route is contracted, the surface is drawn, and the specification is what is missing.** `api.md` carries `PUT /api/models/agents/<backend>/chain` as one of the nineteen state-changing routes, guards it with a `409` refusal, and declares it 「the `mutation.route_replace` row of the authoritative mutation matrix」; on success it returns `{chain, removed_hops, interrupted}`, so the refusal branch, the removal report and the interruption report all exist on the wire. `Q1dkS` is merged, so the controls exist in pixels. §1.2 states no build requirement, which leaves §0.8 with no state for the write and this file with no reading of any of those three response members. That is a different absence from every other row here: those register a behaviour the contract has and no frame draws, and this one registers a frame the contract *and* the drawing both have, which no section writes down. It is therefore also the one row paired with a §0.4 exclusion — the exclusion keeps this document's accounting honest about the route, and this row keeps the debt from being read as a boundary. A separate round writes the section |
+| G-33 | 04 add-subscription, a flow whose declaration carries a device code | anywhere to display or copy `presentation.device_code`, and anywhere to render `presentation.instructions_key` | **Two contracted fields arrive in the start response and have nowhere to land.** `oauth-flow.schema.json`'s `presentation` is `additionalProperties: false` over `auth_url`, `device_code`, `expects` and `instructions_key` — the last described as the i18n key for the step-2 helper line — and the schema's own description names the compositions it expects, the middle one being 「B = auth_url + device_code + expects none」. Frame 04 draws a head, two option cards, a ToS note, a hint and a foot of 取消 / 去登录; neither §1.4's inventory nor its copy table holds a code, a control that copies one, or a line for the helper key. So a Form B flow reaches a dialog that reports it is waiting while withholding the value the provider is asking for. Registered apart from G-17, whose missing affordance is an input plus `POST /api/models/oauth/submit`: this branch submits nothing and needs a read-only value the user copies out, so neither number can close the other |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -689,8 +711,8 @@ as everywhere else in this document.
 | §1.6 | Ready | Source detail loaded and the table holds at least one model — discovered, added by hand, or both. When `last_discovered_at` is null the inventory has no age, `{{time}}` is absent by §0.9's rule, and the status line drops that segment `[contract]` | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry |
 | §1.6 | Empty (no models) | The table is empty **and** a discovery has completed — `last_discovered_at` is non-null `[contract]` | F5 | `sourceDetail.empty` | Manual add, or a successful refetch |
 | §1.6 | Never fetched | The table is empty **and** no successful discovery has ever completed — `last_discovered_at` is null `[contract]` | F5 | `sourceDetail.emptyNeverFetched` | A successful 重新拉取, or a manual add that commits → Ready |
-| §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Refetch failed | `sourceDetail.action.refetch` | A list with at least one row → Refetch result; a list that comes back with no rows and no manual row beside it → Empty (no models) — this refetch completing is what makes `last_discovered_at` non-null, so of §1.6's two empty readings only that one is reachable from here, and it is the one branch that states no diff, because `sourceDetail.empty` already says the stronger thing; a refusal → Refetch refused |
-| §1.6 | Refetch result `[derived]` | A refresh came back usable — the response carries the complete updated source `[contract]`, and this page still holds the list it was rendering, so what changed is a comparison of two payloads it has | F5 — the request already succeeded | `sourceDetail.refetch.added`, `sourceDetail.refetch.removed`, `sourceDetail.refetch.unchangedOnly`, and Ready's own keys, which all still render | Any next action, or the next load → Ready: the diff is a report about one fetch and nothing re-derives it. 重新拉取 again → Refetching |
+| §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Refetch failed | `sourceDetail.action.refetch` | Any answer this page can read → Refetch result, **whatever the row count comes back as, none included**. An emptying refetch is not a different kind of answer, and it is the one where the diff is worth most: every id the source used to advertise has just left the discovered slice, so it is where `sourceDetail.refetch.removed` names the largest set it will ever name. Leaving straight for Empty (no models) — as this row read until this round — dropped that report at that exact moment, and replaced it with a sentence that says a fetch returned nothing and not what stopped being there. The empty table is still an empty table: *Refetch result* renders `sourceDetail.empty` under the removal line, and of §1.6's two empty readings only that one is reachable from here, since this refetch completing is what makes `last_discovered_at` non-null. It is where *Refetch result* lands rather than what this state enters; a refusal → Refetch refused |
+| §1.6 | Refetch result `[derived]` | A refresh came back usable — the response carries the complete updated source `[contract]`, and this page still holds the list it was rendering, so what changed is a comparison of two payloads it has | F5 — the request already succeeded | `sourceDetail.refetch.added`, `sourceDetail.refetch.removed`, `sourceDetail.refetch.unchangedOnly`, and the keys for whatever the table now is: Ready's own while any row is left, `sourceDetail.empty` when the answer emptied it. The diff line and the table's own copy are two statements about one payload, and the second never cancels the first | Any next action, or the next load → Ready, or → Empty (no models) when the answered list was empty: the diff is a report about one fetch and nothing re-derives it, so what remains afterwards is the table's own reading. 重新拉取 again → Refetching |
 | §1.6 | Refetch refused | The refresh came back refused, naming the hops a shorter inventory would remove | F3 — `Qp6FI`, the same confirm this page already starts for a removal | `guard.title.refetch`, `guard.subtitle.refetch`, `guard.confirm.refetch`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要拉取 re-sends the same `POST` with `force` → Refetching; 取消 → Ready, the previous list kept |
 | §1.6 | Refetch failed | The refresh came back a classified failure, **or never answered at all** — F2's own 「otherwise」 lands both here. For the classified one `api.md` has the server update the **source-global state**, preserve the last successful model list and timestamp, and return the normal safe error `[contract]`, so the source changed state and the answer does not carry which. For a lost answer even that is not known: F1's rule leaves the outcome unknown, and a refresh that did commit has already replaced the discovered inventory — on the `force` path, after removing the hops the guard named | F2 lands here. The **previous list is kept only where the contract keeps it**, which is the classified branch and is the contract's guarantee rather than this page's choice; a lost answer guarantees nothing, which is why the re-read below is a reconciliation and not a status refresh | `sourceDetail.fail.refetch`; the status word is not this row's and comes from whichever state the re-read below lands on | The failure line goes on the bar, and the page re-reads `GET /api/models/sources` — the only read that answers with this source, there being no single-source route `[contract]`. **That read settles the mutation as well as the status**, because the page has held `source_id` since it sent the refresh and the list answers with the complete `Source`, models included `[contract]` (D-36): what it renders afterwards is that source as read, so a refresh that committed unseen is visible rather than papered over by the list this page was holding. The state it finds dispatches through this section's own status mapping: `cooldown` → Cooling, `needs_action` → Needs action, `error` → Unclassified error, `standby` or an `active` nothing adopts → Not supplying, an adopted `active` → Ready. The source absent from that list → Source gone. The re-read itself failing → the bar keeps the status word and the page keeps the list it was already rendering, a failed read being no reading at all (D-16), and the line above stays true of both. 重新拉取 stays enabled throughout → Refetching |
 | §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter, or a chip's × → Tier commit; Enter on an empty input, or on a value this row already carries, commits nothing and stays here — `minLength: 1` and `uniqueItems` `[contract]`; blur / Escape → Ready, discarding whatever is still uncommitted in the input |
@@ -715,7 +737,7 @@ as everywhere else in this document.
 | §1.8 | Retained sources, all direct | Every backend is in 直连 and at least one source exists — reachable through `adopt.undo.3` | F5 | — | The page is 01 with every gateway group in its 直连 form, not this frame |
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
 | §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success → the dialog closes and the page becomes 01 with this backend in 网关 mode |
-| §1.9 | Failed | A step this confirm promised did not go through | F1 lands here | `adopt.fail.title`, `adopt.fail.detail`, `adopt.fail.reason.transport`, `adopt.fail.reason.refused`, `adopt.fail.reason.notReady`, `adopt.fail.reason.unknown`, `install.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable. **The title holds for every step; the detail is selected by which step failed.** A step that was a request renders `adopt.fail.detail` — `{{request}}` is the request that failed. The install step is no request `[contract-gap]` G-10, so it renders `install.fail.detail`, the sentence 01 already shows for the same operation (D-26). **`adopt.fail.detail`'s `{{reason}}` is one of four words and never an upstream string**: `fail.reason.transport` when no answer came back, `fail.reason.refused` when one did and it was a refusal, `fail.reason.notReady` when the start step answered but the runtime never read healthy, and `fail.reason.unknown` for everything else — the residue that keeps the set total, because §0.9 has the slot always present. **重试 re-reads before it resumes, and the reading decides where it re-enters** `[derived]`: every step this confirm promises has a read that proves it, and the subject of all of them is the backend the dialog was opened on, which the client has held since the first press (D-36). `GET /api/models/runtime/status` proves the first two — `health` no longer `not_installed` means the component is there, `health` reading `ok` means it started — and `GET /api/models/agents` proves the third, `mode` reading `hub` `[contract]`. So the press is not a replay: the runtime read answers first and the sequence resumes at the first step it cannot already see done — still `not_installed` → install, present but not `ok` → start, `ok` → the mode `PATCH`. A backend that already reads `hub` is a `PATCH` that committed unseen, so nothing is re-sent and the dialog closes into the success it turns out to have been, the same shape §1.6's *Refetch failed* has and §1.5's ⑦ cannot get |
+| §1.9 | Failed | A step this confirm promised did not go through | F1 lands here | `adopt.fail.title`, `adopt.fail.detail`, `adopt.fail.reason.transport`, `adopt.fail.reason.refused`, `adopt.fail.reason.notReady`, `adopt.fail.reason.unknown`, `install.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable. **The title holds for every step; the detail is selected by which step failed.** A step that was a request renders `adopt.fail.detail` — `{{request}}` is the request that failed. The install step is no request `[contract-gap]` G-10, so it renders `install.fail.detail`, the sentence 01 already shows for the same operation (D-26). **`adopt.fail.detail`'s `{{reason}}` is one of four words and never an upstream string**: `fail.reason.transport` when no answer came back, `fail.reason.refused` when one did and it was a refusal, `fail.reason.notReady` when the start step answered and the runtime still reads `not_started` or `down`, and `fail.reason.unknown` for everything else — the residue that keeps the set total, because §0.9 has the slot always present. **重试 re-reads before it resumes, and the reading decides where it re-enters** `[derived]`: every step this confirm promises has a read that proves it, and the subject of all of them is the backend the dialog was opened on, which the client has held since the first press (D-36). `GET /api/models/runtime/status` proves the first two — `health` no longer `not_installed` means the component is there, `health` reading `ok` **or `degraded`** means it started — both are a runtime answering about itself, and only the second half of that pair is a quality judgement — and `GET /api/models/agents` proves the third, `mode` reading `hub` `[contract]`. So the press is not a replay: the runtime read answers first and the sequence resumes at the first step it cannot already see done — still `not_installed` → install, `not_started` or `down` → start, `ok` or `degraded` → the mode `PATCH`. **`degraded` is on the switching side of that split, and §1.0 is what puts it there**: it maps `degraded` to Impaired with an afforded action of `none`, so it is the one health this dialog can read that offers no control at all — re-sending the start route for it would press the thing the product declines to offer, once per retry, against a component that is already answering. Reading it as 「present but not `ok`」 did exactly that. Nothing here waits for `ok` either, because no contract conditions the mode `PATCH` on health: what the sequence owes is that the component exists and is running, and an impaired runtime meets both. A backend that already reads `hub` is a `PATCH` that committed unseen, so nothing is re-sent and the dialog closes into the success it turns out to have been, the same shape §1.6's *Refetch failed* has and §1.5's ⑦ cannot get |
 | §1.9 | Dependency missing `[derived]` D-26 `[contract-gap]` G-10 | Runtime `health` is `not_installed` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press, three steps, reported as one outcome. **Only the last two steps have routes** (`POST /api/models/runtime/start`, then the mode `PATCH`), so this row inherits G-10 the way 01's pill does: the install's progress is client-side only, and a reload while it runs reads back `not_installed` with this backend still in 直连, because the mode `PATCH` is the third step and has not been sent. A step that fails lands in this dialog's own Failed row above, which is why the promise is safe to make as one outcome — the dialog reports no switch it did not make. **Which step failed decides the detail there**: the two route steps have a `METHOD path` to name and render `adopt.fail.detail`; the install step has none — that is what G-10 *is* — so it renders `install.fail.detail`, and no string is asked to interpolate evidence this dialog cannot produce. 取消 is unchanged |
 
 Two frames deliberately hold no rows. §1.2 specifies nothing (§0.2), and the
@@ -874,6 +896,21 @@ this one states the trigger and the text. An explanation reachable only by hover
 reachable by neither of the two inputs most likely to need it, and an unregistered
 string is one a developer has to invent at the keyboard — which is how a hardcoded
 sentence in one locale ships.
+
+**Every icon-only control is named, and one that repeats a labelled control beside it
+takes that control's key** `[derived]`. The icon above is one instance and §1.6's `iGcAi`
+back icon is the other; both register a string because a glyph is not a name. The three
+overlays are the shape that had been missed: 03's `fUvS9`, 04's head close and 10's head
+close were each specified as a 15px glyph and a colour, with the name left to whoever
+built them. They do exactly what the 取消 in the same foot does — 04 says so outright,
+that 取消, the close icon and a press outside 「are one action, not three」 — so each
+takes its own surface's cancel key as its accessible name: `order.cancel`,
+`addSub.cancel`, `adopt.cancel`. That is the whole rule, and it is worth stating once
+here rather than three times below, because the alternative is not one new key but three,
+all of them saying 取消 in two locales. Reuse also keeps them from drifting: a dialog
+cannot rename its button and leave its icon behind, since there is one string. What it
+does **not** extend to is an icon whose action has no twin — §1.6's back icon names its
+destination and gets its own key, which is the case this rule is the complement of.
 
 **States** — §0.8, rows marked §1.0. Every other frame inherits them, and the rows
 that belong to a frame alone are marked with that frame instead.
@@ -1741,15 +1778,30 @@ recommendation. Everything this section previously said about those two modes �
 element inventory, the foot semantics, the metrics, the three inks, the mode copy —
 described a frame that no longer exists, and is deleted rather than rewritten.
 
-**The drawing is the authority.** Frame 02 has been redrawn under S-1 and is merged;
-`Q1dkS` in `design.pen` is what it looks like and what it contains. **This section
-states no build requirement.** Read it as a pointer and a piece of history: the
-decision is recorded here, the surface is over there.
+**The drawing is the authority for what 02 contains, and nothing here is the authority
+for what it does** `[contract-gap]` G-32. Frame 02 has been redrawn under S-1 and is
+merged; `Q1dkS` in `design.pen` is what it looks like and what it holds. **This section
+states no build requirement** — and that is not a way of saying the requirement lives
+somewhere else. The editor owns a guarded mutation, and its request sequencing, its
+reading of a guarded refusal, its reconciliation of a lost response, its failure copy
+and its keyboard behaviour are precisely the class of fact a drawing cannot carry
+(§0.2 item 5). None of them is written anywhere.
+
+**So 02 is excluded from what this document specifies, rather than left half-covered**
+`[contract-gap]` G-32. The route is in §0.4's table with that reason, the debt is G-32,
+and the deliverable is eight specified surfaces plus this pointer; a separate round
+writes 02's interaction contract under the same register-and-gate discipline as the
+rest. Saying so changes nothing about the build — this section never required anything
+— but it changes what a reader may conclude from silence. Without it, an implementer
+who opens §0.8 for the chain write finds nothing and cannot tell whether the answer is
+「no states are needed」 or 「nobody wrote them」, which is the same ambiguity §0.4
+exists to remove for the routes drawn elsewhere.
 
 What still holds, and is stated as a decision rather than as a fact about the
 drawing: the chain a user configures is the chain that runs (D-3), and the exits stay
 live even when the list they lead to is empty (D-15). Both are §2's, not this
-section's.
+section's, and both survive the exclusion because they are decisions about the chain
+rather than statements about the editor.
 
 ---
 
@@ -1802,7 +1854,7 @@ rule, and it is a set equality.
 | Drawer `hnsO5` | 460 wide, **full 1100 height**, right-anchored, `$--surface`, left border only |
 | `head` `qNs0K` | `padding [18,20]`, vertical, `gap 6`, 82 tall `[frame]` — the only overlay head in the product that is not `[16,20]` / `gap 4`, because it stacks a title over a subtitle |
 | Title | 15 / 700, `$--foreground`, + 13px info icon `#FFFFFF59` |
-| Close `fUvS9` | 15px, `#FFFFFF59` |
+| Close `fUvS9` | 15px, `#FFFFFF59`; `order.cancel` is its accessible name in both locales (§1.0) `[derived]` |
 | Subtitle | 11.5 / normal, `#FFFFFF73` |
 | `dbody` `Gd4Bl` | `fill_container` height, `padding 20`, `gap 18` `[frame]`, **the sole scroll owner** `[derived]` |
 | Section label | 10.5 / 700, `#FFFFFF73` |
@@ -1816,19 +1868,30 @@ rule, and it is a set equality.
 
 **The ordinal badge inks the first position, and only the first** `[frame]`. Rank 1 is
 mint; every later rank is the muted neutral. Mint here is **control ink, not relation
-ink** (§1.0): it means *first in this order* — the position the resolver starts from —
-and it says nothing about which source is carrying traffic at this moment. The badge
-moves only when the order is edited `[derived]`.
+ink** (§1.0): it means *first in this stored order* — a position in the list this drawer
+writes, and nothing past it. Not a starting point anything walks, and not a claim about
+which source is carrying traffic. The badge moves only when the order is edited
+`[derived]`.
 
-**This drawer must not claim live supply, and the reason is grain, not caution**
-`[derived]`. The order is one list per backend; resolution is per model. A resolver
-walking this order skips a source that is cooling, out of quota or unhealthy, and skips
-a source whose inventory lacks the requested model — so two models on the same backend
-routinely resolve to different sources, and neither has to be rank 1. Frame 08 draws
-exactly that: ChatGPT is Codex's first source and is paused, while aihub is the one
-actually answering. A backend-level surface that inked rank 1 as 「supplying right now」
-would therefore be wrong on the one frame in this set where the distinction is visible,
-and wrong silently — the badge would look confident and describe nobody.
+**This drawer must not claim live supply, and the reason is the contract, not caution**
+`[contract]`. §4.2 makes the order 「a visible Gateway default for Add-time placement,
+not a runtime capability filter」, puts 「The only order runtime can execute is the exact
+hop order stored for that model」 beside it, and rules out the rest by name: 「No
+adapter, UI consumer, refresh path, or runtime resolver may implement or rerun
+placement」. So nothing walks this list at request time, and a badge inked as 「supplying
+right now」 would be asserting that the per-backend list is the per-model one.
+
+**What does get walked is the other list, and saying which is what keeps this one
+honest** `[contract]`. Execution reads a model's own stored chain, whose next turn takes
+「the FIRST item with `runnable: true`」 — so skipping a source that is cooling, out of
+quota or process-unavailable is real behaviour; it happens one grain down, in a sequence
+this drawer never writes. Routing configuration is per backend *and* per model, so two
+models on the same backend can hold entirely different chains and neither has to begin
+at rank 1. Frame 08 draws exactly that distance: ChatGPT is Codex's first source and is
+paused, while aihub answers — because Codex's chain moved down its own hops, not because
+anything re-read this drawer. A backend-level surface that inked rank 1 as the live
+answer would therefore be wrong on the one frame in this set where the distinction is
+visible, and wrong silently — the badge would look confident and describe nobody.
 
 The rule generalises past this drawer: **a surface may only assert a fact whose inputs
 it displays.** The per-model current source is owned by the frame that shows models —
@@ -1845,7 +1908,7 @@ stop one of them from making the claim at all.
 | Grip | Drag affordance | drag / Space | Grab and drop |
 | 排进来 `MJZ2I` | Add a held-out source to the order | yes | Append at the end, then focus the moved row `[derived]` |
 | 移出 `A2Hz9O` / `FjqVJ` | Take an ordered source out of the order | yes | Move the row to the held-out section, then focus the moved row `[derived]` |
-| 取消 / 关闭 | Leave without saving | yes | Close, discarding uncommitted moves |
+| 取消 / 关闭 `fUvS9` | Leave without saving; the icon is the button's second press and carries `order.cancel` as its name (§1.0) | yes | Close, discarding uncommitted moves |
 | 保存顺序 | Commit | yes | Persist, close |
 
 **排进来 and 移出 are one control in two directions, and both are drawn** `[frame]`. The
@@ -2061,7 +2124,7 @@ is **different per vendor** and for a reason that is legal, not technical.
 **Nothing drawn picks the vendor** `[contract-gap]` G-21. Every line below is stated per
 vendor — the head, both option cards, which one carries 推荐, the ToS note, the hint — and
 `POST /api/models/oauth/start` sends `{vendor, channel}`, of which only the channel has a
-producer in the radio group this dialog draws. The one entrance to 04 these ten frames
+producer in the radio group this dialog draws. The one entrance to 04 these nine frames
 draw is 01's single 添加订阅 (§1.1): not per vendor, not a menu. So the parameter this
 whole section is a function of arrives from a step no frame contains. This section
 specifies the dialog as drawn and states the absence; it does not invent the picker,
@@ -2071,7 +2134,7 @@ because §0.1 confines this document to frames that exist.
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| head | `添加 {vendor} 订阅` + `host / plan` | vendor, chosen before the dialog opens and by nothing this document draws `[contract-gap]` G-21 | close | Dismiss |
+| head | `添加 {vendor} 订阅` + `host / plan` | vendor, chosen before the dialog opens and by nothing this document draws `[contract-gap]` G-21 | close, named by `addSub.cancel` (§1.0) | Dismiss |
 | `gI9r5` / `gBZ4W` (Claude), `mUvIf` / `Fs6bj` (ChatGPT) option | radio mark, name, recommendation badge, one-line consequence | static per vendor | yes | Select **this** option and deselect the other |
 | `uzelE` ToS note | why gateway-supplying a Claude subscription is out of scope | static, Claude only | no | — |
 | `iF4LZ` / `O0o5X` hint | how to get the other channel too (Claude) / what the non-recommended choice costs (ChatGPT) | static per vendor | no | — |
@@ -2153,19 +2216,40 @@ OAuth flow that has nowhere to land is the most expensive possible way to report
 that the engine is down.
 
 **去登录 does not mean 「open a browser and wait」; it means 「start the flow and render
-what the flow declares」** `[contract]` `[contract-gap]` G-17. `POST /api/models/oauth/start`
-answers with an `OAuthFlow`, and `oauth-flow.schema.json` puts the whole step-2 shape in
-`presentation`: `auth_url`, `device_code`, `instructions_key`, and `expects`, which runs
-`none · paste_code · paste_callback_url`. The declaration is what the dialog renders —
-never a vendor→form table on the client, which is the thing the schema's own description
-rules out. Only `expects: none` is a browser round trip that finishes by itself, and
-that is the one this frame draws. The other two end with the user holding a value the
-dialog has to take and send to `POST /api/models/oauth/submit` as `{flow_id, value}`, and
-frame 04's foot is 取消 / 去登录 with no field between them. So *Awaiting sign-in* here
-is the `expects: none` branch, stated as that branch rather than as all of OAuth, and
-the input the other two need is registered as G-17: a contracted behaviour with no drawn
-affordance. The schema's own Claude example uses `paste_code`, so this is not a
-hypothetical vendor — it is the first one.
+what the flow declares」** `[contract]` `[contract-gap]` G-17 `[contract-gap]` G-33.
+`POST /api/models/oauth/start` answers with an `OAuthFlow`, and `oauth-flow.schema.json`
+puts the whole step-2 shape in `presentation`: `auth_url`, `device_code`,
+`instructions_key`, and `expects`, which runs `none · paste_code · paste_callback_url`.
+The declaration is what the dialog renders — never a vendor→form table on the client,
+which is the thing the schema's own description rules out. That description also names
+the three compositions it expects, and the middle one is why this reading had to be
+split: 「A = auth_url + expects paste_code; **B = auth_url + device_code + expects
+none**; C = auth_url + expects paste_callback_url」.
+
+**`expects` says what comes back, not whether anything is shown, and this section had
+read it as both** `[contract]` `[contract-gap]` G-33. `expects: none` means the user
+hands no value back to Avibe. It does not mean the flow declared nothing to display:
+Form B is `expects: none` carrying a `device_code`, the pattern where the provider's own
+page asks for a code that this dialog is the only holder of. So 「the branch that
+finishes by itself」 and 「the branch with nothing to render」 are two different sets,
+and 04 draws the second: a head, two option cards, a ToS note, a hint and a foot
+of 取消 / 去登录, with no code block, no copy control and no line for `instructions_key`
+anywhere in this section's inventory or copy table. A Form B flow therefore renders here
+as a dialog that says it is waiting while withholding the value the user has to type.
+That absence is G-33.
+
+**G-33 is registered beside G-17 rather than folded into it** `[derived]`
+`[contract-gap]` G-17 `[contract-gap]` G-33. Forms A and C end with the user holding a
+value the dialog has to take and send to
+`POST /api/models/oauth/submit` as `{flow_id, value}`, and 04's foot has no field between
+its two buttons to take it — that is G-17, and its repair is an input plus that route.
+G-33's repair is a read-only value the user copies out and a helper line, with nothing
+submitted anywhere. Either can be closed while the other stays open, so folding them
+would leave a number that cannot be retired. *Awaiting sign-in* is therefore the
+`expects: none` branch **whose `presentation` carries no `device_code`**, stated as that
+branch rather than as all of OAuth. The schema's own Claude example uses `paste_code`, so
+neither gap is a hypothetical vendor: the first one it contracts is already outside what
+this frame draws.
 
 **「Finishes by itself」 is not 「tells us by itself」** `[contract]`. `expects: none` means
 the user hands nothing back, not that anything notifies the client — so the completion
@@ -3344,6 +3428,21 @@ and a fetch that changed nothing at all renders `refetch.unchangedOnly` instead.
 `count = 0` is unreachable, which is the first of the two shapes §1.0's count rule asks
 for.
 
+**Its largest case is a fetch that comes back empty, and that is a caller rather than an
+exception** `[derived]`. When a refresh answers with no models at all, every id the
+source used to advertise leaves the discovered slice in one step — the maximum this line
+will ever have to name, on the page whose whole job is which models this source has. So
+an emptying refetch takes the same exit as any other readable answer: §0.8 sends it to
+*Refetch result*, whatever the row count. It read otherwise until this round, jumping
+straight to the empty state on the grounds that `sourceDetail.empty` 「already says the
+stronger thing」 — which reversed the two. 这个来源没有返回型号 is a statement about
+*this* fetch's result; `refetch.removed` is the statement about what the source had
+before it, and nothing else on the page carries that. The two are one payload described
+twice and the second does not cancel the first: the removal line sits under the status
+bar where it always sits, the empty table renders its own sentence underneath, and the
+next load keeps only the table's — which is the same one-fetch lifetime the diff has
+everywhere else.
+
 **`emptyNeverFetched` points at the status line rather than naming a cause**
 `[derived]`. Its entry is one fact — `last_discovered_at` is null — and that fact is
 produced by a revoked credential, a host that never resolved, a cooldown that has covered
@@ -3785,7 +3884,7 @@ way 08's is.
 | Element | Metric |
 | --- | --- |
 | Dialog `UkQqY` | 560 wide, height hugs content, `$--surface`, radius 14 |
-| `head` `ojIOL` | `padding [16,20]` `gap 4`; title 15 / 700; close 15px `#FFFFFF59` |
+| `head` `ojIOL` | `padding [16,20]` `gap 4`; title 15 / 700; close 15px `#FFFFFF59`, named by `adopt.cancel` (§1.0) `[derived]` |
 | Subtitle | 11.5 / normal, `#9BA3B8B3` |
 | `dbody` `PtmwS` | `padding 20`, `gap 16` |
 | Section label | 11.5 / 600, `#FFFFFF8C` |
@@ -3801,6 +3900,7 @@ way 08's is.
 | 会发生什么 ×4 | The consequences of adopting; the first two are selected by backend | no | — |
 | 可以撤回 ×3 | That it is reversible, and precisely where the exit is | no | — |
 | 取消 | Leave unchanged | yes | Dismiss; nothing is written |
+| 关闭 (head) | The same leaving, one press up; `adopt.cancel` names it (§1.0) `[derived]` | yes | Dismiss; nothing is written |
 | 切换到网关 | Commit | yes | Switch **this backend only**; the page becomes 01 |
 | Failure strip `[derived]` | `fail.title` over `fail.detail`, in the Failed state only | no | — |
 
