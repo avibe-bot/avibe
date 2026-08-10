@@ -88,8 +88,9 @@ class MemorySidecarLifecycle:
         self._read_recorder_health = read_recorder_health
         self._process: EverOSProcessPort | None = None
         self._generation = 0
+        self._launch_token = 0
         self._records_calls = False
-        self._ready_generation: int | None = None
+        self._ready_launch: tuple[int, int] | None = None
         self._ready_task: asyncio.Task[None] | None = None
         self._retention_task: asyncio.Task[None] | None = None
         self._retention_blocked = False
@@ -123,6 +124,7 @@ class MemorySidecarLifecycle:
         async def before_start() -> None:
             if not self._is_current(sidecar, generation):
                 raise RuntimeError("stale EverOS recorder supervisor")
+            self._launch_token += 1
             self._records_calls = True
             await self._stop_retention()
 
@@ -133,8 +135,8 @@ class MemorySidecarLifecycle:
             self._ensure_retention()
 
         def ready() -> None:
-            if self._is_current(sidecar, generation) and self._ready_admission_open:
-                self._schedule_ready(generation)
+            if self._is_current(sidecar, generation):
+                self._schedule_ready(generation, self._launch_token)
 
         sidecar = self._process_factory(
             python,
@@ -162,21 +164,25 @@ class MemorySidecarLifecycle:
                 self._ensure_retention()
             self._ready_admission_open = True
             return False
+        launch_token = self._launch_token
         try:
-            await self._admit_recorder_health(sidecar, generation)
+            await self._admit_recorder_health(sidecar, generation, launch_token)
         finally:
             self._ready_admission_open = True
         # Runtime accepts the successful explicit start synchronously. The
         # supervisor's same-turn ready notification is therefore redundant;
         # later recovery notifications still emit the semantic event.
-        if self._ready_generation == generation:
-            self._ready_generation = None
+        if self._ready_launch == (generation, launch_token):
+            self._ready_launch = None
+        elif self._ready_launch is not None:
+            self._ensure_ready_task()
         return True
 
     async def _admit_recorder_health(
         self,
         sidecar: EverOSProcessPort,
         generation: int,
+        launch_token: int,
     ) -> None:
         """Make the child health projection, not file timing, own recorder state."""
 
@@ -184,7 +190,10 @@ class MemorySidecarLifecycle:
             health = await self._read_recorder_health()
         except Exception:
             health = {"state": "degraded", "reason": "writer_failures"}
-        if not self._is_current(sidecar, generation):
+        if (
+            not self._is_current(sidecar, generation)
+            or launch_token != self._launch_token
+        ):
             return
         admission = RecorderAdmission.from_health(health)
         self._on_recorder_health(admission.health())
@@ -245,7 +254,7 @@ class MemorySidecarLifecycle:
 
         self._ready_admission_open = False
         self._closed = True
-        self._ready_generation = None
+        self._ready_launch = None
 
     def handoff_to_host_retention(self) -> None:
         """Start host maintenance after an external orphan handoff proved safe."""
@@ -274,28 +283,39 @@ class MemorySidecarLifecycle:
     def _is_current(self, process: EverOSProcessPort | None, generation: int) -> bool:
         return process is not None and process is self._process and generation == self._generation
 
-    def _schedule_ready(self, generation: int) -> None:
-        self._ready_generation = generation
+    def _schedule_ready(self, generation: int, launch_token: int) -> None:
+        self._ready_launch = (generation, launch_token)
+        if not self._ready_admission_open:
+            return
+        self._ensure_ready_task()
+
+    def _ensure_ready_task(self) -> None:
         task = self._ready_task
         if task is None or task.done():
             self._ready_task = asyncio.create_task(self._emit_ready(), name="memory-ready-activation")
 
     async def _emit_ready(self) -> None:
-        while self._ready_generation is not None:
-            generation = self._ready_generation
-            self._ready_generation = None
+        while self._ready_launch is not None:
+            generation, launch_token = self._ready_launch
+            self._ready_launch = None
             snapshot = self.snapshot()
             if (
                 self._ready_admission_open
                 and snapshot.generation == generation
+                and launch_token == self._launch_token
                 and snapshot.running
             ):
                 assert snapshot.process is not None
-                await self._admit_recorder_health(snapshot.process, generation)
+                await self._admit_recorder_health(
+                    snapshot.process,
+                    generation,
+                    launch_token,
+                )
                 snapshot = self.snapshot()
                 if (
                     not self._ready_admission_open
                     or snapshot.generation != generation
+                    or launch_token != self._launch_token
                     or not snapshot.running
                 ):
                     continue

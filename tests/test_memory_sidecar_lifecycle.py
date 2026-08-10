@@ -158,6 +158,55 @@ async def test_supervised_restart_readmits_recorder_health_before_ready(
     assert lifecycle.snapshot().records_calls is False
 
 
+async def test_recovery_during_initial_admission_discards_stale_health_and_queues_ready(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    initial_health_entered = asyncio.Event()
+    release_initial_health = asyncio.Event()
+    recovery_ready = asyncio.Event()
+    seen: list[dict[str, str | None]] = []
+    ready_health: list[dict[str, str | None]] = []
+    health_reads = 0
+
+    async def recorder_health() -> dict[str, str | None]:
+        nonlocal health_reads
+        health_reads += 1
+        if health_reads == 1:
+            initial_health_entered.set()
+            await release_initial_health.wait()
+            return {"state": "degraded", "reason": "writer_failures"}
+        return {"state": "disabled", "reason": "writer_failures"}
+
+    def observe_ready(_generation: int) -> None:
+        ready_health.append(seen[-1])
+        recovery_ready.set()
+
+    lifecycle = _lifecycle(
+        tmp_path,
+        factory,
+        observe_ready,
+        recorder_health,
+        seen.append,
+    )
+
+    initial_start = asyncio.create_task(
+        lifecycle.start(Path(sys.executable), _settings())
+    )
+    await asyncio.wait_for(initial_health_entered.wait(), timeout=1.0)
+    supervised = factory.supervised[0]
+
+    assert await supervised.start() is True
+    release_initial_health.set()
+    assert await initial_start is True
+    await asyncio.wait_for(recovery_ready.wait(), timeout=1.0)
+
+    assert health_reads == 2
+    assert seen == [{"state": "disabled", "reason": "writer_failures"}]
+    assert ready_health == [{"state": "disabled", "reason": "writer_failures"}]
+    assert lifecycle.snapshot().records_calls is False
+
+
 async def test_stop_failure_retains_current_supervisor(tmp_path: Path) -> None:
     factory = FakeEverOSProcessFactory(template=lambda: FakeEverOSProcess(stop_failure=RuntimeError("stuck")))
     lifecycle = _lifecycle(tmp_path, factory, lambda _generation: None)
