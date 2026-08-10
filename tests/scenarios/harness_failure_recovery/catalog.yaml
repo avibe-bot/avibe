@@ -4218,14 +4218,14 @@ scenarios:
     # quiet cycles keep the Watch armed without moving that acknowledgement.
     test: tests/test_watches.py::test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered
   - id: HFR-470
-    name: once Watch lifetime bounds retry delay
+    name: Watch lifetime is one durable armed episode
     status: covered
     kind: timeout
     layer: contract
     backend: shared
-    # Overall lifetime truncates a longer retry sleep and retires the Watch with
-    # one timeout follow-up instead of waiting past its declared deadline.
-    test: tests/test_watches.py::test_retrying_once_watch_lifetime_bounds_a_long_retry_delay
+    # Creation or explicit resume starts the deadline. Supervisor restarts retain it,
+    # including legacy rows derived from created_at; retry sleeps cannot extend it.
+    test: tests/test_watches.py::test_watch_lifetime_origin_survives_supervisor_restart
   - id: HFR-471
     name: once Watch timeout retries only by explicit policy
     status: covered

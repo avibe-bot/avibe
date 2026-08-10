@@ -1485,6 +1485,7 @@ WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR = "circuit_repair"
 WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"
 WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY = "watch_recent_event_timestamps"
 WATCH_CIRCUIT_BREAKER_METADATA_KEY = "watch_circuit_breaker"
+WATCH_LIFETIME_STARTED_AT_METADATA_KEY = "watch_lifetime_started_at"
 
 
 def watch_metadata_after_resume(
@@ -1492,10 +1493,11 @@ def watch_metadata_after_resume(
     *,
     resumed_at: str,
 ) -> dict[str, Any]:
-    """Reset live circuit state while retaining the repair Run admission fence."""
+    """Start a new armed episode while retaining the repair Run admission fence."""
 
     updated = dict(metadata)
     updated.pop(WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+    updated[WATCH_LIFETIME_STARTED_AT_METADATA_KEY] = resumed_at
     incident = updated.get(WATCH_CIRCUIT_BREAKER_METADATA_KEY)
     if isinstance(incident, dict) and incident.get("status") == "tripped":
         updated[WATCH_CIRCUIT_BREAKER_METADATA_KEY] = {
@@ -2919,14 +2921,13 @@ class SQLiteBackgroundTaskStore:
                     )
                     values.update(dict.fromkeys(clear_columns, None))
                     if current["definition_type"] == "watch":
-                        metadata = _json_loads(current["metadata_json"], None)
-                        if isinstance(metadata, dict):
-                            values["metadata_json"] = _json_dumps(
-                                watch_metadata_after_resume(
-                                    metadata,
-                                    resumed_at=values["updated_at"],
-                                )
+                        metadata = _json_loads(current["metadata_json"], {})
+                        values["metadata_json"] = _json_dumps(
+                            watch_metadata_after_resume(
+                                metadata if isinstance(metadata, dict) else {},
+                                resumed_at=values["updated_at"],
                             )
+                        )
             stmt = (
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)

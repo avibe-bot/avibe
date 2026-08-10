@@ -29,6 +29,7 @@ from core.watches import (
     DELIVERY_ACK_METADATA_KEY,
     FOLLOW_UP_RUN_ID_METADATA_KEY,
     LAST_DELIVERY_ENV,
+    LIFETIME_STARTED_AT_METADATA_KEY,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
     RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
@@ -1311,6 +1312,65 @@ def test_retrying_once_watch_lifetime_bounds_a_long_retry_delay(
     assert expected_body in pending[0].prompt
 
 
+@pytest.mark.parametrize("mode", ["once", "forever"])
+@pytest.mark.parametrize("origin_source", ["metadata", "legacy_created_at"])
+def test_watch_lifetime_origin_survives_supervisor_restart(
+    tmp_path: Path,
+    monkeypatch,
+    mode: str,
+    origin_source: str,
+) -> None:
+    """HFR-470: one armed episode keeps its deadline across supervisor restarts."""
+
+    path = tmp_path / "watches.json"
+    store = ManagedWatchStore(path)
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Bounded wait",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode=mode,
+        timeout_seconds=5,
+        lifetime_timeout_seconds=1,
+        retry_exit_codes=[75],
+        retry_delay_seconds=10,
+        post_to=None,
+        deliver_key=None,
+    )
+    expired_origin = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    if origin_source == "metadata":
+        watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY] = expired_origin
+    else:
+        watch.metadata.pop(LIFETIME_STARTED_AT_METADATA_KEY)
+        watch.created_at = expired_origin
+    store.upsert_watch(watch)
+
+    restarted_store = ManagedWatchStore(path)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=restarted_store,
+        request_store=request_store,
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+
+    async def unexpected_cycle(*args, **kwargs):
+        raise AssertionError("a supervisor restart must not grant another cycle")
+
+    monkeypatch.setattr(service, "_run_cycle", unexpected_cycle)
+    service._running = True
+    service._requires_service_lease = False
+
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = restarted_store.get_watch(watch.id)
+    assert saved is not None and saved.enabled is False
+    assert saved.last_exit_code == 124
+    assert len(request_store.list_pending()) == 1
+
+
 @pytest.mark.parametrize("metadata_run_id", [None, "stale-run"])
 def test_watch_lifetime_retires_while_an_existing_follow_up_is_active(
     tmp_path: Path,
@@ -1718,12 +1778,14 @@ def test_resuming_circuit_paused_watch_clears_window_but_keeps_repair_fence(
         },
     )
     store.set_enabled(watch.id, False)
+    prior_lifetime_origin = watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY]
 
     resumed = store.set_enabled(watch.id, True)
 
     assert RECENT_EVENT_TIMESTAMPS_METADATA_KEY not in resumed.metadata
     assert resumed.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY] == "run-repair"
     assert resumed.metadata[CIRCUIT_BREAKER_METADATA_KEY]["status"] == "resumed"
+    assert resumed.metadata[LIFETIME_STARTED_AT_METADATA_KEY] != prior_lifetime_origin
 
 
 def test_storage_resume_applies_the_same_circuit_reset_as_cli() -> None:
@@ -1759,6 +1821,7 @@ def test_storage_resume_applies_the_same_circuit_reset_as_cli() -> None:
         False,
         definition_type="watch",
     )
+    prior_lifetime_origin = watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY]
     assert store.sqlite_backend.set_definition_enabled(
         watch.id,
         True,
@@ -1771,6 +1834,7 @@ def test_storage_resume_applies_the_same_circuit_reset_as_cli() -> None:
     assert RECENT_EVENT_TIMESTAMPS_METADATA_KEY not in resumed.metadata
     assert resumed.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY] == "run-repair"
     assert resumed.metadata[CIRCUIT_BREAKER_METADATA_KEY]["status"] == "resumed"
+    assert resumed.metadata[LIFETIME_STARTED_AT_METADATA_KEY] != prior_lifetime_origin
 
 
 def test_changing_watch_cwd_starts_a_fresh_burst_window(tmp_path: Path) -> None:
@@ -1796,6 +1860,7 @@ def test_changing_watch_cwd_starts_a_fresh_burst_window(tmp_path: Path) -> None:
             FOLLOW_UP_RUN_ID_METADATA_KEY: "run-before-cwd-change",
         },
     )
+    lifetime_origin = watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY]
 
     updated = store.update_watch(
         watch.id,
@@ -1821,6 +1886,7 @@ def test_changing_watch_cwd_starts_a_fresh_burst_window(tmp_path: Path) -> None:
 
     assert RECENT_EVENT_TIMESTAMPS_METADATA_KEY not in updated.metadata
     assert updated.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY] == "run-before-cwd-change"
+    assert updated.metadata[LIFETIME_STARTED_AT_METADATA_KEY] == lifetime_origin
 
 
 def test_managed_watch_service_once_no_event_exit_finishes_without_follow_up(tmp_path: Path) -> None:

@@ -46,6 +46,7 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
+    WATCH_LIFETIME_STARTED_AT_METADATA_KEY as LIFETIME_STARTED_AT_METADATA_KEY,
     WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY as RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
@@ -142,6 +143,17 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _lifetime_started_monotonic(watch: "ManagedWatch") -> float:
+    """Project the durable armed-episode origin onto this event loop's clock."""
+
+    now = datetime.now(timezone.utc)
+    started_at = _parse_utc_timestamp(
+        watch.metadata.get(LIFETIME_STARTED_AT_METADATA_KEY)
+    ) or _parse_utc_timestamp(watch.created_at)
+    elapsed = max(0.0, (now - started_at).total_seconds()) if started_at else 0.0
+    return asyncio.get_running_loop().time() - elapsed
 
 
 def _recent_event_timestamps(
@@ -630,6 +642,7 @@ class ManagedWatchStore:
             deliver_key=deliver_key,
             metadata=dict(metadata or {}),
         )
+        watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY] = watch.created_at
         return self.upsert_watch(
             watch,
             expected_enabled_agent_id=expected_enabled_agent_id,
@@ -2042,7 +2055,7 @@ class ManagedWatchService:
         await asyncio.sleep(delay)
 
     async def _run_watch(self, watch_id: str) -> None:
-        lifetime_started = asyncio.get_running_loop().time()
+        lifetime_started: float | None = None
         self._watch_started_at[watch_id] = _utc_now_iso()
         self._runtime_state_dirty = True
         self._write_runtime_state()
@@ -2061,6 +2074,8 @@ class ManagedWatchService:
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
+            if lifetime_started is None:
+                lifetime_started = _lifetime_started_monotonic(watch)
 
             follow_up_slot = await self._wait_for_follow_up_slot(
                 watch_id,

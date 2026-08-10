@@ -22,8 +22,8 @@ event. The runtime currently loses both facts between cycles.
   `avibe-watch: no-event`.
 - Other non-zero exits are terminal failures. Exit `124` is retryable only when it is
   explicitly listed.
-- `--lifetime-timeout` bounds the whole Watch lifetime in either mode. This matters
-  for a `once` Watch that can now have multiple retry cycles.
+- `--lifetime-timeout` bounds one armed episode in either mode. Creation or explicit
+  resume starts that episode; supervisor and service restarts retain its deadline.
 - The lifetime deadline also bounds time spent behind the follow-up fence. If an
   earlier Agent Run is still queued or running at the deadline, the Watch retires
   immediately and records that Run's actual ID, but does not create a second
@@ -66,17 +66,20 @@ No schema migration is required. Watch metadata owns:
 
 - the latest follow-up Run ID, used for terminal-state and re-arm checks;
 - the rolling accepted-event timestamps;
-- the last circuit-breaker incident and repair Run ID.
+- the last circuit-breaker incident and repair Run ID;
+- the current armed episode's lifetime origin.
 
-Existing Watches have none of these keys and continue normally. On upgrade, the
-runtime also queries queued/running Watch Runs by definition before starting a waiter,
-so legacy backlog drains without admitting another event. That queried row, rather
-than possibly absent or stale Watch metadata, is also the source of the blocking Run
-ID recorded on lifetime expiry. File-backed stores retain the same behavior for tests
-and legacy operation, without pretending to provide a cross-file transaction.
+Existing Watches without a lifetime-origin key derive it from their durable
+`created_at`; the next explicit resume writes a new origin. On upgrade, the runtime
+also queries queued/running Watch Runs by definition before starting a waiter, so
+legacy backlog drains without admitting another event. That queried row, rather than
+possibly absent or stale Watch metadata, is also the source of the blocking Run ID
+recorded on lifetime expiry. File-backed stores retain the same behavior for tests and
+legacy operation, without pretending to provide a cross-file transaction.
 
 Changing the waiter command, shell command, mode, or cwd starts a new waiter lifecycle
-and clears the old burst window. Session routing and follow-up copy changes do not.
+and clears the old burst window, but does not reset the armed episode's lifetime.
+Session routing and follow-up copy changes do not reset either one.
 
 ## Observability
 
