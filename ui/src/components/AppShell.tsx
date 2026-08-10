@@ -32,7 +32,12 @@ import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { OrganizationShell } from '../features/organization/OrganizationShell';
-import { isAdvancedSettingsPath, isMemorySettingsPath } from '../lib/adminNavigation';
+import {
+  adminLandingPath,
+  isAdvancedSettingsPath,
+  isLocalSystemPath,
+  isMemorySettingsPath,
+} from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -343,24 +348,10 @@ export const AppShell: React.FC = () => {
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
   // Owner is not enough for these: `can_manage_instance` stays true for a remote
-  // Instance owner, but these surfaces run on local-only routes. Harness opens
-  // entirely on `/api/harness/bootstrap`-style routes; the Library's Show Page
-  // controls (visibility, share rotation, icon upload) are local-only; the
-  // service page mutates runtime/local process state; and the platform/backend
-  // settings pages enter and validate IM credentials and agent CLI paths, whose
-  // config saves are protected fields rejected by the remote payload filter (or
-  // `POST /api/settings`, which is local-only). `can_use_system` is the
-  // trusted-local capability (not remote AND owner), so require it as well —
-  // otherwise a remote owner renders controls that dead-end in
-  // `remote_execution_disabled`. Messaging settings are excluded: its saves are
-  // restricted to remotely-mutable preference fields by the payload filter.
-  const localSystemPath =
-    location.pathname.startsWith('/admin/settings/service') ||
-    location.pathname.startsWith('/admin/settings/platforms') ||
-    location.pathname.startsWith('/admin/settings/backends') ||
-    ['/harness', '/apps/library'].some(
-      (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
-    );
+  // Instance owner, but every one of them runs on local-only routes. The list
+  // and its rationale live in `isLocalSystemPath` so this redirect and the
+  // navigation entries below cannot drift apart.
+  const localSystemPath = isLocalSystemPath(location.pathname);
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
@@ -450,13 +441,28 @@ export const AppShell: React.FC = () => {
     },
   ];
 
-  const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
+  // Second half of the trusted-local gate: a page the redirect above withholds
+  // must not still be advertised, or a remote owner taps a nav entry and lands
+  // back on the Workbench. Recurses into groups (平台凭据 is a child) and drops a
+  // group left with nothing to open.
+  const withoutLocalSystemEntries = (navItems: ShellNavItem[]): ShellNavItem[] =>
+    navItems
+      .filter((item) => !item.to || !isLocalSystemPath(item.to))
+      .map((item) =>
+        item.children ? { ...item, children: withoutLocalSystemEntries(item.children) } : item,
+      )
+      .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
+  const visibleAdminItems = capabilities.can_use_system
+    ? adminItems
+    : withoutLocalSystemEntries(adminItems);
+
+  const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
   // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
   // bar with Workbench, Control Panel, and More (which opens the full nested nav
   // sheet). The Organization tab follows the same temporary visibility switch
   // as every other shell entry point. See ``adminMenuOpen``.
-  const adminMobileTabs: ShellNavItem[] = [
+  const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
     ...(ORGANIZATION_NAV_ENABLED
@@ -470,14 +476,15 @@ export const AppShell: React.FC = () => {
       match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
+  const adminMobileTabs = capabilities.can_use_system
+    ? adminMobileTabsAll
+    : withoutLocalSystemEntries(adminMobileTabsAll);
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
-  const adminBottomBarPaths = new Set([
-    '/admin/dashboard',
-    ...(ORGANIZATION_NAV_ENABLED ? ['/admin/organization/overview'] : []),
-    '/admin/settings/messaging',
-  ]);
-  const adminSheetItems = adminItems
+  const adminBottomBarPaths = new Set(
+    adminMobileTabs.map((item) => item.to).filter((to): to is string => !!to && to !== '/'),
+  );
+  const adminSheetItems = visibleAdminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
     // Groups start expanded in the sheet (the sheet is transient — show the
     // children up front). The desktop sidebar keeps its collapse-by-default.
@@ -609,7 +616,7 @@ export const AppShell: React.FC = () => {
               )}
               {shellMode === 'workbench' && capabilities.can_manage_instance && (
                 <Link
-                  to="/admin/dashboard"
+                  to={adminLandingPath(capabilities.can_use_system)}
                   title={t('appShell.openControlPanel')}
                   aria-label={t('appShell.openControlPanel')}
                   className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"

@@ -21,6 +21,8 @@ import clsx from 'clsx';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
+import { adminLandingPath } from '@/lib/adminNavigation';
 
 import { useOrganization } from './context';
 import { OrganizationProvider } from './OrganizationProvider';
@@ -35,9 +37,18 @@ const NAV = [
   { path: '/admin/organization/resources', key: 'resources', icon: Building2 },
 ] as const;
 
+// Organization is the surface a REMOTE Instance owner lives in, and the
+// Dashboard is trusted-local, so "back to control panel" has to resolve to an
+// admin page this caller can actually open instead of bouncing to the Workbench.
+function useBackToControlPanelPath(): string {
+  const { capabilities } = useInstanceAuthorization();
+  return adminLandingPath(capabilities.can_use_system);
+}
+
 function GateState() {
   const { t } = useTranslation();
   const { gate, signIn, retry } = useOrganization();
+  const backToControlPanelPath = useBackToControlPanelPath();
   if (gate === 'loading' || gate === 'reauthorizing') {
     return (
       <div className="grid min-h-[100dvh] place-items-center bg-background p-6 text-center">
@@ -95,7 +106,7 @@ function GateState() {
   const Icon = state.icon;
   return (
     <div className="min-h-[100dvh] bg-background p-4 md:p-8">
-      <Link to="/admin/dashboard" className="inline-flex items-center gap-2 text-[13px] text-muted hover:text-foreground">
+      <Link to={backToControlPanelPath} className="inline-flex items-center gap-2 text-[13px] text-muted hover:text-foreground">
         <ArrowLeft className="size-4" />
         {t('organization.actions.backToControlPanel')}
       </Link>
@@ -115,6 +126,7 @@ function OrganizationSidebar({ mobile = false, onNavigate }: { mobile?: boolean;
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
+  const backToControlPanelPath = useBackToControlPanelPath();
   const {
     organizations,
     selectedOrganizationId,
@@ -131,7 +143,7 @@ function OrganizationSidebar({ mobile = false, onNavigate }: { mobile?: boolean;
   };
   return (
     <div className="flex h-full flex-col bg-surface px-4 py-5">
-      <Link to="/admin/dashboard" className="flex items-center gap-2 text-[13px] text-muted hover:text-foreground" onClick={onNavigate}>
+      <Link to={backToControlPanelPath} className="flex items-center gap-2 text-[13px] text-muted hover:text-foreground" onClick={onNavigate}>
         <ArrowLeft className="size-4" />
         {t('organization.actions.backToControlPanel')}
       </Link>
