@@ -256,6 +256,13 @@ METHOD_LIST_RE = re.compile(r"`\s*/\s*`")
 # Which §1 frame a sentence points at. Only `1.` — a §4 or §0 reference is a
 # pointer into the contract or the registers, and neither is a frame claim.
 FRAME_REF_RE = re.compile(r"§(1\.\d+)")
+# A frame heading gives the same frame three names — section, display number,
+# node id — and §1 prose uses all three ("a state of 09", "Deltas from 01").
+FRAME_NAME_RE = re.compile(r"Frame\s+(\d+)\s+`(\w+)`")
+# What could be one of the other two: a backticked identifier, or a two-digit
+# number standing alone. A digit, a dot or a dash on either side disqualifies it,
+# because the registers number their rows that way — G-10 is a gap, not Frame 10.
+FRAME_ALIAS_RE = re.compile(r"`(\w+)`|(?<![\w.\-])(\d{2})(?![\w.\-])")
 # The document's own marker for a normative claim, and the reason this file can
 # tell one apart from the narration around it. See the class C attribution arm.
 BOLD_RUN_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
@@ -471,6 +478,23 @@ class Universe:
         else:
             found = tuple(sorted(self._alias.get(cite, ())))
         return Match(self.name, cite, found, tuple(self._payload[t] for t in found))
+
+
+def frame_refs(text: str, frames: Universe) -> set[str]:
+    """Which §1 frames `text` names, under any of the three names a frame has.
+
+    The registers file states under `§1.x`, so an arm comparing itself against
+    §0.8 reaches for that spelling. Prose reaches for the other two — "Frames 09
+    and 10 draw the header", "Deltas from 01" — and an arm that recognises only
+    the section number reads those as *no* claim at all. That is the shape a rule
+    stops being applied in: not loudly, but on whichever sentences happened to be
+    written in the document's other habit. Resolution stays in the universe, so
+    the three names are one identity everywhere rather than a second comparator.
+    """
+    named = set(FRAME_REF_RE.findall(text))
+    for match in FRAME_ALIAS_RE.finditer(text):
+        named.update(frames.resolve(match.group(1) or match.group(2)).hits)
+    return named
 
 
 # Which universes each class consults. A class that reads no universe compares
@@ -1061,7 +1085,14 @@ def parse(doc: Document) -> dict[str, Any]:
 
     frames = Universe("frames", "spec", "C")
     for name, line_no, heading in doc.sections("1."):
-        frames.define(name, line_no, content=heading.strip(), where=line_no)
+        also = FRAME_NAME_RE.search(heading)
+        frames.define(
+            name,
+            line_no,
+            content=heading.strip(),
+            where=line_no,
+            aliases=also.groups() if also else (),
+        )
 
     # --- §0.9 slots ----------------------------------------------------------
     # Three cells: what fills the slot, when it is absent, and which copy keys
@@ -2690,10 +2721,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # and the two answers must agree. §0.8 is the definition, so prose is the side
     # that gets checked — a register compared against itself reports itself.
     #
-    # Identity here is the guarded-refusal envelope, not the frame's node id: the
-    # sentence that had this wrong never wrote the id, it wrote "it". A response
-    # key every route returns identifies nothing, so what marks a paragraph as
-    # being about the refusal is the keys only guarded routes carry.
+    # What marks a paragraph as being about the refusal is the guarded-refusal
+    # envelope, not the frame it names: the sentence that had this wrong never
+    # wrote a frame's id, it wrote "it". A response key every route returns
+    # identifies nothing, so the marker is the keys only guarded routes carry.
+    # Which frame the paragraph then *claims* is a separate question, and one the
+    # frames universe answers under all three of a frame's names.
     #
     # And only inside a bold run. This document bolds the claim and narrates
     # around it, so an unbolded §1.x is a pointer — "the stored `hops` array, read
@@ -2723,7 +2756,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         if not named:
             continue
         guard_claims += 1
-        claimed = {ref for run in BOLD_RUN_RE.findall(scope_text) for ref in FRAME_REF_RE.findall(run)}
+        claimed = {ref for run in BOLD_RUN_RE.findall(scope_text) for ref in frame_refs(run, frame_u)}
         for ref in sorted(claimed - guard_frames):
             add(
                 "C",

@@ -755,6 +755,18 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "exactly as §0.9 and §1.3 rule the same hole",
         "reaches the guarded refusal",
     ),
+    # The same misattribution in the document's other habit. A frame heading
+    # gives the frame three names, and §1 prose uses all of them — "Frames 09
+    # and 10 draw the header", "Deltas from 01". An arm that recognises only the
+    # register's spelling reports the case above and lets this one through, so
+    # the two cases differ by nothing except which name the claim is written in.
+    GateCase(
+        "C", "frames", "arm",
+        "the same misattribution, written with the frame's display number",
+        "exactly as §0.9 and §1.6 rule the same hole",
+        "exactly as §0.9 and 03 rule the same hole",
+        "reaches the guarded refusal",
+    ),
     # --- D: copy ------------------------------------------------------------
     # Condition keys are stored bare and cited namespace-qualified, so the
     # citation test has to resolve both spellings to one copy row. Matching on
