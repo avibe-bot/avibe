@@ -5869,13 +5869,21 @@ def cloud_management_auth_callback():
         return _auth_rate_limit_response()
     state = str(request.args.get("state") or "")
     upstream_error = str(request.args.get("error") or "")
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
+    # This route is unauthenticated and CSRF-exempt, so a cross-site top-level
+    # link reaches it with the `SameSite=Lax` management cookies attached. Only
+    # a callback that resolves to this browser's own live handshake may tear
+    # down its existing grant; an unrelated or forged one leaves the current
+    # session exactly as it was instead of forcing a logout.
+    owns_flow = cloud_management.callback_owns_flow(state, browser_id)
     if upstream_error:
+        if not owns_flow:
+            return _cloud_management_redirect("/admin/organization/overview", upstream_error)
         next_path = cloud_management.fail_handshake(state)
         response = _cloud_management_redirect(next_path, upstream_error)
         _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
         _mark_cloud_management_manual(response)
         return response
-    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
     try:
         grant, next_path = cloud_management.complete_authorization(
             config,
@@ -5894,6 +5902,8 @@ def cloud_management_auth_callback():
             "/admin/organization/overview",
             code,
         )
+        if not owns_flow:
+            return response
         cloud_management.invalidate_grant(
             request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
         )

@@ -13,7 +13,7 @@ import { InfoHint } from '../ui/info-hint';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch } from './AgentRoutePicker';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
-import { canEditProjectInstructions } from '../../lib/remoteAuth';
+import { canEditProjectDefaultAgent, canEditProjectInstructions } from '../../lib/remoteAuth';
 
 // Per-project settings. Three sections:
 //   1. Working directory (read-only) — where the Agent runs.
@@ -35,6 +35,10 @@ export const ProjectSettingsDialog: React.FC<{
   // Reading and saving AGENTS.md are both local-only, so the shortcut is only
   // offered where the editor can actually load the file.
   const canEditAgentsMd = capabilities.can_manage_projects && canEditProjectInstructions({ remote });
+  // The remote project PATCH filter keeps only `display_name`, so every pick the
+  // route picker persists would dead-end in `remote_execution_disabled`; the
+  // section is offered only where it can actually save.
+  const canEditDefaultAgent = capabilities.can_manage_projects && canEditProjectDefaultAgent({ remote });
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
 
@@ -100,6 +104,7 @@ export const ProjectSettingsDialog: React.FC<{
             </section>
 
             {/* 2. Default Agent (backend + model + effort). */}
+            {canEditDefaultAgent ? (
             <section className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
                 <span className="text-[12px] font-semibold text-foreground">
@@ -121,6 +126,7 @@ export const ProjectSettingsDialog: React.FC<{
                 onNavigateAway={onClose}
               />
             </section>
+            ) : null}
 
             {/* 3. Project guidance prompt → the existing AGENTS.md editor. */}
             {canEditAgentsMd ? (

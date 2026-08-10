@@ -108,6 +108,17 @@ export function canEditProjectInstructions(context: RemoteContext): boolean {
 }
 
 /**
+ * A Project's default Agent is local-only. `PATCH /api/projects/{id}` is
+ * payload-filtered remotely down to `display_name`, so the rename this dialog
+ * shares stays permitted while every default-Agent field the picker persists
+ * (`agent_id`, `agent_name`, `agent_variant`, `model`, `reasoning_effort`)
+ * dead-ends in `remote_execution_disabled`.
+ */
+export function canEditProjectDefaultAgent(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
+/**
  * Memory administration is local-only: the admin log enumerates memcells for
  * every principal, a settings save repoints the shared provider endpoints, and
  * clear / runtime-restart act on the whole local sidecar. The principal-scoped

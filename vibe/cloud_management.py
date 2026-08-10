@@ -267,6 +267,25 @@ def fail_handshake(state: str | None) -> str:
     return handshake.next_path if handshake is not None else "/admin/organization/overview"
 
 
+def callback_owns_flow(state: str | None, browser_id: str | None) -> bool:
+    """Whether a callback proves it belongs to *browser_id*'s own handshake.
+
+    The OAuth callback is intentionally unauthenticated and CSRF-exempt, and the
+    management cookies are ``SameSite=Lax``, so any site can drive a top-level
+    navigation to it with attacker-chosen ``state`` / ``code`` / ``error`` and
+    have the victim's cookies attached. A failure on such a callback says
+    nothing about the browser's existing grant, so only a live handshake bound
+    to this exact browser authorizes tearing that grant down. This peeks
+    without consuming, so an unrelated callback also cannot pop a genuine
+    pending handshake out from under a real login.
+    """
+
+    if not state or not browser_id:
+        return False
+    handshake = handshake_for_handoff(state)
+    return handshake is not None and secrets.compare_digest(handshake.browser_id, browser_id)
+
+
 def complete_authorization(
     config: V2Config,
     *,

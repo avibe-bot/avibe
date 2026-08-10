@@ -11,6 +11,7 @@ import {
   canAdministerMemory,
   canArchiveProjects,
   canEditAgentDefinitions,
+  canEditProjectDefaultAgent,
   canEditProjectInstructions,
   canManageSkills,
   canManageVaultSecrets,
@@ -45,6 +46,7 @@ describe('local-only workbench controls', () => {
     canUseHarness,
     canArchiveProjects,
     canEditProjectInstructions,
+    canEditProjectDefaultAgent,
     canAdministerMemory,
   };
 
