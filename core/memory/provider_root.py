@@ -14,6 +14,7 @@ from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     SpilledDirectoryOrder,
     create_confined_file,
+    ensure_private_directory,
     fsync_directory,
     open_confined_directory,
     open_confined_regular_file,
@@ -439,6 +440,12 @@ class ProviderRoot:
             if current == current.parent or current == home:
                 break
             current = current.parent
+        try:
+            ensure_private_directory(home, home)
+        except ConfinedFilesystemError as error:
+            raise ProviderRootError(
+                "memory provider root confinement home is unsafe or has an owner mismatch"
+            ) from error
 
     @staticmethod
     def _require_no_follow() -> None:

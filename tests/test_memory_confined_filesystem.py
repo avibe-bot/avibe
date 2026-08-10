@@ -28,6 +28,7 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 delattr(os, "O_NOFOLLOW")
 
@@ -39,6 +40,7 @@ from core.memory.confined_filesystem import ConfinedFilesystemError, PrivateSqli
 from config.v2_config import MemoryConfig
 from core.memory.artifact import MemoryArtifactManager
 from core.memory.runtime import create_memory_runtime
+from core.memory.provider_root import ProviderRoot, ProviderRootError, ProviderRootMetadata
 from core.memory.snapshot import MemorySnapshotManager, MemorySnapshotUnsafePathError
 
 home = Path(sys.argv[1])
@@ -61,6 +63,21 @@ except ConfinedFilesystemError as error:
     assert "no-follow" in str(error)
 else:
     raise AssertionError("Memory persistence accepted a host without O_NOFOLLOW")
+provider_root = ProviderRoot(home / "memory" / "everos-root", effective_home=home)
+try:
+    provider_root.ensure(
+        SimpleNamespace(provider_root_id="root-id"),
+        ProviderRootMetadata(
+            provider_root_format="everos-1.0",
+            compatible_provider_root_formats=frozenset({"everos-1.0"}),
+            artifact_fingerprint="artifact",
+        ),
+    )
+except ProviderRootError:
+    pass
+else:
+    raise AssertionError("Memory provider root accepted a host without O_NOFOLLOW")
+assert not home.exists()
 
 for enabled in (False, True):
     runtime_home = home / ("enabled" if enabled else "disabled")
@@ -129,6 +146,117 @@ def test_spilled_directory_order_preserves_raw_filename_order_across_batches(
     assert [os.fsencode(name) for name in actual] == sorted(
         os.fsencode(name) for name in names
     )
+
+
+def test_spilled_directory_order_translates_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.memory import confined_filesystem
+
+    failure = sqlite3.OperationalError("temporary database unavailable")
+
+    def fail_connect(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(confined_filesystem.sqlite3, "connect", fail_connect)
+
+    with pytest.raises(ConfinedFilesystemError) as raised:
+        confined_filesystem.SpilledDirectoryOrder()
+
+    assert raised.value.__cause__ is failure
+
+
+def test_spilled_directory_order_closes_and_translates_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.memory import confined_filesystem
+
+    real_connection = sqlite3.connect("")
+    failure = sqlite3.OperationalError("temporary schema unavailable")
+
+    class Connection:
+        closed = False
+
+        def execute(self, sql: str, parameters=()):
+            if "CREATE TABLE directory_name" in sql:
+                raise failure
+            return real_connection.execute(sql, parameters)
+
+        def close(self) -> None:
+            self.closed = True
+            real_connection.close()
+
+    connection = Connection()
+    monkeypatch.setattr(
+        confined_filesystem.sqlite3,
+        "connect",
+        lambda *_args, **_kwargs: connection,
+    )
+
+    with pytest.raises(ConfinedFilesystemError) as raised:
+        confined_filesystem.SpilledDirectoryOrder()
+
+    assert raised.value.__cause__ is failure
+    assert connection.closed is True
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        real_connection.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("failure_stage", ["insert", "read"])
+def test_spilled_directory_order_closes_after_operation_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    from core.memory import confined_filesystem
+
+    class Entry:
+        name = "entry"
+
+    class Scandir:
+        def __enter__(self):
+            return iter((Entry(),))
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None
+
+    monkeypatch.setattr(confined_filesystem.os, "scandir", lambda _fd: Scandir())
+    order = confined_filesystem.SpilledDirectoryOrder(insert_batch_size=1)
+    real_connection = order._connection
+    failure = sqlite3.OperationalError(f"temporary {failure_stage} failed")
+
+    class Connection:
+        closed = False
+
+        def execute(self, sql: str, parameters=()):
+            if failure_stage == "read" and "SELECT name" in sql:
+                raise failure
+            return real_connection.execute(sql, parameters)
+
+        def executemany(self, sql: str, parameters):
+            if failure_stage == "insert":
+                raise failure
+            return real_connection.executemany(sql, parameters)
+
+        def close(self) -> None:
+            self.closed = True
+            real_connection.close()
+
+    connection = Connection()
+    if failure_stage == "read":
+        cursor = order.scan(-1)
+        order._connection = connection
+        operation = lambda: order.next_name(cursor)
+    else:
+        order._connection = connection
+        operation = lambda: order.scan(-1)
+
+    with pytest.raises(ConfinedFilesystemError) as raised:
+        operation()
+
+    assert raised.value.__cause__ is failure
+    assert connection.closed is True
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        real_connection.execute("SELECT 1")
 
 
 def test_spilled_directory_order_closes_temporary_database_on_base_exception() -> None:

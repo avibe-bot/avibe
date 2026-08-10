@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import core.memory.confined_filesystem as confined_filesystem_module
 from core.memory.provider_root import (
     PROVIDER_ROOT_CONTROL_FILES,
     ROOT_SENTINEL_FILENAME,
@@ -73,6 +76,107 @@ def test_provider_root_ensure_creates_private_owned_root_and_sentinel(
         "provider_root_format": "everos-1.0",
         "created_by_artifact_fingerprint": "artifact-1.0",
     }
+
+
+def test_provider_root_ensure_creates_a_fresh_effective_home_privately(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "fresh-home"
+    root = ProviderRoot(home / "memory" / "everos-root", effective_home=home)
+    meta = SimpleNamespace(provider_root_id="root-id")
+    previous_umask = os.umask(0o022)
+    try:
+        root.ensure(meta, _metadata())
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert root.inspect(_metadata()).exists is True
+
+
+def test_provider_root_ensure_hardens_an_owned_legacy_effective_home(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "legacy-home"
+    home.mkdir(mode=0o755)
+    home.chmod(0o755)
+    root = ProviderRoot(home / "memory" / "everos-root", effective_home=home)
+    meta = SimpleNamespace(provider_root_id="root-id")
+
+    root.ensure(meta, _metadata())
+
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert root.inspect(_metadata()).exists is True
+
+
+def test_provider_root_refuses_to_harden_an_unowned_effective_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    getuid = getattr(os, "getuid", None)
+    if not callable(getuid):
+        pytest.skip("platform does not expose file ownership")
+    home = tmp_path / "foreign-home"
+    home.mkdir(mode=0o755)
+    home.chmod(0o755)
+    root = ProviderRoot(home / "memory" / "everos-root", effective_home=home)
+    meta = SimpleNamespace(provider_root_id="root-id")
+    monkeypatch.setattr(confined_filesystem_module.os, "getuid", lambda: getuid() + 1)
+
+    with pytest.raises(ProviderRootError, match="confinement home is unsafe"):
+        root.ensure(meta, _metadata())
+
+    assert stat.S_IMODE(home.stat().st_mode) == 0o755
+    assert not (home / "memory").exists()
+
+
+def test_provider_root_refuses_a_symlinked_effective_home_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    outside.chmod(0o755)
+    home = tmp_path / "linked-home"
+    home.symlink_to(outside, target_is_directory=True)
+    root = ProviderRoot(home / "memory" / "everos-root", effective_home=home)
+    meta = SimpleNamespace(provider_root_id="root-id")
+
+    with pytest.raises(ProviderRootError, match="chain contains a symlink"):
+        root.ensure(meta, _metadata())
+
+    assert home.is_symlink()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+    assert list(outside.iterdir()) == []
+
+
+def test_provider_root_translates_temporary_ordering_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, meta = _owner(tmp_path)
+    metadata = _metadata()
+    root.ensure(meta, metadata)
+    (root.path / "vectors").mkdir(mode=0o700)
+    failure = sqlite3.OperationalError("temporary ordering unavailable")
+
+    def fail_connect(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(
+        confined_filesystem_module.sqlite3,
+        "connect",
+        fail_connect,
+    )
+
+    with pytest.raises(ProviderRootError) as raised:
+        root.recreate_empty(meta, metadata)
+
+    assert isinstance(
+        raised.value.__cause__,
+        confined_filesystem_module.ConfinedFilesystemError,
+    )
+    assert raised.value.__cause__.__cause__ is failure
+    assert (root.path / "vectors").is_dir()
 
 
 @pytest.mark.parametrize(

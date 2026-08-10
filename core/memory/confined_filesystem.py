@@ -531,7 +531,12 @@ class SpilledDirectoryOrder:
         if not isinstance(insert_batch_size, int) or isinstance(insert_batch_size, bool) or insert_batch_size < 1:
             raise ValueError("directory order insertion batch size must be positive")
         self._insert_batch_size = insert_batch_size
-        self._connection = sqlite3.connect("")
+        try:
+            self._connection = sqlite3.connect("")
+        except sqlite3.Error as error:
+            raise ConfinedFilesystemError(
+                "confined directory ordering cannot be initialized safely"
+            ) from error
         self._next_order_id = 1
         try:
             self._connection.execute("PRAGMA temp_store=FILE")
@@ -546,8 +551,13 @@ class SpilledDirectoryOrder:
                 ) WITHOUT ROWID
                 """
             )
+        except sqlite3.Error as error:
+            self._close_after_failure()
+            raise ConfinedFilesystemError(
+                "confined directory ordering cannot be initialized safely"
+            ) from error
         except BaseException:
-            self._connection.close()
+            self._close_after_failure()
             raise
 
     def __enter__(self) -> SpilledDirectoryOrder:
@@ -558,6 +568,12 @@ class SpilledDirectoryOrder:
 
     def close(self) -> None:
         self._connection.close()
+
+    def _close_after_failure(self) -> None:
+        try:
+            self._connection.close()
+        except sqlite3.Error:
+            pass
 
     def scan(
         self,
@@ -579,7 +595,12 @@ class SpilledDirectoryOrder:
                         rows.clear()
             if rows:
                 self._insert(rows)
-        except (OSError, sqlite3.Error, UnicodeError) as error:
+        except sqlite3.Error as error:
+            self._close_after_failure()
+            raise ConfinedFilesystemError(
+                "confined directory cannot be scanned safely"
+            ) from error
+        except (OSError, UnicodeError) as error:
             raise ConfinedFilesystemError(
                 "confined directory cannot be scanned safely"
             ) from error
@@ -614,7 +635,12 @@ class SpilledDirectoryOrder:
             )
             cursor.exhausted = True
             return None
-        except (sqlite3.Error, UnicodeError) as error:
+        except sqlite3.Error as error:
+            self._close_after_failure()
+            raise ConfinedFilesystemError(
+                "confined directory cannot be read safely"
+            ) from error
+        except UnicodeError as error:
             raise ConfinedFilesystemError(
                 "confined directory cannot be read safely"
             ) from error

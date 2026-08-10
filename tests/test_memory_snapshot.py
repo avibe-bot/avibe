@@ -719,6 +719,32 @@ def test_spilled_directory_order_is_exact_and_memory_bounded_for_wide_directorie
     assert list(sqlite_temp.iterdir()) == []
 
 
+def test_snapshot_translates_temporary_directory_order_database_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _private_file(home / "memory/everos-root/profile.json", b"profile", home)
+    manager = MemorySnapshotManager(home)
+    failure = sqlite3.OperationalError("temporary ordering unavailable")
+
+    def fail_connect(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(
+        confined_filesystem_module.sqlite3,
+        "connect",
+        fail_connect,
+    )
+
+    with pytest.raises(MemorySnapshotError) as raised:
+        manager.create("ordering-failure")
+
+    assert isinstance(raised.value.__cause__, confined_filesystem_module.ConfinedFilesystemError)
+    assert raised.value.__cause__.__cause__ is failure
+    assert not manager.snapshot_path("ordering-failure").exists()
+
+
 def test_streaming_manifest_accepts_extended_unicode_path_record(tmp_path: Path) -> None:
     manifest_path = _private_directory(tmp_path / "snapshot", tmp_path) / "manifest.jsonl"
     relative_path = "memory/everos-root/" + "/".join(["\u754c" * 200] * 55)
