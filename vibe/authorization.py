@@ -364,6 +364,12 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("GET", r"^/api/harness/(?:runs|bootstrap|runs/[^/]+)$"),
         ("GET", r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|vmk)$"),
         ("GET", r"^/api/global-prompts$"),
+        # Model Hub source listing returns credential metadata
+        # (credential_ref, masked_credential, account_label, custom base_url,
+        # usage/billing) that must not cross the tunnel; the mutation surface
+        # is already fail-closed local-only, so the read stays local-only too.
+        ("GET", r"^/api/models/sources$"),
+        ("HEAD", r"^/api/models/sources$"),
         ("POST", r"^/api/show-pages/[^/]+/visibility$"),
         ("POST", r"^/api/show-pages/[^/]+/(?:rotate-share|share-id)$"),
         ("GET", r"^/api/skills/(?:check|find)$"),
@@ -428,7 +434,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/models/(?:sources|agents|events|runtime/status)$",
+            r"^/api/models/(?:agents|events|runtime/status)$",
         ),
         (
             frozenset({"GET", "HEAD"}),

@@ -1639,6 +1639,7 @@ def test_remote_diagnostics_and_legacy_system_helpers_are_blocked_before_local_a
     [
         ("/api/models/runtime/start", "vibe.ui_server._model_hub_service"),
         ("/api/models/agents/codex/probe", "vibe.ui_server._model_hub_service"),
+        ("/api/models/sources", "vibe.ui_server._model_hub_service"),
         ("/api/backend/codex/restart", "vibe.api.restart_backend"),
         ("/api/backend/codex/auth/test", "vibe.api.test_backend_auth_async"),
     ],
@@ -1752,8 +1753,9 @@ def test_remote_show_page_public_link_mutations_are_blocked_before_store_access(
     [
         ("/api/models/runtime/status", False),
         ("/api/models/agents", False),
+        ("/api/models/sources", True),
         ("/api/backend/codex/runtime", True),
-            ("/api/backend/codex/auth", True),
+        ("/api/backend/codex/auth", True),
     ],
 )
 def test_remote_model_and_backend_reads_follow_execution_safety_policy(path, local_only):
