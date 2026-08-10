@@ -43,6 +43,7 @@ MAX_SHOW_SCREENSHOT_BYTES = 25 * 1024 * 1024
 MAX_WORKBENCH_ATTACHMENT_BYTES = 100 * 1024 * 1024
 _WORKBENCH_UPLOAD_CHUNK_BYTES = 1024 * 1024
 _WORKBENCH_UPLOAD_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,80}")
+_WORKBENCH_BASE64_WHITESPACE_DELETE = str.maketrans("", "", " \t\r\n\v\f")
 _WORKBENCH_UPLOAD_LOCKS_GUARD = threading.Lock()
 _WORKBENCH_UPLOAD_LOCKS: dict[str, "_WorkbenchUploadLock"] = {}
 _SHOW_SCREENSHOT_DATA_URL_RE = re.compile(
@@ -100,6 +101,29 @@ def normalize_workbench_upload_id(value: object) -> str | None:
     if not isinstance(value, str) or _WORKBENCH_UPLOAD_ID_RE.fullmatch(value) is None:
         raise WorkbenchAttachmentUploadError("invalid_upload", "Upload ID is invalid", 400)
     return value
+
+
+def decode_legacy_workbench_attachment(data: str) -> io.BytesIO:
+    """Decode the pre-multipart JSON contract without relaxing validation."""
+    encoded_data = data
+    if encoded_data.startswith("data:") and "," in encoded_data:
+        encoded_data = encoded_data.split(",", 1)[1]
+    encoded_data = encoded_data.translate(_WORKBENCH_BASE64_WHITESPACE_DELETE)
+    max_encoded_bytes = ((MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3) * 4
+    if len(encoded_data) > max_encoded_bytes:
+        raise WorkbenchAttachmentUploadError(
+            "too_large",
+            "Attachment exceeds the size limit",
+            413,
+        )
+    try:
+        return io.BytesIO(base64.b64decode(encoded_data, validate=True))
+    except (binascii.Error, ValueError) as exc:
+        raise WorkbenchAttachmentUploadError(
+            "invalid_upload",
+            "Attachment data is invalid",
+            400,
+        ) from exc
 
 
 @contextmanager

@@ -1744,11 +1744,18 @@ def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatc
     )
 
 
-def test_legacy_attachment_upload_accepts_structured_json_content_type(isolated_state, tmp_path):
+def test_legacy_attachment_upload_preserves_json_contract(isolated_state, tmp_path, monkeypatch):
     import base64
 
+    from core import workbench_media
+    from storage import media_service
+    from storage.db import create_sqlite_engine
     from vibe.ui_server import app
 
+    raw = b"legacy upload"
+    monkeypatch.setattr(workbench_media, "MAX_WORKBENCH_ATTACHMENT_BYTES", len(raw))
+    encoded = base64.b64encode(raw).decode("ascii")
+    wrapped = " \t\r\n\v\f".join(encoded[index : index + 4] for index in range(0, len(encoded), 4))
     _, session_id = _make_session(tmp_path)
     client = app.test_client()
     response = client.post(
@@ -1757,7 +1764,7 @@ def test_legacy_attachment_upload_accepts_structured_json_content_type(isolated_
             {
                 "name": "legacy.txt",
                 "mime": "text/plain",
-                "data": base64.b64encode(b"legacy upload").decode("ascii"),
+                "data": f"data:text/plain;base64,{wrapped}",
             }
         ),
         headers={
@@ -1767,7 +1774,12 @@ def test_legacy_attachment_upload_accepts_structured_json_content_type(isolated_
     )
 
     assert response.status_code == 201
-    assert response.get_json()["size"] == len(b"legacy upload")
+    payload = response.get_json()
+    assert payload["size"] == len(raw)
+    with create_sqlite_engine().connect() as conn:
+        row = media_service.get_by_token(conn, payload["token"])
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == raw
 
 
 def test_legacy_attachment_upload_rejects_invalid_base64(isolated_state, tmp_path):
@@ -1777,7 +1789,7 @@ def test_legacy_attachment_upload_rejects_invalid_base64(isolated_state, tmp_pat
     client = app.test_client()
     response = client.post(
         f"/api/sessions/{session_id}/attachments",
-        json={"name": "broken.txt", "mime": "text/plain", "data": "not-base64"},
+        json={"name": "broken.txt", "mime": "text/plain", "data": "aGVs!bG8="},
         headers=csrf_headers(client),
     )
 

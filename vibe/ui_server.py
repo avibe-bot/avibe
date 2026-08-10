@@ -8068,9 +8068,6 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
     """
 
     async def handler():
-        import binascii
-        import io
-
         from core import workbench_media
         from core.file_browser_service import FileBrowserError
         from core.services import sessions as workbench_sessions_service
@@ -8125,28 +8122,9 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
             def persist_attachment():
                 attachment_source = source
                 if legacy_data_b64 is not None:
-                    encoded_data = legacy_data_b64
-                    if encoded_data.startswith("data:") and "," in encoded_data:
-                        encoded_data = encoded_data.split(",", 1)[1]
-                    max_encoded_bytes = (
-                        (workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3
-                    ) * 4
-                    if len(encoded_data) > max_encoded_bytes:
-                        raise workbench_media.WorkbenchAttachmentUploadError(
-                            "too_large",
-                            "Attachment exceeds the size limit",
-                            413,
-                        )
-                    try:
-                        attachment_source = io.BytesIO(
-                            base64.b64decode(encoded_data, validate=True)
-                        )
-                    except (binascii.Error, ValueError) as exc:
-                        raise workbench_media.WorkbenchAttachmentUploadError(
-                            "invalid_upload",
-                            "Attachment data is invalid",
-                            400,
-                        ) from exc
+                    attachment_source = workbench_media.decode_legacy_workbench_attachment(
+                        legacy_data_b64
+                    )
                 if attachment_source is None:
                     raise workbench_media.WorkbenchAttachmentUploadError(
                         "file_required",
