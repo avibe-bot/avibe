@@ -1665,8 +1665,9 @@ def test_patch_session_rejects_unknown_target_scope_as_invalid_value(isolated_st
     assert response.status_code == 400
 
 
-def test_standalone_session_accepts_attachment_upload(isolated_state):
+def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatch):
     import base64
+    import threading
 
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -1681,6 +1682,22 @@ def test_standalone_session_accepts_attachment_upload(isolated_state):
             agent_backend="codex",
             visibility="foreground",
         )
+
+    request_threads: list[int] = []
+    decode_threads: list[int] = []
+    original_get_session = sessions_service.get_session
+    original_b64decode = base64.b64decode
+
+    def tracked_get_session(*args, **kwargs):
+        request_threads.append(threading.get_ident())
+        return original_get_session(*args, **kwargs)
+
+    def tracked_b64decode(*args, **kwargs):
+        decode_threads.append(threading.get_ident())
+        return original_b64decode(*args, **kwargs)
+
+    monkeypatch.setattr(sessions_service, "get_session", tracked_get_session)
+    monkeypatch.setattr(base64, "b64decode", tracked_b64decode)
 
     client = app.test_client()
     response = client.post(
@@ -1701,6 +1718,24 @@ def test_standalone_session_accepts_attachment_upload(isolated_state):
         ).mappings().one()
     assert row["scope_id"] is None
     assert row["session_id"] == session["id"]
+    assert decode_threads
+    assert request_threads
+    assert decode_threads[0] != request_threads[0]
+
+
+def test_legacy_attachment_upload_rejects_invalid_base64(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        json={"name": "broken.txt", "mime": "text/plain", "data": "not-base64"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "invalid_upload"
 
 
 def test_attachment_upload_preserves_unicode_name_and_binary_body(isolated_state, tmp_path):

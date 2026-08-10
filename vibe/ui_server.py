@@ -8074,6 +8074,8 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
 
         form = None
         try:
+            source = None
+            legacy_data_b64 = None
             content_type = starlette_request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
             if content_type == "multipart/form-data":
                 _validate_file_upload_content_length(
@@ -8102,11 +8104,7 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                 max_encoded_bytes = ((workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3) * 4
                 if len(data_b64) > max_encoded_bytes:
                     return _workbench_attachment_error("too_large", 413)
-                try:
-                    raw = base64.b64decode(data_b64, validate=True)
-                except (binascii.Error, ValueError):
-                    return _workbench_attachment_error("invalid_upload", 400)
-                source = io.BytesIO(raw)
+                legacy_data_b64 = data_b64
                 name = payload.get("name")
                 mime = payload.get("mime") or payload.get("content_type")
                 upload_id = payload.get("upload_id")
@@ -8116,8 +8114,26 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
             stable_upload_id = workbench_media.normalize_workbench_upload_id(upload_id)
 
             def persist_attachment():
+                attachment_source = source
                 result = None
                 try:
+                    if legacy_data_b64 is not None:
+                        try:
+                            attachment_source = io.BytesIO(
+                                base64.b64decode(legacy_data_b64, validate=True)
+                            )
+                        except (binascii.Error, ValueError) as exc:
+                            raise workbench_media.WorkbenchAttachmentUploadError(
+                                "invalid_upload",
+                                "Attachment data is invalid",
+                                400,
+                            ) from exc
+                    if attachment_source is None:
+                        raise workbench_media.WorkbenchAttachmentUploadError(
+                            "file_required",
+                            "File is required",
+                            400,
+                        )
                     with workbench_media.workbench_attachment_upload_lock(
                         session_id, stable_upload_id
                     ):
@@ -8128,7 +8144,7 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                                 session_id=session_id,
                                 file_name=name,
                                 content_type=mime,
-                                source=source,
+                                source=attachment_source,
                                 upload_id=stable_upload_id,
                             )
                     return result
