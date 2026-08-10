@@ -732,7 +732,7 @@ message_deliveries = Table(
     ),
     CheckConstraint(
         "(state = 'reconciling_steer' "
-        "and current_receipt_outcome = 'unknown') "
+        "and current_receipt_outcome in ('accepted', 'unknown')) "
         "or (state <> 'reconciling_steer' "
         "and current_receipt_outcome is null)",
         name="ck_message_deliveries_current_receipt",

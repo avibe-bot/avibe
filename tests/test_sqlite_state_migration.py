@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260809_0049"
+HEAD_REVISION = "20260811_0050"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -91,6 +91,156 @@ def test_message_index_migration_matches_catalog() -> None:
     assert migration.UPGRADE_USER_SEND_PREDICATE == build_partial_index_predicate(
         "ix_messages_inbox_user_send"
     )
+
+
+def test_accepted_steer_receipt_migration_preserves_upgrade_and_downgrade_invariants(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260809_0049")
+    engine = create_sqlite_engine(db_path)
+    now = "2026-08-11T00:00:00Z"
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_name, agent_backend, agent_variant,
+                session_anchor, workdir, native_session_id, status, visibility,
+                pinned, agent_status, metadata_json, created_at, updated_at,
+                last_active_at
+            ) values (
+                'ses_receipt_migration', null, 'codex', 'codex', 'codex',
+                'receipt-migration', '/tmp', '', 'active', 'foreground',
+                0, 'idle', '{}', ?, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        initial = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_receipt_anchor",
+            session_id="ses_receipt_migration",
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=None,
+                session_id="ses_receipt_migration",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="anchor",
+            ),
+            dispatch_text="anchor",
+            now=now,
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id="turn_receipt_migration",
+            session_id="ses_receipt_migration",
+            backend="codex",
+            deliveries=[initial],
+            dispatch_text="anchor",
+        )
+        turn = message_deliveries.bind_native_start(
+            conn,
+            "turn_receipt_migration",
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="runtime",
+            runtime_turn_id="runtime-turn",
+            native_turn_id="native-turn",
+        )
+        assert turn is not None
+        steer = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_receipt_candidate",
+            session_id="ses_receipt_migration",
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=None,
+                session_id="ses_receipt_migration",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="candidate",
+            ),
+            dispatch_text="candidate",
+            now=now,
+        )
+        steering = message_deliveries.open_steer_attempt(
+            conn,
+            "msg_receipt_candidate",
+            expected_version=int(steer["version"]),
+            turn_id="turn_receipt_migration",
+            attempt_id="attempt_receipt_migration",
+            expected_native_turn_id="native-turn",
+        )
+        assert steering is not None
+        assert message_deliveries.mark_attempt_unknown(
+            conn,
+            "msg_receipt_candidate",
+            expected_version=int(steering["version"]),
+            receipt={"reason": "receipt_persistence_lost"},
+        ) is not None
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select state, current_receipt_outcome, current_receipt_json "
+            "from message_deliveries where id = 'msg_receipt_candidate'"
+        ).one() == (
+            "reconciling_steer",
+            "unknown",
+            '{"reason":"receipt_persistence_lost"}',
+        )
+    with engine.begin() as conn:
+        conn.execute(
+            message_deliveries.message_deliveries.update()
+            .where(message_deliveries.message_deliveries.c.id == "msg_receipt_candidate")
+            .values(
+                current_receipt_outcome="accepted",
+                current_receipt_json='{"reason":"native-accepted"}',
+            )
+        )
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select state, current_receipt_outcome from message_deliveries "
+            "where id = 'msg_receipt_candidate'"
+        ).one() == ("reconciling_steer", "accepted")
+
+    with pytest.raises(RuntimeError, match="0050 downgrade refused"):
+        command.downgrade(migrations.alembic_config(db_path), "20260809_0049")
+
+    with engine.begin() as conn:
+        conn.execute(
+            message_deliveries.message_deliveries.update()
+            .where(message_deliveries.message_deliveries.c.id == "msg_receipt_candidate")
+            .values(
+                current_receipt_outcome="unknown",
+                current_receipt_json='{"reason":"receipt_persistence_lost"}',
+            )
+        )
+    command.downgrade(migrations.alembic_config(db_path), "20260809_0049")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select state, current_receipt_outcome, current_receipt_json "
+            "from message_deliveries where id = 'msg_receipt_candidate'"
+        ).one() == (
+            "reconciling_steer",
+            "unknown",
+            '{"reason":"receipt_persistence_lost"}',
+        )
+        assert conn.exec_driver_sql("select version_num from alembic_version").one() == (
+            "20260809_0049",
+        )
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "update message_deliveries set current_receipt_outcome = 'accepted' "
+                "where id = 'msg_receipt_candidate'"
+            )
 
 
 def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
