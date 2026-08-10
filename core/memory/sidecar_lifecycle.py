@@ -169,14 +169,19 @@ class MemorySidecarLifecycle:
             await self._admit_recorder_health(sidecar, generation, launch_token)
         finally:
             self._ready_admission_open = True
+        launch_is_current = self._launch_is_current(
+            sidecar,
+            generation,
+            launch_token,
+        )
         # Runtime accepts the successful explicit start synchronously. The
         # supervisor's same-turn ready notification is therefore redundant;
         # later recovery notifications still emit the semantic event.
-        if self._ready_launch == (generation, launch_token):
+        if launch_is_current and self._ready_launch == (generation, launch_token):
             self._ready_launch = None
         elif self._ready_launch is not None:
             self._ensure_ready_task()
-        return True
+        return launch_is_current
 
     async def _admit_recorder_health(
         self,
@@ -190,10 +195,7 @@ class MemorySidecarLifecycle:
             health = await self._read_recorder_health()
         except Exception:
             health = {"state": "degraded", "reason": "writer_failures"}
-        if (
-            not self._is_current(sidecar, generation)
-            or launch_token != self._launch_token
-        ):
+        if not self._launch_is_current(sidecar, generation, launch_token):
             return
         admission = RecorderAdmission.from_health(health)
         self._on_recorder_health(admission.health())
@@ -270,10 +272,15 @@ class MemorySidecarLifecycle:
         await self._stop_retention()
 
     def observe_recorder_health(self, health: dict[str, str | None]) -> None:
-        """Block host retention when the live recorder reports corruption."""
+        """Keep host retention aligned with the live recorder's ownership."""
 
         if health.get("reason") == "call_log_corrupt":
             self._retention_blocked = True
+            return
+        admission = RecorderAdmission.from_health(health)
+        if not admission.records_calls:
+            self._records_calls = False
+            self._ensure_retention()
 
     def reset_host_retention_after_clear(self) -> None:
         """Reopen retention only after Clear repaired its corrupt call-log surface."""
@@ -282,6 +289,19 @@ class MemorySidecarLifecycle:
 
     def _is_current(self, process: EverOSProcessPort | None, generation: int) -> bool:
         return process is not None and process is self._process and generation == self._generation
+
+    def _launch_is_current(
+        self,
+        process: EverOSProcessPort | None,
+        generation: int,
+        launch_token: int,
+    ) -> bool:
+        return bool(
+            self._is_current(process, generation)
+            and launch_token == self._launch_token
+            and process is not None
+            and process.running
+        )
 
     def _schedule_ready(self, generation: int, launch_token: int) -> None:
         self._ready_launch = (generation, launch_token)

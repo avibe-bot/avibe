@@ -198,13 +198,53 @@ async def test_recovery_during_initial_admission_discards_stale_health_and_queue
 
     assert await supervised.start() is True
     release_initial_health.set()
-    assert await initial_start is True
+    assert await initial_start is False
     await asyncio.wait_for(recovery_ready.wait(), timeout=1.0)
 
     assert health_reads == 2
     assert seen == [{"state": "disabled", "reason": "writer_failures"}]
     assert ready_health == [{"state": "disabled", "reason": "writer_failures"}]
     assert lifecycle.snapshot().records_calls is False
+
+
+async def test_runtime_disabled_recorder_hands_call_log_to_host_retention(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    call_log = tmp_path / "memory" / "call-log" / "call-log.db"
+    call_log.parent.mkdir(parents=True)
+    call_log.touch()
+    retained = asyncio.Event()
+
+    async def retain() -> str | None:
+        retained.set()
+        return None
+
+    lifecycle = MemorySidecarLifecycle(
+        factory,
+        provider_root=tmp_path / "memory" / "everos-root",
+        effective_home=tmp_path,
+        socket_path=tmp_path / "memory" / ".rt" / "everos.sock",
+        call_log_db_path=call_log,
+        retain_call_log=retain,
+        on_current_sidecar_ready=lambda _generation: None,
+        on_recorder_health=lambda _health: None,
+        read_recorder_health=lambda: asyncio.sleep(
+            0, result={"state": "active", "reason": None}
+        ),
+    )
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    assert lifecycle.snapshot().records_calls is True
+
+    lifecycle.observe_recorder_health(
+        {"state": "disabled", "reason": "writer_failures"}
+    )
+    await asyncio.wait_for(retained.wait(), timeout=1.0)
+
+    assert lifecycle.snapshot().records_calls is False
+    assert lifecycle.snapshot().running is True
+    assert lifecycle.retention_task is not None
+    await lifecycle.close()
 
 
 async def test_stop_failure_retains_current_supervisor(tmp_path: Path) -> None:
