@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { dependencyHasInstallAction } from './SettingsDependenciesPage.logic';
+import {
+  dependenciesNeedAutomaticRefresh,
+  dependencyHasInstallAction,
+  dependencyIsStartupManaged,
+  dependencyIsStartupRepairing,
+} from './SettingsDependenciesPage.logic';
 
 describe('dependencyHasInstallAction', () => {
   it('hides install and repair actions for unsupported dependencies', () => {
@@ -11,5 +16,85 @@ describe('dependencyHasInstallAction', () => {
     expect(dependencyHasInstallAction({ id: 'memory-runtime', status: 'missing' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'show-runtime', status: 'ready' })).toBe(true);
     expect(dependencyHasInstallAction({ id: 'node', status: 'missing' })).toBe(false);
+  });
+});
+
+describe('startup dependency refresh', () => {
+  const dependency = (id: string, installed: boolean) => ({
+    id,
+    kind: 'tool' as const,
+    required: true,
+    installed,
+    version: null,
+    status: installed ? ('ready' as const) : ('missing' as const),
+  });
+
+  it('tracks every dependency repaired by the startup reconciler', () => {
+    for (const id of ['askill', 'avault', 'show-runtime', 'tmux']) {
+      expect(dependencyIsStartupManaged({ id })).toBe(true);
+    }
+    expect(dependencyIsStartupManaged({ id: 'node' })).toBe(false);
+    expect(dependencyIsStartupManaged({ id: 'memory-runtime' })).toBe(false);
+  });
+
+  it('allows one initial retry when startup reconciliation has not acquired its lock yet', () => {
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [dependency('show-runtime', false)],
+      }, true),
+    ).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [dependency('show-runtime', false)],
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps polling while startup reconciliation is active', () => {
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: true,
+        deps: [dependency('show-runtime', true)],
+      }),
+    ).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [dependency('show-runtime', true), dependency('memory-runtime', false)],
+      }),
+    ).toBe(false);
+  });
+
+  it('treats installed dependencies requiring an upgrade as startup repairs', () => {
+    expect(
+      dependencyIsStartupRepairing({ id: 'avault', installed: true, status: 'upgrade_required' }),
+    ).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        deps: [{ ...dependency('avault', true), status: 'upgrade_required' }],
+      }, true),
+    ).toBe(true);
+  });
+
+  it('limits startup repair status to dependencies currently active in the backend', () => {
+    const showRuntime = dependency('show-runtime', false);
+    expect(dependencyIsStartupRepairing(showRuntime, new Set(['tmux']))).toBe(false);
+    expect(dependencyIsStartupRepairing(showRuntime, new Set(['show-runtime']))).toBe(true);
+    expect(
+      dependenciesNeedAutomaticRefresh({
+        ok: true,
+        reconciling: false,
+        reconciling_dependencies: [],
+        deps: [showRuntime],
+      }, true),
+    ).toBe(false);
   });
 });

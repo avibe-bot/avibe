@@ -15,6 +15,7 @@ import signal
 import subprocess
 import tarfile
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -139,6 +140,10 @@ class ShowRuntimeManager:
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
         self._lock = asyncio.Lock()
+        # `prepare()` runs in a worker thread while serving requests calls
+        # `ensure()` on the event loop. Both paths can reach the provider
+        # installer, so protect the filesystem-mutating section across threads.
+        self._install_lock = threading.Lock()
 
     async def ensure(self) -> ShowRuntimeResult:
         if self._base_url and await self._healthy(self._base_url):
@@ -146,49 +151,53 @@ class ShowRuntimeManager:
         async with self._lock:
             if self._base_url and await self._healthy(self._base_url):
                 return ShowRuntimeResult(True, self._base_url)
-            self.stop()
-            command = _resolve_command(self.command) if self._command_explicit else None
-            if not command:
-                command = await self._resolve_managed_command()
-            if not command:
-                return ShowRuntimeResult(False, reason=self._install_reason or "runtime_command_missing")
-            self.runtime_dir.mkdir(parents=True, exist_ok=True)
-            self.workspace_root.mkdir(parents=True, exist_ok=True)
-            self.cache_root.mkdir(parents=True, exist_ok=True)
-            # Reap any orphaned runtime server still bound to this workspace root before
-            # spawning ours, so there is a single writer (avibe#813). self.stop() above
-            # already released our own tracked child; anything left is a stray from a
-            # prior avibe instance that died without reaping it (SIGKILL / crash). Run it
-            # off the event loop: the psutil scan + terminate/kill can block for seconds.
-            await asyncio.to_thread(self._sweep_orphan_runtime_servers)
-            with self.stdout_path.open("w", encoding="utf-8") as stdout, self.stderr_path.open(
-                "w", encoding="utf-8"
-            ) as stderr:
-                self._process = subprocess.Popen(
-                    [
-                        *command,
-                        "--workspace-root",
-                        str(self.workspace_root),
-                        "--cache-root",
-                        str(self.cache_root),
-                        "--host",
-                        "127.0.0.1",
-                        "--port",
-                        "0",
-                        "--fallback-delay-seconds",
-                        str(SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS),
-                    ],
-                    stdout=stdout,
-                    stderr=stderr,
-                    text=True,
-                    **isolated_subprocess_kwargs(),
-                )
-            base_url = await self._read_startup_url()
-            if not base_url:
+            await self._acquire_install_lock()
+            try:
                 self.stop()
-                return ShowRuntimeResult(False, reason="runtime_start_failed")
-            self._base_url = base_url
-            return ShowRuntimeResult(True, base_url)
+                command = _resolve_command(self.command) if self._command_explicit else None
+                if not command:
+                    command = await self._resolve_managed_command_locked()
+                if not command:
+                    return ShowRuntimeResult(False, reason=self._install_reason or "runtime_command_missing")
+                self.runtime_dir.mkdir(parents=True, exist_ok=True)
+                self.workspace_root.mkdir(parents=True, exist_ok=True)
+                self.cache_root.mkdir(parents=True, exist_ok=True)
+                # Reap any orphaned runtime server still bound to this workspace root before
+                # spawning ours, so there is a single writer (avibe#813). self.stop() above
+                # already released our own tracked child; anything left is a stray from a
+                # prior avibe instance that died without reaping it (SIGKILL / crash). Run it
+                # off the event loop: the psutil scan + terminate/kill can block for seconds.
+                await asyncio.to_thread(self._sweep_orphan_runtime_servers)
+                with self.stdout_path.open("w", encoding="utf-8") as stdout, self.stderr_path.open(
+                    "w", encoding="utf-8"
+                ) as stderr:
+                    self._process = subprocess.Popen(
+                        [
+                            *command,
+                            "--workspace-root",
+                            str(self.workspace_root),
+                            "--cache-root",
+                            str(self.cache_root),
+                            "--host",
+                            "127.0.0.1",
+                            "--port",
+                            "0",
+                            "--fallback-delay-seconds",
+                            str(SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS),
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                        text=True,
+                        **isolated_subprocess_kwargs(),
+                    )
+                base_url = await self._read_startup_url()
+                if not base_url:
+                    self.stop()
+                    return ShowRuntimeResult(False, reason="runtime_start_failed")
+                self._base_url = base_url
+                return ShowRuntimeResult(True, base_url)
+            finally:
+                self._install_lock.release()
 
     async def request(
         self,
@@ -320,6 +329,30 @@ class ShowRuntimeManager:
             logger.debug("Orphan show runtime sweep skipped", exc_info=True)
 
     async def _resolve_managed_command(self) -> list[str] | None:
+        """Resolve a managed runtime while excluding concurrent preparation."""
+        await self._acquire_install_lock()
+        try:
+            return await self._resolve_managed_command_locked()
+        finally:
+            self._install_lock.release()
+
+    async def _acquire_install_lock(self) -> None:
+        """Acquire the cross-thread lock without leaking it on task cancellation."""
+        acquisition = asyncio.create_task(asyncio.to_thread(self._install_lock.acquire))
+        try:
+            await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            def release_after_acquisition(task: asyncio.Task[bool]) -> None:
+                if task.cancelled() or task.exception() is not None:
+                    return
+                if task.result():
+                    self._install_lock.release()
+
+            acquisition.add_done_callback(release_after_acquisition)
+            raise
+
+    async def _resolve_managed_command_locked(self) -> list[str] | None:
+        """Resolve a managed runtime while the installation lock is held."""
         if self._command_explicit and self.command != _RUNTIME_BIN:
             self._install_reason = "runtime_command_missing"
             return None
@@ -376,6 +409,35 @@ class ShowRuntimeManager:
         if command:
             self._managed_command = command
         return command
+
+    def _install_managed_runtime_serialized(self) -> list[str] | None:
+        """Compatibility wrapper for callers that need a serialized install."""
+        with self._install_lock:
+            return self._install_managed_runtime()
+
+    def _prepare_managed_runtime_locked(self, *, startup: bool = False) -> list[str] | None:
+        """Reuse a verified install, or install it while the shared lock is held."""
+        if startup and not self.force_install:
+            status = self.status()
+            command = status.get("command")
+            if status.get("installed") and isinstance(command, list) and command:
+                self._install_reason = None
+                self._managed_command = command
+                return command
+        command = self._install_managed_runtime()
+        if command:
+            # A successful prepare is already the installation attempt for the
+            # request-time resolver. This is especially important for archive
+            # providers, where re-entering the installer would download and
+            # unpack the same runtime a second time during prewarm.
+            self._install_attempted = True
+            self._managed_command = command
+        return command
+
+    def _prepare_managed_runtime_serialized(self, *, startup: bool = False) -> list[str] | None:
+        """Compatibility wrapper for callers that need a serialized preparation."""
+        with self._install_lock:
+            return self._prepare_managed_runtime_locked(startup=startup)
 
     def _install_managed_runtime(self) -> list[str] | None:
         command: list[str] | None
@@ -674,30 +736,37 @@ class ShowRuntimeManager:
             if path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
 
-    def prepare(self, *, force: bool | None = None, offline: bool | None = None) -> dict[str, Any]:
-        previous_force = self.force_install
-        previous_offline = self.offline
-        if force is not None:
-            self.force_install = force
-        if offline is not None:
-            self.offline = offline
-        try:
-            if self._command_explicit:
-                command = _resolve_command(self.command)
-                self._install_reason = None if command else "runtime_command_missing"
-            else:
-                command = self._install_managed_runtime()
-            return {
-                "ok": command is not None,
-                "provider": self.runtime_source,
-                "platform": _runtime_platform_tag(),
-                "command": command,
-                "reason": None if command else self._install_reason,
-                "status": self.status(),
-            }
-        finally:
-            self.force_install = previous_force
-            self.offline = previous_offline
+    def prepare(
+        self,
+        *,
+        force: bool | None = None,
+        offline: bool | None = None,
+        startup: bool = False,
+    ) -> dict[str, Any]:
+        with self._install_lock:
+            previous_force = self.force_install
+            previous_offline = self.offline
+            if force is not None:
+                self.force_install = force
+            if offline is not None:
+                self.offline = offline
+            try:
+                if self._command_explicit:
+                    command = _resolve_command(self.command)
+                    self._install_reason = None if command else "runtime_command_missing"
+                else:
+                    command = self._prepare_managed_runtime_locked(startup=startup)
+                return {
+                    "ok": command is not None,
+                    "provider": self.runtime_source,
+                    "platform": _runtime_platform_tag(),
+                    "command": command,
+                    "reason": None if command else self._install_reason,
+                    "status": self.status(),
+                }
+            finally:
+                self.force_install = previous_force
+                self.offline = previous_offline
 
     def _installed_manifest_runtime_command(self) -> list[str] | None:
         node = _resolve_node_command()
@@ -1229,18 +1298,23 @@ class ShowRuntimeManager:
 
 
 _manager: ShowRuntimeManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_show_runtime_manager() -> ShowRuntimeManager:
     global _manager
     if _manager is None:
-        _manager = ShowRuntimeManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = ShowRuntimeManager()
     return _manager
 
 
 def stop_show_runtime_manager() -> None:
-    if _manager is not None:
-        _manager.stop()
+    with _manager_lock:
+        manager = _manager
+    if manager is not None:
+        manager.stop()
 
 
 def _is_runtime_server_cmdline(cmdline: list[str], workspace_root: str) -> bool:
@@ -1336,7 +1410,9 @@ async def prewarm_show_page_session(session_id: str, *, base_path: str | None = 
 
 def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> None:
     global _manager
-    previous = _manager
+    with _manager_lock:
+        previous = _manager
+        _manager = manager
     # Stop the manager we are replacing before dropping the reference. Serving-path
     # tests that never install a fake cause get_show_runtime_manager() to lazily
     # create the real manager, which spawns a Node cli.js + esbuild subprocess tree
@@ -1348,7 +1424,6 @@ def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> No
             previous.stop()
         except Exception:  # pragma: no cover - defensive cleanup
             logger.debug("failed to stop previous show runtime manager", exc_info=True)
-    _manager = manager
 
 
 def _show_runtime_prewarm_import_paths(

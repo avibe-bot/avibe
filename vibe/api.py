@@ -7517,8 +7517,24 @@ def reconcile_askill_auto_update() -> dict:
 
 _ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
+_STARTUP_DEPENDENCY_STATE_LOCK = threading.Lock()
+_STARTUP_DEPENDENCY_RECONCILING: set[str] = set()
+_STARTUP_DEPENDENCY_RECONCILE_GENERATION = 0
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
+
+
+def _startup_dependency_state_snapshot() -> tuple[int, set[str]]:
+    with _STARTUP_DEPENDENCY_STATE_LOCK:
+        return _STARTUP_DEPENDENCY_RECONCILE_GENERATION, set(_STARTUP_DEPENDENCY_RECONCILING)
+
+
+def _set_startup_dependency_reconciling(dependency: str, active: bool) -> None:
+    with _STARTUP_DEPENDENCY_STATE_LOCK:
+        if active:
+            _STARTUP_DEPENDENCY_RECONCILING.add(dependency)
+        else:
+            _STARTUP_DEPENDENCY_RECONCILING.discard(dependency)
 
 
 def dependencies_status(*, offline: bool = False) -> dict:
@@ -7529,6 +7545,10 @@ def dependencies_status(*, offline: bool = False) -> dict:
     Returns stable ids + machine-readable status only — display copy (label /
     detail) is localized in the React page, not sent from here.
     """
+    # Probes below can outlive a short reconciliation, so preserve either edge of
+    # the lock window instead of reporting a stale idle snapshot.
+    generation_before, active_before = _startup_dependency_state_snapshot()
+    reconciling_before = _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked()
     deps: list[dict] = []
 
     a = askill_update_status(include_latest=False)
@@ -7646,7 +7666,17 @@ def dependencies_status(*, offline: bool = False) -> dict:
         }
     )
 
-    return {"ok": True, "deps": deps}
+    generation_after, active_after = _startup_dependency_state_snapshot()
+    return {
+        "ok": True,
+        "deps": deps,
+        "reconciling": (
+            reconciling_before
+            or _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked()
+            or generation_before != generation_after
+        ),
+        "reconciling_dependencies": sorted(active_before | active_after),
+    }
 
 
 def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
@@ -7820,6 +7850,12 @@ def reconcile_startup_dependencies() -> dict:
     if not _STARTUP_DEPENDENCY_RECONCILE_LOCK.acquire(blocking=False):
         return {"ok": True, "skipped": True, "reason": "already_running"}
 
+    global _STARTUP_DEPENDENCY_RECONCILE_GENERATION
+
+    with _STARTUP_DEPENDENCY_STATE_LOCK:
+        _STARTUP_DEPENDENCY_RECONCILE_GENERATION += 1
+        _STARTUP_DEPENDENCY_RECONCILING.clear()
+
     started_at = time.monotonic()
     result: dict[str, Any] = {
         "ok": True,
@@ -7830,18 +7866,24 @@ def reconcile_startup_dependencies() -> dict:
         "tmux": {"ok": False, "status": "unknown"},
     }
     try:
+        _set_startup_dependency_reconciling("askill", True)
         try:
             askill = ensure_askill_installed(force=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to ensure askill: %s", exc, exc_info=True)
             askill = {"ok": False, "message": str(exc)}
+        finally:
+            _set_startup_dependency_reconciling("askill", False)
         result["askill"] = askill
 
+        _set_startup_dependency_reconciling("avault", True)
         try:
             avault = ensure_avault_installed(force=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
             avault = {"ok": False, "message": str(exc)}
+        finally:
+            _set_startup_dependency_reconciling("avault", False)
         result["avault"] = avault
 
         try:
@@ -7862,10 +7904,25 @@ def reconcile_startup_dependencies() -> dict:
             }
 
             if node_ok:
+                if status.get("installed"):
+                    # Status verification already found a usable runtime. Do not
+                    # re-enter a provider installer on every service startup.
+                    prepared = {"ok": True, "reason": None}
+                elif not getattr(manager, "auto_install", True):
+                    # Respect the documented opt-out. The explicit install action
+                    # remains available from the Dependencies page.
+                    prepared = {"ok": False, "reason": "runtime_auto_install_disabled"}
+                else:
+                    _set_startup_dependency_reconciling("show-runtime", True)
+                    try:
+                        prepared = manager.prepare(force=False, startup=True)
+                    finally:
+                        _set_startup_dependency_reconciling("show-runtime", False)
+                runtime_ok = bool(prepared.get("ok"))
                 result["show_runtime"] = {
-                    "ok": True,
-                    "status": "pending_prewarm",
-                    "reason": None,
+                    "ok": runtime_ok,
+                    "status": "ready" if runtime_ok else "failed",
+                    "reason": prepared.get("reason"),
                 }
             else:
                 result["show_runtime"] = {
@@ -7883,6 +7940,7 @@ def reconcile_startup_dependencies() -> dict:
         elif os.environ.get("VIBE_INSTALL_SKIP_TMUX", "").strip().lower() in _TRUTHY_ENV_VALUES:
             result["tmux"] = {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_TMUX"}
         else:
+            _set_startup_dependency_reconciling("tmux", True)
             try:
                 from core.tmux_runtime import ensure_tmux_installed
 
@@ -7890,6 +7948,8 @@ def reconcile_startup_dependencies() -> dict:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Startup dependency reconcile failed to ensure tmux runtime: %s", exc, exc_info=True)
                 result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
+            finally:
+                _set_startup_dependency_reconciling("tmux", False)
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
@@ -7899,6 +7959,9 @@ def reconcile_startup_dependencies() -> dict:
         )
         return result
     finally:
+        with _STARTUP_DEPENDENCY_STATE_LOCK:
+            _STARTUP_DEPENDENCY_RECONCILING.clear()
+            _STARTUP_DEPENDENCY_RECONCILE_GENERATION += 1
         _STARTUP_DEPENDENCY_RECONCILE_LOCK.release()
 
 

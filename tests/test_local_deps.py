@@ -868,6 +868,8 @@ def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: _MemoryMgr())
     out = api.dependencies_status()
     assert out["ok"]
+    assert out["reconciling"] is False
+    assert out["reconciling_dependencies"] == []
     by = {d["id"]: d for d in out["deps"]}
     assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
@@ -888,6 +890,67 @@ def test_dependencies_status_shape(monkeypatch):
         "download_error": None,
     }
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+def test_dependencies_status_preserves_reconciliation_seen_before_probes(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
+    import core.show_runtime as srt_mod
+
+    class _ShowRuntime:
+        def status(self):
+            return {"installed": True, "node_available": True, "node_version": "22.0"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _ShowRuntime())
+
+    class _LockSnapshot:
+        def __init__(self):
+            self._calls = 0
+
+        def locked(self):
+            self._calls += 1
+            return self._calls == 1
+
+    monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _LockSnapshot())
+
+    assert api.dependencies_status(offline=True)["reconciling"] is True
+
+
+def test_dependencies_status_detects_reconciliation_during_probes(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
+    monkeypatch.setattr(api.V2Config, "load", classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=False))))
+
+    import core.show_runtime as srt_mod
+
+    class _ShowRuntime:
+        def status(self):
+            return {"installed": True, "node_available": True, "node_version": "22.0"}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _ShowRuntime())
+
+    import core.tmux_runtime as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
+    monkeypatch.setattr(api, "_startup_dependency_state_snapshot", iter([(7, set()), (8, set())]).__next__)
+
+    class _Unlocked:
+        def locked(self):
+            return False
+
+    monkeypatch.setattr(api, "_STARTUP_DEPENDENCY_RECONCILE_LOCK", _Unlocked())
+    result = api.dependencies_status()
+
+    assert result["reconciling"] is True
+    assert result["reconciling_dependencies"] == []
 
 
 @pytest.mark.parametrize(
@@ -968,7 +1031,7 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     assert by["node"]["installed"] is False and by["node"]["status"] == "missing"
 
 
-def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepare(monkeypatch):
+def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(monkeypatch):
     askill_calls = []
     avault_calls = []
 
@@ -989,6 +1052,7 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
     class _Mgr:
         def __init__(self):
             self.prepared = []
+            self.auto_install = True
 
         def status(self):
             return {
@@ -999,8 +1063,8 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
                 "node_version": "22.12.0",
             }
 
-        def prepare(self, *, force=False):
-            self.prepared.append(force)
+        def prepare(self, *, force=False, startup=False):
+            self.prepared.append((force, startup))
             return {"ok": True, "reason": None}
 
     manager = _Mgr()
@@ -1011,9 +1075,67 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
     assert out["ok"] is True
     assert askill_calls == [False]
     assert avault_calls == [False]
-    assert manager.prepared == []
+    assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"
-    assert out["show_runtime"] == {"ok": True, "status": "pending_prewarm", "reason": None}
+    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
+
+
+def test_reconcile_startup_dependencies_respects_show_runtime_auto_install_opt_out(monkeypatch):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        auto_install = False
+
+        def status(self):
+            return {
+                "installed": False,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False, startup=False):
+            raise AssertionError("startup reconcile must honor the auto-install opt-out")
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["show_runtime"] == {
+        "ok": False,
+        "status": "failed",
+        "reason": "runtime_auto_install_disabled",
+    }
+
+
+def test_reconcile_startup_dependencies_does_not_reinstall_ready_show_runtime(monkeypatch):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        auto_install = True
+
+        def status(self):
+            return {
+                "installed": True,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False, startup=False):
+            raise AssertionError("ready runtime must not invoke its provider installer")
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
 
 
 def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(monkeypatch):
@@ -1026,7 +1148,7 @@ def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(mo
         def status(self):
             return {"installed": False, "node_available": False, "node_version": None}
 
-        def prepare(self, *, force=False):
+        def prepare(self, *, force=False, startup=False):
             raise AssertionError("runtime must not prepare without Node")
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
