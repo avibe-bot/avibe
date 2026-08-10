@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import threading
 import time
 
@@ -9,6 +11,44 @@ import pytest
 from config.v2_config import V2Config
 from tests.test_remote_access_vibe_cloud import _config
 from vibe import remote_access, runtime
+
+
+def _save_remote_transport(avibe_home: str, transport_protocol: str) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    from vibe import api
+
+    api.save_config(
+        {
+            "remote_access": {
+                "vibe_cloud": {"transport_protocol": transport_protocol}
+            }
+        }
+    )
+
+
+def _setup_settings_candidate(monkeypatch, tmp_path) -> list[tuple[str, object]]:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.save()
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(remote_access, "status", lambda loaded=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded: "/usr/bin/cloudflared")
+    monkeypatch.setattr(
+        remote_access,
+        "_start_candidate_connector",
+        lambda loaded, binary, protocol: events.append(("start", protocol))
+        or (222, "http://metrics"),
+    )
+    monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, metrics: True)
+    monkeypatch.setattr(
+        remote_access,
+        "_discard_candidate_connector",
+        lambda pid: events.append(("discard", pid)),
+    )
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+    return events
 
 
 def _quality(median: float) -> dict:
@@ -179,6 +219,8 @@ def test_ra_tq_028_settings_candidate_failure_keeps_active_config(monkeypatch, t
 
 
 def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypatch, tmp_path) -> None:
+    from config.v2_config import CONFIG_LOCK
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
@@ -194,7 +236,7 @@ def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypat
     monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, metrics: True)
 
     def promote(pid, **kwargs):
-        assert not remote_access.CONFIG_LOCK._is_owned()
+        assert not CONFIG_LOCK._is_owned()
         events.append(("promote", kwargs["runtime_signature"]["transport_protocol"]))
         return {"pid": 111}
 
@@ -213,6 +255,84 @@ def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypat
     assert result["connector_replaced"] is True
     assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "http2"
     assert events == [("start", "http2"), ("promote", "http2"), ("drain", 111)]
+
+
+def test_ra_tq_028_settings_compare_and_save_reject_concurrent_config_write(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from storage.lock import MigrationFileLock
+
+    events = _setup_settings_candidate(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        remote_access,
+        "_promote_candidate_connector",
+        lambda *args, **kwargs: pytest.fail("concurrent settings must block promotion"),
+    )
+
+    context = multiprocessing.get_context("spawn")
+    concurrent = context.Process(
+        target=_save_remote_transport,
+        args=(str(tmp_path), "quic"),
+    )
+    original_acquire = MigrationFileLock.acquire
+    interleaved = False
+
+    def acquire_after_concurrent_write(lock) -> None:
+        nonlocal interleaved
+        if events and not interleaved:
+            interleaved = True
+            concurrent.start()
+            concurrent.join(timeout=5)
+            assert concurrent.exitcode == 0
+        original_acquire(lock)
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", acquire_after_concurrent_write)
+    try:
+        result = remote_access.apply_settings({"transport_protocol": "http2"})
+    finally:
+        if concurrent.is_alive():
+            concurrent.terminate()
+        concurrent.join(timeout=5)
+
+    assert result["ok"] is False
+    assert result["error"] == "remote_access_settings_apply_failed"
+    assert result["detail"] == "remote_access_settings_changed"
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "quic"
+    assert events == [("start", "http2"), ("discard", 222)]
+
+
+def test_ra_tq_028_settings_rollback_preserves_concurrent_config_write(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    events = _setup_settings_candidate(monkeypatch, tmp_path)
+
+    context = multiprocessing.get_context("spawn")
+    concurrent = context.Process(
+        target=_save_remote_transport,
+        args=(str(tmp_path), "quic"),
+    )
+
+    def fail_promotion(*args, **kwargs):
+        concurrent.start()
+        concurrent.join(timeout=5)
+        assert concurrent.exitcode == 0
+        raise RuntimeError("promotion_failed")
+
+    monkeypatch.setattr(remote_access, "_promote_candidate_connector", fail_promotion)
+    try:
+        result = remote_access.apply_settings({"transport_protocol": "http2"})
+    finally:
+        if concurrent.is_alive():
+            concurrent.terminate()
+        concurrent.join(timeout=5)
+
+    assert result["ok"] is False
+    assert result["error"] == "remote_access_settings_apply_failed"
+    assert result["detail"] == "promotion_failed"
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "quic"
+    assert events == [("start", "http2"), ("discard", 222)]
 
 
 @pytest.mark.parametrize(

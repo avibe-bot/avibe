@@ -37,7 +37,7 @@ import requests
 from jwt import PyJWKClient
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config, config_write_transaction
+from config.v2_config import V2Config, config_write_transaction
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
@@ -939,27 +939,28 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 "error": "remote_access_settings_unavailable",
             }
         with _CONNECTOR_LOCK:
-            live_config = V2Config.load()
-            live_status = status(live_config)
-            if (
-                live_status.get("pid_state") == "unknown"
-                or _remote_access_settings(live_config) != previous_settings
-            ):
-                return {
-                    **live_status,
-                    "ok": False,
-                    "error": "remote_access_settings_unavailable",
-                }
-            if not live_status.get("running"):
-                candidate_config = api.save_config(
-                    {"remote_access": {"vibe_cloud": payload}}
-                )
-                return {
-                    **status(candidate_config),
-                    "ok": True,
-                    "settings_applied": True,
-                    "connector_replaced": False,
-                }
+            with config_write_transaction():
+                live_config = V2Config.load()
+                live_status = status(live_config)
+                if (
+                    live_status.get("pid_state") == "unknown"
+                    or _remote_access_settings(live_config) != previous_settings
+                ):
+                    return {
+                        **live_status,
+                        "ok": False,
+                        "error": "remote_access_settings_unavailable",
+                    }
+                if not live_status.get("running"):
+                    candidate_config = api.save_config(
+                        {"remote_access": {"vibe_cloud": payload}}
+                    )
+                    return {
+                        **status(candidate_config),
+                        "ok": True,
+                        "settings_applied": True,
+                        "connector_replaced": False,
+                    }
 
     current_status = live_status
 
@@ -1010,7 +1011,7 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
             if not _wait_candidate_ready(candidate_pid, metrics_url):
                 raise RuntimeError("candidate_not_ready")
         with _CONNECTOR_LOCK:
-            with CONFIG_LOCK:
+            with config_write_transaction():
                 live_config = V2Config.load()
                 live_binary = _resolve_binary(live_config)
                 if (
@@ -1030,11 +1031,14 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
                     runtime_signature=_runtime_signature(candidate_config, binary),
                 )
             except Exception:
-                with CONFIG_LOCK:
-                    api.save_config(
-                        {"remote_access": {"vibe_cloud": previous_settings}},
-                        validate_remote_access_network=False,
-                    )
+                with config_write_transaction():
+                    persisted = V2Config.load()
+                    # Never roll an older candidate over a newer settings writer.
+                    if _remote_access_settings(persisted) == candidate_settings:
+                        api.save_config(
+                            {"remote_access": {"vibe_cloud": previous_settings}},
+                            validate_remote_access_network=False,
+                        )
                 raise
     except Exception as exc:
         if candidate_pid is not None:
