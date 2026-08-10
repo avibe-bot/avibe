@@ -291,6 +291,42 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(notification["ack_evidence"], "delivery_only")
                 self.assertIs(notification["delivered"], expected)
 
+    async def test_delivery_only_ack_fails_closed_without_target_platform(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform = None
+        emissions = []
+
+        async def emit(_context, message_type, _text, **kwargs):
+            emissions.append((message_type, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.delivered_id = "synthetic-id"
+                evidence.send_returned = True
+            return None
+
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(
+                maybe_emit_auth_recovery_message=AsyncMock(return_value=False)
+            ),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "stream disconnected",
+            request=request,
+        )
+
+        notification = emissions[1][1]["output"].metadata[
+            "turn_failure_notification"
+        ]
+        self.assertEqual(notification["ack_evidence"], "delivery_only")
+        self.assertFalse(notification["delivered"])
+
     async def test_auth_recovery_owns_the_only_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(

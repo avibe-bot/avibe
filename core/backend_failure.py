@@ -171,9 +171,11 @@ def _acknowledges_target(
 ) -> bool:
     if evidence == ACK_EVIDENCE_RECEIPT:
         return True
+    target_platform = getattr(routed_delivery_context(context), "platform", None)
     return (
         evidence == ACK_EVIDENCE_DELIVERY_ONLY
-        and routed_delivery_context(context).platform != "avibe"
+        and bool(target_platform)
+        and target_platform != "avibe"
     )
 
 
