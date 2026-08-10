@@ -69,7 +69,7 @@ describe('apiFetch remote auth recovery', () => {
     expect(remoteAuth.deferRemoteAuthRedirect).not.toHaveBeenCalled();
   });
 
-  it('refreshes a rejected CSRF token and safely replays the guarded mutation once', async () => {
+  it('replays a rejected mutation with the cookie that replaced its header token', async () => {
     let cookie = 'vibe_csrf_token=stale-token';
     vi.stubGlobal('document', {
       get cookie() {
@@ -80,12 +80,9 @@ describe('apiFetch remote auth recovery', () => {
       },
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (input === '/api/csrf-token') {
-        document.cookie = 'vibe_csrf_token=fresh-token; path=/';
-        return Response.json({ csrf_token: 'fresh-token' });
-      }
       const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
       if (token === 'stale-token') {
+        document.cookie = 'vibe_csrf_token=fresh-token; path=/';
         return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
       }
       return Response.json({ ok: true }, { status: 201 });
@@ -98,8 +95,8 @@ describe('apiFetch remote auth recovery', () => {
     });
 
     expect(response.status).toBe(201);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(new Headers(fetchMock.mock.calls[2][1]?.headers).get('X-Vibe-CSRF-Token')).toBe('fresh-token');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('X-Vibe-CSRF-Token')).toBe('fresh-token');
   });
 
   it('shares a CSRF refresh with mutations that start while the cookie is cleared', async () => {
@@ -121,6 +118,7 @@ describe('apiFetch remote auth recovery', () => {
       }
       const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
       if (token === 'stale-token') {
+        cookie = '';
         return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
       }
       return Response.json({ ok: true }, { status: 201 });
@@ -141,6 +139,50 @@ describe('apiFetch remote auth recovery', () => {
       expect.objectContaining({ status: 201 }),
     ]);
     expect(fetchMock.mock.calls.filter(([input]) => input === '/api/csrf-token')).toHaveLength(1);
+  });
+
+  it('rechecks a token cookie overwritten by another tab before replaying', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    let resolveToken!: (response: Response) => void;
+    let mutationCalls = 0;
+    const currentToken = () => cookie.startsWith('vibe_csrf_token=')
+      ? cookie.slice('vibe_csrf_token='.length)
+      : '';
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        return new Promise<Response>((resolve) => {
+          resolveToken = resolve;
+        });
+      }
+      mutationCalls += 1;
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      if (mutationCalls === 1) {
+        cookie = '';
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      return Response.json({ ok: token === currentToken() }, {
+        status: token === currentToken() ? 201 : 403,
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = apiFetch('/api/attachments', { method: 'POST', body: new FormData() });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    document.cookie = 'vibe_csrf_token=tab-a-token; path=/';
+    resolveToken(Response.json({ csrf_token: 'tab-a-token' }));
+    document.cookie = 'vibe_csrf_token=tab-b-token; path=/';
+
+    await expect(request).resolves.toEqual(expect.objectContaining({ status: 201 }));
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('X-Vibe-CSRF-Token'))
+      .toBe('tab-b-token');
   });
 
   it('does not retry an unrelated forbidden mutation', async () => {

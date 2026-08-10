@@ -93,3 +93,9 @@ export function workbenchUploadErrorTranslationKey(error: unknown): string {
   if (error.code === 'network_error') return 'chat.compose.attachmentNetwork';
   return 'chat.compose.attachmentFailed';
 }
+
+export function isWorkbenchUploadRetryable(error: unknown): boolean {
+  if (!(error instanceof WorkbenchUploadError)) return true;
+  if (error.code === 'network_error') return true;
+  return error.code === 'upload_failed' && (error.status == null || error.status >= 500);
+}

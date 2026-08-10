@@ -15,6 +15,7 @@ vi.hoisted(() => {
 
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
+import { WorkbenchUploadError } from '../../lib/workbenchUpload';
 
 const uploadWorkbenchAttachment = vi.hoisted(() => vi.fn());
 
@@ -75,6 +76,34 @@ describe('Composer attachment retry', () => {
       en.chat.compose.retryAttachment,
     ) as HTMLButtonElement).disabled).toBe(true));
     fireEvent.click(screen.getByLabelText(en.chat.compose.retryAttachment));
+    expect(uploadWorkbenchAttachment).toHaveBeenCalledTimes(1);
+  });
+
+  it('withholds retry when the same file cannot succeed', async () => {
+    uploadWorkbenchAttachment
+      .mockRejectedValueOnce(new WorkbenchUploadError('too_large', 'File is too large', 413))
+      .mockResolvedValue({
+        token: 'unexpected-retry',
+        name: 'large.bin',
+        mime: 'application/octet-stream',
+        size: 5,
+        kind: 'file',
+        url: '/api/media/unexpected-retry',
+      });
+    const ref = createRef<ComposerHandle>();
+    render(providers(
+      <Composer
+        ref={ref}
+        sessionId="ses-1"
+        onSend={() => undefined}
+      />,
+    ));
+
+    act(() => ref.current?.addFiles([new File(['hello'], 'large.bin')]));
+    await screen.findByText(en.chat.compose.attachmentTooLarge);
+
+    expect(screen.getByText('large.bin')).toBeTruthy();
+    expect(screen.queryByLabelText(en.chat.compose.retryAttachment)).toBeNull();
     expect(uploadWorkbenchAttachment).toHaveBeenCalledTimes(1);
   });
 });

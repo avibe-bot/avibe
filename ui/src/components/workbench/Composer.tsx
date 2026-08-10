@@ -45,6 +45,7 @@ import {
   type VoiceRealtimeFinal,
 } from '../../lib/voiceRealtime';
 import {
+  isWorkbenchUploadRetryable,
   uploadWorkbenchAttachment,
   workbenchUploadErrorTranslationKey,
 } from '../../lib/workbenchUpload';
@@ -71,6 +72,7 @@ export type ComposerAttachment = {
   width?: number;
   height?: number;
   status: 'uploading' | 'ready' | 'error';
+  retryable?: boolean;
 };
 
 // Parallel-upload pool size. Multipart keeps each request binary, but bounded
@@ -565,13 +567,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 width: typeof json.width === 'number' ? json.width : undefined,
                 height: typeof json.height === 'number' ? json.height : undefined,
                 status: 'ready',
+                retryable: undefined,
               }
             : a,
         ),
       );
     } catch (error) {
       if (attachmentFilesRef.current.get(localId) !== file) return;
-      setAttachments((cur) => cur.map((a) => (a.localId === localId ? { ...a, status: 'error' } : a)));
+      const retryable = isWorkbenchUploadRetryable(error);
+      if (!retryable) attachmentFilesRef.current.delete(localId);
+      setAttachments((cur) => cur.map((a) => (
+        a.localId === localId ? { ...a, status: 'error', retryable } : a
+      )));
       showToast(t(workbenchUploadErrorTranslationKey(error)), 'error');
     }
   };
@@ -581,7 +588,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const file = attachmentFilesRef.current.get(localId);
     if (!file) return;
     setAttachments((cur) => cur.map((a) => (
-      a.localId === localId ? { ...a, status: 'uploading' } : a
+      a.localId === localId ? { ...a, status: 'uploading', retryable: undefined } : a
     )));
     void uploadOne(file, localId, sessionId);
   };
@@ -1256,7 +1263,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink' : 'text-foreground')}>
                 {att.name}
               </span>
-              {att.status === 'error' && (
+              {att.status === 'error' && att.retryable && (
                 <Button
                   type="button"
                   variant="ghost"

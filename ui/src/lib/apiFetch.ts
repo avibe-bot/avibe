@@ -95,23 +95,20 @@ export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
   }
 }
 
-function clearCsrfCookie(): void {
-  if (typeof document === 'undefined') return;
-  document.cookie = `${CSRF_COOKIE_NAME}=; Max-Age=0; path=/; SameSite=Strict`;
-}
-
 async function refreshRejectedCsrfToken(
-  rejectedToken: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const current = readCookie(CSRF_COOKIE_NAME);
-  if (current && current !== rejectedToken) return current;
+  // This is a double-submit token, not server-side session state. A 403 means
+  // the request's header and shared browser cookie crossed; rotating a present
+  // cookie here only creates another race with other tabs.
+  if (current) return current;
 
   if (!csrfTokenPromise) {
-    clearCsrfCookie();
     startCsrfTokenFetch();
   }
-  return waitForSignal(csrfTokenPromise!, signal);
+  const fetched = await waitForSignal(csrfTokenPromise!, signal);
+  return readCookie(CSRF_COOKIE_NAME) || fetched;
 }
 
 async function isInvalidCsrfResponse(response: Response): Promise<boolean> {
@@ -157,7 +154,10 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     && canReplayRequest(input, init.body)
     && await isInvalidCsrfResponse(response.clone())
   ) {
-    csrfToken = await refreshRejectedCsrfToken(csrfToken, init.signal ?? undefined);
+    const recoveredToken = await refreshRejectedCsrfToken(init.signal ?? undefined);
+    // Cookies are shared across tabs while the acquisition promise is not.
+    // Read once more at the replay boundary in case another tab won the race.
+    csrfToken = readCookie(CSRF_COOKIE_NAME) || recoveredToken;
     headers.set(CSRF_HEADER_NAME, csrfToken);
     response = await fetch(input, { ...nextInit, headers });
   }

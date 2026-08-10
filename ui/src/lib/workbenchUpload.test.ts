@@ -4,8 +4,10 @@ const api = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock('./apiFetch', () => api);
 
 import {
+  isWorkbenchUploadRetryable,
   MAX_WORKBENCH_ATTACHMENT_BYTES,
   uploadWorkbenchAttachment,
+  WorkbenchUploadError,
 } from './workbenchUpload';
 
 describe('workbench attachment upload', () => {
@@ -77,5 +79,16 @@ describe('workbench attachment upload', () => {
     await expect(
       uploadWorkbenchAttachment('ses-1', new File(['x'], 'x.txt'), 'upload-id-123456'),
     ).rejects.toMatchObject({ code: 'network_error' });
+  });
+
+  it('only retries failures that can succeed with the same file and session', () => {
+    expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('network_error', 'offline'))).toBe(true);
+    expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('upload_failed', 'server', 503))).toBe(true);
+    expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('too_large', 'large', 413))).toBe(false);
+    expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('empty_file', 'empty', 400))).toBe(false);
+    expect(isWorkbenchUploadRetryable(
+      new WorkbenchUploadError('session_not_found', 'missing', 404),
+    )).toBe(false);
+    expect(isWorkbenchUploadRetryable(new WorkbenchUploadError('upload_failed', 'invalid', 400))).toBe(false);
   });
 });
