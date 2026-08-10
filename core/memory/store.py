@@ -157,6 +157,56 @@ def _install_clean_schema(
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add generation fencing without rebuilding or dropping existing v1 data."""
+
+    # SQLite ADD COLUMN cannot retrofit the clean-v2 cross-column pair CHECK.
+    # The backfill and every Store transition update the recovery pair together.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            """
+            ALTER TABLE memory_meta
+            ADD COLUMN processing_fault_generation INTEGER NOT NULL DEFAULT 0
+                CHECK (processing_fault_generation >= 0)
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE memory_meta
+            ADD COLUMN processing_recovery_generation INTEGER
+                CHECK (
+                    processing_recovery_generation IS NULL
+                    OR processing_recovery_generation >= 0
+                )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memory_meta
+            SET processing_fault_generation = CASE
+                    WHEN processing_fault_since IS NOT NULL
+                         AND processing_recovery_pending_at IS NOT NULL THEN 2
+                    WHEN processing_fault_since IS NOT NULL
+                         OR processing_recovery_pending_at IS NOT NULL THEN 1
+                    ELSE 0
+                END,
+                processing_recovery_generation = CASE
+                    WHEN processing_recovery_pending_at IS NOT NULL THEN 1
+                    ELSE NULL
+                END
+            WHERE singleton = 1
+            """
+        )
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+        _verify_current_schema(conn)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
 def _verify_current_schema(conn: sqlite3.Connection) -> None:
     application_tables = _application_tables(conn)
     if application_tables != _MEMORY_STORE_TABLES:
@@ -2836,9 +2886,11 @@ class MemoryStore:
         with self._connection() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             application_tables = _application_tables(conn)
-            if version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
+            if version == 1:
+                _migrate_v1_to_v2(conn)
+            elif version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
-            if version == 0:
+            elif version == 0:
                 _install_clean_schema(conn, schema_sql, application_tables)
             _verify_current_schema(conn)
 

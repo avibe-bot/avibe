@@ -37,6 +37,7 @@ FOUNDATION_SCHEMAS = (
     Path(__file__).with_name("fixtures") / "memory_initial_foundation_v0.sql",
     Path(__file__).with_name("fixtures") / "memory_foundation_v0.sql",
 )
+V1_SCHEMA = Path(__file__).with_name("fixtures") / "memory_foundation_v1.sql"
 
 
 def _dt(value: str) -> datetime:
@@ -333,11 +334,113 @@ def test_store_initializes_an_empty_v0_database(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM memory_capture_queue").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("version", [1, 3], ids=("prior-v1", "future-v3"))
-def test_store_rejects_nonzero_noncurrent_schema_without_rebuilding(
+def _install_representative_v1_database(database: Path) -> None:
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        conn.executescript(V1_SCHEMA.read_text(encoding="utf-8"))
+        conn.execute(
+            """
+            INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, last_success_at,
+                last_error, last_error_at, processing_fault_kind,
+                processing_fault_since, processing_alert_active,
+                processing_recovery_pending_at, updated_at
+            ) VALUES (
+                1, 4, 0, ?, 'preserved-root', 1234, 2,
+                '2026-01-01T00:00:00.000Z', 'memory_processing_failed',
+                '2026-01-01T00:02:00.000Z', 'engine',
+                '2026-01-01T00:02:00.000Z', 1,
+                '2026-01-01T00:01:00.000Z', '2026-01-01T00:02:00.000Z'
+            )
+            """,
+            (bytes.fromhex("11" * 32),),
+        )
+        conn.execute(
+            """
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id, provider_session_ref,
+                generation, principal_id, project_ref, provenance, payload_text,
+                occurred_at_ms, provider_timestamp_ms, state, attempts, created_at
+            ) VALUES (
+                'preserved-digest', 4, 'preserved-session', ?,
+                2, 'u-11111111111111111111111111111111', ?, 'user_input',
+                'preserved payload', 1000, 1000, 'pending', 0,
+                '2026-01-01T00:00:00.000Z'
+            )
+            """,
+            (
+                ProviderSessionRef(
+                    principal_id="u-11111111111111111111111111111111",
+                    epoch=4,
+                    project_ref=PROJECT,
+                    session_id="preserved-provider-session",
+                ).serialize(),
+                PROJECT,
+            ),
+        )
+
+
+def test_store_migrates_v1_metadata_and_preserves_existing_data(tmp_path: Path) -> None:
+    database = _store_path(tmp_path / "schema-v1")
+    _install_representative_v1_database(database)
+
+    store = MemoryStore(database)
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
+        assert {
+            "processing_fault_generation",
+            "processing_recovery_generation",
+        }.issubset(columns)
+    meta = store.ensure_meta()
+    assert meta.provider_root_id == "preserved-root"
+    assert meta.processing_fault_generation == 2
+    assert meta.processing_recovery_generation == 1
+    assert meta.processing_fault_since == "2026-01-01T00:02:00.000Z"
+    assert meta.processing_recovery_pending_at == "2026-01-01T00:01:00.000Z"
+    rows = store.list_queue_rows()
+    assert len(rows) == 1
+    assert rows[0].payload_text == "preserved payload"
+
+
+def test_store_rolls_back_failed_v1_migration_without_changing_data(
     tmp_path: Path,
-    version: int,
 ) -> None:
+    database = _store_path(tmp_path / "schema-v1-failure")
+    _install_representative_v1_database(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER fail_v1_migration
+            BEFORE UPDATE ON memory_meta
+            BEGIN
+                SELECT RAISE(ABORT, 'injected v1 migration failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected v1 migration failure"):
+        MemoryStore(database)
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
+        assert "processing_fault_generation" not in columns
+        assert "processing_recovery_generation" not in columns
+        assert conn.execute(
+            "SELECT provider_root_id FROM memory_meta WHERE singleton = 1"
+        ).fetchone()[0] == "preserved-root"
+        assert conn.execute(
+            "SELECT payload_text FROM memory_capture_queue"
+        ).fetchone()[0] == "preserved payload"
+
+
+def test_store_rejects_unknown_nonzero_schema_without_rebuilding(
+    tmp_path: Path,
+) -> None:
+    version = 3
     database = _store_path(tmp_path / f"schema-v{version}")
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as conn:

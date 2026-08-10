@@ -53,6 +53,7 @@ ADD_TIMEOUT_SECONDS = 30.0
 FLUSH_TIMEOUT_SECONDS = 300.0
 MAX_CONCURRENT_PROVIDER_WRITES = 4
 SYSTEM_OUTAGE_RETRY_SECONDS = 5.0
+PROCESSING_ACTION_RETRY_SECONDS = 5.0
 MAX_PROCESSING_ACTIONS_PER_PASS = 3
 
 AttachmentRelease = Callable[[str], Awaitable[None] | None]
@@ -104,6 +105,7 @@ class SessionFlushCoordinator:
         )
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._add_outage_until: datetime | None = None
+        self._processing_retry_at: datetime | None = None
         self._paused = False
 
     def replace_provider(self, provider: MemoryProviderPort) -> None:
@@ -205,7 +207,13 @@ class SessionFlushCoordinator:
         self._prune_tasks()
         if self._paused or not self._enabled():
             return 0
-        now = _iso(self._current_time())
+        current_time = self._current_time()
+        if (
+            self._processing_retry_at is not None
+            and current_time >= self._processing_retry_at
+        ):
+            await self._reconcile_processing_events()
+        now = _iso(current_time)
         refs = await self._store_call(
             self._store.list_flush_candidates,
             now=now,
@@ -734,6 +742,7 @@ class SessionFlushCoordinator:
             await self._reconcile_processing_events_locked()
 
     async def _reconcile_processing_events_locked(self) -> None:
+        self._processing_retry_at = None
         for _ in range(MAX_PROCESSING_ACTIONS_PER_PASS):
             action = await self._store_call(self._store.next_processing_action)
             if action is None:
@@ -742,6 +751,7 @@ class SessionFlushCoordinator:
                 try:
                     healthy = bool(await self._provider.processing_healthy())
                 except Exception:
+                    self._defer_processing_retry()
                     return
                 committed = await self._store_call(
                     self._store.record_processing_health,
@@ -762,6 +772,7 @@ class SessionFlushCoordinator:
                     action.kind,
                     action.occurred_at,
                 ):
+                    self._defer_processing_retry()
                     return
                 acknowledged = await self._store_call(
                     self._store.acknowledge_processing_notification,
@@ -769,6 +780,11 @@ class SessionFlushCoordinator:
                 )
                 if not acknowledged:
                     return
+
+    def _defer_processing_retry(self) -> None:
+        self._processing_retry_at = self._current_time() + timedelta(
+            seconds=PROCESSING_ACTION_RETRY_SECONDS
+        )
 
     async def _emit_processing_event(
         self,
