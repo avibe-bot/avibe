@@ -69,37 +69,184 @@ class _ProtocolEvidence:
     authentication: _AuthenticationEvidence
 
 
-_OPENAI_ERROR_PARAMS = {
-    "openai_responses": frozenset(
-        {
-            "input",
-            "instructions",
-            "max_output_tokens",
-            "previous_response_id",
-            "reasoning",
-            "text",
-            "truncation",
-        }
-    ),
-    "openai_chat": frozenset(
-        {
-            "messages",
-            "max_completion_tokens",
-            "max_tokens",
-            "response_format",
-            "stop",
-            "temperature",
-            "tool_choice",
-            "top_p",
-        }
-    ),
-}
-_AUTHENTICATION_ERROR_IDENTIFIERS = frozenset(
+@dataclass(frozen=True)
+class _ProtocolEvidenceRule:
+    statuses: frozenset[int]
+    protocol: _ProtocolProof
+    authentication: _AuthenticationEvidence
+    top_level_field: str | None = None
+    top_level_values: frozenset[str] = frozenset()
+    error_identifiers: frozenset[str] = frozenset()
+    error_params: frozenset[str] | None = None
+
+    def matches(self, status: int, payload: Mapping[str, Any]) -> bool:
+        if status not in self.statuses:
+            return False
+        if self.top_level_field is not None:
+            value = payload.get(self.top_level_field)
+            if not isinstance(value, str) or value.strip().lower() not in self.top_level_values:
+                return False
+        error = payload.get("error")
+        if self.error_identifiers or self.error_params is not None:
+            if not isinstance(error, dict):
+                return False
+        if self.error_identifiers:
+            identifiers = {
+                value.strip().lower() for value in (error.get("type"), error.get("code")) if isinstance(value, str)
+            }
+            if self.error_identifiers.isdisjoint(identifiers):
+                return False
+        if self.error_params is not None and error.get("param") not in self.error_params:
+            return False
+        return True
+
+
+_SUCCESS_STATUSES = frozenset(range(200, 300))
+_REQUEST_ERROR_STATUSES = frozenset({400, 404, 422})
+_AUTHENTICATION_ERROR_STATUSES = frozenset({401, 403})
+_RATE_LIMIT_STATUSES = frozenset({429})
+_SERVER_ERROR_STATUSES = frozenset(range(500, 600))
+
+_REQUEST_ERROR_IDENTIFIERS = frozenset(
     {
-        "authentication_error",
-        "invalid_api_key",
+        "invalid_parameter",
+        "invalid_request_error",
+        "validation_error",
     }
 )
+_MODEL_ERROR_IDENTIFIERS = frozenset({"model_not_found", "not_found_error"})
+_AUTHENTICATION_ERROR_IDENTIFIERS = frozenset({"authentication_error", "invalid_api_key", "permission_error"})
+_SERVER_ERROR_IDENTIFIERS = frozenset({"api_error", "internal_error", "overloaded", "overloaded_error", "server_error"})
+_RATE_LIMIT_ERROR_IDENTIFIERS = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+
+_OPENAI_RESPONSES_PARAMS = frozenset(
+    {
+        "input",
+        "instructions",
+        "max_output_tokens",
+        "previous_response_id",
+        "reasoning",
+        "text",
+        "truncation",
+    }
+)
+_OPENAI_CHAT_PARAMS = frozenset(
+    {
+        "messages",
+        "max_completion_tokens",
+        "max_tokens",
+        "response_format",
+        "stop",
+        "temperature",
+        "tool_choice",
+        "top_p",
+    }
+)
+
+
+def _openai_evidence_rules(
+    success_objects: frozenset[str],
+    request_params: frozenset[str],
+) -> tuple[_ProtocolEvidenceRule, ...]:
+    return (
+        _ProtocolEvidenceRule(
+            statuses=_SUCCESS_STATUSES,
+            top_level_field="object",
+            top_level_values=success_objects,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_REQUEST_ERROR_STATUSES,
+            error_identifiers=_REQUEST_ERROR_IDENTIFIERS,
+            error_params=request_params,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=frozenset({404}),
+            error_identifiers=_MODEL_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_AUTHENTICATION_ERROR_STATUSES,
+            error_params=request_params,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_AUTHENTICATION_ERROR_STATUSES,
+            error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_SERVER_ERROR_STATUSES,
+            error_identifiers=_SERVER_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_RATE_LIMIT_STATUSES,
+            error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        ),
+    )
+
+
+_PROTOCOL_EVIDENCE_RULES = {
+    "anthropic": (
+        _ProtocolEvidenceRule(
+            statuses=_SUCCESS_STATUSES,
+            top_level_field="type",
+            top_level_values=frozenset({"message"}),
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_REQUEST_ERROR_STATUSES,
+            top_level_field="type",
+            top_level_values=frozenset({"error"}),
+            error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_AUTHENTICATION_ERROR_STATUSES,
+            top_level_field="type",
+            top_level_values=frozenset({"error"}),
+            error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_SERVER_ERROR_STATUSES,
+            top_level_field="type",
+            top_level_values=frozenset({"error"}),
+            error_identifiers=_SERVER_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_RATE_LIMIT_STATUSES,
+            top_level_field="type",
+            top_level_values=frozenset({"error"}),
+            error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        ),
+    ),
+    "openai_responses": _openai_evidence_rules(
+        frozenset({"response"}),
+        _OPENAI_RESPONSES_PARAMS,
+    ),
+    "openai_chat": _openai_evidence_rules(
+        frozenset({"chat.completion", "chat.completion.chunk"}),
+        _OPENAI_CHAT_PARAMS,
+    ),
+}
 
 
 def _parse_protocol_authenticated_evidence(
@@ -114,9 +261,11 @@ def _parse_protocol_authenticated_evidence(
     by themselves; a generic response therefore remains unproven even when its
     HTTP status is conventionally associated with authentication or validation.
     A structured authentication error may prove credential rejection without
-    distinguishing the attempted OpenAI protocol. The observation result exposes
-    a non-null protocol if and only if a protocol-specific response shape also
-    proves authentication acceptance.
+    distinguishing the attempted OpenAI protocol. Accepted, rejected, and unknown
+    are all positive table entries; there is no default authentication result for
+    a shaped response. The observation result exposes a non-null protocol if and
+    only if a protocol-specific response shape also proves authentication
+    acceptance.
     """
 
     try:
@@ -132,30 +281,17 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.UNKNOWN,
         )
 
-    shaped = _successful_response_proves_protocol(protocol, payload)
-    error = payload.get("error")
-    if not shaped:
-        if protocol == "anthropic":
-            shaped = (
-                payload.get("type") == "error"
-                and isinstance(error, dict)
-                and isinstance(error.get("type"), str)
+    for rule in _PROTOCOL_EVIDENCE_RULES.get(protocol, ()):
+        if rule.matches(status, payload):
+            return _ProtocolEvidence(
+                protocol=rule.protocol,
+                authentication=rule.authentication,
             )
-        elif protocol in _OPENAI_ERROR_PARAMS and isinstance(error, dict):
-            shaped = error.get("param") in _OPENAI_ERROR_PARAMS[protocol]
-    structured_rejection = isinstance(error, dict) and any(
-        isinstance(identifier, str)
-        and identifier.strip().lower() in _AUTHENTICATION_ERROR_IDENTIFIERS
-        for identifier in (error.get("code"), error.get("type"))
-    )
-    authentication = _AuthenticationEvidence.UNKNOWN
-    if structured_rejection or (shaped and status in {401, 403}):
-        authentication = _AuthenticationEvidence.REJECTED
-    elif shaped:
-        authentication = _AuthenticationEvidence.ACCEPTED
     return _ProtocolEvidence(
-        protocol=_ProtocolProof.PROVEN if shaped else _ProtocolProof.UNPROVEN,
-        authentication=authentication,
+        protocol=(
+            _ProtocolProof.PROVEN if _response_shape_proves_protocol(protocol, payload) else _ProtocolProof.UNPROVEN
+        ),
+        authentication=_AuthenticationEvidence.UNKNOWN,
     )
 
 
@@ -222,18 +358,26 @@ class _AuthRecord:
     account_id: str | None = None
 
 
-def _successful_response_proves_protocol(
+def _response_shape_proves_protocol(
     protocol: str,
     body: Mapping[str, Any],
 ) -> bool:
-    """Keep the ambiguous-success boundary in one response-shape classifier."""
+    """Recognize protocol-specific shapes without inferring authentication."""
 
     if protocol == "anthropic":
-        return body.get("type") == "message"
+        error = body.get("error")
+        return body.get("type") == "message" or (
+            body.get("type") == "error" and isinstance(error, dict) and isinstance(error.get("type"), str)
+        )
+    error = body.get("error")
     if protocol == "openai_responses":
-        return body.get("object") == "response"
+        return body.get("object") == "response" or (
+            isinstance(error, dict) and error.get("param") in _OPENAI_RESPONSES_PARAMS
+        )
     if protocol == "openai_chat":
-        return body.get("object") in {"chat.completion", "chat.completion.chunk"}
+        return body.get("object") in {"chat.completion", "chat.completion.chunk"} or (
+            isinstance(error, dict) and error.get("param") in _OPENAI_CHAT_PARAMS
+        )
     return False
 
 
@@ -616,11 +760,7 @@ class CLIProxyEngineAdapter:
             client = await asyncio.to_thread(self.supervisor.client)
             inventory = await asyncio.to_thread(_auth_inventory, client)
             auth_name = str(metadata.get("auth_name") or "")
-            matches = [
-                auth
-                for auth in inventory.values()
-                if auth.name == auth_name or auth.identity == auth_name
-            ]
+            matches = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matches) != 1 or not matches[0].auth_index:
                 raise EngineStateError("OAuth credential binding is unavailable")
             oauth_auth = matches[0]
@@ -629,6 +769,7 @@ class CLIProxyEngineAdapter:
 
         failures: list[EngineClientError] = []
         received_rejection = False
+        received_proven_unknown = False
         received_unproven_response = False
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
@@ -655,10 +796,12 @@ class CLIProxyEngineAdapter:
                 continue
             if evidence.authentication is _AuthenticationEvidence.REJECTED:
                 received_rejection = True
-            if (
-                evidence.protocol is not _ProtocolProof.PROVEN
-                or evidence.authentication is not _AuthenticationEvidence.ACCEPTED
-            ):
+                continue
+            if evidence.protocol is _ProtocolProof.PROVEN:
+                if evidence.authentication is _AuthenticationEvidence.UNKNOWN:
+                    received_proven_unknown = True
+                    continue
+            else:
                 received_unproven_response = True
                 continue
             try:
@@ -695,6 +838,15 @@ class CLIProxyEngineAdapter:
                 outcome=ObservationOutcome.AUTHENTICATION_FAILED,
                 reachable=True,
                 authenticated=False,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if received_proven_unknown:
+            return SourceObservation(
+                outcome=ObservationOutcome.ADAPTER_ERROR,
+                reachable=True,
+                authenticated=None,
                 protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 model_ids=(),
@@ -740,9 +892,7 @@ class CLIProxyEngineAdapter:
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None:
-            raise EngineStateError(
-                "OAuth vendor lacks Model Hub response-backed observation"
-            )
+            raise EngineStateError("OAuth vendor lacks Model Hub response-backed observation")
         engine_endpoint, callback_provider, auth_provider = endpoint
         with self._oauth_lock:
             self._expire_oauth_flows_locked()
@@ -881,9 +1031,7 @@ class CLIProxyEngineAdapter:
             if source is None:
                 raise EngineStateError("source is not registered")
             if source.allowed_origins and origin not in source.allowed_origins:
-                raise OriginNotAllowedError(
-                    f"origin {origin!r} is not allowed to use source {source_id!r}"
-                )
+                raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
             try:
                 client = await asyncio.to_thread(self.supervisor.client)
             except EngineUnavailableError:
@@ -1162,9 +1310,7 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
         provider = str(item.get("provider") or item.get("type") or "").strip().lower()
         id_token = item.get("id_token")
         account_id = (
-            str(id_token.get("chatgpt_account_id") or "").strip() or None
-            if isinstance(id_token, dict)
-            else None
+            str(id_token.get("chatgpt_account_id") or "").strip() or None if isinstance(id_token, dict) else None
         )
         if identity and name and provider:
             fingerprint = json.dumps(

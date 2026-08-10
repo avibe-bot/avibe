@@ -71,6 +71,7 @@ from vibe.model_hub_runtime.adapter import (
     CLIProxyEngineAdapter,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
+    _PROTOCOL_EVIDENCE_RULES,
     _ProtocolEvidence,
     _ProtocolProof,
 )
@@ -96,19 +97,14 @@ def _assert_valid(schema_name: str, payload: dict) -> None:
 
 def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
     locale_launch = {
-        locale: json.loads(
-            (Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(
-                encoding="utf-8"
-            )
-        )["modelHub"]["launch"]
+        locale: json.loads((Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(encoding="utf-8"))[
+            "modelHub"
+        ]["launch"]
         for locale in ("en", "zh")
     }
 
     assert locale_launch["en"].keys() == locale_launch["zh"].keys()
-    assert all(
-        "{model}" in launch["route_unconfigured"]
-        for launch in locale_launch.values()
-    )
+    assert all("{model}" in launch["route_unconfigured"] for launch in locale_launch.values())
     failure = ModelHubError(
         "no_candidate",
         data={
@@ -124,9 +120,7 @@ def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
             "menu-model",
             failure,
         )
-        assert rendered.detail == launch["route_unconfigured"].format(
-            model="menu-model"
-        )
+        assert rendered.detail == launch["route_unconfigured"].format(model="menu-model")
 
 
 def test_structural_blocker_copy_uses_its_reason_instead_of_source_status() -> None:
@@ -328,11 +322,7 @@ def _canonicalize_fixed_test_routes(
             ModelHubRouteConfig(),
         )
         config.agents[backend].routes = {
-            model_id: (
-                shared_route
-                if model_id == selected[backend]
-                else ModelHubRouteConfig()
-            )
+            model_id: (shared_route if model_id == selected[backend] else ModelHubRouteConfig())
             for model_id in menu_ids
         }
         service.store.requested_models[backend] = selected[backend]
@@ -1163,9 +1153,7 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
-    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
-    )
+    agent.routes["openai/menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),))
     agent.menu.checked = ["openai/menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
@@ -1182,9 +1170,7 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
 
     assert overlay is not None
     payload = json.loads(overlay.content)
-    assert payload["provider"]["openai"]["models"]["menu-model"]["id"] == (
-        "openai/menu-model"
-    )
+    assert payload["provider"]["openai"]["models"]["menu-model"]["id"] == ("openai/menu-model")
     assert overlay.launches[0].target_model == "upstream-model"
 
 
@@ -1207,21 +1193,15 @@ def test_opencode_overlay_supports_mixed_protocols_under_one_provider(tmp_path: 
     agent = config.agents["opencode"]
     agent.menu.checked = ["custom/first-model", "custom/second-model"]
     agent.routes = {
-        "custom/first-model": ModelHubRouteConfig(
-            hops=(ModelHubRouteHopConfig(first.id, "first-model"),)
-        ),
-        "custom/second-model": ModelHubRouteConfig(
-            hops=(ModelHubRouteHopConfig(second.id, "second-model"),)
-        ),
+        "custom/first-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(first.id, "first-model"),)),
+        "custom/second-model": ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(second.id, "second-model"),)),
     }
     service = _service(tmp_path, sources=[first, second])
     service.store.config = config
     router = ModelHubRuntimeRouter(
         service=service,
         turn_gateway=SimpleNamespace(
-            endpoint=AsyncMock(
-                return_value=("http://127.0.0.1:19000/opencode", "gateway-token")
-            ),
+            endpoint=AsyncMock(return_value=("http://127.0.0.1:19000/opencode", "gateway-token")),
         ),
         overlay_path=tmp_path / "overlay.json",
     )
@@ -1260,9 +1240,7 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
     router = ModelHubRuntimeRouter(
         service=service,
         turn_gateway=SimpleNamespace(
-            endpoint=AsyncMock(
-                return_value=("http://127.0.0.1:19000", "gateway-token")
-            ),
+            endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "gateway-token")),
         ),
         overlay_path=tmp_path / "overlay.json",
     )
@@ -1270,9 +1248,7 @@ def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path
     overlay = asyncio.run(router.prepare_opencode_overlay())
 
     assert overlay is not None
-    assert [launch.target_model for launch in overlay.launches] == [
-        "supported-model"
-    ]
+    assert [launch.target_model for launch in overlay.launches] == ["supported-model"]
 
 
 def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
@@ -1286,18 +1262,14 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     config = _config([source])
     agent = config.agents["opencode"]
     agent.routes.pop("openai/shared-model")
-    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
-        hops=(ModelHubRouteHopConfig(source.id, "stale-model"),)
-    )
+    agent.routes["openai/menu-model"] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, "stale-model"),))
     agent.menu.checked = ["openai/menu-model"]
     service = _service(tmp_path, sources=[source])
     service.store.config = config
     router = ModelHubRuntimeRouter(
         service=service,
         turn_gateway=SimpleNamespace(
-            endpoint=AsyncMock(
-                return_value=("http://127.0.0.1:19000", "gateway-token")
-            ),
+            endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "gateway-token")),
         ),
         overlay_path=tmp_path / "overlay.json",
     )
@@ -1347,9 +1319,7 @@ def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them
     )
 
     assert replacement_ref != old_ref
-    assert state_store.credential_metadata(old_ref)["base_url"] == (
-        "https://old-relay.example/v1"
-    )
+    assert state_store.credential_metadata(old_ref)["base_url"] == ("https://old-relay.example/v1")
     assert state_store.credential_metadata(replacement_ref)["base_url"] == (
         "https://new-relay.example/v1?api-version=2026-08-10"
     )
@@ -1386,6 +1356,10 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.REJECTED,
     )
+    proven_unknown = _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
     unproven_unknown = _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
@@ -1417,9 +1391,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
 
     assert observed.outcome.value == "observed"
     assert observed.protocol == hinted_order[0]
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == [
-        hinted_order[0]
-    ]
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == [hinted_order[0]]
     assert inventory_probe.await_args.kwargs["protocol"] == hinted_order[0]
 
     async def indistinguishable_response(**_kwargs) -> _ProtocolEvidence:
@@ -1447,10 +1419,59 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is None
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
-        hinted_order
-    )
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(hinted_order)
     inventory_probe.assert_not_awaited()
+
+    async def shaped_server_failure(**kwargs) -> _ProtocolEvidence:
+        if kwargs["protocol"] == "anthropic":
+            body = {"type": "error", "error": {"type": "api_error"}}
+        else:
+            body = {"error": {"type": "server_error"}}
+        evidence = _parse_protocol_authenticated_evidence(
+            kwargs["protocol"],
+            500,
+            json.dumps(body),
+        )
+        assert evidence == proven_unknown
+        return evidence
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=shaped_server_failure),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("unverified-model",)),
+        ) as inventory_probe,
+    ):
+        upstream_error = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert upstream_error.outcome.value == "adapter_error"
+    assert upstream_error.reachable is True
+    assert upstream_error.authenticated is None
+    assert upstream_error.protocol is None
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+    _assert_valid(
+        "observation-result.schema.json",
+        {
+            "contract_version": 5,
+            "outcome": "adapter_error",
+            "reachable": True,
+            "authenticated": "unknown",
+            "protocol": None,
+            "discovery": "not_attempted",
+            "models": [],
+        },
+    )
 
     proved_protocol = SOURCE_PROTOCOLS[1]
 
@@ -1481,9 +1502,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert observed.outcome.value == "observed"
     assert observed.protocol == proved_protocol
     assert observed.model_ids == ("upstream-model",)
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
-        SOURCE_PROTOCOLS[:2]
-    )
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS[:2])
     assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
     assert inventory_probe.await_args.kwargs["base_url"] == base_url
 
@@ -1562,9 +1581,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert rejected.reachable is True
     assert rejected.authenticated is False
     assert rejected.protocol is None
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
-        SOURCE_PROTOCOLS
-    )
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
 
@@ -1660,29 +1677,45 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
 
 
 @pytest.mark.parametrize(
-    ("protocol", "success_body", "error_body"),
+    ("protocol", "success_body", "request_error_body", "auth_error_body"),
     [
         (
             "anthropic",
             {"type": "message"},
             {"type": "error", "error": {"type": "invalid_request_error"}},
+            {"type": "error", "error": {"type": "authentication_error"}},
         ),
         (
             "openai_responses",
             {"object": "response"},
             {"error": {"type": "invalid_request_error", "param": "input"}},
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                    "param": "input",
+                }
+            },
         ),
         (
             "openai_chat",
             {"object": "chat.completion"},
             {"error": {"type": "invalid_request_error", "param": "messages"}},
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                    "param": "messages",
+                }
+            },
         ),
     ],
 )
 def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
     protocol: str,
     success_body: dict,
-    error_body: dict,
+    request_error_body: dict,
+    auth_error_body: dict,
 ) -> None:
     assert _parse_protocol_authenticated_evidence(
         protocol,
@@ -1695,7 +1728,7 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
     assert _parse_protocol_authenticated_evidence(
         protocol,
         400,
-        json.dumps(error_body),
+        json.dumps(request_error_body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.ACCEPTED,
@@ -1703,7 +1736,7 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
     assert _parse_protocol_authenticated_evidence(
         protocol,
         401,
-        json.dumps(error_body),
+        json.dumps(auth_error_body),
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.PROVEN,
         authentication=_AuthenticationEvidence.REJECTED,
@@ -1715,6 +1748,102 @@ def test_protocol_evidence_parser_requires_candidate_specific_response_shapes(
     ) == _ProtocolEvidence(
         protocol=_ProtocolProof.UNPROVEN,
         authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "status", "body"),
+    [
+        (
+            "anthropic",
+            500,
+            {"type": "error", "error": {"type": "api_error"}},
+        ),
+        (
+            "openai_responses",
+            500,
+            {"error": {"type": "server_error"}},
+        ),
+        (
+            "openai_chat",
+            500,
+            {"error": {"type": "server_error"}},
+        ),
+        (
+            "anthropic",
+            429,
+            {"type": "error", "error": {"type": "rate_limit_error"}},
+        ),
+        (
+            "openai_responses",
+            429,
+            {"error": {"type": "rate_limit_exceeded"}},
+        ),
+        (
+            "openai_chat",
+            429,
+            {"error": {"type": "rate_limit_exceeded"}},
+        ),
+        (
+            "anthropic",
+            400,
+            {"type": "error", "error": {"type": "future_error"}},
+        ),
+        (
+            "openai_responses",
+            400,
+            {"error": {"type": "future_error", "param": "input"}},
+        ),
+        (
+            "openai_chat",
+            400,
+            {"error": {"type": "future_error", "param": "messages"}},
+        ),
+    ],
+)
+def test_protocol_evidence_table_defaults_shaped_non_auth_rows_to_unknown(
+    protocol: str,
+    status: int,
+    body: dict,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        status,
+        json.dumps(body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "body"),
+    [
+        (
+            "anthropic",
+            {"type": "error", "error": {"type": "not_found_error"}},
+        ),
+        (
+            "openai_responses",
+            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+        (
+            "openai_chat",
+            {"error": {"type": "invalid_request_error", "code": "model_not_found"}},
+        ),
+    ],
+)
+def test_protocol_evidence_table_accepts_authenticated_model_errors(
+    protocol: str,
+    body: dict,
+) -> None:
+    assert _parse_protocol_authenticated_evidence(
+        protocol,
+        404,
+        json.dumps(body),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.PROVEN,
+        authentication=_AuthenticationEvidence.ACCEPTED,
     )
 
 
@@ -1743,6 +1872,7 @@ def test_shared_openai_authentication_rejection_does_not_prove_a_protocol() -> N
 def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:
     module_path = Path(__file__).parents[1] / "vibe/model_hub_runtime/adapter.py"
     tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    assert _PROTOCOL_EVIDENCE_RULES.keys() == set(SOURCE_PROTOCOLS)
     consumers = {
         node.name: node
         for node in ast.walk(tree)
@@ -1757,8 +1887,7 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
     for consumer in consumers.values():
         calls = [node for node in ast.walk(consumer) if isinstance(node, ast.Call)]
         assert any(
-            isinstance(call.func, ast.Name)
-            and call.func.id == "_parse_protocol_authenticated_evidence"
+            isinstance(call.func, ast.Name) and call.func.id == "_parse_protocol_authenticated_evidence"
             for call in calls
         )
         compared_statuses = {
@@ -1771,6 +1900,20 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
             and not isinstance(constant.value, bool)
         }
         assert not compared_statuses
+
+    auth_branch_offenders = []
+    for function in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name != "_parse_protocol_authenticated_evidence"
+    ):
+        for branch in (node for node in ast.walk(function) if isinstance(node, (ast.If, ast.IfExp))):
+            condition = ast.unparse(branch.test)
+            branch_source = ast.unparse(branch)
+            if any(token in condition for token in ("status", "error")) and "_AuthenticationEvidence" in branch_source:
+                auth_branch_offenders.append((function.name, condition))
+    assert not auth_branch_offenders
 
 
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
@@ -1852,10 +1995,8 @@ def test_model_discovery_preserves_query_when_appending_models_path() -> None:
 def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None:
     source = _source("src_blocked01", "Blocked")
     service = _service(tmp_path, sources=[source])
-    service.store.config.agents["claude"].routes["shared-model"] = (
-        ModelHubRouteConfig(
-            hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
-        )
+    service.store.config.agents["claude"].routes["shared-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
     )
     router = ModelHubRuntimeRouter(service=service)
 
@@ -1863,11 +2004,7 @@ def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None
         with pytest.raises(ModelHubError):
             asyncio.run(router.resolve("claude", "shared-model"))
 
-    events = [
-        event
-        for event in service.list_events(limit=20)
-        if event["kind"] == "supply_interrupted"
-    ]
+    events = [event for event in service.list_events(limit=20) if event["kind"] == "supply_interrupted"]
     assert len(events) == 1
     assert events[0]["reason"] == "model_unsupported"
 
@@ -1877,9 +2014,7 @@ def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None
     [
         (ModelHubRouteConfig(), True, "route_unconfigured"),
         (
-            ModelHubRouteConfig(
-                hops=(ModelHubRouteHopConfig("src_missing01", "shared-model"),)
-            ),
+            ModelHubRouteConfig(hops=(ModelHubRouteHopConfig("src_missing01", "shared-model"),)),
             True,
             "source_missing",
         ),
@@ -1902,11 +2037,7 @@ def test_supply_interruption_preserves_exact_structural_reason(
     with pytest.raises(ModelHubError):
         asyncio.run(router.resolve("claude", "shared-model"))
 
-    event = next(
-        item
-        for item in service.list_events(limit=20)
-        if item["kind"] == "supply_interrupted"
-    )
+    event = next(item for item in service.list_events(limit=20) if item["kind"] == "supply_interrupted")
     assert event["reason"] == reason
     _assert_valid("resolution-event.schema.json", event)
 
@@ -1928,11 +2059,7 @@ def test_supply_interruption_preserves_native_process_reason(tmp_path: Path) -> 
     with pytest.raises(ModelHubError):
         asyncio.run(router.resolve("claude", "shared-model"))
 
-    event = next(
-        item
-        for item in service.list_events(limit=20)
-        if item["kind"] == "supply_interrupted"
-    )
+    event = next(item for item in service.list_events(limit=20) if item["kind"] == "supply_interrupted")
     assert event["reason"] == "native_cli_unavailable"
     _assert_valid("resolution-event.schema.json", event)
 
@@ -2121,12 +2248,8 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    unclassified_model = _canonicalize_fixed_test_routes(unclassified_service)[
-        "claude"
-    ]
-    unclassified = asyncio.run(
-        unclassified_service.probe_agent("claude", unclassified_model)
-    )
+    unclassified_model = _canonicalize_fixed_test_routes(unclassified_service)["claude"]
+    unclassified = asyncio.run(unclassified_service.probe_agent("claude", unclassified_model))
     assert unclassified["reachable"] is False
     assert isinstance(unclassified["latency_ms"], int)
     assert unclassified["error"] == "models.source.error.unclassified"
@@ -2144,12 +2267,8 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    request_error_model = _canonicalize_fixed_test_routes(request_error_service)[
-        "claude"
-    ]
-    request_error = asyncio.run(
-        request_error_service.probe_agent("claude", request_error_model)
-    )
+    request_error_model = _canonicalize_fixed_test_routes(request_error_service)["claude"]
+    request_error = asyncio.run(request_error_service.probe_agent("claude", request_error_model))
     assert request_error["reachable"] is False
     assert isinstance(request_error["latency_ms"], int)
     assert request_error["error"] == "models.source.error.unclassified"
@@ -2168,12 +2287,8 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    not_found_model = _canonicalize_fixed_test_routes(anthropic_not_found)[
-        "claude"
-    ]
-    not_found = asyncio.run(
-        anthropic_not_found.probe_agent("claude", not_found_model)
-    )
+    not_found_model = _canonicalize_fixed_test_routes(anthropic_not_found)["claude"]
+    not_found = asyncio.run(anthropic_not_found.probe_agent("claude", not_found_model))
     assert not_found["reachable"] is False
     assert anthropic_not_found.store.load().sources[0].state.status == "standby"
     assert anthropic_not_found.events.list(limit=10) == []
@@ -2197,21 +2312,13 @@ def test_probe_401_uses_exact_credential_refresh_capability(tmp_path: Path) -> N
     static_model = _canonicalize_fixed_test_routes(static_service)["claude"]
     static_adapter = cast(ProbeAdapter, static_service.adapter)
 
-    static_probe = asyncio.run(
-        static_service.probe_agent("claude", static_model)
-    )
+    static_probe = asyncio.run(static_service.probe_agent("claude", static_model))
 
     assert static_probe["reachable"] is False
-    assert static_probe["error"] == (
-        "models.source.needs_action.credential_revoked"
-    )
-    assert static_adapter.invocations == [
-        (static_source.id, "shared-model", "claude")
-    ]
+    assert static_probe["error"] == ("models.source.needs_action.credential_revoked")
+    assert static_adapter.invocations == [(static_source.id, "shared-model", "claude")]
     assert static_adapter.capability_queries == [static_source.credential_ref]
-    assert static_service.store.load().sources[0].state.detail_key == (
-        "models.source.needs_action.credential_revoked"
-    )
+    assert static_service.store.load().sources[0].state.detail_key == ("models.source.needs_action.credential_revoked")
 
     refreshable_source = _source("src_refreshprobe", "Refreshable")
     refreshable_service = _service(
@@ -2231,27 +2338,19 @@ def test_probe_401_uses_exact_credential_refresh_capability(tmp_path: Path) -> N
             ),
         ],
     )
-    refreshable_model = _canonicalize_fixed_test_routes(refreshable_service)[
-        "claude"
-    ]
+    refreshable_model = _canonicalize_fixed_test_routes(refreshable_service)["claude"]
     refreshable_adapter = cast(ProbeAdapter, refreshable_service.adapter)
     assert refreshable_source.credential_ref is not None
-    refreshable_adapter.refreshable_credential_refs.add(
-        refreshable_source.credential_ref
-    )
+    refreshable_adapter.refreshable_credential_refs.add(refreshable_source.credential_ref)
 
-    refreshable_probe = asyncio.run(
-        refreshable_service.probe_agent("claude", refreshable_model)
-    )
+    refreshable_probe = asyncio.run(refreshable_service.probe_agent("claude", refreshable_model))
 
     assert refreshable_probe["reachable"] is True
     assert refreshable_adapter.invocations == [
         (refreshable_source.id, "shared-model", "claude"),
         (refreshable_source.id, "shared-model", "claude"),
     ]
-    assert refreshable_adapter.capability_queries == [
-        refreshable_source.credential_ref
-    ]
+    assert refreshable_adapter.capability_queries == [refreshable_source.credential_ref]
 
 
 @pytest.mark.parametrize(
@@ -2495,18 +2594,14 @@ def test_retired_mapping_event_is_rejected_and_channel_switch_retains_subject() 
 
 
 def test_resolution_event_reason_contract_matches_runtime_vocabulary() -> None:
-    schema = json.loads(
-        (CONTRACTS / "resolution-event.schema.json").read_text(encoding="utf-8")
-    )
+    schema = json.loads((CONTRACTS / "resolution-event.schema.json").read_text(encoding="utf-8"))
     authority = tuple(EVENT_REASON_AUTHORITY)
     assert tuple(schema["properties"]["reason"]["enum"]) == authority
 
     locale_reasons = {
-        locale: json.loads(
-            (Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(
-                encoding="utf-8"
-            )
-        )["modelHub"]["events"]["reason"]
+        locale: json.loads((Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(encoding="utf-8"))[
+            "modelHub"
+        ]["events"]["reason"]
         for locale in ("en", "zh")
     }
     assert all(tuple(reasons) == authority for reasons in locale_reasons.values())

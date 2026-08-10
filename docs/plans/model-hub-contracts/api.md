@@ -82,12 +82,18 @@ protocol for every later operation.
 
 The observation result has six terminal outcomes: `observed`, `ambiguous`,
 `unreachable`, `authentication_failed`, `adapter_error`, and `timeout`. Its
-`protocol` is non-null only when a real upstream response shape proves the
-transport. A bare HTTP status proves reachability, but proves neither protocol nor
-authentication. Consequently, `ambiguous` always has `reachable: true` and
-`protocol: null`, while `authenticated` is `authenticated` only when response shape
-proved acceptance and is `unknown` otherwise. `ambiguous` is the sole outcome that
-asks for the one-time probe-order hint.
+`protocol` is non-null only when a real upstream response shape and positive
+authentication evidence prove the transport. Authentication is accepted only by a
+shaped success or a shaped request-level error that occurs after authentication;
+shaped authentication errors are rejected. Shaped server and rate-limit errors
+prove reachability but not authentication, so they settle as `adapter_error` with
+`reachable: true`, `authenticated: unknown`, and `protocol: null`. A local adapter
+failure may use the same outcome with `reachable: null`. A bare HTTP status proves
+reachability, but proves neither protocol nor authentication. Consequently,
+`ambiguous` always has `reachable: true` and `protocol: null`.
+`authentication_failed` also has `protocol: null`, because a rejected credential
+does not establish a persistable protocol. `ambiguous` is the sole outcome that asks
+for the one-time probe-order hint.
 
 ## Identifier rules
 
