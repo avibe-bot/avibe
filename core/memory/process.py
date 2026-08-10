@@ -1412,100 +1412,105 @@ class SidecarOwnership:
         orphan, and a tree that will not exit fails the launch and keeps the record.
         """
 
-        candidates = [
+        sidecars = [
             (_MemoryChildRole.SIDECAR, pid, created_at)
             for pid, created_at in self._host.find_sidecars(socket_path=self._socket_path).items()
         ]
-        candidates.extend(
+        rebuilds = [
             (_MemoryChildRole.CASCADE_REBUILD, pid, created_at)
             for pid, created_at in self._host.find_rebuilds(
                 provider_root=self._provider_root,
                 python=None,
             ).items()
-        )
+        ]
+        candidates = rebuilds or sidecars
         if not candidates:
             return
-        if len(candidates) != 1:
+        if rebuilds and (sidecars or len(rebuilds) != 1):
             raise RuntimeError(
                 "ambiguous EverOS child ownership discovery "
-                f"(pids {sorted(pid for _role, pid, _created_at in candidates)})"
+                f"(pids {sorted(pid for _role, pid, _created_at in rebuilds + sidecars)})"
             )
-        role, pid, created_at = candidates[0]
-        logger.warning(
-            "Reaping an EverOS %s an unusable ownership record could not identify (pid %s)",
-            role.value,
-            pid,
-        )
-        identities = {pid: created_at}
-        discovered_python = self._python
-        if role is _MemoryChildRole.CASCADE_REBUILD:
-            identity = self._host.inspect_identity(pid)
-            getuid = getattr(os, "getuid", None)
-            own_uid = getuid() if callable(getuid) else None
-            if (
-                identity is None
-                or identity.create_time != created_at
-                or identity.cmdline is None
-                or not identity.cmdline
-                or not _cmdline_matches_role(
-                    identity.cmdline,
-                    role=role,
-                    socket_path=self._socket_path,
-                    python=None,
-                )
-                or (own_uid is not None and identity.uid != own_uid)
-                or identity.environment is None
-                or identity.environment.get("EVEROS_ROOT") != str(self._provider_root)
-                or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
-            ):
-                raise RuntimeError(
-                    f"rebuild child identity could not be verified (pid {pid})"
-                )
-            discovered_python = Path(identity.cmdline[0])
-        # Helpers are reached through the anchor's own group rather than by
-        # widening the machine-wide test, because membership is what makes the
-        # looser per-member claim safe.
-        group = self._host.process_group(pid)
-        self._persist_record(
-            pid,
-            created_at,
-            group,
-            role=None if role is _MemoryChildRole.SIDECAR else role,
-            python=discovered_python if role is _MemoryChildRole.CASCADE_REBUILD else None,
-        )
-        foreign: list[int] = []
-        if group is not None:
-            claimed, foreign = self._host.recorded_group_members(
+        for role, pid, created_at in sorted(candidates, key=lambda candidate: candidate[1]):
+            logger.warning(
+                "Reaping an EverOS %s an unusable ownership record could not identify (pid %s)",
+                role.value,
+                pid,
+            )
+            identities = {pid: created_at}
+            discovered_python = self._python
+            if role is _MemoryChildRole.CASCADE_REBUILD:
+                identity = self._host.inspect_identity(pid)
+                getuid = getattr(os, "getuid", None)
+                own_uid = getuid() if callable(getuid) else None
+                if (
+                    identity is None
+                    or identity.create_time != created_at
+                    or identity.cmdline is None
+                    or not identity.cmdline
+                    or not _cmdline_matches_role(
+                        identity.cmdline,
+                        role=role,
+                        socket_path=self._socket_path,
+                        python=None,
+                    )
+                    or (own_uid is not None and identity.uid != own_uid)
+                    or identity.environment is None
+                    or identity.environment.get("EVEROS_ROOT") != str(self._provider_root)
+                    or identity.environment.get("AVIBE_MEMORY_CHILD_ROLE") != role.value
+                ):
+                    raise RuntimeError(
+                        f"rebuild child identity could not be verified (pid {pid})"
+                    )
+                discovered_python = Path(identity.cmdline[0])
+            # Helpers are reached through the anchor's own group rather than by
+            # widening the machine-wide test, because membership is what makes the
+            # looser per-member claim safe.
+            group = self._host.process_group(pid)
+            self._persist_record(
+                pid,
+                created_at,
                 group,
-                socket_path=self._socket_path,
-                provider_root=self._provider_root,
                 role=None if role is _MemoryChildRole.SIDECAR else role,
+                python=(
+                    discovered_python
+                    if role is _MemoryChildRole.CASCADE_REBUILD
+                    else None
+                ),
             )
-            _merge_owned_processes(identities, claimed)
-            if foreign:
-                logger.warning(
-                    "Leaving %s process(es) in EverOS %s group %s alone: %s",
-                    len(foreign),
-                    role.value,
+            foreign: list[int] = []
+            if group is not None:
+                claimed, foreign = self._host.recorded_group_members(
                     group,
-                    foreign,
+                    socket_path=self._socket_path,
+                    provider_root=self._provider_root,
+                    role=None if role is _MemoryChildRole.SIDECAR else role,
                 )
-        terminated, later_foreign = await self._terminate_claimed_processes(
-            group,
-            identities,
-            role=role,
-        )
-        foreign = sorted(set(foreign).union(later_foreign))
-        if not terminated:
-            raise RuntimeError(
-                f"EverOS {role.value} left by an unusable record did not exit "
-                f"(pid {pid}, record {self.record_path})"
+                _merge_owned_processes(identities, claimed)
+                if foreign:
+                    logger.warning(
+                        "Leaving %s process(es) in EverOS %s group %s alone: %s",
+                        len(foreign),
+                        role.value,
+                        group,
+                        foreign,
+                    )
+            terminated, later_foreign = await self._terminate_claimed_processes(
+                group,
+                identities,
+                role=role,
             )
-        if foreign and role is _MemoryChildRole.CASCADE_REBUILD:
-            raise RuntimeError(
-                "orphaned rebuild group could not be verified "
-                f"(leader pid {pid}, group {group}, record {self.record_path})"
-            )
+            foreign = sorted(set(foreign).union(later_foreign))
+            if not terminated:
+                raise RuntimeError(
+                    f"EverOS {role.value} left by an unusable record did not exit "
+                    f"(pid {pid}, record {self.record_path})"
+                )
+            if foreign and role is _MemoryChildRole.CASCADE_REBUILD:
+                raise RuntimeError(
+                    "orphaned rebuild group could not be verified "
+                    f"(leader pid {pid}, group {group}, record {self.record_path})"
+                )
 
     async def _terminate_claimed_processes(
         self,

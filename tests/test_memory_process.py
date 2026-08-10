@@ -3035,6 +3035,28 @@ async def test_rebuild_boot_cancellation_waits_for_orphan_reaping(tmp_path: Path
     assert not process._ownership.record_path.exists()
 
 
+async def test_rebuild_boot_reaps_multiple_exact_sidecars_before_rebuild(
+    tmp_path: Path,
+) -> None:
+    anchors = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    host = _FakeProcessHost(
+        sidecars=dict(anchors),
+        process_groups={pid: pid for pid in anchors},
+        groups={pid: ({pid: created_at}, []) for pid, created_at in anchors.items()},
+        live_processes=dict(anchors),
+    )
+    process = _rebuild_process(tmp_path, host)
+
+    await process.reconcile_orphan()
+
+    assert host.live_processes == {}
+    assert {next(iter(owned)) for owned, *_rest in host.signal_calls} == set(anchors)
+    assert not process._ownership.record_path.exists()
+
+
 async def test_rebuild_boot_fails_closed_on_ambiguous_discovery(tmp_path: Path) -> None:
     host = _FakeProcessHost(
         rebuilds={
