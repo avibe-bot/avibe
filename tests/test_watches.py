@@ -38,7 +38,12 @@ from core.watches import (
     _ManagedWatchRuntimeWorkHandler,
     _StaleWorkerRecovery,
 )
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    WATCH_HOOK_OUTCOME_EVENT,
+    WATCH_HOOK_OUTCOME_METADATA_KEY,
+    WATCH_HOOK_OUTCOME_WAITER_FAILURE,
+    SQLiteBackgroundTaskStore,
+)
 
 TEST_MARKER = "test-watch-worker"
 TEST_FINGERPRINT = fingerprint_process_marker(TEST_MARKER)
@@ -646,6 +651,10 @@ def test_managed_watch_service_once_success_enqueues_hook_and_disables(tmp_path:
     # which scheduled_tasks dispatches like a hook_send but tags as trigger_kind="watch".
     assert pending[0].request_type == "watch"
     assert pending[0].prompt == "The waiter finished.\n\nwaiter output"
+    assert (
+        pending[0].metadata[WATCH_HOOK_OUTCOME_METADATA_KEY]
+        == WATCH_HOOK_OUTCOME_EVENT
+    )
     assert saved is not None
     assert saved.enabled is False
     assert saved.last_exit_code == 0
@@ -989,6 +998,10 @@ def test_managed_watch_service_turns_spawn_error_into_failed_cycle(tmp_path: Pat
     assert len(pending) == 1
     assert "stopped because the waiter exited with code 1" in pending[0].prompt
     assert "fix the waiter or its dependencies" in pending[0].prompt
+    assert (
+        pending[0].metadata[WATCH_HOOK_OUTCOME_METADATA_KEY]
+        == WATCH_HOOK_OUTCOME_WAITER_FAILURE
+    )
 
 
 @pytest.mark.parametrize("use_shell", [False, True], ids=["exec", "shell"])

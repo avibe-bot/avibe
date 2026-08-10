@@ -1235,9 +1235,7 @@
   },
   "models": {
     "eligibility": {
-      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用",
-      "opencode_api_key_only": "OpenCode 只能由 API Key 来源供给",
-      "consent_required": "需要先同意实验性中枢供给"
+      "subscription_wrong_client": "{{vendor}} 订阅仅可供 {{backend}} 使用"
     },
     "oauth": {
       "upstream_failed": "厂商没有完成这次登录，请重试",
@@ -2991,6 +2989,7 @@
       "mode": "模式",
       "followUp": "跟进消息",
       "runtime": "运行时",
+      "eventProcessing": "事件处理",
       "lastError": "上次错误",
       "type": "类型",
       "triggeredBy": "触发来源",
@@ -3077,6 +3076,11 @@
       "failing": "连续失败",
       "degraded": "近期失败",
       "unknown": "状态未知"
+    },
+    "processingHealth": {
+      "failing": "处理失败",
+      "degraded": "近期处理失败",
+      "unknown": "处理状态未知"
     },
     "lifecycle": {
       "running": "运行中",
@@ -3197,6 +3201,13 @@
       "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
+      "vault": "来自 Vault",
+      "vaultProvided": "填写完成",
+      "vaultAccessApproved": "访问已批准",
+      "vaultSigned": "签名完成",
+      "vaultDenied": "已拒绝",
+      "vaultFailed": "处理失败",
+      "vaultExpired": "已过期",
       "agentFallback": "智能体"
     },
     "annotation": {
@@ -3237,6 +3248,7 @@
       "voice": "语音输入",
       "stopRecording": "完成录音",
       "cancelRecording": "取消录音",
+      "voicePreview": "实时转写预览",
       "voiceProcessing": "正在处理录音",
       "voiceRetry": "重试转写",
       "voiceCopyTranscript": "复制已恢复的文字",
@@ -3250,6 +3262,12 @@
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
       "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
+      "attachmentTooLarge": "文件超过 100 MB 的附件上限。",
+      "attachmentEmpty": "不能上传空文件。",
+      "attachmentSessionUnavailable": "当前会话已不可用。",
+      "attachmentNetwork": "上传连接失败，请重试。",
+      "attachmentFailed": "文件上传失败，请重试。",
+      "retryAttachment": "重试上传",
       "removeAttachment": "移除",
       "dropOverlay": "拖放文件以添加"
     },
@@ -3585,6 +3603,8 @@
       "help": "提供这个值——它会进入保险库,绝不会进入聊天或模型。",
       "notSetYet": "尚未设置",
       "dismiss": "忽略",
+      "denyTitle": "拒绝这次填写请求？",
+      "denyDescription": "Agent 会收到拒绝结果并停止等待，这个操作无法撤销。",
       "saveAndWake": "保存并让 AI 继续",
       "ambiguousProvision": "有多个待处理请求都需要这个密钥。请在 Vaults 里打开对应请求的填写行，这样才能保留请求里的详细设置。",
       "saveFailed": "保存失败，请重试。"

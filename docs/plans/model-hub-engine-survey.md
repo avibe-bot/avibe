@@ -555,3 +555,227 @@ Performed against the pinned sources and assets:
 Not verified: live OAuth exchanges, live model entitlements, billable provider
 requests, vendor ToS/billing, macOS notarization/code signing, maintainer release
 signatures, or mutation behavior of startup-owned CPA config fields.
+
+## S4. M0 agentic-fidelity spike: Anthropic <-> OpenAI
+
+Status: **measured**, checked 2026-08-09. This section
+extends S1; it does not revisit S1 section 3's finding that syntax conversion
+exists, is registry-driven, and covers both directions. The question here is
+semantic fidelity under an agentic workload.
+
+### 13. Evidence boundary and stop condition
+
+The live run used the owner-provided OpenAI/Anthropic-compatible relay as the
+upstream for an isolated CPA v7.2.95 instance. The relay root and credentials
+were read from the local regression environment, injected into the child
+process, and never written to this repository or the report. The CPA binary was
+obtained through `vibe/model_hub_runtime/` from the repository's packaged
+manifest, with ambient manifest overrides disabled and the installed version
+asserted before the probe. It was bound to `127.0.0.1`; no Avibe service, user
+configuration, CLI login state, or auth file was inspected.
+
+Before the run, the relay's `/v1/models` returned 21 OpenAI-compatible model
+ids; `gpt-5.4-mini` was selected as the smallest listed OpenAI model. One
+Anthropic probe for an unavailable model returned HTTP 503 with `no available
+accounts`; the owner then confirmed `claude-haiku-4-5` with the required
+minimal request returned HTTP 200. The fixture retries a 503 with bounded
+backoff and tries one configured Claude fallback model before reporting the
+Claude direction as blocked. Direct official vendor APIs were not measured;
+the evidence source for this section is the owner-provided compatible relay.
+
+### 14. Conversion matrix and decisions
+
+S1's source inspection identifies all four directions as built-in translator
+paths in CPA v7.2.95. The plugin host is disabled in the managed runtime and no
+plugin is named by the translator registrations. That is an engine-core
+classification, not a semantic-fidelity result.
+
+| Conversion pair | Direction exercised by the fixture | Translation owner | Plugin dependency in v7.2.95 | M0 gate |
+| --- | --- | --- | --- | --- |
+| Anthropic Messages <-> OpenAI Responses | Messages -> Responses: **NO-GO**; Responses -> Messages: **NO-GO** | CPA engine-core registry and stream translators | None identified; plugins remain disabled | **NO-GO** |
+| Anthropic Messages <-> OpenAI Chat Completions | Messages -> Chat: **NO-GO**; Chat -> Messages: **NO-GO** | CPA engine-core registry and OpenAI-compatible executor | None identified; plugins remain disabled | **NO-GO** |
+
+The direction-level evidence ledger is explicit because a pair is accepted only
+when both directions pass:
+
+| Client request | Target API-key source | Live result | Evidence |
+| --- | --- | --- | --- |
+| Anthropic Messages | OpenAI Responses | 200 for both two-turn cases; **NO-GO** | r45: the single retained reasoning in both turns and failed both parse gates and the exact tuple. The parallel retained reasoning in both turns but failed both parse/order gates |
+| OpenAI Responses | Anthropic Messages | 200 for both two-turn cases; **NO-GO** | r45: the single passed both parse gates but lacked reasoning in both turns and failed final system scope and the exact tuple. The parallel lacked reasoning in both turns, failed both parse/order gates, and failed final system scope and the exact tuple |
+| Anthropic Messages | OpenAI Chat Completions | 200 for both two-turn cases; **NO-GO** | r45: the single retained reasoning in both turns and failed both parse gates and the final exact tuple. The parallel retained reasoning only in the first turn, failed the first parse/order gates, and failed the final exact tuple |
+| OpenAI Chat Completions | Anthropic Messages | 200 for both two-turn cases; **NO-GO** | r45: the single passed both parse gates but lacked reasoning in both turns and failed final system scope. The parallel lacked reasoning, failed both parse gates and first-turn stream ordering, and failed final system scope |
+
+Final-answer marker and tuple failures varied across complete live reruns because
+the upstream response text is nondeterministic. The ledger above records the
+latest complete matrix attempt (r45); the direction decisions remain anchored
+by the repeated reasoning and parse failures plus the current final-turn
+evidence.
+
+### 15. Agentic capability matrix
+
+The fixture covers the following invariants. A passing HTTP status alone is
+insufficient: the response must preserve the observable protocol contract and
+the agentic state transition.
+
+| Capability | Minimal workload | Required invariant | Owner | M0 evidence |
+| --- | --- | --- | --- | --- |
+| Single tool call | One prompt with `lookup_weather` | Tool name, JSON arguments, call id, and terminal stop reason survive the conversion | Engine-core translator plus caller adapter | Structural checks passed in all four directions |
+| Parallel tools | One prompt explicitly naming `lookup_weather` and `lookup_time` | Both calls remain addressable and are not silently serialized or merged | Engine-core translator | Passed in all four directions |
+| Multi-turn loop | Assistant tool call followed by a tool result and a final answer | No tool result appears before execution; the call id links the returned result to the same call and the second turn sees the tool output | Engine-core translator plus caller adapter | r45 independently recognized malformed tuple candidates and rejected empty identities; final exact tuples failed in five of eight cases, while Messages -> Responses parallel and both Chat -> Messages cases preserved the exact complete set |
+| Streaming text | Short streamed answer | Every data event is strict UTF-8 JSON, wire sequence and ordering are monotonic, lifecycle transitions are unique, Anthropic text openings are explicit and empty, Anthropic `message_delta` precedes `message_stop`, done/content-part snapshots agree with deltas/items, per-item output snapshots agree with their own deltas, Chat delta objects carry one assistant role before any payload, and the stream terminates with the protocol's done event | Engine-core stream translator | r45: Messages -> Responses and Responses -> Messages parallel failed both parse/order gates; Messages -> Chat parallel failed its first parse/order gates; Chat -> Messages parallel failed both parse gates and first-turn ordering |
+| Streaming tool fragments | Stream a tool call with split arguments | Opening tool snapshots contain the required empty argument field; at least two nonempty fragments reassemble into exactly one valid JSON argument object and one call id; typed error/discriminator events cannot be accepted as completion | Engine-core stream translator | r45 gated Anthropic, Responses, and Chat fragment counts and the Responses empty opening argument snapshot. Complete first-turn arguments reconstructed in all four parallel cases, but Messages -> Responses and Responses -> Messages failed both parse/order gates; Messages -> Chat failed its first parse/order gates; Chat -> Messages failed both parse gates and first-turn ordering |
+| System prompt | System/instructions text containing a marker plus a conflicting user marker | Exact system marker remains system-scoped and the exact user conflict marker is absent | Engine-core translator | r45 final system scope passed in both Messages -> Responses and both Messages -> Chat cases, and failed in both Responses -> Messages and both Chat -> Messages cases |
+| Thinking/reasoning | Anthropic `thinking` budget and OpenAI `reasoning.effort` | Requested signal is observable or an explicit loss is recorded; readable reasoning, Anthropic signatures/redacted data, and Responses encrypted content are all protected from visible-text leakage | Engine-core translator; upstream model semantics | r45 observed reasoning in seven of eight Anthropic -> OpenAI turns, confirmed its absence in all eight OpenAI -> Anthropic turns, and passed normalized full-value/meaningful-excerpt leakage checks on all 16 returned turns |
+| Context length/truncation | Prompt with a tail marker, then increasing prefix sizes | The first rejected/truncated size and error shape are recorded; no silent loss of the tail marker is accepted | Upstream model plus engine request limits; no plugin | Not covered (optional low-cost probe) |
+
+Thinking and reasoning are deliberately treated as a fidelity question. The
+fixture sends both parameter families and accepts either Chat's explicit
+`reasoning_content` or its standard positive
+`usage.completion_tokens_details.reasoning_tokens` signal. The r45 matrix
+attempt requested stateless Responses encrypted reasoning and applied the
+visible-text gate to readable reasoning, Anthropic signatures and redacted
+data, and Responses encrypted content. It passed that gate on all 16 returned
+turns. The corrected parser still observed no positive signal in any of the
+eight returned OpenAI -> Anthropic turns, including the Chat direction after
+both signal forms
+were accepted. Anthropic-to-OpenAI responses with observable thinking still
+failed parser gates in several cases and are not treated as semantically valid
+merely because a reasoning signal was present.
+This report does not infer that a budget maps to an OpenAI effort level (or vice
+versa) from field-name similarity. CPA's engine-core translation may carry,
+clamp, or drop a field; the target model's own behavior determines whether the
+result is useful.
+
+### 16. Minimum reproductions for each no-go
+
+Each no-go starts with the single-tool request in the fixture and inspects the
+first response before the tool-result follow-up. Successful HTTP 200 and valid
+tool-call structure separate the semantic losses from relay transport failures;
+the exact tuple and system-scope checks additionally inspect the final turn.
+
+1. **Messages -> Responses.** POST `/v1/messages` with one function tool and
+   Anthropic `thinking: {type: enabled, budget_tokens: 1024}`. Require the
+   projected Anthropic thinking block to contain a nonempty signature. In r45
+   the single retained reasoning in both turns and failed both parse gates and
+   the exact tuple. The parallel retained reasoning in both turns but failed
+   both parse/order gates. The direction remains NO-GO because both cases fail
+   the closed matrix.
+2. **Responses -> Messages.** POST `/v1/responses` with `instructions`, two
+   function tools, `reasoning: {effort: low}`, a `function_call`, and a matching
+   `function_call_output`; repeat with `stream: true`. In r45 the single
+   passed both parse gates but lacked reasoning in both turns and failed final
+   system scope and the exact tuple. The parallel lacked reasoning in both
+   turns, failed both parse/order
+   gates, and failed final system scope, tool-output correlation, and the exact
+   tuple. The reasoning loss
+   is independently sufficient for the pair's NO-GO.
+3. **Messages -> Chat Completions.** Repeat the Messages single-tool request
+   against the Chat target and require a signed Anthropic thinking block in the
+   projected response. In r45 the single retained reasoning in both turns,
+   failed both parse gates, and failed the final exact tuple. The parallel
+   retained reasoning only in the first turn, failed the first parse/order
+   gates, and failed the final exact tuple.
+4. **Chat Completions -> Messages.** POST `/v1/chat/completions` with an
+   assistant `tool_calls` item and a matching `tool` result, then repeat as a
+   short stream. Require an Anthropic `tool_use` block, matching `tool_result`,
+   system scope, and a terminal message event, then fail the gate when the
+   requested reasoning signal is absent. In r45 the single passed both parse
+   gates but lacked reasoning in both turns and failed final system scope. The
+   parallel also lacked reasoning and failed both parse gates, first-turn
+   stream ordering, and final system scope.
+
+For the optional context probe, keep the request count small: send a marker at
+the end of a progressively larger system/user prefix, record the first 4xx or
+provider limit response, and separately verify whether the marker is present in
+the model-visible tool/final-answer behavior. A silent marker disappearance is
+NO-GO even if CPA returns HTTP 200. This probe was not run in M0.
+
+### 17. Fixture and rerun contract
+
+`docs/plans/fixtures/cpa-agentic-fidelity/` contains the probe and an isolated
+`run_relay.py` launcher. It has eight cases covering both
+directions of both pairs, single and parallel tools, tool-result round trips,
+streaming, system text, and thinking/reasoning parameters. Each case makes a
+second request only when the first response contains parsed tool calls with
+nonempty unique observed IDs; otherwise
+the report records that the multi-turn path was not reached. When reached, the
+runner uses the first response's observed tool-call ids and complete assistant
+continuation; fabricated ids are never used. The runner parses
+non-stream and SSE responses into a redacted semantic projection and exits
+non-zero when names, arguments, ids, reasoning presence, stream termination,
+tool-result correlation, or final markers do not satisfy the matrix. It fails
+closed before any network request when either vendor key, the gateway token, or
+a source-qualified model is absent, and it never logs request/response bodies,
+model prefixes, or environment values.
+
+The launcher obtains CPA through `vibe/model_hub_runtime/`, explicitly selects
+the packaged v7.2.95 manifest, verifies the installed version, creates a private
+temporary engine state, binds CPA to `127.0.0.1`, and generates the
+source-qualified model ids from the runtime's source prefixes. Run it after
+loading the owner-provided regression environment in the shell; the keys are
+consumed only by the temporary runtime state and child process, never copied
+into the fixture, a committed config, or this document.
+
+The probe also disables environment proxy handlers for loopback requests and
+classifies an exhausted 503 capacity response for any target as blocked; the
+Claude-only fallback model remains limited to the Anthropic target. Every case
+reports a redacted `fallback_used` flag and evidence from a fallback is kept
+separate from the primary-model result. The latest closed-matrix rerun (r45)
+exercised all eight cases through the loopback CPA after additionally requiring
+an explicit empty Anthropic text opening snapshot, an explicit empty Responses
+function-call argument snapshot, and an explicit Chat delta object whose
+unique assistant role precedes every payload delta. All eight cases completed
+both turns with HTTP 200. No fallback was used. The causal gate passed all
+returned first turns, and the normalized full-value/meaningful-excerpt
+reasoning leakage gate passed on all 16 returned turns. A mixed
+primary/fallback run in
+which only the second turn falls back is not verified by the closed semantic
+matrix and may underreport `fallback_used`; such a run remains blocked from
+semantic evidence.
+The future-collection validator now centralizes 25 protocol envelope kinds and
+123 required-field cells in one table-driven authority, with one delete-a-field
+mutation per cell. The focused probe suite contains 206 tests. Per the owner decision recorded on
+2026-08-08, r45 is sealed M0 evidence: later fixture-only validator hardening
+applies to future collections and does not retroactively rewrite r45 or its
+direction-level decisions without a new, explicitly adopted matrix run.
+
+### 18. M0 conclusion and remaining coverage
+
+Both conversion pairs are **NO-GO for v2.1 adoption** on measured evidence.
+Anthropic-to-OpenAI directions preserved an observable thinking signal on seven
+of eight r45 turns but still failed parser gates in several cases. The protected
+reasoning leakage gate passed on all 16 returned turns. All eight returned
+OpenAI-to-Anthropic turns lost the requested reasoning signal even
+after the corrected parsers retained Responses reasoning deltas and required
+integer Chat reasoning-token usage. The complete final-turn gates also exposed
+exact-tuple losses in five of eight cases.
+All four directions are therefore **NO-GO**. Both pairs are classified as **engine-core** in
+CPA v7.2.95; no plugin dependency was identified, and the managed runtime keeps
+plugins disabled. This is a semantic limitation, not a syntax-conversion
+finding and does not reopen S1 section 3.
+
+Not covered: context-limit thresholds, transport-outage classification,
+malformed relay URL validation (including nonnumeric loopback ports) and
+blocked-report shaping,
+non-stream wall-clock deadlines, non-loopback relay TLS enforcement,
+latency/cost, OAuth or subscription behavior, direct official vendor APIs, and
+cross-vendor subscription paths. Top-level Anthropic message ID validation,
+non-stream Anthropic `stop_sequence` type/compatibility validation, mixed
+primary/fallback second-turn accounting, compatibility of the configured
+Anthropic fallback with the primary thinking contract, required `text` field
+presence in non-stream Anthropic text blocks and Responses message parts, and
+redaction of unrecognized stop reasons are also not verified. Responses
+wire-sequence origin is not gated: the closed matrix requires monotonicity, and
+the measured relay emitted contiguous one-based values. Non-stream response
+media-type enforcement is also not verified. The historical fixture is not
+independent of future product-manifest upgrades: the launcher currently selects
+the product manifest and blocks unless it still declares v7.2.95. The probe
+child also inherits the caller environment rather than receiving a minimal
+allowlist. Transport, non-stream timing and media types, TLS, fallback
+accounting and fallback-model capability, non-stream Anthropic/Responses
+envelope and content-part schema completeness, report redaction, wire-sequence
+origin, fixture-owned release resolution, and child-environment minimization
+are outside the closed eight-row S4 semantic matrix; they are recorded here as
+residuals rather than added as new probe gates. The scope guard remains
+unchanged: this spike concerns API-key
+sources only; subscriptions stay bound to their own vendor's backend.

@@ -47,16 +47,10 @@ _ADMISSION_ACK_REACTIONS: dict[str, str] = {
     "reconciling_steer": UNCONFIRMED_REACTION_EMOJI,
     "retired": NOT_DELIVERED_REACTION_EMOJI,
 }
-# Receipts that can still be replaced or cleared later, and are therefore worth
-# remembering. The rest are final: the Delivery they describe never starts a turn
-# of its own, so nothing would ever read the entry back and keeping it would grow
-# the registry by one key per mid-turn message for the life of the process.
-_REPLACEABLE_ADMISSION_STATES = frozenset(
-    {"queued", "pending_steer", "reconciling_steer"}
-)
-# Backstop for receipts whose Delivery never reaches a turn (a queue drained by a
-# Stop, a session archived mid-wait). Bounded FIFO eviction: dropping the oldest
-# key only forfeits a later replace/clear, never the reaction itself.
+# Backstop for receipts nothing ever reads back (a queue drained by a Stop, a
+# session archived mid-wait, a terminal ✍️/🤷 on a message no other Delivery
+# touches). Bounded FIFO eviction: dropping the oldest key only forfeits a later
+# replace/clear, never the reaction itself.
 _ADMISSION_ACK_REGISTRY_LIMIT = 1024
 # Registry marker for a message whose own turn has started. Kept so a receipt
 # still in flight when the turn began cannot decorate it afterwards.
@@ -365,12 +359,14 @@ class ProcessingIndicatorService:
             if not applied:
                 registry.pop(key, None)
                 return None
-            if str(state or "").strip() in _REPLACEABLE_ADMISSION_STATES:
-                self._remember_admission_ack(key, emoji)
-            else:
-                # Final receipt: the Delivery behind it never starts a turn, so
-                # nothing will ever replace or clear this reaction.
-                registry.pop(key, None)
+            # Every receipt is remembered, terminal ones included. A reaction
+            # target can be shared — a quick-reply callback reacts on its bot
+            # echo, so two Deliveries settle on one message — and a platform
+            # shows one reaction per (message, emoji, bot). The receipt therefore
+            # describes the message rather than any one Delivery: last writer
+            # wins, and the previous receipt is removed instead of stacked. The
+            # FIFO cap bounds what a terminal receipt leaves behind.
+            self._remember_admission_ack(key, emoji)
             return emoji
 
     async def clear_admission_ack(self, context: MessageContext) -> None:
@@ -604,8 +600,34 @@ class ProcessingIndicatorService:
             if self._mode_supported(capabilities, "typing", handle.context):
                 fell_back = await self._start_typing_indicator(handle)
             if not fell_back and self._mode_supported(capabilities, "message", handle.context):
-                await self._start_message_indicator(handle, agent_name or "")
+                fell_back = await self._start_message_indicator(handle, agent_name or "")
+            if fell_back:
+                self._warn_ack_mode_downgraded(
+                    handle.context,
+                    "typing" if handle.typing_indicator_active else "message",
+                )
         self._sync_reaction_to_request(handle, request)
+
+    def _warn_ack_mode_downgraded(self, context: MessageContext, applied_mode: str) -> None:
+        """Report that the configured ack mode failed and a lower one was used.
+
+        The fallback ladder is deliberately silent about *which* mode won, so a
+        user who picked ``reaction`` and keeps seeing an ack message has nothing
+        to go on. Warn once per downgraded turn, naming the channel — a DM whose
+        channel_id is a user id is the usual cause.
+        """
+
+        configured = str(getattr(self.config, "ack_mode", "typing") or "typing")
+        if configured != "reaction":
+            return
+        logger.warning(
+            "Ack mode 'reaction' failed for %s channel=%s; downgraded to '%s'. "
+            "Check that the bot can react in this conversation (reactions:write, membership, "
+            "and a real channel id — a DM context must not carry the user id).",
+            context.platform or "unknown",
+            context.channel_id,
+            applied_mode,
+        )
 
     @staticmethod
     def _turn_tokens(context: MessageContext) -> set[str]:

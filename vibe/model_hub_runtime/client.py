@@ -524,7 +524,7 @@ def _endpoint_for_protocol(protocol: str) -> str:
         return "/v1/messages"
     if protocol == "openai_responses":
         return "/v1/responses"
-    if protocol in {"openai_chat", "openai_compatible"}:
+    if protocol == "openai_chat":
         return "/v1/chat/completions"
     raise ValueError("unsupported source protocol")
 

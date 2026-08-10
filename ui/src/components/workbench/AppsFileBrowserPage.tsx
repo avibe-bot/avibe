@@ -34,10 +34,12 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
 import {
   contentUrl,
@@ -205,6 +207,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   const { t } = useTranslation();
   const wm = useWindowManager();
   const routerNavigate = useNavigate();
+  // A single-app browser tab (`?standalone=1`) frames the app exactly like a window body —
+  // full-bleed, no page header or card border — since the shell drops its chrome there too.
+  const standalone = useStandaloneAppTab();
+  const fullBleed = windowed || standalone;
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -390,7 +396,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // routes correctly regardless of where it's called from.
   const openInEditor = useCallback(
     (path: string, filename: string, mtime: number | null) => {
-      if (window.matchMedia('(min-width: 768px)').matches) {
+      if (isDesktopViewport()) {
         wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
       } else {
         routerNavigate('/apps/editor', { state: { path, filename, mtime } });
@@ -403,7 +409,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // supplies resolved metadata when it has already been fetched (content hits / ambiguous names).
   const openPreview = useCallback(
     (item: RowItem, entry: FsEntry = item.entry, editable = isEditableFile(entry), mtime = entry.mtime) => {
-      if (window.matchMedia('(min-width: 768px)').matches) {
+      if (isDesktopViewport()) {
         wm.openApp('preview', { title: entry.name, params: { path: item.full, name: entry.name } });
       } else {
         setPreview({ path: item.full, name: entry.name, mtime, editable });
@@ -417,7 +423,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // route with the dir in router state. Mirrors openInEditor.
   const openTerminalHere = useCallback(
     (dir: string) => {
-      if (window.matchMedia('(min-width: 768px)').matches) {
+      if (isDesktopViewport()) {
         wm.openApp('terminal', { params: { cwd: dir } });
       } else {
         routerNavigate('/apps/terminal', { state: { cwd: dir } });
@@ -522,7 +528,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // hidden, so fall back to the inline create row so a file can still be made.
   const onNewFile = useCallback(() => {
     if (!cwd) return;
-    if (window.matchMedia('(min-width: 768px)').matches) {
+    if (isDesktopViewport()) {
       wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
     } else {
       startNewEntry('file');
@@ -1321,15 +1327,15 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     : 0;
 
   return (
-    <div className={windowed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
-      {!windowed && (
+    <div className={fullBleed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
+      {!fullBleed && (
         <div>
           <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
           <p className="text-[12px] text-muted">{t('apps.fileBrowser.tagline')}</p>
         </div>
       )}
 
-      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !windowed && 'rounded-xl border border-border')}>
+      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !fullBleed && 'rounded-xl border border-border')}>
         {/* Toolbar: breadcrumb (left) + search + New File / New Folder (right) */}
         <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">

@@ -921,7 +921,7 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
     }
     for key, value in os.environ.items():
-        if key == "REGRESSION_UI_HOST":
+        if key in {"REGRESSION_UI_HOST", "REGRESSION_VOICE_REALTIME_ENABLED"}:
             continue
         if key.startswith(ENV_PREFIX):
             mappings[key] = value
@@ -1213,7 +1213,13 @@ def update_dependencies_and_build(
             or ui_deps_changed
             or previous_fingerprints.get("ui_source") != next_fingerprints.get("ui_source")
         ):
-            runner.run(tenant_exec(target, "cd ui && npm run build", remote=remote))
+            runner.run(
+                tenant_exec(
+                    target,
+                    "cd ui && npm run build",
+                    remote=remote,
+                )
+            )
         else:
             print("UI source fingerprint unchanged; skipping npm run build.")
     if python_changed:

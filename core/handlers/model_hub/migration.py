@@ -35,11 +35,11 @@ _CUSTOM_ENDPOINT_NOTE = "settings.models.source.customEndpoint"
 _NATIVE_SUPPLY_NOTE = "settings.models.source.nativeSupply"
 _OPENCODE_BUILTIN_PROTOCOLS: dict[
     str,
-    Literal["anthropic", "openai_compatible"],
+    Literal["anthropic", "openai_chat"],
 ] = {
-    "deepseek": "openai_compatible",
+    "deepseek": "openai_chat",
     "minimax": "anthropic",
-    "openrouter": "openai_compatible",
+    "openrouter": "openai_chat",
 }
 _OPENCODE_UNSUPPORTED_NATIVE_IDS = {"alibaba-cn", "poe"}
 
@@ -101,7 +101,6 @@ class NativeMigrationItem:
         "anthropic",
         "openai_responses",
         "openai_chat",
-        "openai_compatible",
     ]
     display_name: str
     base_url: Optional[str] = None
@@ -372,7 +371,7 @@ def _opencode_protocol(
     provider_id: str,
     provider_config: dict[str, Any],
     catalog_provider: dict[str, Any],
-) -> Optional[Literal["anthropic", "openai_responses", "openai_compatible"]]:
+) -> Optional[Literal["anthropic", "openai_responses", "openai_chat"]]:
     if provider_id == "anthropic":
         return "anthropic"
     if provider_id == "openai":
@@ -381,7 +380,7 @@ def _opencode_protocol(
     if custom_adapter == "anthropic-compatible":
         return "anthropic"
     if custom_adapter == "openai-compatible":
-        return "openai_compatible"
+        return "openai_chat"
     builtin_protocol = _OPENCODE_BUILTIN_PROTOCOLS.get(provider_id)
     if builtin_protocol is not None:
         return builtin_protocol
@@ -391,7 +390,7 @@ def _opencode_protocol(
     if npm == "@ai-sdk/openai":
         return "openai_responses"
     if npm in {"@ai-sdk/openai-compatible", "@openrouter/ai-sdk-provider"}:
-        return "openai_compatible"
+        return "openai_chat"
     return None
 
 

@@ -9,6 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
+from core.delivery_evidence import DeliveryEvidence
 from core.message_output import (
     MessageOutput,
     contained_teardown_output_for,
@@ -145,6 +146,89 @@ class _StubController:
 
 
 class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_terminal_snapshot_elects_fallback_after_excluding_canceled_runs(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-fallback",
+                "accepted_agent_run_ids": ["run-a", "run-b"],
+            },
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-fallback",
+                    "delivered": False,
+                }
+            },
+        )
+        store = mock.Mock()
+        store.get_run.side_effect = lambda run_id: {
+            "run-a": {"id": "run-a", "status": "canceled"},
+            "run-b": {"id": "run-b", "status": "running"},
+        }.get(run_id)
+
+        with mock.patch(
+            "core.message_dispatcher.SQLiteBackgroundTaskStore",
+            return_value=store,
+        ):
+            enriched = dispatcher._output_with_turn_fallback_owner(context, output)
+
+        self.assertEqual(
+            enriched.metadata["turn_failure_notification"]["fallback_run_id"],
+            "run-b",
+        )
+        store.close.assert_called_once_with()
+
+    def test_terminal_recording_delegates_owner_election_to_the_atomic_store_batch(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController(platform="slack"))
+        store = mock.Mock()
+        store.get_run.side_effect = AssertionError(
+            "the dispatcher must not snapshot participant state outside the batch"
+        )
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            idempotency_key="terminal-output",
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-fallback",
+                    "delivered": False,
+                    "fallback_run_id": "run-a",
+                }
+            },
+        )
+
+        dispatcher._record_agent_run_terminal_for_ids(
+            store=store,
+            run_ids=["run-a", "run-b"],
+            text="",
+            message_id=None,
+            terminal_status="failed",
+            terminal_error="stream disconnected",
+            output_semantics=output,
+            provenance=dict(output.metadata),
+        )
+
+        store.record_turn_run_outputs.assert_called_once_with(
+            ["run-a", "run-b"],
+            output_id="terminal-output",
+            text="",
+            message_id=None,
+            sequence=None,
+            provenance=output.metadata,
+            terminal_status="failed",
+            error="stream disconnected",
+            deferred_run_ids=[],
+        )
+        store.get_run.assert_not_called()
+
     async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
         controller = _StubController(platform="slack")
         controller.agent_service = type(
@@ -905,14 +989,55 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             user_id="U1", channel_id="C1", platform="slack",
             platform_specific={"suppress_delivery": True},
         )
+        evidence = DeliveryEvidence()
         with mock.patch(
             "core.message_dispatcher.persist_agent_message",
             return_value={"id": "msg-background"},
         ) as persist:
-            message_id = await dispatcher.emit_agent_message(context, "result", "private output")
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private output",
+                delivery=evidence,
+            )
         persist.assert_called_once()
         self.assertEqual(message_id, "msg-background")
         self.assertEqual(controller.im_client.sent_messages, [])
+        self.assertIsNone(evidence.ack_evidence)
+
+    async def test_suppressed_history_id_is_not_recorded_as_run_delivery(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._record_suppressed_agent_run_terminal_result = mock.Mock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "scheduled",
+                "task_execution_id": "run-background",
+            },
+        )
+        with mock.patch(
+            "core.message_dispatcher.persist_agent_message",
+            return_value={"id": "msg-local-history"},
+        ):
+            returned = await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "private output",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    idempotency_key="stable-output",
+                ),
+            )
+
+        self.assertEqual(returned, "msg-local-history")
+        self.assertIsNone(
+            dispatcher._record_suppressed_agent_run_terminal_result.call_args.args[2]
+        )
 
     async def test_suppressed_result_records_folded_footer(self):
         """A suppressed Web result keeps structured UI metrics while its run
@@ -947,6 +1072,68 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
             await dispatcher.emit_agent_message(context, "notify", "heads up")
         persist.assert_called_once()
         self.assertEqual(persist.call_args.args[1], "notify")
+
+    async def test_output_is_delivered_and_persisted_without_settling(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+        with (
+            mock.patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "msg-output"},
+            ) as persist,
+            mock.patch(
+                "core.message_dispatcher._stream_chunk",
+                new=mock.AsyncMock(),
+            ) as stream,
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "output",
+                "primary answer",
+                output=MessageOutput(completes_turn=False, completes_run=False),
+            )
+
+        self.assertEqual(message_id, "msg-1")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "primary answer", "markdown")])
+        self.assertEqual(persist.call_args.args[1], "output")
+        stream.assert_awaited_once()
+        self.assertEqual(stream.call_args.kwargs["kind"], "output")
+        self.assertFalse(stream.call_args.kwargs["completes_turn"])
+
+    async def test_output_can_explicitly_skip_agent_run_recording(self):
+        controller = _StubController(platform="slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"accepted_agent_run_ids": ["run-steer"]},
+        )
+
+        with (
+            mock.patch(
+                "core.message_dispatcher.persist_agent_message",
+                return_value={"id": "msg-output"},
+            ),
+            mock.patch.object(
+                dispatcher,
+                "_record_agent_run_terminal_for_ids",
+            ) as record,
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "output",
+                "primary answer",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    records_run_output=False,
+                ),
+            )
+
+        record.assert_not_called()
 
     async def test_notify_not_persisted_when_send_fails(self):
         class _FailClient(_StubIMClient):

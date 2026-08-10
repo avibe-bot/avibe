@@ -74,10 +74,21 @@ before the turn's own indicator takes over — a promoted Delivery is
 re-dispatched with its original native message id (`_hydrate_delivery_context`),
 so 👌 and 👀 would otherwise land on the same message.
 
-Only *replaceable* states (`queued`, `pending_steer`, `reconciling_steer`) are
-remembered. A final receipt (✍️ / 🤷) is never cleared, so keeping its key would
-leak one entry per message for the life of the process; a FIFO cap
-(`_ADMISSION_ACK_REGISTRY_LIMIT`) backstops the replaceable ones.
+Every receipt is remembered, terminal ✍️ / 🤷 included. `accepted` and `retired`
+are terminal in the state matrix, so one Delivery never moves off its own final
+receipt — but the reaction *target* can be shared. A quick-reply callback reacts
+on its bot echo (§3.4), so a second click settles on a message the first already
+decorated, and a platform shows one reaction per (message, emoji, bot). The
+receipt therefore describes the message rather than any one Delivery: last writer
+wins, the previous receipt is removed instead of stacked, and `start()` can clear
+a stale one. Per-Delivery receipts were the alternative and buy nothing — two
+Deliveries wanting the same emoji on one message collapse to a single reaction
+anyway, and the display cannot represent two states at once.
+
+Nothing reads back a receipt on a message no other Delivery touches, so the FIFO
+cap (`_ADMISSION_ACK_REGISTRY_LIMIT`) is what keeps those entries from living for
+the life of the process. Evicting the oldest only forfeits a later replace or
+clear, never the reaction itself.
 
 A receipt and the turn start it races are serialized per message key by a
 refcounted `asyncio.Lock`, and `clear_admission_ack` writes an
@@ -117,10 +128,12 @@ keys.
 - `slack.py`: `writing_hand`, `thinking_face`, `shrug` added.
 - `telegram.py`: `✍️ → ✍` normalization; 👌/🤔/🤷 pass through.
 - `discord.py`: raw unicode, no change.
-- `feishu.py`: 🤔 already maps to `THINKING`. ✍️ and 🤷 are deliberately left
-  unmapped rather than guessed — `add_reaction` logs the exact "add it to
-  `_EMOJI_MAP`" warning and returns `False`, so Lark degrades to no receipt for
-  those two until the `emoji_type` keys are verified against the Lark table.
+- `feishu.py`: 🤔 already maps to `THINKING`; ✍️ → `Typing` and 🤷 → `Shrug`,
+  both verified against the Lark `emoji_type` table (Lark has no writing-hand
+  glyph, so `Typing` — the pen/being-written-into icon — carries the steered
+  receipt). Both `✍️` and `✍` are listed because `_normalize_emoji` does not
+  strip U+FE0F. `emoji_type` keys are case-sensitive: an unmapped emoji stays
+  non-ASCII, so `add_reaction` logs the "add it to `_EMOJI_MAP`" warning.
 
 ### 3.5 Reporting outcomes that settle away from ingress
 
@@ -146,8 +159,14 @@ react is logged and never blocks the Delivery.
 - Receipts are best-effort and in-memory: after a restart a stale 👌 is not
   cleared by `start()`. On Telegram the reaction is replaced anyway; on Slack it
   can linger until the next turn on that message.
-- The ✍️ receipt is intentionally permanent. It records which turn absorbed the
-  message, which stays useful after the reply arrives.
+- The ✍️ receipt outlives its own Delivery — nothing clears it, because a steered
+  input never dispatches a turn of its own — so it keeps recording which turn
+  absorbed the message. It is not *permanent*: another Delivery settling on the
+  same reaction target replaces it (§3.2).
+- Removing a receipt is precise on Slack and Lark, but Telegram's
+  `remove_reaction` clears every reaction on the message
+  (`telegram_api.clear_message_reaction` ignores the emoji), so replacing a
+  receipt there also drops a coexisting 🤖.
 
 ## 5. Evidence
 
@@ -157,5 +176,8 @@ react is logged and never blocks the Delivery.
   (MESSAGE-DELIVERY-303, 306, 307, 308, 309)
 - regression: `tests/test_processing_indicator_reaction.py`,
   `tests/test_session_delivery_fsm.py`, `tests/scenarios/message_delivery/`
+- platform mappings: `tests/test_feishu_reaction_emoji.py` pins each Lark
+  `emoji_type` against the published table and asserts every receipt the agent
+  sends has one
 - manual: send a second and third message on Telegram/Slack while a turn runs;
   confirm ✍️ for a steered input, 👌 → 👀 for a queued one.

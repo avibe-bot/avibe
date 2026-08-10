@@ -29,7 +29,7 @@
         "null"
       ],
       "format": "date-time",
-      "description": "v2 (2026-07-29): when the source was added. IMMUTABLE once written — edits, re-auth, re-discovery and cooldown cycles never touch it. This is not decoration: `follow` policy recommends api_key sources 'by creation time ascending' (spec §4.2), so without a persisted creation stamp that rule is not reproducible — the sources array is explicitly unordered (api.md) and insertion order in config is not a contract. Two sources imported in one batch can legitimately share a stamp, so `id` ascending is the tie-breaker. NULL PLACEMENT (07-29, review round 2) — a tie-breaker does not define how null compares to a real timestamp, and leaving that open would let two correct implementations publish different canonical orders: **a null stamp sorts BEFORE every non-null one**, ties among nulls by `id` ascending. That is not an arbitrary sentinel choice, it is the truth about the record — it predates this field, so it is older than anything that carries a stamp, and 跟随推荐 sorts oldest first. The serializer PR MUST backfill pre-existing sources with the constant `1970-01-01T00:00:00Z` rather than the upgrade timestamp, so the backfill preserves exactly the order the null rule already produced instead of silently reshuffling the user's chain on upgrade (spec §4.2 promises the product never reorders behind the user's back). With both halves stated the sort is total over every mix of stamped, unstamped and same-stamped sources. OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional discipline)."
+      "description": "When the Source was added, retained as ordinary audit/display metadata. Add-time placement and runtime routing do not read this field. Optional in the schema and nullable when the creation time is unknown."
     },
     "last_discovered_at": {
       "type": [
@@ -37,7 +37,7 @@
         "null"
       ],
       "format": "date-time",
-      "description": "Targeted v4 (2026-07-31): the completion time of this source's latest successful full model discovery. The server updates it for every successful automatic or explicit discovery that replaces the discovered inventory, including source creation, credential/base-URL changes, re-auth, migration, and POST /sources/<id>/refresh. A failed attempt does not advance it, so the UI never presents failure time as freshness. null means the source predates this field or has no known successful discovery; no backfill invents a fetch time. This source-level fact cannot be derived from models[].discovered_at because a valid refresh may return no discovered rows while preserving manual rows. REQUIRED and nullable at the API boundary because the serializer always answers the question.",
+      "description": "Completion time of the latest successful full model discovery. Every successful automatic or explicit discovery that replaces discovered inventory updates it, including Source creation, credential/Base-URL changes, re-auth, native-config import, and POST /sources/<id>/refresh. Failure does not advance it. null means no successful discovery time is known. This Source-level fact cannot be derived from models[].discovered_at because a valid refresh may return no discovered rows while preserving manual rows.",
       "$comment": "Evidence-pinned targeted amendment: core/handlers/model_hub/service.py::_apply_discovered_models stamps the source from the same instant used for discovered rows; core/handlers/model_hub/migration.py::_new_source reuses its existing discovery stamp; config/v2_config.py::ModelHubSourceConfig persists and emits the nullable field."
     },
     "kind": {
@@ -58,8 +58,7 @@
       "enum": [
         "anthropic",
         "openai_responses",
-        "openai_chat",
-        "openai_compatible"
+        "openai_chat"
       ]
     },
     "base_url": {
@@ -74,15 +73,7 @@
         "native_cli",
         "hub"
       ],
-      "description": "Resolved 2026-07-23 (README): subscription→native_cli by default (sanctioned CLI-held OAuth, per-turn dispatch), api_key→hub. Any hub-held subscription (Claude AND ChatGPT) requires the subscription_hub_experimental flag + recorded per-source consent; UI marks such sources 实验."
-    },
-    "experimental_consent_at": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "format": "date-time",
-      "description": "Set iff this is a hub-held subscription the user explicitly consented to (subscription_hub_experimental); null otherwise. Both halves of that 'iff' are conditionals below (07-29, review round 4), not emitter discipline: a hub-held subscription with no stamp is the exact configuration the S2 ruling forbids without recorded consent, and a stamp anywhere else would imply a consent decision the user was never asked for."
+      "description": "Serving channel. API keys use hub. Claude subscriptions recommend native_cli; ChatGPT subscriptions recommend hub; both explicit alternatives remain legal. Hub-held subscriptions require no feature flag, consent stamp, or per-route warning."
     },
     "billing": {
       "enum": [
@@ -174,7 +165,7 @@
             ],
             "properties": {
               "detail_key": {
-                "$comment": "Targeted v4b (finding 3675168031), completed by the owner-approved channel class pass: `models.source.needs_action.oauth_expired` is also the closed, existing classification for a hub-OAuth same-ref re-auth that wrote new grant material and then failed before the source-state commit, and for retained-material disposition `unknown`, where material may have been rewritten but no ref can be named safely. The truthful user-facing fact is that OAuth authentication must be re-established; this use does not claim a wall-clock token expiry. Evidence: vibe/model_hub_runtime/state.py:135-166 binds OAuth identity to a stable credential_ref and returns the existing ref on a match; state.py:330-341 raises on duplicate auth metadata; neither case permits restoration by guessing a ref. Deliberate non-goal: a two-ref transactional OAuth swap is REJECTED for v2 — the window is rare, the user is already mid-re-auth, one more re-auth is the convergent remedy. Revisit only on field evidence.",
+                "$comment": "oauth_expired is the convergent classification when a hub OAuth re-auth may have rewritten grant material but cannot commit a safely identified replacement. It truthfully requires re-authentication without claiming a wall-clock expiry.",
                 "enum": [
                   "models.source.needs_action.oauth_expired",
                   "models.source.needs_action.balance_exhausted",
@@ -224,8 +215,8 @@
             "needs_action",
             "error"
           ],
-          "$comment": "Targeted v4 same-assumption audit (escalations #2+#3): source-global health cannot imply process-local native CLI availability. Evidence at master 807d1eee: core/handlers/model_hub/service.py:431-445 computes unavailable native sources independently of persisted health, then resolver.py:83-87 gives that process-local set precedence over active/standby and cooldown retry readiness.",
-          "description": "Classified by whether the source-global state heals itself (spec §4.5). cooldown = 暂不可用, self-healing, `retry_at` known; needs_action = 需处理, will NEVER recover unattended; error = unclassified blocker with no unattended recovery. active/standby are the two HEALTHY persisted display values and both project to `health: healthy` in agent-chain.schema.json. Targeted v4 correction: neither healthy value asserts that this serving process can launch a native CLI right now. Process availability is a distinct resolve-time fact carried by chain `channel` / `runnable` / `reason`; a source may therefore remain globally healthy while one process reports `native_cli_unavailable`. Per-agent role is still positional and never stored here. Health itself remains source-global: quota and upstream reachability belong to the account and one cooldown pool is shared across backends (core/handlers/model_hub/service.py::_cooldown)."
+          "$comment": "Source-global health never implies process-local native CLI availability. Live process availability is resolved separately and takes precedence when deciding hop runnability.",
+          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability is a distinct live fact carried by Route-hop annotations, so a globally healthy Source may still have a native_cli_unavailable hop. Quota and upstream reachability share one Source-global state across backends."
         },
         "retry_at": {
           "type": [
@@ -233,15 +224,15 @@
             "null"
           ],
           "format": "date-time",
-          "$comment": "Targeted v4 same-assumption audit: retry_at belongs only to source-global cooldown. core/handlers/model_hub/resolver.py:83-87 at master 807d1eee still rejects an unavailable native source before evaluating source_retry_ready, so a health stamp never proves process availability.",
-          "description": "When source-global cooldown health becomes retry-ready. NON-NULL FOR EXACTLY ONE STATUS — `cooldown` — and null for the other four. Targeted v4 correction: this timestamp says when health permits another try; it does not promise that a native CLI is available in this process. Process unavailability may coexist with cooldown before the stamp lapses and may still block the source after health recovers. agent-chain.schema.json mirrors the timestamp per member without collapsing those dimensions."
+          "$comment": "retry_at belongs only to Source-global cooldown; a health timestamp never proves process availability.",
+          "description": "When Source-global cooldown becomes retry-ready. Non-null only for cooldown and null for every other status. It permits another health attempt but does not promise that native CLI is available in this process."
         },
         "detail_key": {
           "type": [
             "string",
             "null"
           ],
-          "description": "i18n key, never raw upstream error text — and as of round 5 that is ENFORCED for every status rather than asserted for some (07-29). Each status closes its own vocabulary, so the union below is the complete set of values this field can ever hold and 'never raw text' is a property of the schema instead of a promise about emitters. For needs_action it names the cause or convergent remedy so the row can offer one tap to fix it, and the four keys are required: models.source.needs_action.oauth_expired (re-auth; also the v4b stable-ref rewrite failure whose only honest recovery is re-auth), .balance_exhausted (top up), .credential_revoked (replace key), .account_banned (contact vendor). For cooldown it stays OPTIONAL — a cooling source is already fully described by its `retry_at`, so a cause is useful detail rather than a required one — but the five keys it may carry are now a closed enum, not a `models.source.cooldown.*` prefix: `.network`, `.timeout`, `.rate_limited`, `.quota_exhausted`, `.server_error`. Round 4 wrote that constraint as a prefix pattern with `.+`, which accepted `models.source.cooldown.network: <raw upstream body>` — a naming convention, not a redaction boundary. Null for the two healthy statuses. For `error` — the unclassified failure — the single generic key `models.source.error.unclassified` is REQUIRED: round 4 left this status unconstrained on the grounds that the cause is by definition unknown, which is exactly backwards, since the one status an adapter reaches when it cannot classify a failure is where a raw diagnostic is most likely to land. Not knowing the cause is not permission to widen the channel; the raw text belongs in scrubbed logs. That key is ALSO an event cause as of round 6 (`resolution-event.schema.json` → `reason: unclassified_error`), because a status that never lapses on a timer is a state the user has to be told about; the five non-self-healing keys and the five non-self-healing reasons are a bijection, checked mechanically (api.md → Mechanical guards). VOCABULARY HOME: this field owns these keys — all TEN of them, the five cooldown plus the four needs_action plus this one `error` key — and probe-result.schema.json → `error` mirrors them, because draft-07 gives a bare validator no cross-file `$ref`; the lists are compared mechanically ACROSS files (README.md → vocabulary mirror table, api.md → Serializer completeness). The `examples` list below is part of that comparison and not decoration: round 6 added the `error` key to the three enforcing branches and left `examples` at nine, so the field advertised a nine-key vocabulary while enforcing ten, and round 7 found it. Two things made that survivable and are now closed: this key is pinned as a `const` rather than a one-value `enum`, so a checker that collects only `enum` lists could not see it and its 'examples equal the enforced union' guard passed vacuously; and the comparison ran inside each file rather than between them. `const` now counts as an enum of cardinality one (07-29, review round 7).",
+          "description": "Closed i18n key, never raw upstream error text. Healthy states require null. Cooldown may carry a self-healing cause; needs_action requires the cause/remedy key selected by its schema branch; error requires the generic unclassified key. The mirror registry checks this vocabulary against probe and resolution-event consumers.",
       "examples": [
         "models.source.cooldown.network",
         "models.source.cooldown.timeout",
@@ -299,7 +290,8 @@
         "type": "object",
         "required": [
           "id",
-          "provenance"
+          "origin",
+          "reasoning_efforts"
         ],
         "additionalProperties": false,
         "allOf": [
@@ -307,12 +299,12 @@
             "$comment": "v2 (07-29, review round 4): a `manual` entry is one the user typed (spec §5 frame 08), so there is no discovery moment to stamp — a non-null `discovered_at` there would let the drawer claim the vendor advertised a model the vendor never mentioned. `discovered` is deliberately NOT required to carry a stamp: entries persisted before this field existed are legitimately unstamped, and back-dating them would invent a fact.",
             "if": {
               "properties": {
-                "provenance": {
+                "origin": {
                   "const": "manual"
                 }
               },
               "required": [
-                "provenance"
+                "origin"
               ]
             },
             "then": {
@@ -335,12 +327,18 @@
               "null"
             ]
           },
-          "provenance": {
+          "origin": {
             "enum": [
               "discovered",
               "manual"
             ],
             "description": "manual = custom model entry (spec §5 frame 08)"
+          },
+          "reasoning_efforts": {
+            "type": "array",
+            "description": "Declared reasoning-effort capability values for this exact upstream model. Editable for discovered and manual entries; may be empty and has no selected or default item.",
+            "items": { "type": "string", "minLength": 1 },
+            "uniqueItems": true
           },
           "discovered_at": {
             "type": [
@@ -357,14 +355,14 @@
         "string",
         "null"
       ],
-      "description": "Opaque handle into the ENGINE-OWNED credential store. Secret material NEVER appears in any payload (README invariant 1). Null for native_cli sources and non-null for hub sources — both directions pinned by the conditionals below (07-29, review round 4), because a native source's credential lives in the CLI's own store and there is nothing here to point at, while a hub source with a null handle cannot be called at all. Re-authenticating a native source therefore refreshes that CLI store and leaves this null (api.md → POST /sources/<id>/reauth); only a consented hub-held subscription swaps a handle here. TOP-LEVEL REQUIRED as of round 5 (07-29): round 4 wrote the hub direction as `then: {credential_ref: {type: string, minLength: 1}}` and believed that enforced it, but draft-07 `properties` only validates fields that are PRESENT, so a hub source that simply omitted the key satisfied the branch and the stated invariant was decorative — the review is right that it was unenforced. Presence is lifted to the type level rather than pinned inside each branch because this field is TOTAL: every source has a `supply_channel`, and each channel determines an answer (null or a handle), so there is no source for which the question is open. That is also strictly stronger than two per-branch `required` lists and needs no upkeep — a future channel value inherits the presence obligation automatically, and 'absent' can never again read as 'not applicable'. Same move probe-result made for `source_id`/`model_id` in round 4, for the same reason."
+      "description": "Opaque handle into the engine-owned credential store; secret material never appears in a payload. Null for native_cli Sources because their credential stays in the sanctioned CLI store, and non-null for hub Sources. Re-authenticating native_cli refreshes that CLI store and leaves this null; re-authenticating a hub Source replaces the engine-held grant behind its handle."
     },
     "account_label": {
       "type": [
         "string",
         "null"
       ],
-      "description": "v1.1 (07-23 12:10, L4 finding): human display identity for subscription sources (e.g. 'me@gmail.com'), for the row's mono sub-line (frame 01r). Populated from the sanctioned CLI auth surface for native_cli sources; MAY stay null for hub-held experimental sources until a later adapter rev. Never secret material."
+      "description": "Human display identity for subscription Sources (for example, an account label). Populated from the sanctioned CLI auth surface for native_cli Sources and from the adapter when available for hub-held Sources. It may be null and is never secret material."
     },
     "masked_credential": {
       "type": [
@@ -465,55 +463,6 @@
           }
         }
       }
-    },
-    {
-      "$comment": "v2 (07-29, review round 4): the consent gate, as shape rather than as a flag check somewhere in the call path. A hub-held subscription is the ONE configuration the S2 ruling admits only behind `subscription_hub_experimental` plus recorded per-source consent, so a hub-held subscription carrying no consent stamp must not be a representable source — that payload is precisely the ToS exposure the ruling exists to bound, and 'we forgot to write the stamp' and 'the user never consented' are indistinguishable after the fact. The converse pins the stamp's meaning: it is set IFF this is that configuration, so it can never appear on an api_key or on a sanctioned native subscription and imply a consent decision the user was never asked for.",
-      "if": {
-        "properties": {
-          "kind": {
-            "const": "subscription"
-          },
-          "supply_channel": {
-            "const": "hub"
-          }
-        },
-        "required": [
-          "kind",
-          "supply_channel"
-        ]
-      },
-      "then": {
-        "required": [
-          "experimental_consent_at"
-        ],
-        "properties": {
-          "experimental_consent_at": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "experimental_consent_at": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "experimental_consent_at"
-        ]
-      },
-      "then": {
-        "properties": {
-          "kind": {
-            "const": "subscription"
-          },
-          "supply_channel": {
-            "const": "hub"
-          }
-        }
-      }
     }
   ],
   "examples": [
@@ -541,7 +490,8 @@
         {
           "id": "claude-opus-4-6",
           "display_name": "Opus 4.6",
-          "provenance": "discovered",
+          "origin": "discovered",
+          "reasoning_efforts": [],
           "discovered_at": "2026-07-23T03:00:00Z"
         }
       ],
@@ -555,7 +505,7 @@
       "kind": "api_key",
       "vendor": "custom",
       "display_name": "relay.example",
-      "protocol": "openai_compatible",
+      "protocol": "openai_chat",
       "base_url": "https://relay.example/v1",
       "supply_channel": "hub",
       "billing": "metered",
@@ -573,7 +523,8 @@
         {
           "id": "glm-5.2-air",
           "display_name": "GLM 5.2 Air",
-          "provenance": "manual",
+          "origin": "manual",
+          "reasoning_efforts": [],
           "discovered_at": null
         }
       ],

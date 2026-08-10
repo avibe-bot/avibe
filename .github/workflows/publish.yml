@@ -216,6 +216,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Pin package version to release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+
       - name: Verify Show Runtime release assets
         run: |
           python - <<'PY'

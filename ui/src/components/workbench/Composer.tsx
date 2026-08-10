@@ -17,9 +17,8 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
-  applyVoiceInsertion,
+  applyVoiceInsertionWithSnapshot,
   voiceInsertionSnapshot,
-  voiceInsertionText,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
 import {
@@ -41,6 +40,15 @@ import {
   isVoiceControlDisabled,
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
+import {
+  VoiceRealtimeSession,
+  type VoiceRealtimeFinal,
+} from '../../lib/voiceRealtime';
+import {
+  isWorkbenchUploadRetryable,
+  uploadWorkbenchAttachment,
+  workbenchUploadErrorTranslationKey,
+} from '../../lib/workbenchUpload';
 import { Button } from '../ui/button';
 import {
   MentionEditor,
@@ -64,36 +72,24 @@ export type ComposerAttachment = {
   width?: number;
   height?: number;
   status: 'uploading' | 'ready' | 'error';
+  retryable?: boolean;
 };
 
-// Read a File/Blob as bare base64 (no ``data:...,`` prefix) for the JSON upload
-// + transcribe endpoints — the auth/CSRF-guarded compat route parses JSON, not
-// multipart, so binaries ride as base64.
-function readFileAsBase64(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error);
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-// Parallel-upload pool size. A multi-file batch reads each file as base64
-// (~33% larger) and POSTs it; cap how many are in flight so a big drop of large
-// files (up to 25 MB each) doesn't materialize every request body at once.
+// Parallel-upload pool size. Multipart keeps each request binary, but bounded
+// concurrency still prevents a large drop from saturating the connection.
 const UPLOAD_CONCURRENCY = 4;
 
 // Unique-enough id for an optimistic attachment chip before the server token
 // lands. Date.now() collides within a batch, so the random suffix separates
 // files staged in the same tick.
-const newLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const newLocalId = () => (
+  globalThis.crypto?.randomUUID?.()
+  ?? `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
+);
 
 type VoiceSegment = VoiceTranscriptionSegment & {
   task: Promise<void>;
+  transcriptionStarted?: boolean;
 };
 
 type VoiceRecordingSession = {
@@ -116,8 +112,13 @@ type VoiceRecordingSession = {
   finalization?: Promise<void>;
   transcriptionQueue: VoiceTranscriptionQueue;
   insertion: VoiceInsertionSnapshot;
+  previewInsertion?: VoiceInsertionSnapshot;
   cleanupOutcome?: VoiceCleanupOutcome;
   cleanupElapsedMs?: number;
+  realtime?: VoiceRealtimeSession;
+  realtimeState?: 'connecting' | 'active' | 'failed' | 'finalized';
+  realtimeFirstPreviewAt?: number;
+  realtimeFinalAt?: number;
 };
 
 // Composer remounts when the user switches chats. Keep pending or retryable
@@ -167,26 +168,28 @@ const settleVoiceSession = async (session: VoiceRecordingSession): Promise<void>
   }
 };
 
+const runVoiceFinalization = async (session: VoiceRecordingSession): Promise<void> => {
+  await Promise.all(session.segments.map((segment) => segment.task));
+  if (session.abortController.signal.aborted) {
+    deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+    return;
+  }
+  if (session.captureError !== undefined) {
+    session.transcript = undefined;
+    session.error = session.captureError;
+    session.status = 'failed';
+    return;
+  }
+  await settleVoiceSession(session);
+  if (session.abortController.signal.aborted) {
+    deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+  }
+};
+
 const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
   if (session.finalization) return session.finalization;
   session.status = 'transcribing';
-  session.finalization = (async () => {
-    await Promise.all(session.segments.map((segment) => segment.task));
-    if (session.abortController.signal.aborted) {
-      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
-      return;
-    }
-    if (session.captureError !== undefined) {
-      session.transcript = undefined;
-      session.error = session.captureError;
-      session.status = 'failed';
-      return;
-    }
-    await settleVoiceSession(session);
-    if (session.abortController.signal.aborted) {
-      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
-    }
-  })();
+  session.finalization = runVoiceFinalization(session);
   return session.finalization;
 };
 
@@ -254,6 +257,13 @@ const reportVoiceFinalization = (
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
       : session.stoppedAt - session.startedAt,
+    realtime: session.realtimeState !== undefined,
+    firstPreviewMs: session.realtimeFirstPreviewAt == null || session.startedAt == null
+      ? undefined
+      : session.realtimeFirstPreviewAt - session.startedAt,
+    stopToFinalMs: session.realtimeFinalAt == null || session.stoppedAt == null
+      ? undefined
+      : session.realtimeFinalAt - session.stoppedAt,
     retry: session.retryCount > 0,
   });
   session.reportedAttemptCount = attemptCount;
@@ -273,6 +283,13 @@ const reportVoiceInsertion = (session: VoiceRecordingSession): void => {
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
       : session.stoppedAt - session.startedAt,
+    realtime: session.realtimeState !== undefined,
+    firstPreviewMs: session.realtimeFirstPreviewAt == null || session.startedAt == null
+      ? undefined
+      : session.realtimeFirstPreviewAt - session.startedAt,
+    stopToFinalMs: session.realtimeFinalAt == null || session.stoppedAt == null
+      ? undefined
+      : session.realtimeFinalAt - session.stoppedAt,
     stopToInsertionMs: session.stoppedAt == null
       ? undefined
       : Date.now() - session.stoppedAt,
@@ -379,6 +396,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Blocks a same-tick double-submit before the optimistic clear re-renders.
   const pendingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentFilesRef = useRef(new Map<string, File>());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [asrAvailable, setAsrAvailable] = useState(false);
   const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
@@ -388,6 +406,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId))
   ));
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [realtimeAnnouncement, setRealtimeAnnouncement] = useState('');
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
@@ -493,6 +512,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
+      if (recordingSessionRef.current) {
+        recordingSessionRef.current.previewInsertion = undefined;
+      }
       try {
         if (recordingStartRef.current) {
           recordingSessionRef.current?.abortController.abort();
@@ -512,6 +534,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
+    attachmentFilesRef.current.clear();
+    setRealtimeAnnouncement('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
       sessionId != null && voiceSessionLocksDraft(voiceSessionsById.get(sessionId)),
@@ -519,23 +543,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
+    attachmentFilesRef.current.delete(localId);
     setAttachments((cur) => cur.filter((a) => a.localId !== localId));
   };
 
-  // Upload one already-staged file (its chip exists as 'uploading'): POST it as
-  // base64-JSON, then flip the chip to ready (carrying the server token + proxy
-  // URL) or to error. ``sid`` is threaded in so the fan-out below stays typed
-  // after the session guard.
+  // Upload one already-staged file, then flip its chip to ready or retryable.
+  // ``sid`` is threaded in so the fan-out below stays typed after the guard.
   const uploadOne = async (file: File, localId: string, sid: string) => {
     try {
-      const data = await readFileAsBase64(file);
-      const res = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/attachments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: file.name, mime: file.type, data }),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.token) throw new Error('upload failed');
+      const json = await uploadWorkbenchAttachment(sid, file, localId);
+      if (attachmentFilesRef.current.get(localId) !== file) return;
+      attachmentFilesRef.current.delete(localId);
       setAttachments((cur) =>
         cur.map((a) =>
           a.localId === localId
@@ -549,13 +567,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 width: typeof json.width === 'number' ? json.width : undefined,
                 height: typeof json.height === 'number' ? json.height : undefined,
                 status: 'ready',
+                retryable: undefined,
               }
             : a,
         ),
       );
-    } catch {
-      setAttachments((cur) => cur.map((a) => (a.localId === localId ? { ...a, status: 'error' } : a)));
+    } catch (error) {
+      if (attachmentFilesRef.current.get(localId) !== file) return;
+      const retryable = isWorkbenchUploadRetryable(error);
+      if (!retryable) attachmentFilesRef.current.delete(localId);
+      setAttachments((cur) => cur.map((a) => (
+        a.localId === localId ? { ...a, status: 'error', retryable } : a
+      )));
+      showToast(t(workbenchUploadErrorTranslationKey(error)), 'error');
     }
+  };
+
+  const retryAttachment = (localId: string) => {
+    if (!sessionId || disabledRef.current || voiceDraftReadOnly) return;
+    const file = attachmentFilesRef.current.get(localId);
+    if (!file) return;
+    setAttachments((cur) => cur.map((a) => (
+      a.localId === localId ? { ...a, status: 'uploading', retryable: undefined } : a
+    )));
+    void uploadOne(file, localId, sessionId);
   };
 
   // Upload a whole batch — multi-select from the picker or a chat-page drag-drop
@@ -566,6 +601,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (!sessionId) return;
     const sid = sessionId;
     const staged = files.map((file) => ({ file, localId: newLocalId() }));
+    for (const { file, localId } of staged) attachmentFilesRef.current.set(localId, file);
     setAttachments((cur) => [
       ...cur,
       ...staged.map(({ file, localId }) => ({
@@ -629,22 +665,80 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [useMentions]);
 
   const insertVoiceTranscript = useCallback((session: VoiceRecordingSession): boolean => {
-    // Insert the finalized transcript as one atomic replacement. Segment-level
-    // results never touch the draft while the user is still speaking.
+    // Replace the active preview (or the original captured range when realtime
+    // never produced one) with the finalized transcript as one draft edit.
     if (useMentions) {
-      return mentionRef.current?.replaceSelection(session.insertion, session.transcript ?? '') ?? false;
+      const inserted = mentionRef.current?.commitVoicePreview(
+        session.insertion,
+        session.transcript ?? '',
+      ) ?? false;
+      if (inserted) setRealtimeAnnouncement('');
+      return inserted;
     }
     const current = valueRef.current;
-    const insertion = voiceInsertionText(current, session.insertion, session.transcript ?? '');
-    const next = applyVoiceInsertion(current, session.insertion, session.transcript ?? '');
-    if (insertion === null || next === null) return false;
-    valueRef.current = next;
-    setValue(next);
-    onDraftChange?.(next);
-    const caret = session.insertion.start + insertion.length;
+    const result = applyVoiceInsertionWithSnapshot(
+      current,
+      session.previewInsertion ?? session.insertion,
+      session.transcript ?? '',
+      session.insertion,
+    );
+    if (result === null) return false;
+    session.previewInsertion = undefined;
+    valueRef.current = result.text;
+    setValue(result.text);
+    setRealtimeAnnouncement('');
+    onDraftChange?.(result.text);
+    const caret = session.insertion.start + result.insertion.length;
     requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
     return true;
   }, [onDraftChange, useMentions]);
+
+  const restoreRealtimePreview = useCallback((session: VoiceRecordingSession): void => {
+    setRealtimeAnnouncement('');
+    if (useMentions) {
+      mentionRef.current?.restoreVoicePreview();
+      return;
+    }
+    const preview = session.previewInsertion;
+    session.previewInsertion = undefined;
+    if (preview === undefined || valueRef.current !== preview.text) return;
+    valueRef.current = session.insertion.text;
+    setValue(session.insertion.text);
+  }, [useMentions]);
+
+  const showRealtimePreview = useCallback((
+    session: VoiceRecordingSession,
+    preview: string,
+  ): void => {
+    const normalized = preview.trim();
+    if (!normalized) {
+      restoreRealtimePreview(session);
+      return;
+    }
+    if (useMentions) {
+      if (mentionRef.current?.showVoicePreview(session.insertion, normalized)) {
+        setRealtimeAnnouncement(normalized);
+      }
+      return;
+    }
+    const current = valueRef.current;
+    const result = applyVoiceInsertionWithSnapshot(
+      current,
+      session.previewInsertion ?? session.insertion,
+      normalized,
+      session.insertion,
+    );
+    if (result === null) return;
+    session.previewInsertion = result.snapshot;
+    valueRef.current = result.text;
+    setValue(result.text);
+    setRealtimeAnnouncement(normalized);
+  }, [restoreRealtimePreview, useMentions]);
+
+  const retainSettledVoiceSession = useCallback((session: VoiceRecordingSession): void => {
+    restoreRealtimePreview(session);
+    setVoiceRetainedSession(session);
+  }, [restoreRealtimePreview]);
 
   const queueVoiceSegment = (
     session: VoiceRecordingSession,
@@ -662,7 +756,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       task: Promise.resolve(),
     };
     session.segments.push(segment);
+    if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
+      return;
+    }
+    segment.transcriptionStarted = true;
     segment.task = session.transcriptionQueue.enqueue(segment);
+  };
+
+  const activateHttpFallback = (session: VoiceRecordingSession): void => {
+    if (session.realtimeState === 'failed') {
+      for (const segment of session.segments) {
+        if (!segment.transcriptionStarted && segment.blob && !segment.final) {
+          segment.transcriptionStarted = true;
+          segment.task = session.transcriptionQueue.enqueue(segment);
+        }
+      }
+    }
   };
 
   const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
@@ -680,11 +789,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
     if (session.status === 'ready' && session.transcript) {
       if (disabledRef.current) {
-        setVoiceRetainedSession(session);
+        retainSettledVoiceSession(session);
         return;
       }
       if (!insertVoiceTranscript(session)) {
-        setVoiceRetainedSession(session);
+        retainSettledVoiceSession(session);
         showToast(t('chat.compose.voiceDraftChanged'), 'error');
         return;
       }
@@ -694,10 +803,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'failed') {
-      setVoiceRetainedSession(session);
+      retainSettledVoiceSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
-  }, [insertVoiceTranscript, sessionId, showToast, t]);
+  }, [insertVoiceTranscript, retainSettledVoiceSession, sessionId, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
     const activeHere = !unmountedRef.current && sessionId === session.sessionId;
@@ -708,6 +817,52 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     try {
       await finalizeVoiceSession(session);
+      presentVoiceSession(session);
+    } finally {
+      if (recordingSessionRef.current === session) recordingSessionRef.current = null;
+      if (activeHere) {
+        transcribingRef.current = false;
+        if (!unmountedRef.current) setTranscribing(false);
+      }
+    }
+  };
+
+  const finishRealtimeVoiceSession = async (session: VoiceRecordingSession) => {
+    const activeHere = !unmountedRef.current && sessionId === session.sessionId;
+    if (activeHere) {
+      transcribingRef.current = true;
+      setTranscribing(true);
+      setVoiceRetainedSession(session);
+    }
+    session.status = 'transcribing';
+    session.finalization = (async () => {
+      try {
+        if (session.captureError !== undefined || !session.realtime) {
+          throw session.captureError ?? new Error('realtime_unavailable');
+        }
+        const result: VoiceRealtimeFinal = await session.realtime.finish();
+        if (session.abortController.signal.aborted) return;
+        if (!result.text.trim()) throw new VoiceTranscriptionError('empty');
+        session.realtimeState = 'finalized';
+        session.realtimeFinalAt = Date.now();
+        session.cleanupOutcome = result.cleanup;
+        session.cleanupElapsedMs = session.realtimeFinalAt - (session.stoppedAt ?? session.realtimeFinalAt);
+        session.finalizedSegmentCount = session.segments.filter((segment) => segment.blob).length;
+        session.finalizedFailedSegmentCount = 0;
+        session.transcript = result.text;
+        session.segments = [];
+        session.error = undefined;
+        session.status = 'ready';
+      } catch (_error) {
+        if (session.abortController.signal.aborted) return;
+        session.realtimeState = 'failed';
+        activateHttpFallback(session);
+        session.status = 'transcribing';
+        await runVoiceFinalization(session);
+      }
+    })();
+    try {
+      await session.finalization;
       presentVoiceSession(session);
     } finally {
       if (recordingSessionRef.current === session) recordingSessionRef.current = null;
@@ -733,9 +888,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const discardVoiceSession = useCallback((session: VoiceRecordingSession) => {
     session.abortController.abort();
+    restoreRealtimePreview(session);
     deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
     setVoiceRetainedSession((current) => (current === session ? null : current));
-  }, []);
+  }, [restoreRealtimePreview]);
 
   const copyReadyVoiceTranscript = useCallback(async (session: VoiceRecordingSession) => {
     if (!session.transcript) return;
@@ -819,6 +975,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           dictationId,
         }),
       };
+      session.realtimeState = 'connecting';
+      session.realtime = new VoiceRealtimeSession({
+        before: insertion.before,
+        after: insertion.after,
+        signal: abortController.signal,
+        onPreview: (preview) => {
+          if (recordingSessionRef.current !== session || unmountedRef.current) return;
+          session.realtimeFirstPreviewAt ??= Date.now();
+          showRealtimePreview(session, `${preview.text}${preview.stash}`.trim());
+        },
+        onError: () => {
+          if (abortController.signal.aborted) return;
+          session.realtimeState = 'failed';
+          activateHttpFallback(session);
+        },
+      });
+      void session.realtime.start().then(() => {
+        if (abortController.signal.aborted) return;
+        session.realtimeState = 'active';
+      }).catch(() => {
+        if (abortController.signal.aborted) return;
+        session.realtimeState = 'failed';
+        activateHttpFallback(session);
+      });
       startingSession = session;
       const pipeline = new VoiceRecordingPipeline({
         stream,
@@ -831,6 +1011,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           metadata.overlapMs,
           metadata.final,
         ),
+        onPcm: (samples) => {
+          if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
+            session.realtime?.sendPcm(samples);
+          }
+        },
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
@@ -840,6 +1025,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         },
         onError: (error) => {
           session.captureError = error;
+          if (session.realtime) {
+            session.realtimeState = 'failed';
+            session.realtime.abort();
+            activateHttpFallback(session);
+          }
           if (!voiceSessionsById.has(session.sessionId)) {
             voiceSessionsById.set(session.sessionId, session);
           }
@@ -852,11 +1042,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
           if (reason === 'abort') {
             session.abortController.abort();
+            session.realtime?.abort();
+            restoreRealtimePreview(session);
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
           if (!session.segments.length && session.captureError === undefined) {
+            session.realtime?.abort();
+            restoreRealtimePreview(session);
             reportVoiceFinalization(session, 'empty');
             if (!unmountedRef.current && sessionId === session.sessionId) {
               showToast(t('chat.compose.voiceEmpty'), 'error');
@@ -873,7 +1067,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               task: Promise.resolve(),
             });
           }
-          void finishVoiceSession(session);
+          if (session.realtime && session.realtimeState !== 'failed') {
+            void finishRealtimeVoiceSession(session);
+          } else {
+            void finishVoiceSession(session);
+          }
         },
       });
       startingPipeline = pipeline;
@@ -905,6 +1103,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before capture setup
       // threw. Release it so the mic does not stay on.
+      startingSession?.abortController.abort();
+      startingSession?.realtime?.abort();
+      if (startingSession) restoreRealtimePreview(startingSession);
       if (recorderRef.current === startingPipeline) recorderRef.current = null;
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       clearRecordingTimers();
@@ -1016,6 +1217,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setHasText(false);
     onDraftChange?.('');
     setAttachments([]);
+    attachmentFilesRef.current.clear();
     referencesRef.current = [];
     if (useMentions) mentionRef.current?.clear();
     try {
@@ -1061,6 +1263,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink' : 'text-foreground')}>
                 {att.name}
               </span>
+              {att.status === 'error' && att.retryable && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={disabled || voiceDraftReadOnly}
+                  onClick={() => retryAttachment(att.localId)}
+                  aria-label={t('chat.compose.retryAttachment')}
+                  className="size-5 shrink-0 text-muted hover:text-foreground"
+                >
+                  <RotateCcw className="size-3.5" />
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="ghost"
@@ -1075,6 +1290,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ))}
         </div>
       )}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {realtimeAnnouncement
+          ? `${t('chat.compose.voicePreview')}: ${realtimeAnnouncement}`
+          : ''}
+      </div>
       <div
         className={cn(
           'flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
@@ -1221,7 +1441,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onPasteFiles={mediaEnabled && !disabled && !voiceDraftReadOnly
               ? (files) => void uploadFiles(files)
               : undefined}
-            onChange={(text, references, isDraftSeed) => {
+            onChange={(text, references, isDraftSeed, isVoicePreview) => {
               // The editor owns the text; keep the live copy in a ref (no
               // re-render) so a fast IME isn't interrupted mid-insert, and only
               // re-render when the empty/non-empty state actually flips (React
@@ -1233,7 +1453,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // is at best a redundant write, and under a stale-props remount it
               // would save the previous session's draft under this session id
               // (mirrors the plain-textarea path, whose seeding never saves).
-              if (!isDraftSeed) onDraftChange?.(text);
+              if (!isDraftSeed && !isVoicePreview) onDraftChange?.(text);
             }}
             onSubmit={submit}
           />

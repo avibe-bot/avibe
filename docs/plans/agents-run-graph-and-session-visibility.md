@@ -72,6 +72,16 @@ standalone session" entry point (model support only); mobile canvas rendering
 - Filters: 活跃 / 含历史 segmented; time window (default 24h) applies to
   history; project filter (including `独立` bucket); `显示后台会话` toggle
   (default on).
+- Cross-visit memory (added later): the Agents page remembers which tab it was
+  left on, and the 活跃/含历史 choice inside `运行`, so re-entering resumes that
+  view instead of resetting. 含历史 remains the fresh-browser default; only an
+  explicit segmented-control click is remembered — the search-locate path that
+  widens 活跃 → 含历史 to surface an out-of-window node is transient, like the
+  disabled-trigger reveal. Best-effort local storage
+  (`ui/src/lib/agentsViewMemory.ts`); blocked storage falls back to the defaults.
+  Time window / project / `显示后台会话` are not remembered. Only general
+  navigation resumes the memory: a contextual entry point passes
+  `/agents?tab=definitions` and that destination wins without being remembered.
 
 ### Graph semantics (all from existing columns)
 

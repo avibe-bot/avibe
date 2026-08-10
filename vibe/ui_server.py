@@ -34,7 +34,17 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
+from vibe.ui_compat import (
+    CompatApp,
+    Response,
+    TEST_REMOTE_ADDR_HEADER,
+    g,
+    is_json_content_type,
+    jsonify,
+    redirect,
+    request,
+    send_file,
+)
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
@@ -1469,6 +1479,7 @@ def _remote_auth_exempt_path() -> bool:
     path = request.path
     return (
         path == "/health"
+        or path == "/auth/login"
         or path == "/auth/callback"
         or path == "/auth/logout"
         or path == "/api/session"
@@ -1499,6 +1510,11 @@ def _remote_auth_exempt_before_host_validation() -> bool:
         }
         or request.path == "/favicon.ico"
     )
+
+
+def _is_ui_static_request() -> bool:
+    endpoint = request._request.scope.get("endpoint")
+    return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
@@ -1629,6 +1645,14 @@ def _strip_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", query, ""))
 
 
+def _oauth_retry_requested(value: Any) -> bool:
+    target = _safe_remote_redirect_target(value)
+    return any(
+        key == REMOTE_OAUTH_RETRY_PARAM and val == "1"
+        for key, val in parse_qsl(urlsplit(target).query, keep_blank_values=True)
+    )
+
+
 def _add_oauth_retry_param(value: str) -> str:
     target = _strip_oauth_retry_param(value)
     parsed = urlsplit(target)
@@ -1641,20 +1665,20 @@ def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
 
 
-def _redirect_to_vibe_cloud_login(config: V2Config):
+def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None = None):
     from vibe import remote_access
 
     cloud = config.remote_access.vibe_cloud
     code_verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    raw_next = request.full_path if request.query_string else request.path
+    raw_next = next_target if next_target is not None else (request.full_path if request.query_string else request.path)
     next_target = _strip_oauth_retry_param(raw_next)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
         next_target=next_target,
-        retry=request.args.get(REMOTE_OAUTH_RETRY_PARAM) == "1",
+        retry=_oauth_retry_requested(raw_next),
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
@@ -2164,12 +2188,14 @@ def enforce_remote_access_cookie():
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
         return None
-    if request.method == "GET":
-        # Bound unauthenticated login-start floods at the door (this writes a
-        # handshake + sets cookies); a real user spends only a couple per login.
-        if _auth_rate_limited():
-            return _auth_rate_limit_response()
-        return _redirect_to_vibe_cloud_login(config)
+    # The SPA shell is non-sensitive and its APIs remain protected. Serving it
+    # lets AuthGuard keep an iOS Home-Screen cold launch on the installed app's
+    # origin instead of automatically crossing into an OAuth browser sheet.
+    if _is_ui_static_request():
+        return None
+    if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
+        target = request.full_path if request.query_string else request.path
+        return redirect(f"/auth/login?{urlencode({'next': _safe_remote_redirect_target(target)})}")
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
 
 
@@ -3326,26 +3352,52 @@ async def model_hub_opencode_menu_put():
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["POST"])
-async def model_hub_custom_models_post():
+@app.route("/api/models/sources/<source_id>/models", methods=["POST"])
+async def model_hub_source_models_post(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         source = await _model_hub_service().add_custom_model(
-            _model_hub_json_object("source_not_found", status=404)
+            source_id,
+            _model_hub_json_object("mapping_target_unavailable")
         )
         return _model_hub_success(source=source), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/custom-models", methods=["DELETE"])
-async def model_hub_custom_models_delete():
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["PATCH"],
+)
+async def model_hub_source_models_patch(source_id, model_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        source = await _model_hub_service().update_model_reasoning_efforts(
+            source_id,
+            model_id,
+            _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(source=source)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route(
+    "/api/models/sources/<source_id>/models/<path:model_id>",
+    methods=["DELETE"],
+)
+async def model_hub_source_models_delete(source_id, model_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        source = await _model_hub_service().delete_custom_model(payload.get("source_id"), payload.get("model_id"))
+        source = await _model_hub_service().delete_custom_model(
+            source_id,
+            model_id,
+            force=payload.get("force") is True,
+        )
         return _model_hub_success(source=source)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -4937,6 +4989,28 @@ async def remote_access_diagnostics():
             "detail": str(exc),
         }
     return jsonify(result), 200 if result.get("ok") else 409
+
+
+@app.route("/auth/login", methods=["GET"])
+def remote_access_login():
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return jsonify({"error": "remote_access_not_enabled"}), 400
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.enabled:
+        return jsonify({"error": "remote_access_disabled"}), 503
+    if not cloud.session_secret:
+        return jsonify({"error": "remote_access_session_secret_missing"}), 503
+
+    next_target = _safe_remote_redirect_target(request.args.get("next"))
+    session = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
+    if session is not None:
+        return redirect(next_target)
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    return _redirect_to_vibe_cloud_login(config, next_target=next_target)
 
 
 @app.route("/auth/callback", methods=["GET"])
@@ -7270,6 +7344,12 @@ def sessions_messages_list(session_id: str):
     # ``around_id`` centers the window on a specific message (search deep-link
     # jump); it takes precedence over after/before/tail in the service.
     around_id = request.args.get("around_id") or None
+    # Legacy IM caller contexts may carry only the platform-native message id;
+    # storage resolves it to the durable row before applying cursor pagination.
+    around_native_id = request.args.get("around_native_id") or None
+    around_native_platform = request.args.get("around_native_platform") or None
+    around_turn_id = request.args.get("around_turn_id") or None
+    around_run_id = request.args.get("around_run_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -7291,6 +7371,10 @@ def sessions_messages_list(session_id: str):
             after_id=after_id,
             before_id=before_id,
             around_id=around_id,
+            around_native_id=around_native_id,
+            around_native_platform=around_native_platform,
+            around_turn_id=around_turn_id,
+            around_run_id=around_run_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             tail=tail,
@@ -7992,81 +8076,169 @@ def media_meta(token: str):
     )
 
 
-@app.route("/api/sessions/<session_id>/attachments", methods=["POST"])
-def sessions_attachments_create(session_id: str):
-    """Persist a user-uploaded file (base64 JSON) and register it for the media
-    proxy. Returns an opaque token + proxy URL; the browser never holds a path.
-    base64-over-JSON keeps uploads on the existing auth + CSRF-guarded compat
-    route (the compat layer parses JSON, not multipart)."""
-    import base64
-    import re
-    import uuid
+_WORKBENCH_ATTACHMENT_ERROR_CODES = {
+    "session_not_found",
+    "file_required",
+    "empty_file",
+    "too_large",
+    "invalid_upload",
+    "upload_failed",
+}
 
-    from config import paths
-    from core.services import sessions as workbench_sessions_service
-    from storage import media_service
 
-    payload = request.json or {}
-    name = (payload.get("name") or "upload").strip() or "upload"
-    mime = (payload.get("mime") or payload.get("content_type") or "application/octet-stream").strip()
-    data_b64 = payload.get("data") or ""
-    if not isinstance(data_b64, str) or not data_b64:
-        return jsonify({"error": "data is required"}), 400
-    if data_b64.startswith("data:") and "," in data_b64:
-        data_b64 = data_b64.split(",", 1)[1]
-    try:
-        raw = base64.b64decode(data_b64)
-    except Exception:
-        return jsonify({"error": "invalid base64"}), 400
-    if not raw:
-        return jsonify({"error": "empty file"}), 400
-    if len(raw) > 25 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413
+async def _workbench_attachment_error(code: str, status: int):
+    from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES
+    from core.services import settings as settings_service
 
-    engine = _projects_engine()
-    try:
-        with engine.connect() as conn:
-            session = workbench_sessions_service.get_session(conn, session_id)
-    except LookupError:
-        return jsonify({"error": "session_not_found"}), 404
+    message_code = code if code in _WORKBENCH_ATTACHMENT_ERROR_CODES else "invalid_upload"
+    config = await asyncio.to_thread(settings_service.load_config_or_default)
+    extra: dict[str, Any] = {}
+    if code == "too_large":
+        extra["max_file_bytes"] = MAX_WORKBENCH_ATTACHMENT_BYTES
+    return _coded_error_response(
+        code,
+        t(f"error.workbenchAttachment.{message_code}", config.language),
+        status,
+        **extra,
+    )
 
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name.rsplit("/", 1)[-1]).strip("_") or "upload"
-    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    local_path = upload_dir / f"{uuid.uuid4().hex[:8]}_{safe}"
-    local_path.write_bytes(raw)
 
-    kind = "image" if mime.startswith("image/") else "file"
-    with engine.begin() as conn:
-        token = media_service.register(
-            conn,
-            scope_id=session["scope_id"],
-            session_id=session_id,
-            kind=kind,
-            source="user_upload",
-            local_path=str(local_path.resolve()),
-            file_name=name,
-            content_type=mime,
-        )
-        # Read back the pixel dimensions register() captured (NULL for non-images
-        # / unreadable) so the client can reserve the image box and never shift the
-        # transcript when the upload renders.
-        row = media_service.get_by_token(conn, token)
+def _workbench_attachment_response(result: Any):
     return (
         jsonify(
             {
-                "token": token,
-                "name": name,
-                "mime": mime,
-                "size": len(raw),
-                "kind": kind,
-                "url": f"/api/media/{token}",
-                "width": row.get("width_px") if row else None,
-                "height": row.get("height_px") if row else None,
+                "token": result.token,
+                "name": result.name,
+                "mime": result.mime,
+                "size": result.size,
+                "kind": result.kind,
+                "url": f"/api/media/{result.token}",
+                "width": result.width,
+                "height": result.height,
             }
         ),
-        201,
+        201 if result.created else 200,
     )
+
+
+@app.post("/api/sessions/{session_id}/attachments", include_in_schema=False)
+async def sessions_attachments_create(session_id: str, starlette_request: FastAPIRequest):
+    """Stream a user upload into the session's media store.
+
+    Multipart is the current browser contract. Base64 JSON remains accepted so
+    a page opened before a service upgrade can finish uploading without a forced
+    refresh; it should not be used by new clients.
+    """
+
+    async def handler():
+        from core import workbench_media
+        from core.file_browser_service import FileBrowserError
+        from core.services import sessions as workbench_sessions_service
+
+        def load_session():
+            engine = _projects_engine()
+            with engine.connect() as conn:
+                session = workbench_sessions_service.get_session(conn, session_id)
+            return engine, session
+
+        try:
+            engine, session = await asyncio.to_thread(load_session)
+        except LookupError:
+            return await _workbench_attachment_error("session_not_found", 404)
+
+        form = None
+        try:
+            source = None
+            legacy_data_b64 = None
+            content_type = starlette_request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == "multipart/form-data":
+                _validate_file_upload_content_length(
+                    starlette_request.headers,
+                    workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES,
+                )
+                form = await _parse_file_upload_form(
+                    starlette_request,
+                    max_file_bytes=workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES,
+                )
+                upload = form.get("file")
+                if not isinstance(upload, StarletteUploadFile):
+                    return await _workbench_attachment_error("file_required", 400)
+                await upload.seek(0)
+                source = upload.file
+                name = upload.filename
+                mime = upload.content_type
+                upload_id = form.get("upload_id")
+            elif is_json_content_type(content_type):
+                payload = request.json or {}
+                data_b64 = payload.get("data") or ""
+                if not isinstance(data_b64, str) or not data_b64:
+                    return await _workbench_attachment_error("file_required", 400)
+                legacy_data_b64 = data_b64
+                name = payload.get("name")
+                mime = payload.get("mime") or payload.get("content_type")
+                upload_id = payload.get("upload_id")
+            else:
+                return await _workbench_attachment_error("invalid_upload", 415)
+
+            stable_upload_id = workbench_media.normalize_workbench_upload_id(upload_id)
+
+            def persist_attachment():
+                attachment_source = source
+                if legacy_data_b64 is not None:
+                    attachment_source = workbench_media.decode_legacy_workbench_attachment(
+                        legacy_data_b64
+                    )
+                if attachment_source is None:
+                    raise workbench_media.WorkbenchAttachmentUploadError(
+                        "file_required",
+                        "File is required",
+                        400,
+                    )
+                with workbench_media.workbench_attachment_upload_lock(
+                    session_id, stable_upload_id
+                ):
+                    result = None
+                    try:
+                        with engine.begin() as conn:
+                            result = workbench_media.materialize_workbench_attachment(
+                                conn,
+                                scope_id=session["scope_id"],
+                                session_id=session_id,
+                                file_name=name,
+                                content_type=mime,
+                                source=attachment_source,
+                                upload_id=stable_upload_id,
+                            )
+                        return result
+                    except Exception:
+                        # Registration and commit are one logical publish. Keep
+                        # rollback under the same key lock so a waiting retry
+                        # cannot recreate this path before cleanup completes.
+                        if result is not None and result.created:
+                            Path(result.path).unlink(missing_ok=True)
+                        raise
+
+            result = await asyncio.to_thread(persist_attachment)
+            return _workbench_attachment_response(result)
+        except workbench_media.WorkbenchAttachmentUploadError as exc:
+            return await _workbench_attachment_error(exc.code, exc.status)
+        except MultiPartException as exc:
+            if "too large" in str(exc).lower():
+                return await _workbench_attachment_error("too_large", 413)
+            return await _workbench_attachment_error("invalid_upload", 400)
+        except FileBrowserError as exc:
+            code = "too_large" if exc.code == "too_large" else "invalid_upload"
+            return await _workbench_attachment_error(code, exc.status_code)
+        except StarletteHTTPException:
+            return await _workbench_attachment_error("invalid_upload", 400)
+        except Exception:
+            logger.exception("workbench attachment upload failed for session %s", session_id)
+            return await _workbench_attachment_error("upload_failed", 500)
+        finally:
+            if form is not None:
+                await form.close()
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/asr/transcribe", methods=["POST"])
@@ -8264,6 +8436,8 @@ def asr_telemetry():
         "backlogAtStop",
         "totalDurationMs",
         "stopToInsertionMs",
+        "firstPreviewMs",
+        "stopToFinalMs",
     }
     for key in integer_fields:
         if key not in payload:
@@ -8287,6 +8461,11 @@ def asr_telemetry():
         if not isinstance(payload["retry"], bool):
             return jsonify({"error": "invalid_field", "field": "retry"}), 400
         sanitized["retry"] = payload["retry"]
+
+    if "realtime" in payload:
+        if not isinstance(payload["realtime"], bool):
+            return jsonify({"error": "invalid_field", "field": "realtime"}), 400
+        sanitized["realtime"] = payload["realtime"]
 
     logger.info(
         "voice_reliability %s",
@@ -11012,6 +11191,32 @@ def _show_runtime_config_script(
         "(function(){"
         f"var next={payload};"
         "globalThis.__AVIBE_SHOW__=Object.assign({},globalThis.__AVIBE_SHOW__||{},next);"
+        "function parentNavigate(){"
+        "try{"
+        "var candidate=window.parent!==window&&window.parent.__AVIBE_PWA_NAVIGATE_SAME_ORIGIN__;"
+        "return typeof candidate==='function'?candidate:null;"
+        "}catch(_){return null;}"
+        "}"
+        "function isIosStandalone(){"
+        "var ua=navigator.userAgent||'';"
+        "var ios=/iP(hone|ad|od)/.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);"
+        "return ios&&(navigator.standalone===true||(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches));"
+        "}"
+        "document.addEventListener('click',function(event){"
+        "var bridge=parentNavigate();"
+        "if(!bridge&&!isIosStandalone())return;"
+        "var element=event.target instanceof Element?event.target:null;"
+        "var anchor=element&&element.closest('a[href]');"
+        "if(!anchor||String(anchor.target).toLowerCase()!=='_blank'||anchor.hasAttribute('download'))return;"
+        "var target;try{target=new URL(anchor.href,window.location.href);}catch(_){return;}"
+        "if(target.origin!==window.location.origin||!/^https?:$/.test(target.protocol))return;"
+        "event.preventDefault();event.stopImmediatePropagation();"
+        "var path=target.pathname+target.search+target.hash;"
+        "var base=String(next.basePath||'');"
+        "var withinShow=base&&(target.pathname===base.slice(0,-1)||target.pathname.indexOf(base)===0);"
+        "if(window.parent!==window&&!withinShow&&bridge){bridge(target.href);return;}"
+        "window.location.assign(path);"
+        "},true);"
         "}());"
         "</script>"
     )

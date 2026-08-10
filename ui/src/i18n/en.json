@@ -1235,9 +1235,7 @@
   },
   "models": {
     "eligibility": {
-      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}",
-      "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
-      "consent_required": "Needs your consent for experimental hub supply first"
+      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}"
     },
     "oauth": {
       "upstream_failed": "The vendor didn't complete this sign-in, please retry",
@@ -2991,6 +2989,7 @@
       "mode": "Mode",
       "followUp": "Follow-up message",
       "runtime": "Runtime",
+      "eventProcessing": "Event processing",
       "lastError": "Last error",
       "type": "Type",
       "triggeredBy": "Triggered by",
@@ -3077,6 +3076,11 @@
       "failing": "failing",
       "degraded": "degraded",
       "unknown": "health unknown"
+    },
+    "processingHealth": {
+      "failing": "processing failed",
+      "degraded": "recent processing failure",
+      "unknown": "processing status unknown"
     },
     "lifecycle": {
       "running": "Running",
@@ -3197,6 +3201,13 @@
       "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
+      "vault": "From Vault",
+      "vaultProvided": "Secret provided",
+      "vaultAccessApproved": "Access approved",
+      "vaultSigned": "Signature complete",
+      "vaultDenied": "Denied",
+      "vaultFailed": "Failed",
+      "vaultExpired": "Expired",
       "agentFallback": "agent"
     },
     "annotation": {
@@ -3237,6 +3248,7 @@
       "voice": "Voice input",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
+      "voicePreview": "Live transcription preview",
       "voiceProcessing": "Processing recording",
       "voiceRetry": "Retry transcription",
       "voiceCopyTranscript": "Copy recovered transcript",
@@ -3250,6 +3262,12 @@
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
       "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
       "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
+      "attachmentTooLarge": "This file exceeds the 100 MB attachment limit.",
+      "attachmentEmpty": "Empty files cannot be attached.",
+      "attachmentSessionUnavailable": "This session is no longer available.",
+      "attachmentNetwork": "The upload connection failed. Try again.",
+      "attachmentFailed": "The file could not be uploaded. Try again.",
+      "retryAttachment": "Retry upload",
       "removeAttachment": "Remove",
       "dropOverlay": "Drop files to attach"
     },
@@ -3585,6 +3603,8 @@
       "help": "Provide the value — it goes to the vault, never to the chat or model.",
       "notSetYet": "not set yet",
       "dismiss": "Dismiss",
+      "denyTitle": "Reject this secret request?",
+      "denyDescription": "The agent will be notified that this request was rejected and stop waiting. This can't be undone.",
       "saveAndWake": "Save & let the agent continue",
       "ambiguousProvision": "Multiple pending requests need this secret. Open the request-specific Provide secret row in Vaults so the requested details are preserved.",
       "saveFailed": "Couldn't save the secret. Please try again."

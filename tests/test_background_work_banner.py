@@ -18,6 +18,8 @@ from sqlalchemy import insert
 
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
+from storage import message_deliveries as delivery_store
+from storage.agent_session_rows import create_agent_session_row
 from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -78,6 +80,36 @@ def _insert_run(engine, **overrides) -> str:
     return values["id"]
 
 
+def _insert_queued_delivery(engine, *, delivery_id: str, session_id: str, now: str) -> None:
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id=session_id,
+            session_anchor=session_id,
+            agent_backend="codex",
+            workdir="/tmp",
+            now=now,
+        )
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="harness",
+                text="audit the contract",
+            ),
+            dispatch_text="audit the contract",
+            now=now,
+        )
+
+
 def test_each_harness_source_contributes_one_row(tmp_path: Path):
     engine, _ = _make_engine(tmp_path)
     _insert_definition(
@@ -117,10 +149,40 @@ def test_each_harness_source_contributes_one_row(tmp_path: Path):
     assert by_kind["task"]["schedule_type"] == "cron"
     assert by_kind["agent_run"]["id"] == "agent_run:run-1"
     assert by_kind["agent_run"]["label"] == "worker: audit the contract"
+    assert by_kind["agent_run"]["status"] == "running"
     assert by_kind["agent_run"]["schedule_type"] is None
     # ``since`` and a stable id are present on every unified item.
     assert all(item["since"] == _NOW for item in items)
     assert all(item["id"] for item in items)
+
+
+def test_queued_delivery_projects_delegated_run_as_queued(tmp_path: Path):
+    engine, _ = _make_engine(tmp_path)
+    queued_at = "2026-07-16T00:00:01Z"
+    _insert_queued_delivery(
+        engine,
+        delivery_id="delivery-queued",
+        session_id="ses-delegate",
+        now=queued_at,
+    )
+    _insert_run(
+        engine,
+        id="run-queued-delivery",
+        agent_name="worker",
+        message="audit the contract",
+        session_id="ses-delegate",
+        callback_session_id="ses-caller",
+        delivery_id="delivery-queued",
+        status="running",
+        started_at="2026-07-16T00:00:02Z",
+    )
+
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-caller")
+
+    assert len(items) == 1
+    assert items[0]["status"] == "queued"
+    assert items[0]["since"] == queued_at
 
 
 def test_task_schedule_type_comes_from_the_durable_definition(tmp_path: Path):

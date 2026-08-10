@@ -10,6 +10,7 @@ import {
   type PersistedWindow,
 } from '../lib/workbenchPersistence';
 import { useLatestRef } from '@/lib/useLatestRef';
+import { DESKTOP_MEDIA_QUERY, isDesktopViewport } from '../lib/useIsDesktop';
 import {
   WindowManagerContext,
   type WindowBounds,
@@ -22,16 +23,16 @@ const DEFAULT_SIZE = { width: 760, height: 520 };
 const CASCADE_STEP = 32;
 const CASCADE_WRAP = 6;
 
+function highestVisibleWindow(windows: readonly WindowInstance[]): WindowInstance | null {
+  return windows
+    .filter((window) => !window.minimized)
+    .reduce<WindowInstance | null>((top, window) => (!top || window.z > top.z ? window : top), null);
+}
+
 // Persistence is desktop-only: the window layer is `hidden md:block` and windowed apps open only
 // from the desktop-only launcher/Dock, so restoring windows below md would mount invisible bodies
 // and a `[]` save from a phone would clobber a real desktop layout. Read live (not frozen at mount)
 // so a desktop tab that starts narrow and is widened still restores/saves once it crosses md.
-function isDesktopViewport(): boolean {
-  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-    ? window.matchMedia('(min-width: 768px)').matches
-    : false;
-}
-
 /**
  * `standalone`: this document is a single-app tab (`appTabHref` + `isStandaloneAppTab`).
  * Such a tab neither RESTORES the saved layout — the app it was opened for must not
@@ -83,6 +84,12 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
     }
     restoredRef.current = true;
     return loadAndSeed();
+  });
+  const [focusedId, setFocusedId] = useState<string | null>(() => {
+    const visible = windows.filter((window) => !window.minimized);
+    return visible.length > 0
+      ? visible.reduce((top, window) => (window.z > top.z ? window : top)).id
+      : null;
   });
 
   // Latest windows for the debounced/pagehide save closures (which fire after render).
@@ -158,6 +165,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
   }, []);
 
   const focus = useCallback((id: string) => {
+    setFocusedId(id);
     setWindows((prev) => {
       const target = prev.find((w) => w.id === id);
       if (!target) return prev;
@@ -166,6 +174,12 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
       if (target.z === nextZ - 1 && prev.every((w) => w.id === id || w.z < target.z)) return prev;
       return prev.map((w) => (w.id === id ? { ...w, z: nextZ } : w));
     });
+  }, []);
+
+  const focusCanvas = useCallback(() => {
+    setFocusedId(null);
+    const active = typeof document === 'undefined' ? null : document.activeElement;
+    if (active instanceof HTMLElement && active.closest('[data-window-id]')) active.blur();
   }, []);
 
   const openApp = useCallback<WindowManagerValue['openApp']>((appId, opts) => {
@@ -196,6 +210,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
         maximized: false,
       },
     ]);
+    setFocusedId(id);
     return id;
   }, []);
 
@@ -203,12 +218,16 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
     closeGuards.current.delete(id);
     stateProviders.current.delete(id);
     closingIds.current.delete(id);
-    setWindows((prev) => prev.filter((w) => w.id !== id));
-  }, []);
+    const nextWindows = windowsRef.current.filter((window) => window.id !== id);
+    setFocusedId((current) => (current === id ? highestVisibleWindow(nextWindows)?.id ?? null : current));
+    setWindows(nextWindows);
+  }, [windowsRef]);
 
   const minimize = useCallback((id: string) => {
-    setWindows((prev) => prev.map((w) => (w.id === id ? { ...w, minimized: true } : w)));
-  }, []);
+    const nextWindows = windowsRef.current.map((window) => (window.id === id ? { ...window, minimized: true } : window));
+    setFocusedId((current) => (current === id ? highestVisibleWindow(nextWindows)?.id ?? null : current));
+    setWindows(nextWindows);
+  }, [windowsRef]);
 
   const restore = useCallback(
     (id: string) => {
@@ -256,12 +275,19 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
   useEffect(() => {
     if (restoredRef.current) return;
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mql = window.matchMedia('(min-width: 768px)');
+    const mql = window.matchMedia(DESKTOP_MEDIA_QUERY);
     const restoreOnce = () => {
       if (restoredRef.current || !mql.matches) return;
       restoredRef.current = true;
       const restored = loadAndSeed();
       setWindows((cur) => (cur.length ? cur : restored));
+      setFocusedId((current) => {
+        if (current) return current;
+        const visible = restored.filter((window) => !window.minimized);
+        return visible.length > 0
+          ? visible.reduce((top, window) => (window.z > top.z ? window : top)).id
+          : null;
+      });
     };
     restoreOnce(); // may have crossed to desktop between the initial render and this effect
     mql.addEventListener('change', restoreOnce);
@@ -287,12 +313,6 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
     };
   }, [flushSave]);
 
-  const focusedId = useMemo(() => {
-    const visible = windows.filter((w) => !w.minimized);
-    if (visible.length === 0) return null;
-    return visible.reduce((top, w) => (w.z > top.z ? w : top)).id;
-  }, [windows]);
-
   // True while ANY window is mid drag/resize. A transient shared flag (not persisted)
   // that arms the per-window iframe shield during a gesture (§7.1i).
   const [gestureActive, setGestureActive] = useState(false);
@@ -304,6 +324,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
       openApp,
       close,
       focus,
+      focusCanvas,
       minimize,
       restore,
       toggleMaximize,
@@ -317,7 +338,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
       gestureActive,
       setGestureActive,
     }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose, gestureActive],
+    [windows, focusedId, openApp, close, focus, focusCanvas, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose, gestureActive],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;

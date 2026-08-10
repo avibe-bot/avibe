@@ -1,61 +1,11 @@
-"""Model Hub — EngineAdapter interface. FROZEN CONTRACT v1.5 (2026-07-31).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v5 (2026-08-09).
 
-v1.5 changelog (honest lazy-start health):
-- ``EngineHealth.NOT_STARTED`` distinguishes an installed runtime that has not
-  been demanded in this service lifetime from one that started and went down.
-
-v1.4 changelog (ref-keyed cleanup convergence):
-- ``cleanup_orphaned_oauth_material`` treats an absent credential ref as an
-  already-converged cleanup, making journal replay idempotent across crashes.
-
-v1.3 changelog (owner-approved channel class pass):
-- ``OAuthFlowState.channel`` makes Hub and native CLI success semantics explicit:
-  Hub success carries an engine credential ref; native success never does.
-- Hub flows expose a total five-way retained-material disposition for repair
-  decisions. Native flows pin that disposition to ``none`` because CLI-owned
-  login material never crosses this engine seam.
-- Retained refs are exposed only for flow-owned or orphaned material. Foreign
-  and unknown placements deliberately expose no actionable handle.
-- ``cleanup_orphaned_oauth_material`` is the ref-keyed retry seam: it confirms
-  both auth-file deletions before revoking the only retained handle.
-
-v1.2 changelog (L1 implementation findings — credential & model lifecycle):
-- Secret provisioning path closed: ``provision_credential`` moves an API-key
-  secret (transient parameter, never logged, never persisted by L2) into the
-  ENGINE-OWNED store and returns the opaque ``credential_ref``;
-  ``revoke_credential`` releases it on source deletion. L2's config persists
-  refs only. Flow: provision → discover (probe) → persist Source → sync.
-- ``SourceBinding.model_ids`` added: the declared supply list (discovered +
-  manual custom entries) — required by the engine's generic/API-key config.
-- ``discover_models`` re-signed as a PROBE (vendor/protocol/base_url/
-  credential_ref) so discovery works BEFORE registration; it no longer takes
-  a ``source_id``.
-
-v1.1 changelog (L1 review findings, routed via orchestrator):
-- OAuth surface added with DETERMINISTIC source binding: ``start_oauth`` takes
-  the pre-created (pending) ``source_id``; a Hub-channel ``success``
-  ``OAuthFlowState`` carries the resulting opaque ``credential_ref``. The
-  later native channel uses the same flow state without an engine ref.
-  Concurrent same-vendor flows can never cross-bind.
-- Client binding made enforceable at the engine boundary:
-  ``SourceBinding.allowed_origins`` + ``invoke(origin=...)`` +
-  ``OriginNotAllowedError`` (adapter-side backstop; L2's resolver filters
-  first — defense in depth per README invariant 3).
-
-Canonical text: docs/plans/model-hub-contracts/adapter-interface.py (this file).
-Dual-copy rule: BOTH lane L1 and lane L2 copy this file VERBATIM to
-``core/handlers/model_hub/adapter.py`` in their branches (byte-identical, so the
-merge is a no-op). L2 owns the in-repo copy on master thereafter. Any change
-routes through the orchestrator and bumps the version line above.
-
-Seam semantics (from spike S1, binding):
-- L1 implements this protocol (engine facade). L1 must NOT classify errors,
-  retry, or fall back across sources — per-source invocation only; the
-  engine's internal fallback and usage feed stay disabled/bypassed.
-- L2 consumes it: picks exactly one source per call (priority resolution),
-  classifies ``RawCallOutcome`` into the canonical taxonomy, emits redacted
-  resolution events.
-- No credential material may appear in any field defined here.
+This file is the canonical adapter boundary and must remain byte-identical to
+``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
+credential custody, protocol observation, model discovery, OAuth, invocation,
+and cleanup. It never chooses or reorders Route hops, classifies cross-Source
+fallthrough, or exposes credential material. Contract changes route through the
+orchestrator and land with every affected consumer on the same tested head.
 """
 
 from __future__ import annotations
@@ -63,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
+
+# authority-consumer: protocol anthropic openai_responses openai_chat
 
 
 class EngineHealth(str, Enum):
@@ -89,7 +41,7 @@ class SourceBinding:
 
     source_id: str
     vendor: str
-    protocol: str  # "anthropic" | "openai_responses" | "openai_chat" | "openai_compatible"
+    protocol: str  # "anthropic" | "openai_responses" | "openai_chat"
     base_url: str | None  # None => vendor official default
     credential_ref: str  # opaque handle; never secret material
     allowed_origins: tuple[str, ...]  # agent names allowed to draw on this
@@ -175,9 +127,8 @@ class OAuthFlowState:
     error_key: str | None
     expires_at_iso: str | None
     credential_ref: str | None
-    # Defaults preserve pre-v1.3 call sites until the follow-up service-consumer
-    # lane supplies the discriminator explicitly. Channel-aware producers MUST
-    # set all three fields.
+    # Channel-aware producers set all three fields explicitly. Defaults keep the
+    # dataclass construction total for presentation-only adapter implementations.
     channel: Literal["hub", "native_cli"] = "hub"
     retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
     retained_credential_ref: str | None = None
