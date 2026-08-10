@@ -719,6 +719,7 @@ class MemoryMaintenance:
                         actor_ref="system:boot",
                     )
                 )
+                self._runtime.restore_completed()
             return True
         except asyncio.CancelledError:
             await self._mark_backup_restore_recovery(operation)

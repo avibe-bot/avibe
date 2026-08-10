@@ -2194,6 +2194,11 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         MemoryConfig(enabled=True),
         effective_home=tmp_path,
     )
+    restored_call_log: list[None] = []
+    _replace_runtime_port(
+        restarted,
+        restore_completed=lambda: restored_call_log.append(None),
+    )
     recovery = _maintenance(restarted)._backup_restore_journal.get_open_operation()
     assert recovery is not None
     assert recovery.state == "recovery_needed"
@@ -2228,6 +2233,7 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         still_fenced = _maintenance(restarted)._backup_restore_journal.get_open_operation()
         assert still_fenced == recovery
         assert restarted.module._worker._claims_paused is True
+        assert restored_call_log == []
         monkeypatch.setattr(SidecarOwnership, "reap", original_reap)
 
     assert await restarted.reconcile(MemoryConfig()) == {
@@ -2256,6 +2262,7 @@ async def test_backup_restore_crash_is_fenced_and_boot_converges_one_generation(
         )
     ] == ["started", "recovery_needed", "retry_started", "completed"]
     assert _maintenance(restarted).is_open() is False
+    assert restored_call_log == [None]
 
     await memory_runtime_factory.close(runtime)
     await memory_runtime_factory.close(restarted)
