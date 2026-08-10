@@ -518,9 +518,10 @@ async def test_typed_failure_and_maintenance_reads_preserve_owner_recovery_and_r
 async def test_runtime_serializes_one_composite_and_compatibility_projections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     typed_composite = await runtime._processing_record.read_record(
         operator_ref="u-operator"
@@ -570,16 +571,16 @@ async def test_runtime_serializes_one_composite_and_compatibility_projections(
         "clear_recovery": composite["maintenance"]["clear_recovery"],
     }
     assert "u-operator" not in repr(composite)
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_failure_compatibility_projection_skips_health_and_sources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     async def unexpected_read() -> None:
         raise AssertionError("compatibility failure reads must stay narrow")
@@ -593,16 +594,16 @@ async def test_failure_compatibility_projection_skips_health_and_sources(
     )
 
     assert result == {"status": "ok", "items": [], "recovery": None}
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_runtime_propagates_recorder_transition_time_at_mutation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
 
     runtime._update_recorder_health(
         {"state": "degraded", "reason": "writer_failures"},
@@ -622,13 +623,13 @@ async def test_runtime_propagates_recorder_transition_time_at_mutation(
     assert first["items"][0]["occurred_at"] == "transition-1"
     assert second["items"][0]["occurred_at"] == "transition-2"
     assert second["items"][0]["id"] != first["items"][0]["id"]
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_disabled_runtime_status_is_authoritative_when_store_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -636,7 +637,9 @@ async def test_disabled_runtime_status_is_authoritative_when_store_is_unavailabl
         raise OSError("test store unavailable")
 
     monkeypatch.setattr("core.memory.runtime.MemoryStore", unavailable_store)
-    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False), effective_home=tmp_path
+    )
 
     assert runtime.available is False
     assert await runtime.status_payload() == {
@@ -648,16 +651,18 @@ async def test_disabled_runtime_status_is_authoritative_when_store_is_unavailabl
         },
         "health": None,
     }
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_health_probe_releases_reconcile_lock_and_discards_stale_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True), effective_home=tmp_path
+    )
     original_process = SimpleNamespace(running=True)
     runtime._process = original_process
     probe_entered = asyncio.Event()
@@ -684,16 +689,18 @@ async def test_health_probe_releases_reconcile_lock_and_discards_stale_result(
     )
     assert runtime._recorder_health == {"state": "disabled", "reason": None}
     runtime._process = None
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_health_probe_returns_closed_without_waiting_for_reconcile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True), effective_home=tmp_path
+    )
     runtime._process = SimpleNamespace(running=True)
     provider_called = False
 
@@ -713,16 +720,18 @@ async def test_health_probe_returns_closed_without_waiting_for_reconcile(
     assert observation.unavailable_reason == "busy"
     assert provider_called is False
     runtime._process = None
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_health_probe_discards_result_after_same_process_lifecycle_transition(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True), effective_home=tmp_path
+    )
     runtime._process = SimpleNamespace(running=True)
     probe_entered = asyncio.Event()
     release_probe = asyncio.Event()
@@ -746,7 +755,6 @@ async def test_health_probe_discards_result_after_same_process_lifecycle_transit
         unavailable_reason="memory_sidecar_unavailable",
     )
     runtime._process = None
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -759,6 +767,7 @@ async def test_processing_sources_read_local_history_without_a_running_sidecar(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     enabled: bool,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source_reads = 0
@@ -769,7 +778,7 @@ async def test_processing_sources_read_local_history_without_a_running_sidecar(
             source_reads += 1
             return _sources()
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=enabled),
         effective_home=tmp_path,
         insight_reader=Reader(),
@@ -779,7 +788,6 @@ async def test_processing_sources_read_local_history_without_a_running_sidecar(
 
     assert sources == _sources()
     assert source_reads == 1
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -788,9 +796,12 @@ async def test_processing_anomalies_return_busy_without_waiting_for_fences(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     fence: str,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False), effective_home=tmp_path
+    )
     failure_log_reads = 0
 
     def failure_log(*, limit: int) -> tuple[MemoryFailureLogEntry, ...]:
@@ -822,16 +833,18 @@ async def test_processing_anomalies_return_busy_without_waiting_for_fences(
 
     assert available == FailureLogObservation(())
     assert failure_log_reads == 1
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_processing_anomalies_discard_read_after_lifecycle_transition(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False), effective_home=tmp_path
+    )
     failure_log_started = threading.Event()
     release_failure_log = threading.Event()
 
@@ -854,13 +867,13 @@ async def test_processing_anomalies_discard_read_after_lifecycle_transition(
 
     assert observation == FailureLogObservation((), "busy")
     assert runtime.module._root_lifecycle_lock().locked() is False
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_processing_sources_return_busy_without_waiting_for_lifecycle_locks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source_reads = 0
@@ -871,7 +884,7 @@ async def test_processing_sources_return_busy_without_waiting_for_lifecycle_lock
             source_reads += 1
             return _sources()
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         effective_home=tmp_path,
         insight_reader=Reader(),
@@ -896,7 +909,6 @@ async def test_processing_sources_return_busy_without_waiting_for_lifecycle_lock
         sources.calls,
     )} == {"busy"}
     runtime._process = None
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -912,6 +924,7 @@ async def test_processing_sources_discard_stale_lifecycle_observation(
     tmp_path: Path,
     transition: str,
     expected_reason: str,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source_read_started = threading.Event()
@@ -923,7 +936,7 @@ async def test_processing_sources_discard_stale_lifecycle_observation(
             assert release_source_read.wait(2)
             return _sources()
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         effective_home=tmp_path,
         insight_reader=Reader(),
@@ -956,16 +969,18 @@ async def test_processing_sources_discard_stale_lifecycle_observation(
         sources.calls,
     )} == {expected_reason}
     runtime._process = None
-    await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_status_projection_never_reads_maintenance_journals(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False), effective_home=tmp_path
+    )
 
     async def unexpected_read(*_args: object) -> object:
         raise AssertionError("status compatibility reads must stay runtime-only")
@@ -982,7 +997,6 @@ async def test_status_projection_never_reads_maintenance_journals(
     payload = await runtime.status_payload()
 
     assert payload["source"]["reason"] == "memory_disabled"
-    await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -1032,9 +1046,12 @@ async def test_typed_status_uses_provider_budget_without_identity_or_composite_r
 async def test_processing_record_keeps_event_loop_responsive_during_journal_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True), effective_home=tmp_path
+    )
     maintenance = runtime._maintenance
     assert maintenance is not None
     restore_journal = maintenance._backup_restore_journal
@@ -1075,16 +1092,18 @@ async def test_processing_record_keeps_event_loop_responsive_during_journal_read
         release_journal.set()
         watchdog.cancel()
         await asyncio.gather(reading, return_exceptions=True)
-        await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True), effective_home=tmp_path
+    )
     maintenance = runtime._maintenance
     assert maintenance is not None
     journal = maintenance._clear_journal
@@ -1153,7 +1172,6 @@ async def test_processing_sources_distinguish_busy_clear_from_failed_recovery(
         failed_sources.capture,
         failed_sources.calls,
     )} == {"memory_clear_failed"}
-    await runtime.close()
 
 
 def _enqueue(runtime: MemoryRuntime, source: str) -> None:
