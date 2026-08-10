@@ -291,3 +291,28 @@ def test_get_authenticated_login_still_works_uncached() -> None:
 
     with patch.object(module, "github_get", return_value={"login": "qiqi"}):
         assert module.get_authenticated_login("token") == "qiqi"
+
+
+def test_get_authenticated_login_strict_mode_preserves_request_failures() -> None:
+    module = _load_module()
+    error = TimeoutError("viewer lookup timed out")
+
+    with patch.object(module, "github_get", side_effect=error):
+        try:
+            module.get_authenticated_login("token", raise_on_error=True)
+        except TimeoutError as raised:
+            assert raised is error
+        else:  # pragma: no cover - strict mode must preserve the failure taxonomy
+            raise AssertionError("expected viewer failure to propagate")
+
+
+def test_get_authenticated_login_strict_mode_rejects_missing_login() -> None:
+    module = _load_module()
+
+    with patch.object(module, "github_get", return_value={}):
+        try:
+            module.get_authenticated_login("token", raise_on_error=True)
+        except module.GitHubProtocolError as error:
+            assert "no login" in str(error)
+        else:  # pragma: no cover - unusable identity must fail closed
+            raise AssertionError("expected missing login to fail")

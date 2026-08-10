@@ -155,6 +155,10 @@ def test_background_watch_skill_resolves_local_waiters_and_persists_managed_pr_s
     assert body.count('--state-file "$STATE_FILE"') >= 7
     assert body.count("--seed-state") >= 3
     assert "The one-shot PR and Actions waiters retry" in body
+    assert "review-thread status" in body
+    assert "independent wake signal" in body
+    assert "single wake/no-wake" in body
+    assert "caught up or reseeded" in body
 
 
 def test_pr_delivery_loop_delegates_waiters_to_background_watch_skill() -> None:

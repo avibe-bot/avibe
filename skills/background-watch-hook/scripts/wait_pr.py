@@ -11,7 +11,6 @@ import re
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.parse
 from contextlib import contextmanager
 from functools import partial
@@ -34,7 +33,6 @@ from _github_wait_common import (  # noqa: E402
     github_get,
     github_graphql,
     github_request,
-    is_retryable_http_error,
     LAST_DELIVERY_ENV,
     later_since,
     list_paginated,
@@ -1574,12 +1572,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ignore-author",
         action="append",
-        help="GitHub login whose reviews and comments never trigger a follow-up; repeatable",
+        help=(
+            "GitHub login whose review/comment payloads never trigger a follow-up; repeatable. "
+            "Independent review-thread status transitions remain visible"
+        ),
     )
     parser.add_argument(
         "--ignore-comment-pattern",
         action="append",
-        help="Case-insensitive regex; matching review/comment bodies never trigger a follow-up. Repeatable",
+        help=(
+            "Case-insensitive regex; matching review/comment payloads never trigger a follow-up. "
+            "Independent review-thread status transitions remain visible. Repeatable"
+        ),
     )
     parser.add_argument(
         "--catch-up",
@@ -1670,8 +1674,17 @@ def main() -> int:
         # account's comments and let the new account's own comments wake the Agent.
         if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
             viewer_login = _saved_str(saved, "viewer_login")
-        viewer_login = viewer_login or get_authenticated_login(token)
-        if token is not None and viewer_login is None:
+        if viewer_login is None:
+            viewer_result = retry_initial_request(
+                lambda: get_authenticated_login(token, raise_on_error=True),
+                description="GitHub viewer lookup",
+                unauthenticated=token is None,
+            )
+            if viewer_result.error is not None:
+                print(f"GitHub viewer lookup failed: {viewer_result.error}", file=sys.stderr)
+                return 1
+            viewer_login = viewer_result.value
+        if token is not None and not viewer_login:
             print(
                 "Could not resolve the authenticated GitHub login; refusing to poll while self-comment filtering is enabled.",
                 file=sys.stderr,
@@ -1767,10 +1780,21 @@ def main() -> int:
 
     resume_cursors = {key: _saved_int(saved, key) for key in STATE_CURSOR_KEYS}
     resumed = not args.catch_up and all(value is not None for value in resume_cursors.values())
+    explicit_replay = args.pr is not None and any(
+        value is not None
+        for value in (
+            args.since_review_id,
+            args.since_review_comment_id,
+            args.since_issue_comment_id,
+            args.since_reaction_id,
+            args.since_pr_status,
+        )
+    )
     missing_baselines = _missing_pr_baselines(saved) if resumed and args.pr is not None else []
-    if missing_baselines and two_phase:
+    if missing_baselines and not explicit_replay:
         print(
-            "Saved PR state lacks required baseline(s): %s; run --seed-state before the watched action."
+            "Saved PR state lacks required baseline(s): %s; use --catch-up, or remove "
+            "and reseed this legacy state file before resuming."
             % ", ".join(missing_baselines),
             file=sys.stderr,
         )
@@ -1787,26 +1811,15 @@ def main() -> int:
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
     tracked_head_sha = _saved_str(saved, "head_sha")
-    observed_head_sha = tracked_head_sha
     review_fingerprints = _saved_fingerprints(saved, REVIEW_FINGERPRINTS_KEY)
     review_comment_fingerprints = _saved_fingerprints(saved, REVIEW_COMMENT_FINGERPRINTS_KEY)
     issue_comment_fingerprints = _saved_fingerprints(saved, ISSUE_COMMENT_FINGERPRINTS_KEY)
     review_thread_states = _saved_review_thread_states(saved)
-    explicit_replay = any(
-        value is not None
-        for value in (
-            args.since_review_id,
-            args.since_review_comment_id,
-            args.since_issue_comment_id,
-            args.since_reaction_id,
-            args.since_pr_status,
-        )
-    )
-    snapshot = (
-        {}
-        if args.catch_up or explicit_replay
-        else (_saved_snapshot(saved) if resumed and not missing_baselines else None)
-    )
+    # Normal monitoring always compares one complete normalized snapshot. Numeric
+    # cursors, fingerprints, and thread maps only explain that change in the report;
+    # they never decide independently whether to wake. Explicit replay/catch-up is
+    # the deliberate exception: there the requested cursor streams are the contract.
+    snapshot = None if args.catch_up or explicit_replay else (_saved_snapshot(saved) if resumed else None)
     review_comment_since = (
         _saved_str(saved, "review_comment_since")
         if resumed and args.since_review_comment_id is None
@@ -1819,6 +1832,26 @@ def main() -> int:
     )
 
     observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
+
+    if args.pr is not None and not resumed and not args.catch_up and not explicit_replay:
+        tracked_head_sha = observed_head_sha
+        review_fingerprints = _fingerprint_map(state["reviews"])
+        review_comment_fingerprints = _fingerprint_map(state["review_comments"])
+        issue_comment_fingerprints = _fingerprint_map(state["issue_comments"])
+        if token is not None:
+            raw_threads = state.get("review_threads")
+            review_thread_states = _review_thread_state_map(
+                raw_threads if isinstance(raw_threads, list) else []
+            )
+        snapshot = _normalized_pr_snapshot(
+            state,
+            viewer_login=viewer_login,
+            ignore_self_comments=not args.include_self_comments,
+            actionable_only=args.actionable_only,
+            ignored_authors=ignored_authors,
+            ignore_patterns=ignore_patterns,
+            review_threads_available=token is not None,
+        )
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -2003,25 +2036,31 @@ def main() -> int:
                         )
                         return best
                 time.sleep(settle_seconds)
-                try:
-                    state, _count = _fetch_state(
+                settle_request = github_request(
+                    lambda: _fetch_state(
                         args.repo,
                         args.pr,
                         token,
                         cache=cache,
+                    ),
+                    unauthenticated=token is None,
+                )
+                if settle_request.error is not None:
+                    # Settling only coalesces a batch. Once an event is known, no
+                    # enrichment failure may suppress it; the follow-up re-fetches
+                    # live state and can handle a terminal API problem explicitly.
+                    print(
+                        f"Settle re-poll failed: {settle_request.error}; reporting the batch seen so far.",
+                        file=sys.stderr,
                     )
-                except urllib.error.HTTPError as err:
-                    print(f"Settle GitHub API error: {err.code} {err.reason}", file=sys.stderr)
-                    if not is_retryable_http_error(err):
-                        raise
                     return best
-                except urllib.error.URLError as err:
-                    print(f"Settle GitHub network error: {err.reason}", file=sys.stderr)
+                if settle_request.value is None:
+                    print(
+                        "Settle re-poll returned no state; reporting the batch seen so far.",
+                        file=sys.stderr,
+                    )
                     return best
-                except Exception:
-                    # Malformed responses and other protocol failures are terminal;
-                    # hiding them behind a partial review report leaves the loop blind.
-                    raise
+                state, _count = settle_request.value
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
                 candidate = _render(pending)

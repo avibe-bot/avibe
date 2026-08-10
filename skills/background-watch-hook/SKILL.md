@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.12.1
+version: 0.13.0
 ---
 
 # Background Watch Hook
@@ -253,7 +253,10 @@ is everything the review loop needs to make progress or close out.
 
 Narrow it further with `--ignore-author <login>` and `--ignore-comment-pattern <regex>`
 (both repeatable). Filtered items still advance the cursors, so they are examined
-once and never re-reported.
+once and never re-reported. These filters suppress review/comment payloads, not
+review-thread status. A thread becoming unresolved or resolved remains an
+independent wake signal because thread state is a separate mutable resource and
+may later be changed by a different actor.
 
 `--settle <seconds>` is worth setting on any review loop. A bot review arrives as a
 burst of inline comments plus an envelope, so the poll that happens to catch the
@@ -309,6 +312,12 @@ anything that arrived between the previous cycle's exit and that snapshot is los
 The file carries the resolved GitHub login and the complete mutable PR baseline
 forward. PR cycles reread complete review/comment/thread collections because
 edits, deletions, and thread-resolution changes are wake-worthy state.
+For an ordinary wait, that normalized complete snapshot is the single wake/no-wake
+decision. Numeric cursors, fingerprints, and the thread map only describe a detected
+change; they cannot wake independently. `--catch-up` and explicit `--since-*-id`
+flags are the deliberate replay modes and therefore remain cursor-driven. A legacy
+state file with cursors but no complete snapshot is rejected until it is deliberately
+caught up or reseeded, rather than silently absorbing mutable changes.
 The login is reused only while the token still fingerprints to the account it was
 resolved for. Explicit cursor flags still request a replay from that cursor, while
 the complete PR collections remain the source of truth for edits and removals. The
@@ -369,9 +378,10 @@ GitHub-specific notes:
 - `--catch-up` reports activity that already exists at startup, and overrides saved
   cursors when a state file is present; an explicit `--since-*-id` still wins
 - without `--catch-up` or a `--state-file`, the waiter snapshots current PR activity as the baseline
-- polling is cheap by design: comment fetches are filtered server-side with `since`,
-  reactions with `content=+1`, and unchanged pages revalidate to `304`, which GitHub
-  does not charge against the rate limit — an idle watch can poll for hours for free
+- polling is cheap by design: mutable review/comment collections are fetched in full
+  so edits and deletions remain observable, reactions are filtered server-side with
+  `content=+1`, and unchanged pages revalidate to `304`, which GitHub does not charge
+  against the rate limit — an idle watch can poll for hours for free
 - PR activity also includes the special case where `chatgpt-codex-connector` or
   `chatgpt-codex-connector[bot]` leaves a `+1` reaction on the PR body instead of
   posting a comment; pass reactions remain visible even when `--event-limit` is

@@ -1037,6 +1037,40 @@ def test_main_fails_closed_when_authenticated_login_cannot_be_resolved() -> None
     assert "refusing to poll" in stderr.getvalue()
 
 
+def test_main_retries_transient_authenticated_login_failure() -> None:
+    module = _load_module()
+    state = _pr_state(
+        issue_comments=[
+            {
+                "id": 501,
+                "body": "Review result",
+                "html_url": "https://github.com/example/repo/pull/153#issuecomment-501",
+                "user": {"login": "reviewer"},
+            }
+        ]
+    )
+
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(
+            module,
+            "get_authenticated_login",
+            side_effect=[TimeoutError("temporary viewer timeout"), "tester"],
+        ) as lookup,
+        patch.object(module, "_fetch_state", return_value=(state, 1)),
+        patch.object(module.time, "sleep", return_value=None) as sleep,
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--catch-up"],
+        ),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert lookup.call_count == 2
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0]
+
+
 def test_render_activity_actionable_only_drops_bot_trigger_comment_but_advances_cursor() -> None:
     module = _load_module()
     state = {
@@ -1460,6 +1494,24 @@ def _review_comment(comment_id: int, *, body="Fix this", created_at="2026-08-04T
     }
 
 
+def _complete_pr_baseline_fields(module, state=None) -> dict[str, object]:
+    baseline = state or _pr_state()
+    raw_threads = baseline.get("review_threads")
+    return {
+        "head_sha": module._current_pr_head_sha(baseline.get("pull_request")) or "unknown",
+        "review_fingerprints": module._fingerprint_map(baseline["reviews"]),
+        "review_comment_fingerprints": module._fingerprint_map(baseline["review_comments"]),
+        "issue_comment_fingerprints": module._fingerprint_map(baseline["issue_comments"]),
+        "review_thread_states": module._review_thread_state_map(
+            raw_threads if isinstance(raw_threads, list) else []
+        ),
+        "snapshot": module._normalized_pr_snapshot(
+            baseline,
+            ignore_self_comments=False,
+        ),
+    }
+
+
 def test_fetch_state_narrows_comments_and_filters_reactions_server_side() -> None:
     module = _load_module()
     urls: list[str] = []
@@ -1570,6 +1622,38 @@ def test_fetch_state_paginates_review_threads_as_part_of_the_pr_snapshot() -> No
     assert request_count == 7
 
 
+def test_fresh_pr_watch_baselines_existing_review_threads() -> None:
+    module = _load_module()
+    state = _pr_state(review_threads=[{"id": "thread-1", "isResolved": False}])
+    stdout = io.StringIO()
+
+    with (
+        patch.object(module, "_fetch_state", return_value=(state, 1)) as fetch,
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "monotonic", side_effect=[0.0, 1.0]),
+        patch.object(module.time, "sleep", side_effect=AssertionError("must not wait")),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--timeout",
+                "0.5",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 124
+    assert fetch.call_count == 1
+    assert stdout.getvalue() == ""
+
+
 def test_render_activity_reports_review_edit_and_thread_transition() -> None:
     module = _load_module()
     old_review = {
@@ -1640,6 +1724,44 @@ def test_snapshot_gate_advances_past_filtered_activity_without_waking() -> None:
 
     assert result[0] is None
     assert result[3] == 9
+
+
+def test_review_thread_status_remains_visible_when_its_comment_author_is_filtered() -> None:
+    module = _load_module()
+    baseline = _pr_state()
+    current = _pr_state(
+        review_comments=[
+            {
+                **_review_comment(501),
+                "user": {"login": "dependabot[bot]"},
+            }
+        ],
+        review_threads=[{"id": "thread-1", "isResolved": False}],
+    )
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=current,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        snapshot=module._normalized_pr_snapshot(
+            baseline,
+            ignore_self_comments=False,
+            ignored_authors={"dependabot[bot]"},
+        ),
+        review_thread_states={},
+        ignore_self_comments=False,
+        ignored_authors={"dependabot[bot]"},
+    )
+
+    assert output is not None
+    assert "review_thread thread-1 absent -> unresolved" in output
+    assert "review_comment #501" not in output
 
 
 def test_pending_report_payload_is_replayable_without_remote_state(tmp_path) -> None:
@@ -1836,6 +1958,55 @@ def test_main_settle_window_survives_a_failed_re_poll() -> None:
     assert "review_comment #501" in stdout.getvalue()
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("settle timed out"),
+        ConnectionError("connection reset"),
+        OSError("socket unavailable"),
+    ],
+)
+def test_main_settle_preserves_detected_event_for_every_transient_error(error) -> None:
+    module = _load_module()
+    fetches = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 1:
+            return _pr_state(), 1
+        if fetches == 2:
+            return _pr_state(review_comments=[_review_comment(501)]), 1
+        raise error
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--interval",
+                "1",
+                "--settle",
+                "5",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert "review_comment #501" in stdout.getvalue()
+
+
 def test_main_writes_the_state_file_even_with_nothing_to_report(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "cursors" / "pr-153.json"
@@ -1933,6 +2104,53 @@ def test_seed_state_persists_a_complete_pr_baseline_and_exits(tmp_path) -> None:
     assert "Seeded GitHub PR baseline" in stderr.getvalue()
 
 
+def test_manual_resume_rejects_complete_cursors_without_snapshot_baselines(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "legacy-pr-153.json"
+    raw = json.dumps(
+        {
+            "version": module.STATE_FILE_VERSION,
+            "repo": "avibe-bot/avibe",
+            "pr": 153,
+            "review_cursor": 0,
+            "review_comment_cursor": 400,
+            "issue_comment_cursor": 0,
+            "reaction_cursor": 0,
+            "pr_status": "open",
+            "viewer_login": "qiqi",
+            "token_fingerprint": module._token_fingerprint("token"),
+        }
+    )
+    state_file.write_text(raw, encoding="utf-8")
+    stderr = io.StringIO()
+
+    with (
+        patch.object(module, "_fetch_state", return_value=(_pr_state(), 1)) as fetch,
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login") as lookup,
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert fetch.call_count == 1
+    lookup.assert_not_called()
+    assert "lacks required baseline" in stderr.getvalue()
+    assert state_file.read_text(encoding="utf-8") == raw
+
+
 def test_invalid_remote_target_does_not_claim_the_state_file(tmp_path) -> None:
     module = _load_module()
     state_file = tmp_path / "pr-999.json"
@@ -1971,6 +2189,7 @@ def test_main_resumes_from_the_state_file_instead_of_re_baselining(tmp_path) -> 
                 "issue_comment_since": "2026-08-04T09:00:00Z",
                 "viewer_login": "qiqi",
                 "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module),
             }
         ),
         encoding="utf-8",
@@ -2017,6 +2236,7 @@ def test_main_re_resolves_the_login_when_the_token_changed(tmp_path) -> None:
                 "pr_status": "open",
                 "viewer_login": "someone-else",
                 "token_fingerprint": module._token_fingerprint("old-token"),
+                **_complete_pr_baseline_fields(module),
             }
         ),
         encoding="utf-8",
@@ -2057,7 +2277,7 @@ def test_main_re_resolves_the_login_when_the_token_changed(tmp_path) -> None:
     # The cached login belonged to the previous credential. Reusing it would let the
     # new account's own comments wake the Agent, so the login is resolved again and
     # it is the fresh login that filters this cycle.
-    fake_login.assert_called_once_with("new-token")
+    fake_login.assert_called_once_with("new-token", raise_on_error=True)
     assert rc == 124
     assert stdout.getvalue() == ""
     saved = json.loads(state_file.read_text(encoding="utf-8"))
@@ -2978,6 +3198,7 @@ def test_main_skips_the_settle_window_that_would_outlast_the_timeout(tmp_path) -
                 "pr_status": "open",
                 "viewer_login": "qiqi",
                 "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module),
             }
         ),
         encoding="utf-8",
@@ -3045,6 +3266,7 @@ def test_main_skips_the_settle_window_when_only_its_sleep_would_fit(tmp_path) ->
                 "pr_status": "open",
                 "viewer_login": "qiqi",
                 "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module),
             }
         ),
         encoding="utf-8",
@@ -3128,6 +3350,7 @@ def test_main_commits_cursors_only_after_the_event_is_reported(tmp_path) -> None
                 "pr_status": "open",
                 "viewer_login": "qiqi",
                 "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module),
             }
         ),
         encoding="utf-8",

@@ -78,6 +78,10 @@ class GitHubTerminalError(GitHubRequestError):
     """A terminal GitHub failure that must stop the waiter."""
 
 
+class GitHubProtocolError(GitHubTerminalError):
+    """A successful response that violates the expected GitHub contract."""
+
+
 class InitialRequestRetriesExhausted(GitHubTerminalError):
     """A bounded initial GitHub request exhausted its transient retries."""
 
@@ -360,19 +364,31 @@ def is_retryable_http_error(err: urllib.error.HTTPError) -> bool:
     return code in RETRYABLE_HTTP_STATUS_CODES
 
 
-def get_authenticated_login(token: str | None) -> str | None:
+def get_authenticated_login(
+    token: str | None,
+    *,
+    raise_on_error: bool = False,
+) -> str | None:
     if not token:
         return None
 
     try:
         payload = github_get("https://api.github.com/user", token)
     except Exception:
+        if raise_on_error:
+            raise
         return None
 
     if not isinstance(payload, dict):
+        if raise_on_error:
+            raise GitHubProtocolError("GitHub viewer response is not an object")
         return None
     login = payload.get("login")
-    return str(login) if isinstance(login, str) and login else None
+    if isinstance(login, str) and login:
+        return login
+    if raise_on_error:
+        raise GitHubProtocolError("GitHub viewer response has no login")
+    return None
 
 
 def list_paginated(
