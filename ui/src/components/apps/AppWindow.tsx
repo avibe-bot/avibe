@@ -363,7 +363,11 @@ export const AppWindow: React.FC<{
                 // Jump to the owning session's chat and drop the window to the Dock
                 // (chat visible immediately; the Dock thumbnail brings the app back).
                 authorization.runNavigation(() => navigate(chatHref));
-                wm.minimize(win.id);
+                // Same reason the minimize light is withheld above: this tab's chrome —
+                // and with it the Dock — comes back only WHILE it sits on /chat. Going
+                // Back to the standalone app route hides the Dock again and would strand
+                // the window minimized and inert, so leave it shown instead.
+                if (!chromeless) wm.minimize(win.id);
               }}
               className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
             >
