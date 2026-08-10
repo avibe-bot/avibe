@@ -2165,39 +2165,12 @@ class AgentAuthService:
                 )
 
         try:
-            config = getattr(self.controller, "config", None)
-            target = getattr(getattr(config, "agents", None), backend, None)
-            saver = getattr(config, "save", None) if config is not None else None
-            if target is not None and callable(saver):
-                try:
-                    from config.v2_config import CONFIG_LOCK
-
-                    with CONFIG_LOCK:
-                        target.auth_mode = "oauth"
-                        target.api_key = None
-                        # Drop the relay base_url too: if the user
-                        # signed in via OAuth after this, the stored
-                        # base_url would still get injected as
-                        # ``ANTHROPIC_BASE_URL`` / Codex provider
-                        # override, sending OAuth requests to a relay
-                        # that only accepts API keys (401).
-                        target.base_url = None
-                        # Sign out is an explicit user choice — flip
-                        # the marker so ``build_claude_subprocess_env``
-                        # honors ``auth_mode == "oauth"`` strictly
-                        # and strips inherited ``ANTHROPIC_*`` env vars
-                        # (Codex-only field; setattr is a no-op for
-                        # other backends).
-                        if backend == "claude":
-                            target.auth_mode_set = True
-                        saver()
-                except ImportError:
-                    target.auth_mode = "oauth"
-                    target.api_key = None
-                    target.base_url = None
-                    if backend == "claude":
-                        target.auth_mode_set = True
-                    saver()
+            await self._save_backend_auth_fields(
+                backend,
+                "oauth",
+                clear_credentials=True,
+                mark_mode_explicit=backend == "claude",
+            )
         except Exception as err:  # noqa: BLE001
             # Disk state has already been cleared; surface the V2Config
             # write failure but report partial success so the UI shows
@@ -3551,75 +3524,87 @@ class AgentAuthService:
         if backend == "codex" and auth_mode == "oauth":
             await self._clear_codex_api_key_for_oauth()
         try:
-            config = getattr(self.controller, "config", None)
-            target = getattr(getattr(config, "agents", None), backend, None)
-            saver = getattr(config, "save", None) if config is not None else None
-            loaded_config = None
-            if target is None or not callable(saver):
-                from config.v2_config import V2Config
-
-                loaded_config = V2Config.load()
-                target = getattr(getattr(loaded_config, "agents", None), backend, None)
-                saver = getattr(loaded_config, "save", None)
-            if target is None or not callable(saver):
-                return
-            # An explicit OAuth save must also flip ``auth_mode_set``
-            # for Claude — otherwise a successful OAuth flow on a
-            # legacy install never trips the marker (auth_mode was
-            # already "oauth" from the schema default), so
-            # ``build_claude_subprocess_env`` keeps preserving env-var
-            # auth and the OAuth credentials are ignored at launch.
-            needs_mode_write = getattr(target, "auth_mode", None) != auth_mode
-            needs_marker_write = (
-                backend == "claude"
-                and not bool(getattr(target, "auth_mode_set", False))
+            await self._save_backend_auth_fields(
+                backend,
+                auth_mode,
+                clear_credentials=backend == "codex" and auth_mode == "oauth",
+                mark_mode_explicit=backend == "claude",
             )
-            needs_codex_oauth_cleanup = (
-                backend == "codex"
-                and auth_mode == "oauth"
-                and (
-                    bool(getattr(target, "api_key", None))
-                    or bool(getattr(target, "base_url", None))
-                )
-            )
-            if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
-                return
-            try:
-                from config.v2_config import CONFIG_LOCK
-
-                with CONFIG_LOCK:
-                    if needs_mode_write:
-                        target.auth_mode = auth_mode
-                    if needs_marker_write:
-                        target.auth_mode_set = True
-                    if needs_codex_oauth_cleanup:
-                        target.api_key = None
-                        target.base_url = None
-                    saver()
-            except ImportError:
-                if needs_mode_write:
-                    target.auth_mode = auth_mode
-                if needs_marker_write:
-                    target.auth_mode_set = True
-                if needs_codex_oauth_cleanup:
-                    target.api_key = None
-                    target.base_url = None
-                saver()
-            if loaded_config is not None and config is not None:
-                compat_target = getattr(config, backend, None)
-                if compat_target is not None:
-                    if needs_mode_write:
-                        setattr(compat_target, "auth_mode", auth_mode)
-                    if needs_marker_write:
-                        setattr(compat_target, "auth_mode_set", True)
-                    if needs_codex_oauth_cleanup:
-                        setattr(compat_target, "api_key", None)
-                        setattr(compat_target, "base_url", None)
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
                 auth_mode, backend, err,
             )
+
+    async def _save_backend_auth_fields(
+        self,
+        backend: str,
+        auth_mode: str,
+        *,
+        clear_credentials: bool,
+        mark_mode_explicit: bool,
+    ) -> None:
+        """Fresh-load and persist backend auth fields without blocking the loop."""
+
+        controller_config = getattr(self.controller, "config", None)
+
+        def update_target(target: Any) -> bool:
+            changed = getattr(target, "auth_mode", None) != auth_mode
+            target.auth_mode = auth_mode
+            if clear_credentials:
+                changed = changed or bool(
+                    getattr(target, "api_key", None)
+                    or getattr(target, "base_url", None)
+                )
+                target.api_key = None
+                target.base_url = None
+            if mark_mode_explicit:
+                changed = changed or not bool(
+                    getattr(target, "auth_mode_set", False)
+                )
+                target.auth_mode_set = True
+            return changed
+
+        def persist() -> dict[str, Any] | None:
+            from config.v2_config import V2Config, config_write_transaction
+
+            if isinstance(controller_config, V2Config):
+                with config_write_transaction():
+                    try:
+                        config = V2Config.load()
+                    except FileNotFoundError:
+                        config = controller_config
+                    target = getattr(config.agents, backend, None)
+                    if target is None:
+                        return None
+                    if update_target(target):
+                        config.save()
+            else:
+                config = controller_config
+                target = getattr(getattr(config, "agents", None), backend, None)
+                saver = getattr(config, "save", None) if config is not None else None
+                if target is None or not callable(saver):
+                    return None
+                if update_target(target):
+                    saver()
+            return {
+                "auth_mode": getattr(target, "auth_mode", None),
+                "api_key": getattr(target, "api_key", None),
+                "base_url": getattr(target, "base_url", None),
+                "auth_mode_set": getattr(target, "auth_mode_set", None),
+            }
+
+        persisted = await run_blocking(persist)
+        live_target = getattr(
+            getattr(controller_config, "agents", None),
+            backend,
+            None,
+        )
+        if persisted is None or live_target is None:
+            return
+        for field, value in persisted.items():
+            if field != "auth_mode_set" or value is not None:
+                setattr(live_target, field, value)
 
     async def _terminate_web_flow(
         self,

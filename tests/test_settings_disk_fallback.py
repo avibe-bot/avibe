@@ -22,6 +22,8 @@ The fixes:
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -29,6 +31,39 @@ from pathlib import Path
 import pytest
 
 from vibe.codex_config import read_codex_auth_state
+
+
+def _save_claude_base_url(
+    avibe_home: str,
+    claude_home: str,
+    base_url: str,
+    attempting,
+    finished,
+) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    os.environ["CLAUDE_CONFIG_DIR"] = claude_home
+    from storage.lock import MigrationFileLock
+    from vibe import api
+
+    original_acquire = MigrationFileLock.acquire
+
+    def signal_acquire(lock) -> None:
+        attempting.set()
+        original_acquire(lock)
+
+    MigrationFileLock.acquire = signal_acquire
+    api.restart_backend = lambda name, **kwargs: {"ok": True}
+    api._clear_claude_oauth_credentials_after_api_key_save = (
+        lambda _service=None: {"ok": True}
+    )
+    api.save_claude_auth(
+        {
+            "auth_mode": "api_key",
+            "api_key": "sk-concurrent",
+            "base_url": base_url,
+        }
+    )
+    finished.set()
 
 
 def test_codex_reads_base_url_from_user_titlecase_provider(tmp_path: Path) -> None:
@@ -911,6 +946,78 @@ def test_save_claude_auth_keeps_settings_token_over_legacy_v2_key(
     assert "ANTHROPIC_API_KEY" not in settings["env"]
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://new-relay.example.invalid"
     _assert_claude_managed_env(settings["env"])
+
+
+def test_save_claude_auth_preserved_fields_share_final_config_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    claude_restart_calls: list[dict],
+) -> None:
+    avibe_home = tmp_path / ".vibe_remote"
+    claude_home = tmp_path / ".claude"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+
+    from config.v2_config import CONFIG_LOCK, AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+    from storage.lock import MigrationFileLock
+    from vibe import claude_config
+    from vibe.api import save_claude_auth
+
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.agents.claude.auth_mode = "api_key"
+    config.agents.claude.api_key = "sk-legacy"
+    config.agents.claude.base_url = "https://old.example.invalid"
+    config.save()
+    context = multiprocessing.get_context("spawn")
+    attempting = context.Event()
+    finished = context.Event()
+    concurrent = context.Process(
+        target=_save_claude_base_url,
+        args=(
+            str(avibe_home),
+            str(claude_home),
+            "https://new.example.invalid",
+            attempting,
+            finished,
+        ),
+    )
+    original_apply = claude_config.apply_claude_auth
+    original_acquire = MigrationFileLock.acquire
+
+    def interleaved_apply(**kwargs):
+        concurrent.start()
+        assert attempting.wait(timeout=5)
+        if not CONFIG_LOCK._is_owned():
+            assert finished.wait(timeout=5)
+        return original_apply(**kwargs)
+
+    def wait_for_concurrent_writer(lock) -> None:
+        if concurrent.pid is not None and not CONFIG_LOCK._is_owned():
+            assert finished.wait(timeout=5)
+        original_acquire(lock)
+
+    monkeypatch.setattr(claude_config, "apply_claude_auth", interleaved_apply)
+    monkeypatch.setattr(MigrationFileLock, "acquire", wait_for_concurrent_writer)
+    try:
+        result = save_claude_auth({"auth_mode": "api_key", "api_key": ""})
+        assert finished.wait(timeout=5)
+    finally:
+        concurrent.join(timeout=5)
+        if concurrent.is_alive():
+            concurrent.terminate()
+            concurrent.join(timeout=5)
+
+    settings = json.loads((claude_home / "settings.json").read_text(encoding="utf-8"))
+    assert result["ok"] is True
+    assert concurrent.exitcode == 0
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://new.example.invalid"
 
 
 def test_remove_claude_api_key_refreshes_cached_runtime(

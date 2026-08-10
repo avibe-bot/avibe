@@ -37,7 +37,7 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import V2Config, config_write_transaction
 from core.show_pages import (
     SHOW_CLI_EVENT_TOKEN_HEADER,
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
@@ -4602,7 +4602,7 @@ def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, b
     from vibe import api
     from vibe import remote_access
 
-    with CONFIG_LOCK:
+    with config_write_transaction():
         previous_config = _load_remote_access_config()
         config = api.save_config(payload, generic_remote_access=True)
         should_reconcile_remote_access = False

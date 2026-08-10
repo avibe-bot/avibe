@@ -26,6 +26,33 @@ def _save_remote_transport(avibe_home: str, transport_protocol: str) -> None:
     )
 
 
+def _save_remote_enabled(avibe_home: str, enabled: bool) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    from vibe import api
+
+    api.save_config({"remote_access": {"vibe_cloud": {"enabled": enabled}}})
+
+
+def _save_remote_transport_with_signal(
+    avibe_home: str,
+    transport_protocol: str,
+    attempting,
+    finished,
+) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    from storage.lock import MigrationFileLock
+
+    original_acquire = MigrationFileLock.acquire
+
+    def signal_acquire(lock) -> None:
+        attempting.set()
+        original_acquire(lock)
+
+    MigrationFileLock.acquire = signal_acquire
+    _save_remote_transport(avibe_home, transport_protocol)
+    finished.set()
+
+
 def _setup_settings_candidate(monkeypatch, tmp_path) -> list[tuple[str, object]]:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
@@ -236,7 +263,7 @@ def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypat
     monkeypatch.setattr(remote_access, "_wait_candidate_ready", lambda pid, metrics: True)
 
     def promote(pid, **kwargs):
-        assert not CONFIG_LOCK._is_owned()
+        assert CONFIG_LOCK._is_owned()
         events.append(("promote", kwargs["runtime_signature"]["transport_protocol"]))
         return {"pid": 111}
 
@@ -255,6 +282,43 @@ def test_ra_tq_028_settings_promote_before_draining_previous_connector(monkeypat
     assert result["connector_replaced"] is True
     assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "http2"
     assert events == [("start", "http2"), ("promote", "http2"), ("drain", 111)]
+
+
+def test_ra_tq_028_settings_holds_config_transaction_through_promotion(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    events = _setup_settings_candidate(monkeypatch, tmp_path)
+    context = multiprocessing.get_context("spawn")
+    attempting = context.Event()
+    finished = context.Event()
+    concurrent = context.Process(
+        target=_save_remote_transport_with_signal,
+        args=(str(tmp_path), "quic", attempting, finished),
+    )
+
+    def promote(pid, **kwargs):
+        concurrent.start()
+        assert attempting.wait(timeout=5)
+        assert not finished.wait(timeout=0.2)
+        events.append(("promote", kwargs["runtime_signature"]["transport_protocol"]))
+        return {"pid": 111}
+
+    monkeypatch.setattr(remote_access, "_promote_candidate_connector", promote)
+    monkeypatch.setattr(remote_access, "_drain_tracked_connector", lambda connector: True)
+    try:
+        result = remote_access.apply_settings({"transport_protocol": "http2"})
+        assert finished.wait(timeout=5)
+    finally:
+        concurrent.join(timeout=5)
+        if concurrent.is_alive():
+            concurrent.terminate()
+            concurrent.join(timeout=5)
+
+    assert result["ok"] is True
+    assert concurrent.exitcode == 0
+    assert events == [("start", "http2"), ("promote", "http2")]
+    assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "quic"
 
 
 def test_ra_tq_028_settings_compare_and_save_reject_concurrent_config_write(
@@ -302,6 +366,48 @@ def test_ra_tq_028_settings_compare_and_save_reject_concurrent_config_write(
     assert events == [("start", "http2"), ("discard", 222)]
 
 
+def test_config_runtime_decision_compares_snapshot_from_same_transaction(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from storage.lock import MigrationFileLock
+    from vibe import ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    context = multiprocessing.get_context("spawn")
+    concurrent = context.Process(
+        target=_save_remote_enabled,
+        args=(str(tmp_path), True),
+    )
+    original_acquire = MigrationFileLock.acquire
+    interleaved = False
+
+    def acquire_after_concurrent_write(lock) -> None:
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            concurrent.start()
+            concurrent.join(timeout=5)
+            assert concurrent.exitcode == 0
+        original_acquire(lock)
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", acquire_after_concurrent_write)
+    try:
+        saved, should_reconcile, _, _ = ui_server._save_config_and_runtime_decisions(
+            {"remote_access": {"vibe_cloud": {"enabled": False}}}
+        )
+    finally:
+        if concurrent.is_alive():
+            concurrent.terminate()
+        concurrent.join(timeout=5)
+
+    assert should_reconcile is True
+    assert saved.remote_access.vibe_cloud.enabled is False
+
+
 def test_ra_tq_028_settings_rollback_preserves_concurrent_config_write(
     monkeypatch,
     tmp_path,
@@ -309,26 +415,31 @@ def test_ra_tq_028_settings_rollback_preserves_concurrent_config_write(
     events = _setup_settings_candidate(monkeypatch, tmp_path)
 
     context = multiprocessing.get_context("spawn")
+    attempting = context.Event()
+    finished = context.Event()
     concurrent = context.Process(
-        target=_save_remote_transport,
-        args=(str(tmp_path), "quic"),
+        target=_save_remote_transport_with_signal,
+        args=(str(tmp_path), "quic", attempting, finished),
     )
 
     def fail_promotion(*args, **kwargs):
         concurrent.start()
-        concurrent.join(timeout=5)
-        assert concurrent.exitcode == 0
+        assert attempting.wait(timeout=5)
+        assert not finished.wait(timeout=0.2)
         raise RuntimeError("promotion_failed")
 
     monkeypatch.setattr(remote_access, "_promote_candidate_connector", fail_promotion)
     try:
         result = remote_access.apply_settings({"transport_protocol": "http2"})
+        assert finished.wait(timeout=5)
     finally:
+        concurrent.join(timeout=5)
         if concurrent.is_alive():
             concurrent.terminate()
-        concurrent.join(timeout=5)
+            concurrent.join(timeout=5)
 
     assert result["ok"] is False
+    assert concurrent.exitcode == 0
     assert result["error"] == "remote_access_settings_apply_failed"
     assert result["detail"] == "promotion_failed"
     assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "quic"

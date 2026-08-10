@@ -1025,21 +1025,19 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 candidate_config = api.save_config(
                     {"remote_access": {"vibe_cloud": payload}}
                 )
-            try:
-                replaced = _promote_candidate_connector(
-                    candidate_pid,
-                    runtime_signature=_runtime_signature(candidate_config, binary),
-                )
-            except Exception:
-                with config_write_transaction():
+                try:
+                    replaced = _promote_candidate_connector(
+                        candidate_pid,
+                        runtime_signature=_runtime_signature(candidate_config, binary),
+                    )
+                except Exception:
                     persisted = V2Config.load()
-                    # Never roll an older candidate over a newer settings writer.
                     if _remote_access_settings(persisted) == candidate_settings:
                         api.save_config(
                             {"remote_access": {"vibe_cloud": previous_settings}},
                             validate_remote_access_network=False,
                         )
-                raise
+                    raise
     except Exception as exc:
         if candidate_pid is not None:
             _discard_candidate_connector(candidate_pid)

@@ -1196,6 +1196,53 @@ def test_remove_web_auth_codex_uses_logout_subcommand(
     assert "logout" in args and "auth" not in args
 
 
+def test_remove_web_auth_fresh_loads_config_and_saves_off_loop(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.services.settings import default_config
+    from config.v2_config import V2Config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.agents.codex.base_url = "https://old.example.test/v1"
+    config.save()
+    service.controller.config = V2Config.load()
+    concurrent = V2Config.load()
+    concurrent.runtime.log_level = "DEBUG"
+    concurrent.save()
+    service._run_utility_command = AsyncMock(return_value=(True, None))
+    service._post_web_success_hook = None
+    original_save = V2Config.save
+    save_threads: list[int] = []
+
+    def record_save(config, *args, **kwargs):
+        save_threads.append(threading.get_ident())
+        return original_save(config, *args, **kwargs)
+
+    monkeypatch.setattr(V2Config, "save", record_save)
+
+    async def exercise():
+        event_loop_thread = threading.get_ident()
+        result = await service.remove_web_auth("codex")
+        return result, event_loop_thread
+
+    result, event_loop_thread = _run(exercise())
+    persisted = V2Config.load()
+
+    assert result == {"ok": True}
+    assert persisted.runtime.log_level == "DEBUG"
+    assert persisted.agents.codex.auth_mode == "oauth"
+    assert persisted.agents.codex.api_key is None
+    assert persisted.agents.codex.base_url is None
+    assert save_threads and all(
+        thread_id != event_loop_thread for thread_id in save_threads
+    )
+
+
 def test_remove_web_auth_surfaces_logout_failure(
     service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1232,6 +1279,51 @@ def test_remove_web_auth_surfaces_claude_settings_cleanup_failure(
     assert result["partial"] is True
     assert result["warning"] == "settings_cleanup_failed"
     assert "Failed to clear Claude Code settings env" in result["detail"]
+
+
+def test_persist_backend_auth_mode_fresh_loads_config_and_saves_off_loop(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from core.services.settings import default_config
+    from config.v2_config import V2Config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.agents.codex.base_url = "https://old.example.test/v1"
+    config.save()
+    service.controller.config = V2Config.load()
+    concurrent = V2Config.load()
+    concurrent.runtime.log_level = "DEBUG"
+    concurrent.save()
+    service._clear_codex_api_key_for_oauth = AsyncMock()
+    original_save = V2Config.save
+    save_threads: list[int] = []
+
+    def record_save(config, *args, **kwargs):
+        save_threads.append(threading.get_ident())
+        return original_save(config, *args, **kwargs)
+
+    monkeypatch.setattr(V2Config, "save", record_save)
+
+    async def exercise():
+        event_loop_thread = threading.get_ident()
+        await service._persist_backend_auth_mode("codex", "oauth")
+        return event_loop_thread
+
+    event_loop_thread = _run(exercise())
+    persisted = V2Config.load()
+
+    assert persisted.runtime.log_level == "DEBUG"
+    assert persisted.agents.codex.auth_mode == "oauth"
+    assert persisted.agents.codex.api_key is None
+    assert persisted.agents.codex.base_url is None
+    assert save_threads and all(
+        thread_id != event_loop_thread for thread_id in save_threads
+    )
 
 
 def test_clear_claude_oauth_for_api_key_mode_restores_key_settings(

@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config, config_write_transaction
+from config.v2_config import V2Config, config_write_transaction
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -9252,7 +9252,9 @@ def save_codex_auth(payload: dict) -> dict:
         try:
             config = load_config()
         except FileNotFoundError:
-            config = V2Config()
+            from core.services.settings import default_config
+
+            config = default_config()
         stored_codex = getattr(getattr(config, "agents", None), "codex", None)
         if auth_mode == "api_key" and not api_key:
             api_key = getattr(stored_codex, "api_key", None) or None
@@ -9510,64 +9512,58 @@ def save_claude_auth(payload: dict) -> dict:
     if auth_mode == "api_key":
         credential_type = raw_credential_type or existing_credential_type or "api_key"
     credential = api_key or existing_credential
-
-    if auth_mode == "api_key" and not credential:
-        # Fall back to legacy V2Config only for older installs that have not
-        # yet migrated their credential into Claude Code settings.
-        with CONFIG_LOCK:
-            try:
-                existing = load_config()
-                stored = getattr(getattr(existing, "agents", None), "claude", None)
-                credential = getattr(stored, "api_key", None) or None
-            except Exception:
-                pass
-        if not credential:
-            return {"ok": False, "message": "api_key is required when auth_mode='api_key'"}
-
     effective_base_url = base_url_change if base_url_present else None
     if not base_url_present and auth_mode == "api_key":
         existing_base = settings_env.get("ANTHROPIC_BASE_URL")
         if isinstance(existing_base, str) and existing_base.strip():
             effective_base_url = existing_base.strip()
-        else:
-            with CONFIG_LOCK:
-                try:
-                    existing = load_config()
-                    stored = getattr(getattr(existing, "agents", None), "claude", None)
-                    effective_base_url = getattr(stored, "base_url", None) or None
-                except Exception:
-                    effective_base_url = None
 
     oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
 
     from vibe.claude_config import apply_claude_auth
 
-    try:
-        apply_claude_auth(
-            auth_mode=auth_mode,
-            api_key=(
-                credential
-                if auth_mode == "api_key" and credential_type == "api_key"
-                else None
-            ),
-            base_url=effective_base_url if auth_mode == "api_key" else None,
-            auth_token=(
-                credential
-                if auth_mode == "api_key" and credential_type == "auth_token"
-                else None
-            ),
-        )
-    except ValueError as exc:
-        return {"ok": False, "message": str(exc)}
-    except OSError as exc:
-        logger.error("Failed to write Claude settings.json: %s", exc, exc_info=True)
-        return {"ok": False, "message": f"Failed to write Claude settings: {exc}"}
-
     with config_write_transaction():
         try:
             config = load_config()
         except FileNotFoundError:
-            config = V2Config()
+            from core.services.settings import default_config
+
+            config = default_config()
+        stored_claude = getattr(getattr(config, "agents", None), "claude", None)
+        if auth_mode == "api_key" and not credential:
+            # Legacy installs may still have a credential cached in V2Config.
+            credential = getattr(stored_claude, "api_key", None) or None
+            if not credential:
+                return {
+                    "ok": False,
+                    "message": "api_key is required when auth_mode='api_key'",
+                }
+        if (
+            auth_mode == "api_key"
+            and not base_url_present
+            and effective_base_url is None
+        ):
+            effective_base_url = getattr(stored_claude, "base_url", None) or None
+        try:
+            apply_claude_auth(
+                auth_mode=auth_mode,
+                api_key=(
+                    credential
+                    if auth_mode == "api_key" and credential_type == "api_key"
+                    else None
+                ),
+                base_url=effective_base_url if auth_mode == "api_key" else None,
+                auth_token=(
+                    credential
+                    if auth_mode == "api_key" and credential_type == "auth_token"
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+        except OSError as exc:
+            logger.error("Failed to write Claude settings.json: %s", exc, exc_info=True)
+            return {"ok": False, "message": f"Failed to write Claude settings: {exc}"}
         config.agents.claude.auth_mode = auth_mode
         # Flip the explicit marker so ``build_claude_subprocess_env``
         # honors ``auth_mode`` strictly (strip inherited env in OAuth
