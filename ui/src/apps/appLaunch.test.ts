@@ -157,6 +157,12 @@ describe('isStandaloneAppRoutePath', () => {
     expect(isStandaloneAppRoutePath('/apps/show/sess42')).toBe(false);
   });
 
+  it('accepts the trailing-slash variant React Router still renders', () => {
+    expect(isStandaloneAppRoutePath('/apps/terminal/')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/files//')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/library/')).toBe(false);
+  });
+
   it('is false off the app routes', () => {
     // A standalone tab that navigates away is an ordinary page again — chrome comes back.
     expect(isStandaloneAppRoutePath('/')).toBe(false);
