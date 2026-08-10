@@ -48,7 +48,12 @@ function useBackToControlPanelPath(): string {
 function GateState() {
   const { t } = useTranslation();
   const { gate, signIn, retry } = useOrganization();
+  const { capabilities } = useInstanceAuthorization();
   const backToControlPanelPath = useBackToControlPanelPath();
+  const cloudNotConnectedPath = capabilities.can_use_system ? '/admin/remote-access' : backToControlPanelPath;
+  const cloudNotConnectedLabel = capabilities.can_use_system
+    ? t('organization.actions.openRemoteAccess')
+    : t('organization.actions.backToControlPanel');
   if (gate === 'loading' || gate === 'reauthorizing') {
     return (
       <div className="grid min-h-[100dvh] place-items-center bg-background p-6 text-center">
@@ -69,7 +74,7 @@ function GateState() {
       icon: CloudOff,
       title: t('organization.states.notConnectedTitle'),
       body: t('organization.states.notConnectedBody'),
-      action: <Button asChild variant="brand"><Link to="/admin/remote-access">{t('organization.actions.openRemoteAccess')}</Link></Button>,
+      action: <Button asChild variant="brand"><Link to={cloudNotConnectedPath}>{cloudNotConnectedLabel}</Link></Button>,
     },
     authorization_required: {
       icon: Cloud,

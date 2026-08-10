@@ -7797,18 +7797,30 @@ async def skills_list():
 
     scope = request.args.get("scope") or "all"
     backends = [b for b in (request.args.get("backends") or "").split(",") if b]
+    project_id = request.args.get("project_id")
     try:
-        project_dir = _resolve_project_dir(request.args.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         # Folderless project: no project-scoped skills are possible — show
         # global skills (with a flag) instead of erroring the whole page.
-        result = await api.list_skills(scope="global", backends=backends or None)
+        result = await api.list_skills(
+            scope="global",
+            project_id=project_id,
+            backends=backends or None,
+        )
         if isinstance(result, dict) and result.get("ok"):
             result = {**result, "project_no_folder": True}
         return jsonify(result)
-    return jsonify(await api.list_skills(scope=scope, project_dir=project_dir, backends=backends or None))
+    return jsonify(
+        await api.list_skills(
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            backends=backends or None,
+        )
+    )
 
 
 @app.route("/api/skills/preview", methods=["POST"])
@@ -7816,13 +7828,20 @@ async def skills_preview():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         project_dir = None  # preview doesn't need the project folder (gh/zip sources)
-    return jsonify(await api.preview_skill_source(str(payload.get("source") or ""), project_dir=project_dir))
+    return jsonify(
+        await api.preview_skill_source(
+            str(payload.get("source") or ""),
+            project_dir=project_dir,
+            project_id=project_id,
+        )
+    )
 
 
 @app.route("/api/skills", methods=["POST"])
@@ -7830,8 +7849,9 @@ async def skills_add():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
@@ -7841,6 +7861,7 @@ async def skills_add():
             str(payload.get("source") or ""),
             scope=payload.get("scope") or "project",
             project_dir=project_dir,
+            project_id=project_id,
             backends=payload.get("backends") or None,
             all_skills=bool(payload.get("all")),
             skill=payload.get("skill") or None,
@@ -7854,8 +7875,9 @@ async def skills_remove(name):
     from vibe import api
 
     backends = [b for b in (request.args.get("backends") or "").split(",") if b]
+    project_id = request.args.get("project_id")
     try:
-        project_dir = _resolve_project_dir(request.args.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
@@ -7865,6 +7887,7 @@ async def skills_remove(name):
             name,
             scope=request.args.get("scope") or "project",
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends or None,
         )
     )
@@ -7882,14 +7905,15 @@ async def skills_check():
     from vibe import api
 
     scope = request.args.get("scope") or "project"
+    project_id = request.args.get("project_id")
     try:
-        project_dir = _resolve_project_dir(request.args.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         # Folderless project has no project-local skills, so nothing to check.
         return jsonify({"ok": True, "skills": []})
-    return jsonify(await api.check_skills(scope=scope, project_dir=project_dir))
+    return jsonify(await api.check_skills(scope=scope, project_dir=project_dir, project_id=project_id))
 
 
 @app.route("/api/skills/update", methods=["POST"])
@@ -7897,8 +7921,9 @@ async def skills_update():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
@@ -7908,6 +7933,7 @@ async def skills_update():
             str(payload.get("name") or ""),
             scope=payload.get("scope") or "project",
             project_dir=project_dir,
+            project_id=project_id,
         )
     )
 
@@ -7917,15 +7943,18 @@ async def skills_upload():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         # The zip is unpacked to a temp dir (project-independent); the install
         # step picks the scope. Drop the cwd like preview rather than erroring.
         project_dir = None
-    return jsonify(await api.upload_skill_zip(payload, project_dir=project_dir))
+    return jsonify(
+        await api.upload_skill_zip(payload, project_dir=project_dir, project_id=project_id)
+    )
 
 
 @app.route("/api/browse/mkdir", methods=["POST"])

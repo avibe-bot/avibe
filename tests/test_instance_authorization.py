@@ -191,7 +191,7 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
         ("PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
         ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/models/runtime/status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/models/agents/codex/chain", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/turns/turn-1/provenance", REMOTE_HTTP_ALLOWED),
         # Only the local owner can start an OAuth flow, and a status poll hands
@@ -392,6 +392,7 @@ def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     viewer = _remote_context("viewer")
     editor = _remote_context("editor")
     owner = _remote_context("owner")
+    local = trusted_local_context()
 
     assert can_receive_workbench_event(viewer, "authorization.changed") is True
     assert can_receive_workbench_event(viewer, "message.new") is True
@@ -400,6 +401,10 @@ def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     assert can_receive_workbench_event(editor, "queue.updated") is True
     assert can_receive_workbench_event(editor, "vaults.updated") is False
     assert can_receive_workbench_event(owner, "vaults.updated") is True
+    assert can_receive_workbench_event(local, "runs.updated") is True
+    assert can_receive_workbench_event(viewer, "runs.updated") is False
+    assert can_receive_workbench_event(editor, "runs.updated") is False
+    assert can_receive_workbench_event(owner, "runs.updated") is False
     assert can_receive_workbench_event(viewer, "future.management.event") is False
     assert can_receive_workbench_event(owner, "future.management.event") is True
 

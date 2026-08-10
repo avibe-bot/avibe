@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping
 
+from core.inbox_events import RUNS_UPDATED_EVENT
+
 
 INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
 INSTANCE_ACCESS_SOURCES = frozenset(
@@ -35,6 +37,7 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
     }
 )
 _EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
+_REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS = frozenset({RUNS_UPDATED_EVENT})
 
 REMOTE_HTTP_ALLOWED = "allowed"
 REMOTE_HTTP_LOCAL_ONLY = "local_only"
@@ -287,6 +290,8 @@ def can_receive_workbench_event(
         require_instance_role(context, required_workbench_event_role(event_type))
     except InstanceAuthorizationError:
         return False
+    if getattr(context, "is_remote", False) and event_type in _REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS:
+        return False
     return True
 
 
@@ -441,7 +446,7 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/models/(?:agents|events|runtime/status)$",
+            r"^/api/models/(?:agents|events)$",
         ),
         (
             frozenset({"GET", "HEAD"}),

@@ -938,6 +938,12 @@ def test_remote_config_post_uses_the_safe_projection_for_an_instance_owner(monke
     config = _save_config(tmp_path)
     config.runtime.default_cwd = "/private/local-agent-workdir"
     config.agents.codex.cli_path = "/opt/avibe/bin/codex"
+    config.ack_mode = "reaction"
+    config.show_duration = False
+    config.include_time_info = False
+    config.include_user_info = True
+    config.reply_enhancements = False
+    config.agent_progress_style = "concise"
     config.save()
     client = app.test_client()
     client.set_cookie(
@@ -957,7 +963,25 @@ def test_remote_config_post_uses_the_safe_projection_for_an_instance_owner(monke
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["ui"]["instance_name"] == "Remote Workbench"
-    assert set(payload) == {"language", "mode", "setup_state", "ui", "version"}
+    assert set(payload) == {
+        "ack_mode",
+        "agent_progress_style",
+        "include_time_info",
+        "include_user_info",
+        "language",
+        "mode",
+        "reply_enhancements",
+        "setup_state",
+        "show_duration",
+        "ui",
+        "version",
+    }
+    assert payload["ack_mode"] == "reaction"
+    assert payload["show_duration"] is False
+    assert payload["include_time_info"] is False
+    assert payload["include_user_info"] is True
+    assert payload["reply_enhancements"] is False
+    assert payload["agent_progress_style"] == "concise"
     assert "runtime" not in payload
     assert "agents" not in payload
     assert "memory" not in payload
@@ -1808,7 +1832,7 @@ def test_remote_show_page_public_link_mutations_are_blocked_before_store_access(
 @pytest.mark.parametrize(
     ("path", "local_only"),
     [
-        ("/api/models/runtime/status", False),
+        ("/api/models/runtime/status", True),
         ("/api/models/agents", False),
         ("/api/models/sources", True),
         ("/api/backend/codex/runtime", True),

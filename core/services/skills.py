@@ -228,11 +228,30 @@ def _normalized_backends(backends: Optional[list[str]]) -> list[str]:
     return result
 
 
-def _project_resource_segment(scope: str, project_dir: Optional[str]) -> str:
+def _normalize_project_id(project_id: Any) -> str:
+    cleaned = str(project_id or "").strip()
+    if (
+        not cleaned
+        or len(cleaned) > 64
+        or any(ord(char) < 32 or ord(char) == 127 for char in cleaned)
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", cleaned)
+    ):
+        raise SkillsError("invalid_project_id", "project id is required")
+    return cleaned
+
+
+def _project_resource_segment(
+    scope: str,
+    project_dir: Optional[str],
+    *,
+    project_id: Optional[str] = None,
+) -> str:
     if scope == "global":
         return "global"
     if scope != "project":
         raise SkillsError("invalid_scope", f"unknown scope: {scope}")
+    if project_id:
+        return f"project-{_normalize_project_id(project_id)}"
     if not project_dir:
         raise SkillsError("project_required", "a project is required for project-scoped skills")
     canonical_path = os.path.normcase(os.path.realpath(os.path.abspath(project_dir)))
@@ -244,6 +263,7 @@ def skill_resource_id(
     *,
     scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str] = None,
     name: str,
 ) -> str:
     """Return the stable local ACL descriptor for one backend-specific Skill."""
@@ -257,7 +277,7 @@ def skill_resource_id(
         [
             normalized_backend,
             scope,
-            _project_resource_segment(scope, project_dir),
+            _project_resource_segment(scope, project_dir, project_id=project_id),
             _normalize_skill_name(name),
         ]
     )
@@ -313,6 +333,7 @@ def _skill_resource_descriptors(
     *,
     requested_scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str],
     backends: Optional[list[str]],
 ) -> list[dict[str, Any]]:
     descriptors: list[dict[str, Any]] = []
@@ -330,6 +351,7 @@ def _skill_resource_descriptors(
                             backend,
                             scope=scope,
                             project_dir=project_dir,
+                            project_id=project_id,
                             name=name,
                         ),
                         "skill_index": skill_index,
@@ -347,6 +369,7 @@ def _filter_skill_listing(
     *,
     scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str],
     backends: Optional[list[str]],
     user_context: Any = None,
 ) -> dict[str, Any]:
@@ -363,6 +386,7 @@ def _filter_skill_listing(
         raw_skills,
         requested_scope=scope,
         project_dir=project_dir,
+        project_id=project_id,
         backends=backends,
     )
     if not descriptors:
@@ -442,10 +466,17 @@ def _resource_ids_for_skill_name(
     *,
     scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str],
     backends: Optional[list[str]],
 ) -> list[str]:
     return [
-        skill_resource_id(backend, scope=scope, project_dir=project_dir, name=name)
+        skill_resource_id(
+            backend,
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            name=name,
+        )
         for backend in _normalized_backends(backends) or list(BACKEND_TO_AGENT)
     ]
 
@@ -588,6 +619,7 @@ def _register_created_skill_policies(
     *,
     scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str],
     backends: list[str],
     user_context: Any,
 ) -> None:
@@ -608,6 +640,7 @@ def _register_created_skill_policies(
                         backend,
                         scope=scope,
                         project_dir=project_dir,
+                        project_id=project_id,
                         name=name,
                     ),
                     organization_id=context.organization_id,
@@ -639,6 +672,7 @@ def _installed_skill_resource_ids_from_listing(
     *,
     scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str],
     backends: Optional[list[str]],
 ) -> list[str]:
     if not listing.get("ok") or not isinstance(listing.get("skills"), list):
@@ -667,6 +701,7 @@ def _installed_skill_resource_ids_from_listing(
                     backend,
                     scope=row_scope,
                     project_dir=project_dir,
+                    project_id=project_id,
                     name=str(skill["name"]),
                 )
             )
@@ -679,6 +714,7 @@ async def _installed_skill_resource_ids(
     *,
     scope: str,
     project_dir: Optional[str],
+    project_id: Optional[str],
     backends: Optional[list[str]],
 ) -> list[str]:
     listing = await _run_askill(
@@ -691,6 +727,7 @@ async def _installed_skill_resource_ids(
         name,
         scope=scope,
         project_dir=project_dir,
+        project_id=project_id,
         backends=backends,
     )
     if not resource_ids:
@@ -706,6 +743,7 @@ async def list_skills(
     *,
     scope: str = "all",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[list[str]] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
@@ -723,6 +761,7 @@ async def list_skills(
         result,
         scope=scope,
         project_dir=project_dir,
+        project_id=project_id,
         backends=backends,
         user_context=context,
     )
@@ -733,6 +772,7 @@ async def preview_source(
     source: str,
     *,
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Discover the skills a source contains without installing.
@@ -752,6 +792,7 @@ async def add_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[list[str]] = None,
     all_skills: bool = False,
     skill: Optional[str] = None,
@@ -785,6 +826,7 @@ async def add_skill(
                     target_name,
                     scope=scope,
                     project_dir=project_dir,
+                    project_id=project_id,
                     backends=backends,
                 ),
                 user_context=context,
@@ -801,6 +843,7 @@ async def add_skill(
                 target_name,
                 scope=scope,
                 project_dir=project_dir,
+                project_id=project_id,
                 backends=backends,
             )
             if installed_resource_ids:
@@ -846,6 +889,7 @@ async def add_skill(
                 names,
                 scope=scope,
                 project_dir=project_dir,
+                project_id=project_id,
                 backends=_result_backends(result, backends),
                 user_context=context,
             )
@@ -858,6 +902,7 @@ async def remove_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[list[str]] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
@@ -877,6 +922,7 @@ async def remove_skill(
             name,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends,
         )
         _require_skill_management_access(
@@ -893,6 +939,7 @@ async def remove_skill(
                 name,
                 scope=scope,
                 project_dir=project_dir,
+                project_id=project_id,
                 backends=removed_backends,
             )
         )
@@ -922,6 +969,7 @@ async def check(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Check installed skills for available updates (no install).
@@ -938,6 +986,7 @@ async def check(
         result,
         scope=scope,
         project_dir=project_dir,
+        project_id=project_id,
         backends=list(BACKEND_TO_AGENT),
         user_context=context,
     )
@@ -960,6 +1009,7 @@ async def update(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Update one installed skill. Maps to ``askill update <name> [-g] -y``."""
@@ -975,6 +1025,7 @@ async def update(
             name,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             backends=None,
         )
         _require_skill_management_access(
