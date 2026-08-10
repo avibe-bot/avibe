@@ -124,6 +124,44 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.subagent_name, "echo-probe")
         self.assertEqual(request.message, "audit the queue")
 
+    async def test_scheduled_subagent_prefix_routes_before_hidden_provenance(self):
+        controller, handler = _build_handler()
+        del handler._prepend_message_metadata
+        context = _scheduled_context(
+            source_kind="agent",
+            source_actor="source-session",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            agents_dir = project / ".codex" / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "echo-probe.toml").write_text(
+                "\n".join(
+                    [
+                        'name = "echo-probe"',
+                        'description = "probe agent"',
+                        'developer_instructions = "probe"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            handler.session_handler.get_session_info = (
+                lambda context, source="human": (
+                    "base-session",
+                    str(project),
+                    f"base-session:{project}",
+                )
+            )
+
+            await handler.handle_scheduled_message(context, "echo-probe: audit the queue")
+
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(request.subagent_name, "echo-probe")
+        self.assertEqual(
+            request.message,
+            "From: #source-session\naudit the queue",
+        )
+
     async def test_human_turn_never_stages_a_prompt(self):
         controller, handler = _build_handler()
 
