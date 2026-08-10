@@ -2,7 +2,7 @@
 name: use-avibe
 slug: use-avibe
 description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state.
-version: 0.5.0
+version: 0.6.1
 ---
 
 # Use Avibe
@@ -830,6 +830,8 @@ Operational guidance:
 
 - use `vibe task list` before editing or deleting an existing task; use `vibe watch list` before touching a managed watch
 - if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches and command tasks both accept `--shell` and `--timeout` (per-cycle for watches, per-run for tasks), while `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay` stay watch-only
+- for Watch waiters, exit `0` means one new reportable event; an allowed retry exit code keeps either mode waiting, while `64` plus `avibe-watch: no-event` ends a once Watch or re-arms a forever Watch without an Agent Run; a once waiter that is still waiting must use a retry exit code
+- a forever waiter must keep a durable cursor, state transition, or domain cooldown; Avibe serializes its event follow-ups and automatically pauses plus sends a repair Run after six successful events within 60 seconds
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist

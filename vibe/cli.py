@@ -1361,14 +1361,17 @@ def _watch_add_examples_text() -> str:
           Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
-          In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
-          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
+          In either mode, an allowed `--retry-exit-code` keeps waiting. A once Watch stops after its first event.
+          A forever Watch waits for each event's Agent Run to finish before re-arming, then applies a five-second safety delay.
+          Exit 0 must mean one new reportable event, not a condition that merely remains true. Repeated rapid successes automatically pause the Watch and send the Agent a repair message.
+          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and is terminal unless explicitly allowed for retry;
           64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
-          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          so a once Watch ends and a forever Watch re-arms WITHOUT an Agent turn. A once waiter that is still waiting must use a retry exit code.
+          Any other non-zero is a failure.
           The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
           Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
-          --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
+          --timeout applies to each cycle. --lifetime-timeout applies to the whole Watch lifetime across retries and re-arms.
 
         Examples:
           vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
@@ -1757,7 +1760,6 @@ def _validate_watch_timing(
     timeout_seconds: float,
     retry_delay_seconds: float,
     lifetime_timeout_seconds: float,
-    mode: str,
     help_command: str,
 ) -> None:
     if timeout_seconds < 0:
@@ -1784,13 +1786,6 @@ def _validate_watch_timing(
             help_command=help_command,
             details={"lifetime_timeout": lifetime_timeout_seconds},
         )
-    if lifetime_timeout_seconds and mode != "forever":
-        raise TaskCliError(
-            "--lifetime-timeout requires --forever",
-            code="invalid_watch_lifetime_timeout",
-            hint="Use --lifetime-timeout only on forever watches.",
-            help_command=help_command,
-    )
 
 
 def _task_message_preview(message: str, *, max_chars: int = 72) -> str:
@@ -9615,7 +9610,6 @@ def cmd_watch_add(args):
             timeout_seconds=float(args.timeout),
             retry_delay_seconds=float(args.retry_delay),
             lifetime_timeout_seconds=float(args.lifetime_timeout),
-            mode=mode,
             help_command="vibe watch add --help",
         )
         prefix = _normalize_task_name(getattr(args, "prefix", None))
@@ -9931,7 +9925,6 @@ def cmd_watch_update(args):
             timeout_seconds=timeout_seconds,
             retry_delay_seconds=retry_delay_seconds,
             lifetime_timeout_seconds=lifetime_timeout_seconds,
-            mode=mode,
             help_command="vibe watch update --help",
         )
         session_policy = _definition_session_policy_for_update(
@@ -15234,7 +15227,7 @@ def build_parser():
         epilog=_watch_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch add --help",
-        error_hint="Use --session-id and either --shell or a command after '--'. Add --forever only when the waiter should re-arm after successful cycles and only retry failures for explicit retry exit codes.",
+        error_hint="Use --session-id and either --shell or a command after '--'. Retry exit codes keep either mode waiting; add --forever only when distinct successful events should re-arm the Watch.",
     )
     watch_add_parser.add_argument("--name", help="Optional human-friendly watch name")
     watch_add_parser.add_argument(
@@ -15279,13 +15272,13 @@ def build_parser():
     watch_add_parser.add_argument(
         "--forever",
         action="store_true",
-        help="Keep re-arming the watch after each successful cycle instead of stopping after the first event. Terminal failures still stop the watch unless a retry exit code is allowed.",
+        help="Monitor distinct events continuously. After each event's Agent Run settles, the Watch re-arms; terminal failures still stop it unless their exit code is retryable.",
     )
     watch_add_parser.add_argument(
         "--lifetime-timeout",
         type=float,
         default=0,
-        help="Overall forever-watch lifetime timeout in seconds. Use 0 for no lifetime limit. Requires --forever.",
+        help="Overall Watch lifetime timeout in seconds across retries and re-arms. Use 0 for no lifetime limit.",
     )
     watch_add_parser.add_argument(
         "--retry-exit-code",
@@ -15293,13 +15286,13 @@ def build_parser():
         action="append",
         type=int,
         default=None,
-        help=f"Cycle exit code that should be retried in forever mode. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
+        help=f"Cycle exit code that should keep waiting. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
     )
     watch_add_parser.add_argument(
         "--retry-delay",
         type=float,
         default=30,
-        help="Delay in seconds before retrying an allowed forever cycle failure. Default: 30",
+        help="Delay in seconds before retrying an allowed cycle result. Default: 30",
     )
     watch_add_parser.add_argument(
         "--shell",
@@ -15372,7 +15365,7 @@ def build_parser():
     watch_update_parser.add_argument(
         "--lifetime-timeout",
         type=float,
-        help="Set overall forever-watch lifetime timeout in seconds. Use 0 for no lifetime limit.",
+        help="Set the overall Watch lifetime timeout across retries and re-arms. Use 0 for no lifetime limit.",
     )
     watch_update_parser.add_argument(
         "--retry-exit-code",
@@ -15380,7 +15373,7 @@ def build_parser():
         action="append",
         type=int,
         default=None,
-        help="Replace retryable forever-mode exit codes. Repeat to add more.",
+        help="Replace exit codes that keep this Watch waiting. Repeat to add more.",
     )
     watch_update_parser.add_argument("--retry-delay", type=float, help="Set retry delay in seconds")
     watch_update_parser.add_argument("--shell", help="Replace waiter with a shell command")

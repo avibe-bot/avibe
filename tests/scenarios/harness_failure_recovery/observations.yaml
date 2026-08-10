@@ -287,3 +287,16 @@ observations:
       belongs to the Turn and waiter health belongs to the waiter. Linked Runs need
       only one Turn-scoped fallback when the primary backend notification cannot be
       acknowledged; downstream processing health must remain a separate projection.
+  - id: HFR-OBS-024
+    date: 2026-08-08
+    source: issue #953 Watch and Agent Run history
+    result: confirmed
+    detail: >-
+      A level-triggered forever Watch returned exit zero while the observed
+      condition remained true. The supervisor immediately re-ran the waiter after
+      every success and treated each identical level as a new event. In 18.139
+      seconds the one definition created 274 Agent Runs: 174 completed no-op Runs
+      and 100 more queued Runs. Queue coalescing cannot repair this because the
+      producer has already asserted 274 distinct events. The event lifecycle must
+      include its Agent follow-up, and the Watch owner must stop admitting events
+      when successful exits remain implausibly dense.
