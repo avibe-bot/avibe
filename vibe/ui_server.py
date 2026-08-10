@@ -5529,14 +5529,36 @@ def remote_access_status():
         # control or route recovery, so a locally spoofed value can at most
         # change the caller's own displayed ingress location.
         client_colo = cloudflare_network.parse_cf_ray_colo(request.headers.get("CF-Ray"))
-    return jsonify(
-        remote_access.status(
-            config,
-            client_colo=client_colo,
-            client_access="remote" if remote_request else "local",
-            include_network_path=True,
-        )
+    status_payload = remote_access.status(
+        config,
+        client_colo=client_colo,
+        client_access="remote" if remote_request else "local",
+        include_network_path=True,
     )
+    if remote_request:
+        # The raw status exposes host internals — cloudflared PID, absolute
+        # binary path/version, the edge bind-address settings, and network-path
+        # diagnostics — none of which a remote caller needs and several of which
+        # fingerprint the host. The remote-visible UI (the Dashboard connector
+        # card) consumes only the public URL, the paired/running connector
+        # state, and the tunnel quality, so project exactly that and drop the
+        # rest at the boundary rather than relying on every future field staying
+        # inert across the tunnel.
+        status_payload = {
+            key: status_payload[key]
+            for key in (
+                "ok",
+                "provider",
+                "enabled",
+                "public_url",
+                "paired",
+                "running",
+                "transport_protocol",
+                "tunnel_quality",
+            )
+            if key in status_payload
+        }
+    return jsonify(status_payload)
 
 
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])

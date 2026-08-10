@@ -2962,6 +2962,94 @@ def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
     assert config.remote_access.vibe_cloud.public_url == "https://alex.avibe.bot"
 
 
+def test_remote_status_projects_a_remote_safe_payload(monkeypatch, tmp_path):
+    """A remote caller gets only the connector state the UI shows, not host internals.
+
+    The raw ``remote_access.status()`` payload includes the cloudflared PID, the
+    absolute binary path/version, the edge bind-address settings and the
+    network-path diagnostics. None of that is needed across the tunnel and the
+    host-internal fields fingerprint the machine, so the allowlisted status
+    endpoint projects only the public URL, paired/running state, transport
+    protocol and tunnel quality when the request is remote. A local caller still
+    receives the full payload.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+
+    full_payload = {
+        "ok": True,
+        "provider": "vibe_cloud",
+        "enabled": True,
+        "public_url": "https://alex.avibe.bot",
+        "paired": True,
+        "running": True,
+        "pid": 4711,
+        "pid_state": "cloudflared",
+        "binary_found": True,
+        "binary_path": "/usr/local/bin/cloudflared",
+        "binary_version": "2024.1.0",
+        "transport_protocol": "http2",
+        "settings": {
+            "transport_protocol": "http2",
+            "auto_recovery": True,
+            "optimization_profile": "balanced",
+            "edge_ip_version": "4",
+            "edge_bind_address": "192.168.1.5",
+        },
+        "tunnel_quality": {"sampled_at": "2026-08-10T10:00:00Z", "grade": "good"},
+        "network_path": {"provider": "Cloudflare", "asn": 13335},
+    }
+    monkeypatch.setattr(remote_access, "status", lambda *a, **k: dict(full_payload))
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def _status(base_url, environ):
+        return client.get(
+            "/api/remote-access/status",
+            base_url=base_url,
+            environ_base=environ,
+        )
+
+    remote_response = _status("https://alex.avibe.bot", _remote_peer())
+    local_response = _status("http://127.0.0.1:5123", {"REMOTE_ADDR": "127.0.0.1"})
+
+    assert remote_response.status_code == 200
+    remote_body = remote_response.get_json()
+    assert set(remote_body) == {
+        "ok",
+        "provider",
+        "enabled",
+        "public_url",
+        "paired",
+        "running",
+        "transport_protocol",
+        "tunnel_quality",
+    }
+    # The host-internal and diagnostic fields never cross the tunnel.
+    for sensitive in (
+        "pid",
+        "pid_state",
+        "binary_found",
+        "binary_path",
+        "binary_version",
+        "settings",
+        "network_path",
+    ):
+        assert sensitive not in remote_body
+    assert remote_body["public_url"] == config.remote_access.vibe_cloud.public_url
+    assert remote_body["running"] is True
+
+    # A local caller keeps the full payload, including the host internals.
+    assert local_response.status_code == 200
+    assert local_response.get_json() == full_payload
+
+
 def test_trusted_proxy_missing_forwarded_host_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
