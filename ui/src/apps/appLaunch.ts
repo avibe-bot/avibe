@@ -162,6 +162,21 @@ export function isStandaloneAppTab(search: string): boolean {
   }
 }
 
+/**
+ * Whether a pathname is one of the built-in app routes a standalone tab can land on
+ * (`STANDALONE_BUILTIN_ROUTES`). Combined with `isStandaloneAppTab`, this is what tells
+ * the shell to drop ALL chrome — sidebar, mobile header/tab bar, page padding — so the
+ * app owns the whole viewport. Kept here, next to the allowlist it reads, so a new
+ * standalone app opts into both behaviors in one place.
+ *
+ * Only the exact route matches: a standalone tab that navigates elsewhere (e.g. Files →
+ * `/chat/<id>`) is an ordinary page again and gets the chrome back.
+ */
+export function isStandaloneAppRoutePath(pathname: string): boolean {
+  const id = pathname.startsWith('/apps/') ? pathname.slice('/apps/'.length) : '';
+  return STANDALONE_BUILTIN_ROUTES.has(id);
+}
+
 /** `appTabHref` for a persisted Dock id (`files` / `show:<session_id>`). */
 export function appTabHrefForDockId(
   dockId: string,

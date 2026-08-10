@@ -4,7 +4,8 @@ import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Ha
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { isStandaloneAppTab } from '../apps/appLaunch';
+import { isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
+import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
@@ -407,7 +408,16 @@ export const AppShell: React.FC = () => {
   const isChat = location.pathname.startsWith('/chat/');
   const isSearch = location.pathname === '/search';
   const isFullScreenMobile = isChat || isSearch;
-  const showBottomNav = !isFullScreenMobile && location.pathname !== '/setup';
+
+  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
+  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
+  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
+  // and hands the whole viewport to the app. Both halves matter: the flag alone would
+  // strip the chrome off any page such a tab later navigates to, and the route alone
+  // would strip it inside the normal workbench. The app pages render their full-bleed
+  // body off the same signal (StandaloneAppTabContext).
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
+  const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
   return (
     // Mobile: a LOCKED, full-viewport flex column (overflow-hidden) so the
@@ -419,13 +429,22 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
+    <StandaloneAppTabContext.Provider value={chromeless}>
     <DockProvider>
     <ShowPageDragProvider>
-    <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
+    {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
+        the app fills the browser area exactly, with nothing to scroll around it. */}
+    <div
+      className={clsx(
+        'flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground',
+        !chromeless && 'md:block md:h-auto md:min-h-screen md:overflow-visible'
+      )}
+    >
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
           The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
           un-maximize to reach it. */}
+      {!chromeless && (
       <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         {/* Workbench packs more rows (search/inbox/capabilities/projects) into the
             sidebar, so it runs a tighter vertical rhythm than admin — less outer
@@ -540,11 +559,13 @@ export const AppShell: React.FC = () => {
           </div>
         </div>
       </aside>
+      )}
 
       {/* Chat and Search are fixed full-screen surfaces with their own header
           bars, so the brand header is hidden there (otherwise it would sit
-          behind them). */}
-      {!isFullScreenMobile && (
+          behind them). A chromeless single-app tab hides it for the same
+          reason: the app owns the viewport. */}
+      {!isFullScreenMobile && !chromeless && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <img
@@ -566,12 +587,17 @@ export const AppShell: React.FC = () => {
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
           // + sidebar offset).
-          'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
-          showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0',
-          location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console'
+          chromeless
+            // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
+            // is the only thing in the viewport and sizes itself to this box (h-full).
+            ? 'min-h-0 flex-1 overflow-hidden'
+            : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+          !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
+          !chromeless &&
+            (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
-        <div className="mx-auto w-full px-4 py-5 md:px-10 md:py-8">
+        <div className={clsx('w-full', chromeless ? 'h-full' : 'mx-auto px-4 py-5 md:px-10 md:py-8')}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
@@ -653,6 +679,7 @@ export const AppShell: React.FC = () => {
     </div>
     </ShowPageDragProvider>
     </DockProvider>
+    </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
   );
 };
