@@ -192,6 +192,163 @@ async def test_maintenance_fence_closes_capture_and_reads(tmp_path: Path) -> Non
     assert provider.search_scopes == []
 
 
+async def test_module_maintenance_state_fences_capture_until_closed(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    module.enter_maintenance()
+    assert module.maintenance_active
+    assert await module.capture(_request()) == CaptureSkipped(reason="memory_clear_failed")
+    assert store.list_queue_rows() == ()
+
+    module.leave_maintenance()
+    assert not module.maintenance_active
+    assert await module.capture(_request()) == CaptureAccepted()
+
+
+async def test_destructive_lifecycle_owns_root_and_blocks_ordinary_lifecycle(
+    tmp_path: Path,
+) -> None:
+    module, _store, _provider = _module(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def destructive_operation() -> None:
+        async with module.destructive_lifecycle():
+            entered.set()
+            async with module.observe_provider_root() as root_available:
+                assert root_available is False
+            await release.wait()
+
+    destructive = asyncio.create_task(destructive_operation())
+    ordinary: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        ordinary_entered = False
+
+        async def ordinary_operation() -> None:
+            nonlocal ordinary_entered
+            async with module.lifecycle():
+                ordinary_entered = True
+
+        ordinary = asyncio.create_task(ordinary_operation())
+        await asyncio.sleep(0)
+        assert ordinary_entered is False
+
+        release.set()
+        await destructive
+        await ordinary
+        assert ordinary_entered is True
+    finally:
+        release.set()
+        await asyncio.gather(
+            destructive,
+            *((ordinary,) if ordinary is not None else ()),
+            return_exceptions=True,
+        )
+
+
+async def test_claim_quiescence_fences_delivery_until_resumed(tmp_path: Path) -> None:
+    module, _store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+
+    assert await module.quiesce_claims()
+    assert await module.drain() == 0
+    assert provider.captures == []
+
+    module.resume_claims()
+    assert await module.drain() == 1
+    assert [capture.text for capture in provider.captures] == ["remember this"]
+
+
+async def test_timed_out_quiescence_remains_fenced_until_resumed(tmp_path: Path) -> None:
+    add_entered = asyncio.Event()
+    release_add = asyncio.Event()
+
+    async def block_add(_capture) -> None:
+        add_entered.set()
+        await release_add.wait()
+
+    provider = FakeMemoryProvider(add_hook=block_add)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request()) == CaptureAccepted()
+
+    draining = asyncio.create_task(module.drain())
+    try:
+        await asyncio.wait_for(add_entered.wait(), timeout=1.0)
+        assert not await module.quiesce_claims(timeout_seconds=0.01)
+
+        release_add.set()
+        assert await draining == 1
+        assert await module.capture(_request(source="still-paused")) == CaptureAccepted()
+        assert await module.drain() == 0
+
+        module.resume_claims()
+        assert await module.drain() == 1
+    finally:
+        release_add.set()
+        await asyncio.gather(draining, return_exceptions=True)
+
+
+async def test_provider_replacement_updates_reads_and_claim_delivery(tmp_path: Path) -> None:
+    original = FakeMemoryProvider()
+    replacement = FakeMemoryProvider(
+        search_items=(MemoryItem(kind="fact", text="replacement result"),),
+    )
+    module, _store, _provider = _module(tmp_path, provider=original)
+
+    module.replace_provider(replacement)
+    assert await module.search(
+        "query",
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    ) == MemoryItems(items=replacement.search_items)
+    assert await module.capture(_request()) == CaptureAccepted()
+    assert await module.drain() == 1
+    assert original.captures == []
+    assert [capture.text for capture in replacement.captures] == ["remember this"]
+
+
+async def test_session_lifecycle_fences_capture_through_operation(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    operation_entered = asyncio.Event()
+    release_operation = asyncio.Event()
+
+    async def reset_session() -> str:
+        operation_entered.set()
+        await release_operation.wait()
+        return "reset-complete"
+
+    lifecycle = asyncio.create_task(
+        module.run_session_lifecycle(
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            raw_session_id="conversation-1",
+            operation=reset_session,
+            deadline_seconds=2.0,
+        )
+    )
+    capture: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(operation_entered.wait(), timeout=1.0)
+        capture = asyncio.create_task(module.capture(_request(source="after-reset")))
+        await asyncio.sleep(0)
+
+        assert not capture.done()
+        assert store.list_queue_rows() == ()
+
+        release_operation.set()
+        assert await lifecycle == "reset-complete"
+        assert await capture == CaptureAccepted()
+    finally:
+        release_operation.set()
+        await asyncio.gather(
+            lifecycle,
+            *((capture,) if capture is not None else ()),
+            return_exceptions=True,
+        )
+
+
 async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path)
     request = _request(
@@ -232,7 +389,7 @@ async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_
     assert attachment.uri not in queued.payload_attachments
 
     source_path.unlink()
-    assert await module._worker.drain_once() == 1
+    assert await module.drain() == 1
     forwarded = provider.captures[0].attachments[0]
     assert forwarded.name == attachment.name
     assert forwarded.uri != attachment.uri
@@ -273,9 +430,9 @@ async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accep
     )
     try:
         assert await asyncio.to_thread(published.wait, 1)
-        recovery = asyncio.create_task(
-            module._worker.coordinator.recover(lease_owner="activation-boot")
-        )
+        module.pause_claims()
+        module.begin_activation(new_lease=True)
+        recovery = asyncio.create_task(module.drain())
         assert await asyncio.to_thread(recovery_started.wait, 1)
 
         completed, _pending = await asyncio.wait({recovery}, timeout=0.1)
@@ -299,7 +456,9 @@ async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accep
         enabled=True,
         attachment_store=restarted_attachments,
     )
-    await restarted._worker.coordinator.recover(lease_owner="restart-boot")
+    restarted.pause_claims()
+    restarted.begin_activation(new_lease=True)
+    await restarted.drain()
 
     assert restarted_attachments.provider_attachments(bundle)[0].name == attachment.name
     assert restarted_store.list_queue_rows()[0].attachment_bundle_id == bundle.bundle_id

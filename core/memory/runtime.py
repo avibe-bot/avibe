@@ -35,7 +35,7 @@ from core.memory.everos import (
 )
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log
-from core.memory.module import MemoryModule
+from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.maintenance import (
     ClearRecoveryResult,
     ClearResult,
@@ -262,17 +262,11 @@ def _processing_record_payload(summary: ProcessingRecordSummary) -> dict[str, An
     }
 
 
-class MemorySessionLifecycleBusyError(RuntimeError):
-    """Raised when a destructive session transition cannot acquire its fence."""
-
-    code = "memory_session_lifecycle_busy"
-
-
 class _UnavailableMemoryModule:
     """Capture sink for a runtime whose store could not be opened.
 
     ``MemoryRuntime.module`` is only ever used to capture, so this narrow adapter
-    is the whole seam — not a stand-in for ``MemoryModule``'s six methods.
+    is the whole seam, not a stand-in for the complete ``MemoryModule`` interface.
     """
 
     async def capture(self, _request: Any) -> OperationFailed:
@@ -402,7 +396,7 @@ class MemoryRuntime:
         self._module = module
         self._require_maintenance().attach_store(opened)
         if self._maintenance_open():
-            module._worker.pause_claims()
+            module.pause_claims()
         self._store_error = None
         self._configure_insight_reader(self._config)
         self._artifact_manager.set_activation_coordinator(self._coordinate_artifact_activation)
@@ -496,7 +490,7 @@ class MemoryRuntime:
             transition_active=self._reconcile_lock.locked(),
             enabled=self._config.enabled,
             store_available=module is not None,
-            maintenance_active=bool(module and module._clear_active),
+            maintenance_active=bool(module and module.maintenance_active),
             closing=self._closing,
             process=process,
             process_running=bool(process and process.running),
@@ -507,15 +501,14 @@ class MemoryRuntime:
     async def _maintenance_fence(self) -> AsyncIterator[None]:
         """Acquire destructive fences in their single permitted order."""
 
-        async with self._reconcile_lock, self.module._lifecycle_lock:
-            async with self.module._root_lifecycle_lock():
-                yield
+        async with self._reconcile_lock, self.module.destructive_lifecycle():
+            yield
 
     @asynccontextmanager
     async def _maintenance_boot_recovery_fence(self) -> AsyncIterator[None]:
         """Add the root fence while reconcile and module fences are already held."""
 
-        async with self.module._root_lifecycle_lock():
+        async with self.module.provider_root_lifecycle():
             yield
 
     def _maintenance_runtime_state(self) -> MaintenanceRuntimeState:
@@ -525,17 +518,17 @@ class MemoryRuntime:
 
     def _enter_maintenance(self) -> None:
         if self._module is not None:
-            self._module._clear_active = True
+            self._module.enter_maintenance()
         self._advance_processing_lifecycle()
 
     def _leave_maintenance(self) -> None:
         if self._module is not None:
-            self._module._clear_active = False
+            self._module.leave_maintenance()
         self._advance_processing_lifecycle()
 
     def _resume_maintenance_claims(self) -> None:
         if self._module is not None:
-            self._module._worker.resume_claims()
+            self._module.resume_claims()
 
     def _configure_insight_reader(self, config: MemoryConfig) -> None:
         if self._insight_reader_override is not None:
@@ -664,7 +657,7 @@ class MemoryRuntime:
             # This is deliberately the same lifecycle lock Clear uses. A settings
             # save cannot race a root wipe or replace sidecar credentials halfway
             # through an active provider call.
-            async with self.module._lifecycle_lock:
+            async with self.module.lifecycle():
                 restore_operation_open = (
                     self._maintenance is not None
                     and self._maintenance.has_open_restore()
@@ -676,10 +669,10 @@ class MemoryRuntime:
                 ):
                     result = await self._disable_locked(config)
                 elif restore_operation_open and not recorded_sidecar_reaped:
-                    self.module._worker.pause_claims()
+                    self.module.pause_claims()
                     return {"ok": False, "error": "memory_clear_failed"}
                 elif maintenance_open and not restore_operation_open:
-                    self.module._worker.pause_claims()
+                    self.module.pause_claims()
                     return {"ok": False, "error": "memory_clear_failed"}
                 else:
                     result = await self._reconcile_locked(config)
@@ -690,11 +683,11 @@ class MemoryRuntime:
     async def _disable_locked(self, config: MemoryConfig) -> dict[str, Any]:
         """Stop every active Memory component without consulting maintenance state."""
 
-        self.module._worker.pause_claims()
+        self.module.pause_claims()
         self._config = config
         self._configure_insight_reader(config)
         self._provider = EverOSPort(self._socket_path)
-        self.module._replace_provider(self._provider)
+        self.module.replace_provider(self._provider)
         await self._stop_worker()
         stopped_process = self._process is not None
         if stopped_process:
@@ -720,12 +713,12 @@ class MemoryRuntime:
         if self._maintenance is not None and self._maintenance.has_open_restore():
             recovered = await self._maintenance.recover_boot()
             if not recovered:
-                self.module._worker.pause_claims()
+                self.module.pause_claims()
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
 
         if self._maintenance_open():
-            self.module._worker.pause_claims()
+            self.module.pause_claims()
             if self._can_disable_without_maintenance_authority(config):
                 return await self._disable_locked(config)
             return {"ok": False, "error": "memory_clear_failed"}
@@ -738,12 +731,12 @@ class MemoryRuntime:
             # Stop the worker before inspecting provider state. A capture may
             # still enqueue while settings are being reconciled, but no
             # old-embedding drain can cross this boundary.
-            if not await self.module._worker.pause_and_wait():
+            if not await self.module.quiesce_claims():
                 # ``pause_and_wait`` fences claims before waiting, so a timeout
                 # leaves them fenced. Releasing here is what keeps a failed
                 # settings save from silently stopping the drain loop forever.
                 if resume_claims_on_failure:
-                    self.module._worker.resume_claims()
+                    self.module.resume_claims()
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
             claims_paused = True
@@ -761,7 +754,7 @@ class MemoryRuntime:
                 return {"ok": False, "error": self._runtime_error}
             finally:
                 if embedding_guard_rejected and resume_claims_on_failure:
-                    self.module._worker.resume_claims()
+                    self.module.resume_claims()
                     claims_paused = False
 
         if config.embedding_change_pending:
@@ -774,7 +767,7 @@ class MemoryRuntime:
                 if not (self._process and self._process.running):
                     self._runtime_error = error
                 if claims_paused and resume_claims_on_failure:
-                    self.module._worker.resume_claims()
+                    self.module.resume_claims()
                 return {"ok": False, "error": error}
             # Settlement is independently durable even when later candidate
             # activation fails. Mirror only that fact into the replay snapshot.
@@ -796,24 +789,24 @@ class MemoryRuntime:
             if not (self._process and self._process.running):
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
-                self.module._worker.resume_claims()
+                self.module.resume_claims()
             return {"ok": False, "error": error}
         if not await self._probe_processing(python, config):
             error = "memory_processing_failed"
             if not (self._process and self._process.running):
                 self._runtime_error = error
             if claims_paused and resume_claims_on_failure:
-                self.module._worker.resume_claims()
+                self.module.resume_claims()
             return {"ok": False, "error": error}
 
         # Every enabled reconciliation receives a fresh process. Endpoint,
         # model, and key changes belong exclusively in its allowlisted child
         # environment and must never leave an old sidecar running.
-        if not claims_paused and not await self.module._worker.pause_and_wait():
+        if not claims_paused and not await self.module.quiesce_claims():
             # Same fence release as the embedding guard above: a timed-out pause
             # must not leave the worker permanently unable to claim.
             if resume_claims_on_failure:
-                self.module._worker.resume_claims()
+                self.module.resume_claims()
             self._runtime_error = "memory_clear_failed"
             return {"ok": False, "error": self._runtime_error}
         await self._stop_worker()
@@ -825,7 +818,7 @@ class MemoryRuntime:
         self._config = config
         self._configure_insight_reader(config)
         self._provider = candidate_provider
-        self.module._replace_provider(self._provider)
+        self.module.replace_provider(self._provider)
         try:
             meta = await asyncio.to_thread(self._store.ensure_meta)
             await run_blocking(
@@ -836,7 +829,7 @@ class MemoryRuntime:
         except Exception:
             self._runtime_error = "memory_clear_failed"
             if resume_claims_on_failure:
-                self.module._worker.resume_claims()
+                self.module.resume_claims()
             return {"ok": False, "error": self._runtime_error}
 
         await self._stop_call_log_retention()
@@ -888,7 +881,7 @@ class MemoryRuntime:
             self._ready_event = None
         self._update_recorder_health(_RECORDER_DEGRADED)
         self._runtime_error = None
-        self.module._worker.resume_claims()
+        self.module.resume_claims()
         self._ensure_worker()
         return {"ok": True, "state": "ready"}
 
@@ -940,13 +933,9 @@ class MemoryRuntime:
         reason = before.local_observation_reason(maintenance_reason)
         if reason is not None:
             return FailureLogObservation((), reason)
-        root_lock = self.module._root_lifecycle_lock()
-        if root_lock.locked():
-            return FailureLogObservation((), "busy")
-        # asyncio.Lock's uncontended acquire completes synchronously, so no
-        # lifecycle owner can enter between this check and acquisition.
-        await root_lock.acquire()
-        try:
+        async with self.module.observe_provider_root() as root_available:
+            if not root_available:
+                return FailureLogObservation((), "busy")
             acquired = self._processing_runtime_snapshot()
             reason = acquired.local_observation_reason(maintenance_reason)
             if acquired.generation != before.generation or reason is not None:
@@ -957,8 +946,6 @@ class MemoryRuntime:
             if after.generation != before.generation or reason is not None:
                 return FailureLogObservation((), reason or "busy")
             return FailureLogObservation(entries)
-        finally:
-            root_lock.release()
 
     async def _processing_record_sources(
         self,
@@ -1113,31 +1100,14 @@ class MemoryRuntime:
     ) -> bool:
         """Fence one trusted canonical session at a centralized lifecycle boundary."""
 
-        if not self.available or not self._config.enabled or self._maintenance_open():
+        if not self.available:
             return False
-        timeout = _final_flush_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        admission_lock = self.module._capture_admission_lock(
+        return await self.module.final_flush(
             principal_id=principal_id,
             project_id=project_id,
-            session_id=raw_session_id,
+            raw_session_id=raw_session_id,
+            deadline_seconds=deadline_seconds,
         )
-        acquired = False
-        try:
-            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
-            acquired = True
-            return await self._final_flush_under_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                raw_session_id=raw_session_id,
-                deadline=deadline,
-            )
-        except asyncio.TimeoutError:
-            return False
-        finally:
-            if acquired:
-                admission_lock.release()
 
     async def run_session_lifecycle(
         self,
@@ -1150,33 +1120,15 @@ class MemoryRuntime:
     ) -> _SessionLifecycleResult:
         """Flush and run one destructive session transition under one fence."""
 
-        if not self.available or not self._config.enabled or self._maintenance_open():
+        if not self.available:
             return await operation()
-        timeout = _final_flush_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        admission_lock = self.module._capture_admission_lock(
+        return await self.module.run_session_lifecycle(
             principal_id=principal_id,
             project_id=project_id,
-            session_id=raw_session_id,
+            raw_session_id=raw_session_id,
+            operation=operation,
+            deadline_seconds=deadline_seconds,
         )
-        try:
-            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
-        except asyncio.TimeoutError as error:
-            raise MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ) from error
-
-        try:
-            await self._final_flush_under_admission(
-                principal_id=principal_id,
-                project_id=project_id,
-                raw_session_id=raw_session_id,
-                deadline=deadline,
-            )
-            return await operation()
-        finally:
-            admission_lock.release()
 
     async def run_session_scopes_lifecycle(
         self,
@@ -1199,87 +1151,14 @@ class MemoryRuntime:
             )
         ):
             raise ValueError("invalid canonical Memory session scopes")
-        if not self.available or not self._config.enabled:
+        if not self.available:
             return await operation()
-        if self._maintenance_open():
-            raise MemorySessionLifecycleBusyError("memory session lifecycle is unavailable")
-
-        timeout = _final_flush_timeout(deadline_seconds)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        locks = [
-            self.module._capture_admission_lock(
-                principal_id=principal_id,
-                project_id=project_id,
-                session_id=raw_session_id,
-            )
-            for principal_id, project_id in canonical_scopes
-        ]
-        acquired: list[asyncio.Lock] = []
-        try:
-            for admission_lock in locks:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
-                acquired.append(admission_lock)
-        except asyncio.TimeoutError as error:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            raise MemorySessionLifecycleBusyError(
-                "memory capture admission did not quiesce before the deadline"
-            ) from error
-        except asyncio.CancelledError:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-            raise
-
-        try:
-            for principal_id, project_id in canonical_scopes:
-                await self._final_flush_under_admission(
-                    principal_id=principal_id,
-                    project_id=project_id,
-                    raw_session_id=raw_session_id,
-                    deadline=deadline,
-                )
-            return await operation()
-        finally:
-            for admission_lock in reversed(acquired):
-                admission_lock.release()
-
-    async def _final_flush_under_admission(
-        self,
-        *,
-        principal_id: str,
-        project_id: str,
-        raw_session_id: str,
-        deadline: float,
-    ) -> bool:
-        """Flush one session while its capture admission lock is already held."""
-
-        if not self.available or not self._config.enabled or self._maintenance_open():
-            return False
-        try:
-            session_ref = await asyncio.to_thread(
-                self._store.provider_session_ref,
-                principal_id=principal_id,
-                project_ref=project_id,
-                session_id=raw_session_id,
-            )
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return False
-            return await self.module._worker.coordinator.final_flush(
-                session_ref,
-                deadline_seconds=remaining,
-            )
-        except asyncio.TimeoutError:
-            return False
-        except (TypeError, ValueError):
-            return False
-        except Exception:
-            logger.warning("Memory final flush failed")
-            return False
+        return await self.module.run_session_scopes_lifecycle(
+            scopes=canonical_scopes,
+            raw_session_id=raw_session_id,
+            operation=operation,
+            deadline_seconds=deadline_seconds,
+        )
 
     async def profile_payload(self, principal_id: str, project_id: str) -> dict[str, Any]:
         if not self.available:
@@ -1366,7 +1245,7 @@ class MemoryRuntime:
         self,
         operation: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
-        async with self.module._lifecycle_lock:
+        async with self.module.lifecycle():
             return await run_blocking(operation)
 
     async def create_backup(self, backup_id: str | None = None) -> MemorySnapshot:
@@ -1428,9 +1307,7 @@ class MemoryRuntime:
         return _clear_result_payload(result)
 
     async def _pause_clear_claims(self) -> None:
-        if not await self.module._worker.pause_and_wait(
-            timeout_seconds=self.module._clear_drain_timeout_seconds
-        ):
+        if not await self.module.quiesce_claims_for_clear():
             raise RuntimeError("Memory worker did not quiesce before clear")
 
     async def _quiesce_for_clear(self, claims_already_paused: bool = False) -> None:
@@ -1477,7 +1354,7 @@ class MemoryRuntime:
             self._set_recorder_health_disabled()
             return
         if surface.surface == "attachments":
-            await run_blocking(self.module._attachment_store.clear_all)
+            await self.module.clear_attachments()
             return
         raise RuntimeError("unknown Memory clear surface")
 
@@ -1503,7 +1380,7 @@ class MemoryRuntime:
 
     async def _resume_after_clear_once(self) -> None:
         if not self._config.enabled:
-            self.module._worker.resume_claims()
+            self.module.resume_claims()
             return
         try:
             reconciled = await self._reconcile_locked(
@@ -1557,9 +1434,9 @@ class MemoryRuntime:
                     "download_error": None,
                 }
             if supervisor is not None:
-                async with self.module._lifecycle_lock:
+                async with self.module.lifecycle():
                     try:
-                        claims_paused = await self.module._worker.pause_and_wait()
+                        claims_paused = await self.module.quiesce_claims()
                     except Exception:
                         claims_paused = False
                     if not claims_paused:
@@ -1684,28 +1561,27 @@ class MemoryRuntime:
         if python is None:
             return {"ok": False, "error": "memory_restart_failed"}
 
-        async with self.module._lifecycle_lock:
+        async with self.module.lifecycle():
             if self._maintenance_open():
-                self.module._worker.pause_claims()
+                self.module.pause_claims()
                 return {"ok": False, "error": "memory_clear_failed"}
 
             # Recovery may resume claims. Reinstate the fence synchronously,
             # before a drain task can run another claim.
-            worker = self.module._worker
-            worker.pause_claims()
+            self.module.pause_claims()
             old_process = self._process
             try:
                 # The grace budget applies only to the current drain tick. A
                 # timeout leaves the current process/provider ownership intact.
-                if not await worker.pause_and_wait(timeout_seconds=5.0):
+                if not await self.module.quiesce_claims(timeout_seconds=5.0):
                     if old_process is not None and old_process.running:
-                        worker.resume_claims()
+                        self.module.resume_claims()
                         self._ensure_worker()
                     return {"ok": False, "error": "memory_restart_failed"}
                 await self._stop_worker()
             except Exception:
                 if old_process is not None and old_process.running:
-                    worker.resume_claims()
+                    self.module.resume_claims()
                     self._ensure_worker()
                 return {"ok": False, "error": "memory_restart_failed"}
 
@@ -1729,7 +1605,7 @@ class MemoryRuntime:
                 self._socket_path,
                 processing_health_check=self._processing_healthy,
             )
-            self.module._replace_provider(self._provider)
+            self.module.replace_provider(self._provider)
             try:
                 meta = await asyncio.to_thread(self._store.ensure_meta)
                 await run_blocking(
@@ -1774,7 +1650,7 @@ class MemoryRuntime:
             )
             self._process = sidecar
             self._process_records_calls = True
-            worker.begin_new_lease_activation()
+            self.module.begin_activation(new_lease=True)
             try:
                 started = await sidecar.start()
             except Exception:
@@ -1792,7 +1668,7 @@ class MemoryRuntime:
 
             self._update_recorder_health(_RECORDER_DEGRADED)
             self._runtime_error = None
-            worker.resume_claims()
+            self.module.resume_claims()
             self._ensure_worker()
             return {"ok": True, "state": "ready"}
 
@@ -1824,7 +1700,7 @@ class MemoryRuntime:
                 pass
         if self.available:
             try:
-                await self.module._worker.prepare_shutdown()
+                await self.module.prepare_shutdown()
             finally:
                 await self._stop_worker()
         if self._process is not None:
@@ -1933,14 +1809,14 @@ class MemoryRuntime:
         """Cut over a verified pointer while preserving the prior runtime on failure."""
 
         async with self._reconcile_lock:
-            async with self.module._lifecycle_lock:
+            async with self.module.lifecycle():
                 if self._maintenance_open():
-                    self.module._worker.pause_claims()
+                    self.module.pause_claims()
                     raise MemoryRuntimeActivationError("memory clear recovery is required")
-                if not await self.module._worker.pause_and_wait():
-                    self.module._worker.resume_claims()
+                if not await self.module.quiesce_claims():
+                    self.module.resume_claims()
                     raise MemoryRuntimeActivationError("memory worker could not pause")
-                async with self.module._root_lifecycle_lock():
+                async with self.module.provider_root_lifecycle():
                     meta = None
                     root_rollback: ProviderRootRollback | None = None
                     try:
@@ -2020,7 +1896,7 @@ class MemoryRuntime:
     async def _activate_ready_events(self) -> None:
         while True:
             async with self._reconcile_lock:
-                async with self.module._lifecycle_lock:
+                async with self.module.lifecycle():
                     process = self._ready_event
                     self._ready_event = None
                     if process is None:
@@ -2028,7 +1904,7 @@ class MemoryRuntime:
                     if not self._ready_event_is_current(process):
                         continue
                     if self._maintenance_open():
-                        self.module._worker.pause_claims()
+                        self.module.pause_claims()
                         continue
                     if not self._ready_event_is_current(process):
                         continue
@@ -2037,7 +1913,7 @@ class MemoryRuntime:
                     if not self._ready_event_is_current(process):
                         continue
                     self._runtime_error = None
-                    self.module._worker.resume_claims()
+                    self.module.resume_claims()
                     self._ensure_worker()
 
     def _ready_event_is_current(
@@ -2102,10 +1978,10 @@ class MemoryRuntime:
 
     def _ensure_worker(self) -> None:
         if self._maintenance_open():
-            self.module._worker.pause_claims()
+            self.module.pause_claims()
             return
         if self._worker_task is None or self._worker_task.done():
-            self.module._worker.begin_activation()
+            self.module.begin_activation()
             self._worker_task = asyncio.create_task(self._drain_loop(), name="memory-drain")
 
     async def _stop_worker(self) -> None:
@@ -2188,7 +2064,7 @@ class MemoryRuntime:
                 return False, None
             if self._module is None:
                 return True, await self._run_call_log_maintenance()
-            async with self.module._lifecycle_lock:
+            async with self.module.lifecycle():
                 if self._process_records_calls or not self._call_log_exists():
                     return False, None
                 return True, await self._run_call_log_maintenance()
@@ -2218,7 +2094,7 @@ class MemoryRuntime:
     async def _drain_loop(self) -> None:
         while self._config.enabled:
             try:
-                await self.module._worker.drain()
+                await self.module.drain()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2229,10 +2105,9 @@ class MemoryRuntime:
     async def _recover_failed_drain(self) -> None:
         """Quiesce detached session work before rotating the worker lease."""
 
-        worker = self.module._worker
         while self._config.enabled:
             try:
-                if await worker.pause_and_wait():
+                if await self.module.quiesce_claims():
                     break
             except asyncio.CancelledError:
                 raise
@@ -2249,7 +2124,7 @@ class MemoryRuntime:
             # waited for lifecycle ownership. Fence and join that newer work.
             while self._config.enabled:
                 try:
-                    if await worker.pause_and_wait():
+                    if await self.module.quiesce_claims():
                         break
                 except asyncio.CancelledError:
                     raise
@@ -2259,11 +2134,11 @@ class MemoryRuntime:
             else:
                 return
 
-            worker.begin_new_lease_activation()
+            self.module.begin_activation(new_lease=True)
             while self._config.enabled:
                 try:
                     # Claims remain paused, so this pass can only run boot recovery.
-                    await worker.drain()
+                    await self.module.drain()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -2271,7 +2146,7 @@ class MemoryRuntime:
                     await asyncio.sleep(1.0)
                     continue
                 if not self._maintenance_open():
-                    worker.resume_claims()
+                    self.module.resume_claims()
                 return
 
     def _data_exists(self) -> bool:
@@ -2315,13 +2190,6 @@ def _provider_kwargs(config: MemoryConfig) -> dict[str, str | None]:
         "embedding_model": config.processing.embedding.model,
         "embedding_api_key": config.processing.embedding.api_key,
     }
-
-
-def _final_flush_timeout(value: float) -> float:
-    try:
-        return max(float(value), 0.001)
-    except (TypeError, ValueError):
-        return 0.001
 
 
 def _active_compatible_root_formats(artifact_manager: MemoryArtifactPort) -> tuple[str, ...]:

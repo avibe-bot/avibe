@@ -121,15 +121,22 @@ async def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failur
     async def no_wait(_seconds: float) -> None:
         return None
 
-    initial_boot_id = runtime.module._worker._boot_id
-    monkeypatch.setattr(runtime.module._worker, "drain", drain)
+    activations: list[bool] = []
+    begin_activation = runtime.module.begin_activation
+
+    def track_activation(*, new_lease: bool = False) -> None:
+        activations.append(new_lease)
+        begin_activation(new_lease=new_lease)
+
+    monkeypatch.setattr(runtime.module, "begin_activation", track_activation)
+    monkeypatch.setattr(runtime.module, "drain", drain)
     monkeypatch.setattr("core.memory.runtime.asyncio.sleep", no_wait)
 
     runtime._ensure_worker()
     assert runtime._worker_task is not None
     await runtime._worker_task
     assert drain_calls == 2
-    assert runtime.module._worker._boot_id != initial_boot_id
+    assert activations == [False, True]
 
 
 async def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
@@ -187,7 +194,7 @@ async def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
         flush_hook=block_flush,
     )
     runtime._provider = provider
-    runtime.module._replace_provider(provider)
+    runtime.module.replace_provider(provider)
     worker = runtime.module._worker
     coordinator = worker.coordinator
 
@@ -1248,7 +1255,7 @@ async def test_final_flush_fences_capture_before_queue_visibility(
         flush_hook=block_flush,
     )
     runtime._provider = provider
-    runtime.module._replace_provider(provider)
+    runtime.module.replace_provider(provider)
 
     source_root = runtime_home / "attachments" / "avibe"
     source_root.mkdir(parents=True, mode=0o700)
@@ -1310,7 +1317,7 @@ async def test_final_flush_fences_capture_before_queue_visibility(
 
     release_pin.set()
     assert isinstance(await old_capture, CaptureAccepted)
-    drain = asyncio.create_task(runtime.module._worker.drain_once())
+    drain = asyncio.create_task(runtime.module.drain())
 
     await asyncio.wait_for(flush_entered.wait(), timeout=1.0)
     assert [capture.text for capture in provider.captures] == [
@@ -1354,20 +1361,9 @@ async def test_session_lifecycle_fences_capture_through_reset(
     )
     provider = FakeMemoryProvider()
     runtime._provider = provider
-    runtime.module._replace_provider(provider)
+    runtime.module.replace_provider(provider)
     principal_id = "u-11111111111111111111111111111111"
     session_id = "lifecycle-session"
-    admission_lock = runtime.module._capture_admission_lock(
-        principal_id=principal_id,
-        project_id=PROJECT,
-        session_id=session_id,
-    )
-
-    async def failed_flush(**_kwargs) -> bool:
-        assert admission_lock.locked()
-        return False
-
-    monkeypatch.setattr(runtime, "_final_flush_under_admission", failed_flush)
     request = CaptureRequest(
         source_message_id="after-reset-source",
         session_id=session_id,
@@ -1442,36 +1438,56 @@ async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation
         "p-22222222222222222222222222222222",
     )
     session_id = "multi-scope-lifecycle-session"
-    locks = [
-        runtime.module._capture_admission_lock(
-            principal_id=principal_id,
-            project_id=project_id,
-            session_id=session_id,
-        )
-        for principal_id, project_id in (first_scope, second_scope)
-    ]
-    flushes: list[tuple[str, str]] = []
-
-    async def flush_under_fence(*, principal_id, project_id, **_kwargs) -> bool:
-        assert all(lock.locked() for lock in locks)
-        flushes.append((principal_id, project_id))
-        return True
-
-    monkeypatch.setattr(runtime, "_final_flush_under_admission", flush_under_fence)
+    operation_entered = asyncio.Event()
+    release_operation = asyncio.Event()
 
     async def archive_session() -> str:
-        assert all(lock.locked() for lock in locks)
+        operation_entered.set()
+        await release_operation.wait()
         return "archived"
 
-    assert await runtime.run_session_scopes_lifecycle(
-        scopes=(second_scope, first_scope, second_scope),
-        raw_session_id=session_id,
-        operation=archive_session,
-        deadline_seconds=2.0,
-    ) == "archived"
-    assert flushes == [first_scope, second_scope]
-    assert all(not lock.locked() for lock in locks)
-    await memory_runtime_factory.close(runtime)
+    lifecycle = asyncio.create_task(
+        runtime.run_session_scopes_lifecycle(
+            scopes=(second_scope, first_scope, second_scope),
+            raw_session_id=session_id,
+            operation=archive_session,
+            deadline_seconds=2.0,
+        )
+    )
+    captures: list[asyncio.Task[object]] = []
+    try:
+        await asyncio.wait_for(operation_entered.wait(), timeout=1.0)
+        captures = [
+            asyncio.create_task(
+                runtime.module.capture(
+                    CaptureRequest(
+                        source_message_id=f"multi-scope-{index}",
+                        session_id=session_id,
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        provenance="user_input",
+                        text=f"scope {index} after lifecycle",
+                        occurred_at_ms=1_725_000_001_234 + index,
+                        attachments=(),
+                    )
+                )
+            )
+            for index, (principal_id, project_id) in enumerate(
+                (first_scope, second_scope),
+                start=1,
+            )
+        ]
+        await asyncio.sleep(0)
+        assert all(not capture.done() for capture in captures)
+
+        release_operation.set()
+        assert await lifecycle == "archived"
+        capture_results = await asyncio.gather(*captures)
+        assert all(isinstance(result, CaptureAccepted) for result in capture_results)
+    finally:
+        release_operation.set()
+        await asyncio.gather(lifecycle, *captures, return_exceptions=True)
+        await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
@@ -1599,7 +1615,7 @@ async def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
     )
     provider = FakeMemoryProvider()
     runtime._provider = provider
-    runtime.module._replace_provider(provider)
+    runtime.module.replace_provider(provider)
     principal_id = "u-11111111111111111111111111111111"
     session_id = f"aborted-{outcome}-session"
     request = CaptureRequest(
@@ -1835,7 +1851,7 @@ async def test_runtime_repair_stops_retained_down_supervisor_before_replacing_ar
         events.append("pause")
         return True
 
-    monkeypatch.setattr(runtime.module._worker, "pause_and_wait", pause_and_wait)
+    monkeypatch.setattr(runtime.module, "quiesce_claims", pause_and_wait)
 
     assert await runtime.install_artifact() == {
         "ok": True,
@@ -3228,7 +3244,7 @@ async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     runtime._process = old
     provider = FakeMemoryProvider(add_hook=block_add)
     runtime._provider = provider
-    runtime.module._replace_provider(provider)
+    runtime.module.replace_provider(provider)
     store = runtime._store
     assert store is not None
     accepted = store.enqueue_request(

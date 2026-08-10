@@ -1,16 +1,18 @@
-"""The five-method, provider-independent MemoryModule interface."""
+"""The provider-independent MemoryModule interface."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import unicodedata
 import weakref
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal, TypeVar
 
 from config import paths
 from core.memory.blocking import run_blocking
@@ -68,7 +70,17 @@ PROVIDER_READ_TIMEOUT_SECONDS = 20.0
 CLEAR_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
+logger = logging.getLogger(__name__)
+_SessionLifecycleResult = TypeVar("_SessionLifecycleResult")
+
+
 _ROOT_LIFECYCLE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+class MemorySessionLifecycleBusyError(RuntimeError):
+    """Raised when a destructive session transition cannot acquire its fence."""
+
+    code = "memory_session_lifecycle_busy"
 
 
 class MemoryModule:
@@ -125,10 +137,286 @@ class MemoryModule:
             attachment_admission_lock=self._root_lifecycle_lock(),
         )
 
-    def _replace_provider(self, provider: MemoryProviderPort) -> None:
-        """Swap the private provider shared by direct reads and the worker.
+    @property
+    def maintenance_active(self) -> bool:
+        """Whether Runtime-owned maintenance currently fences module work."""
 
-        ``MemoryRuntime`` holds the module lifecycle lock before invoking this,
+        return self._clear_active
+
+    def enter_maintenance(self) -> None:
+        """Fence capture and reads before a maintenance transition begins."""
+
+        self._clear_active = True
+
+    def leave_maintenance(self) -> None:
+        """Reopen capture and reads after maintenance ownership is released."""
+
+        self._clear_active = False
+
+    @asynccontextmanager
+    async def lifecycle(self) -> AsyncIterator[None]:
+        """Serialize an ordinary module lifecycle transition."""
+
+        async with self._lifecycle_lock:
+            yield
+
+    @asynccontextmanager
+    async def destructive_lifecycle(self) -> AsyncIterator[None]:
+        """Acquire module and provider-root ownership in their required order."""
+
+        async with self._lifecycle_lock:
+            async with self._root_lifecycle_lock():
+                yield
+
+    @asynccontextmanager
+    async def provider_root_lifecycle(self) -> AsyncIterator[None]:
+        """Fence provider-root work when module lifecycle ownership is already held."""
+
+        async with self._root_lifecycle_lock():
+            yield
+
+    @asynccontextmanager
+    async def observe_provider_root(self) -> AsyncIterator[bool]:
+        """Acquire provider-root observation only when it is immediately available."""
+
+        lock = self._root_lifecycle_lock()
+        if lock.locked():
+            yield False
+            return
+        # An uncontended asyncio.Lock acquisition completes without yielding.
+        await lock.acquire()
+        try:
+            yield True
+        finally:
+            lock.release()
+
+    def pause_claims(self) -> None:
+        """Synchronously fence new add and flush claims."""
+
+        self._worker.pause_claims()
+
+    async def quiesce_claims(self, *, timeout_seconds: float | None = None) -> bool:
+        """Fence claims and join in-flight add and flush work under one deadline."""
+
+        if timeout_seconds is None:
+            return await self._worker.pause_and_wait()
+        return await self._worker.pause_and_wait(timeout_seconds=timeout_seconds)
+
+    async def quiesce_claims_for_clear(self) -> bool:
+        """Fence claims using the module's configured destructive-work budget."""
+
+        return await self._worker.pause_and_wait(
+            timeout_seconds=self._clear_drain_timeout_seconds
+        )
+
+    def resume_claims(self) -> None:
+        """Permit add and flush claims after lifecycle recovery succeeds."""
+
+        self._worker.resume_claims()
+
+    def begin_activation(self, *, new_lease: bool = False) -> None:
+        """Require recovery before the next drain, optionally rotating lease ownership."""
+
+        if new_lease:
+            self._worker.begin_new_lease_activation()
+            return
+        self._worker.begin_activation()
+
+    async def drain(self) -> int:
+        """Run one bounded worker drain through the module interface."""
+
+        return await self._worker.drain()
+
+    async def prepare_shutdown(self) -> None:
+        """Settle in-process flush work without initiating provider writes."""
+
+        await self._worker.prepare_shutdown()
+
+    async def clear_attachments(self) -> None:
+        """Remove every module-owned pinned attachment during destructive clear."""
+
+        await run_blocking(self._attachment_store.clear_all)
+
+    async def final_flush(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        raw_session_id: str,
+        deadline_seconds: float = 5.0,
+    ) -> bool:
+        """Fence capture and flush one trusted canonical session by deadline."""
+
+        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
+            return False
+        timeout = _positive_timeout(deadline_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        admission_lock = self._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
+        acquired = False
+        try:
+            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
+            acquired = True
+            return await self._final_flush_under_admission(
+                principal_id=principal_id,
+                project_id=project_id,
+                raw_session_id=raw_session_id,
+                deadline=deadline,
+            )
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            if acquired:
+                admission_lock.release()
+
+    async def run_session_lifecycle(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
+        deadline_seconds: float = 5.0,
+    ) -> _SessionLifecycleResult:
+        """Flush and run one destructive session transition under one fence."""
+
+        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
+            return await operation()
+        timeout = _positive_timeout(deadline_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        admission_lock = self._capture_admission_lock(
+            principal_id=principal_id,
+            project_id=project_id,
+            session_id=raw_session_id,
+        )
+        try:
+            await asyncio.wait_for(admission_lock.acquire(), timeout=timeout)
+        except asyncio.TimeoutError as error:
+            raise MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ) from error
+
+        try:
+            await self._final_flush_under_admission(
+                principal_id=principal_id,
+                project_id=project_id,
+                raw_session_id=raw_session_id,
+                deadline=deadline,
+            )
+            return await operation()
+        finally:
+            admission_lock.release()
+
+    async def run_session_scopes_lifecycle(
+        self,
+        *,
+        scopes: tuple[tuple[str, str], ...],
+        raw_session_id: str,
+        operation: Callable[[], Awaitable[_SessionLifecycleResult]],
+        deadline_seconds: float = 5.0,
+    ) -> _SessionLifecycleResult:
+        """Flush all session scopes and run one transition under every fence."""
+
+        canonical_scopes = tuple(sorted(set(scopes)))
+        if (
+            not canonical_scopes
+            or not isinstance(raw_session_id, str)
+            or not raw_session_id
+            or any(
+                not is_principal_id(principal_id) or not is_project_id(project_id)
+                for principal_id, project_id in canonical_scopes
+            )
+        ):
+            raise ValueError("invalid canonical Memory session scopes")
+        if not self._is_enabled():
+            return await operation()
+        if self.maintenance_active or self._is_maintenance_open():
+            raise MemorySessionLifecycleBusyError("memory session lifecycle is unavailable")
+
+        timeout = _positive_timeout(deadline_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        locks = [
+            self._capture_admission_lock(
+                principal_id=principal_id,
+                project_id=project_id,
+                session_id=raw_session_id,
+            )
+            for principal_id, project_id in canonical_scopes
+        ]
+        acquired: list[asyncio.Lock] = []
+        try:
+            for admission_lock in locks:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(admission_lock.acquire(), timeout=remaining)
+                acquired.append(admission_lock)
+        except asyncio.TimeoutError as error:
+            for admission_lock in reversed(acquired):
+                admission_lock.release()
+            raise MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ) from error
+        except asyncio.CancelledError:
+            for admission_lock in reversed(acquired):
+                admission_lock.release()
+            raise
+
+        try:
+            for principal_id, project_id in canonical_scopes:
+                await self._final_flush_under_admission(
+                    principal_id=principal_id,
+                    project_id=project_id,
+                    raw_session_id=raw_session_id,
+                    deadline=deadline,
+                )
+            return await operation()
+        finally:
+            for admission_lock in reversed(acquired):
+                admission_lock.release()
+
+    async def _final_flush_under_admission(
+        self,
+        *,
+        principal_id: str,
+        project_id: str,
+        raw_session_id: str,
+        deadline: float,
+    ) -> bool:
+        if not self._is_enabled() or self.maintenance_active or self._is_maintenance_open():
+            return False
+        try:
+            session_ref = await self._store_call(
+                self._store.provider_session_ref,
+                principal_id=principal_id,
+                project_ref=project_id,
+                session_id=raw_session_id,
+            )
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            return await self._worker.coordinator.final_flush(
+                session_ref,
+                deadline_seconds=remaining,
+            )
+        except asyncio.TimeoutError:
+            return False
+        except (TypeError, ValueError):
+            return False
+        except Exception:
+            logger.warning("Memory final flush failed")
+            return False
+
+    def replace_provider(self, provider: MemoryProviderPort) -> None:
+        """Swap the provider shared by direct reads and claim delivery.
+
+        The caller holds module lifecycle ownership before invoking this,
         so a sidecar credential/runtime replacement cannot split these two
         consumers across provider instances.
         """
