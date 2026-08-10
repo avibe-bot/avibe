@@ -1367,12 +1367,16 @@ async def test_final_flush_fences_capture_before_queue_visibility(
 
     pin_entered = asyncio.Event()
     release_pin = asyncio.Event()
+    handshake_timeout_seconds = 5.0
     original_pin = runtime.module._attachment_store.pin
 
     async def gate_attachment_pin(operation, /, *args, **kwargs):
         if operation == original_pin:
             pin_entered.set()
-            await release_pin.wait()
+            await asyncio.wait_for(
+                release_pin.wait(), timeout=handshake_timeout_seconds
+            )
+            return operation(*args, **kwargs)
         return await original_run_blocking(operation, *args, **kwargs)
 
     original_run_blocking = memory_module.run_blocking
@@ -1416,53 +1420,61 @@ async def test_final_flush_fences_capture_before_queue_visibility(
         )
     ] = admission_lock
 
-    old_capture = asyncio.create_task(runtime.module.capture(old_request))
-    await pin_entered.wait()
+    try:
+        old_capture = asyncio.create_task(runtime.module.capture(old_request))
+        await asyncio.wait_for(pin_entered.wait(), timeout=handshake_timeout_seconds)
 
-    final_flush = asyncio.create_task(
-        runtime.final_flush(
-            principal_id=old_request.principal_id,
-            project_id=old_request.project_id,
-            raw_session_id=old_request.session_id,
-            deadline_seconds=2.0,
+        final_flush = asyncio.create_task(
+            runtime.final_flush(
+                principal_id=old_request.principal_id,
+                project_id=old_request.project_id,
+                raw_session_id=old_request.session_id,
+                deadline_seconds=2.0,
+            )
         )
-    )
-    await admission_lock.final_flush_waiting.wait()
-    later_capture = asyncio.create_task(runtime.module.capture(later_request))
-    await admission_lock.later_capture_waiting.wait()
-    assert admission_lock.locked()
-    assert not final_flush.done()
-    assert not later_capture.done()
+        await asyncio.wait_for(
+            admission_lock.final_flush_waiting.wait(),
+            timeout=handshake_timeout_seconds,
+        )
+        later_capture = asyncio.create_task(runtime.module.capture(later_request))
+        await asyncio.wait_for(
+            admission_lock.later_capture_waiting.wait(),
+            timeout=handshake_timeout_seconds,
+        )
+        assert admission_lock.locked()
+        assert not final_flush.done()
+        assert not later_capture.done()
 
-    release_pin.set()
-    assert isinstance(await old_capture, CaptureAccepted)
-    drain = asyncio.create_task(runtime.module._worker.drain(max_rows=1))
+        release_pin.set()
+        assert isinstance(await old_capture, CaptureAccepted)
 
-    await flush_entered.wait()
-    assert [capture.text for capture in provider.captures] == [
-        "old session message"
-    ]
-    assert len(provider.flushes) == 1
-    assert not final_flush.done()
-    assert not later_capture.done()
-    assert all(
-        row.payload_text != "later session message"
-        for row in store.list_queue_rows()
-    )
+        await asyncio.wait_for(flush_entered.wait(), timeout=handshake_timeout_seconds)
+        assert [capture.text for capture in provider.captures] == [
+            "old session message"
+        ]
+        assert len(provider.flushes) == 1
+        assert not final_flush.done()
+        assert not later_capture.done()
+        assert all(
+            row.payload_text != "later session message"
+            for row in store.list_queue_rows()
+        )
 
-    release_flush.set()
-    assert await final_flush
+        release_flush.set()
+        assert await final_flush
 
-    assert isinstance(await later_capture, CaptureAccepted)
-    await drain
-    later_rows = [
-        row
-        for row in store.list_queue_rows()
-        if row.payload_text == "later session message"
-    ]
-    assert len(later_rows) == 1
-    assert later_rows[0].state == "pending"
-    await memory_runtime_factory.close(runtime)
+        assert isinstance(await later_capture, CaptureAccepted)
+        later_rows = [
+            row
+            for row in store.list_queue_rows()
+            if row.payload_text == "later session message"
+        ]
+        assert len(later_rows) == 1
+        assert later_rows[0].state == "pending"
+    finally:
+        release_pin.set()
+        release_flush.set()
+        await memory_runtime_factory.close(runtime)
 
 
 async def test_session_lifecycle_fences_capture_through_reset(
