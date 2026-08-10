@@ -8,6 +8,7 @@ from core.memory.backup_restore_journal import (
     BackupRestoreCASMismatch,
     BackupRestoreConflict,
     MemoryBackupRestoreJournal,
+    MemoryBackupRestoreJournalError,
 )
 from core.memory.snapshot import MemorySnapshotManager
 
@@ -91,3 +92,32 @@ def test_restore_journal_keeps_one_open_operation_until_completion(tmp_path: Pat
             expected_revision=operation.revision,
             actor_ref="system:runtime",
         )
+
+
+def test_restore_journal_translates_hardening_failure_after_durable_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, snapshot = _snapshot(tmp_path)
+    journal = MemoryBackupRestoreJournal(home)
+
+    from core.memory import confined_filesystem
+
+    real_chmod = confined_filesystem.os.chmod
+
+    def fail_journal_hardening(target, mode: int) -> None:
+        if Path(target) == journal.database_path and mode == 0o600:
+            raise confined_filesystem.ConfinedFilesystemError("unsafe journal")
+        real_chmod(target, mode)
+
+    monkeypatch.setattr(confined_filesystem.os, "chmod", fail_journal_hardening)
+
+    with pytest.raises(
+        MemoryBackupRestoreJournalError,
+        match="Memory backup restore journal files could not be hardened safely",
+    ):
+        journal.start(snapshot)
+
+    committed = journal.get_open_operation()
+    assert committed is not None
+    assert committed.backup_id == snapshot.snapshot_id

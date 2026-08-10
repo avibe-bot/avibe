@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import sqlite3
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,45 +107,36 @@ class MemoryBackupRestoreJournal:
         operation_id = secrets.token_hex(16)
         token = secrets.token_hex(16)
         now = _utc_now()
-        connection = self._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO backup_restore_operation (
-                    operation_id, backup_id, manifest_sha256, surface_digests_json,
-                    state, started_at, updated_at, attempt_count, open_slot,
-                    revision, execution_token
-                ) VALUES (?, ?, ?, ?, 'restoring', ?, ?, 1, 1, 1, ?)
-                """,
-                (
+            with self._transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO backup_restore_operation (
+                        operation_id, backup_id, manifest_sha256, surface_digests_json,
+                        state, started_at, updated_at, attempt_count, open_slot,
+                        revision, execution_token
+                    ) VALUES (?, ?, ?, ?, 'restoring', ?, ?, 1, 1, 1, ?)
+                    """,
+                    (
+                        operation_id,
+                        backup_id,
+                        manifest,
+                        _encode_digests(digests),
+                        now,
+                        now,
+                        token,
+                    ),
+                )
+                self._append_event(
+                    connection,
                     operation_id,
-                    backup_id,
-                    manifest,
-                    _encode_digests(digests),
-                    now,
-                    now,
-                    token,
-                ),
-            )
-            self._append_event(
-                connection,
-                operation_id,
-                "started",
-                "system:runtime",
-                occurred_at=now,
-                resulting_revision=1,
-            )
-            connection.commit()
+                    "started",
+                    "system:runtime",
+                    occurred_at=now,
+                    resulting_revision=1,
+                )
         except sqlite3.IntegrityError as error:
-            connection.rollback()
             raise BackupRestoreConflict("a Memory backup restore is already open") from error
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(operation_id)
 
     def get_operation(self, operation_id: str) -> BackupRestoreOperation | None:
@@ -193,14 +185,11 @@ class MemoryBackupRestoreJournal:
     def mark_boot_recovery_needed(self) -> BackupRestoreOperation | None:
         """Release a dead process claim while retaining the restore fence."""
 
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM backup_restore_operation WHERE open_slot = 1"
             ).fetchone()
             if row is None:
-                connection.commit()
                 return None
             now = _utc_now()
             revision = row["revision"] + 1
@@ -222,14 +211,7 @@ class MemoryBackupRestoreJournal:
                 resulting_revision=revision,
                 error_code="memory_clear_failed",
             )
-            connection.commit()
             identifier = row["operation_id"]
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def claim_retry(
@@ -241,9 +223,7 @@ class MemoryBackupRestoreJournal:
     ) -> BackupRestoreOperation:
         identifier = _validated_operation_id(operation_id)
         actor = _validated_actor(actor_ref)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._require_row(
                 connection,
                 identifier,
@@ -271,13 +251,6 @@ class MemoryBackupRestoreJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def mark_recovery_needed(
@@ -332,9 +305,7 @@ class MemoryBackupRestoreJournal:
         identifier = _validated_operation_id(operation_id)
         token = _validated_token(execution_token)
         actor = _validated_actor(actor_ref)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._require_row(
                 connection,
                 identifier,
@@ -371,13 +342,6 @@ class MemoryBackupRestoreJournal:
                 resulting_revision=revision,
                 error_code=error_code,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     @staticmethod
@@ -488,6 +452,16 @@ class MemoryBackupRestoreJournal:
             raise MemoryBackupRestoreJournalError(
                 "Memory backup restore journal is unsafe"
             ) from error
+
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._database.transaction(
+            translate_connect_error=lambda _error: MemoryBackupRestoreJournalError(
+                "Memory backup restore journal is unsafe"
+            ),
+            translate_harden_error=lambda _error: MemoryBackupRestoreJournalError(
+                "Memory backup restore journal files could not be hardened safely"
+            ),
+        )
 
     def _harden_database_files(self, *, sync_parent: bool = False) -> None:
         try:
