@@ -10544,6 +10544,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         )
         settlement = CancellationSettlement()
         if pid in auth_entries:
+            mutation_started = True
             auth_result = await settlement.wait(
                 _delete_opencode_provider_auth_async(pid)
             )
@@ -11001,6 +11002,7 @@ async def _settle_opencode_delete_runtime(
 
     settlement = settlement or CancellationSettlement()
     boundary_cause = cancellation_cause
+    default_clear_error: BaseException | None = None
     if clear_default:
         try:
             await settlement.run_blocking(
@@ -11011,6 +11013,7 @@ async def _settle_opencode_delete_runtime(
             if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
                 raise
             boundary_cause = boundary_cause or exc
+            default_clear_error = exc
             logger.warning(
                 "Failed to revalidate opencode.default_provider after delete for %s: %s",
                 provider_id,
@@ -11027,6 +11030,12 @@ async def _settle_opencode_delete_runtime(
         restart = {"ok": False, "message": str(exc)}
     _OPENCODE_OPTIONS_CACHE.clear()
     settlement.raise_if_cancelled(boundary_cause)
+    if default_clear_error is not None:
+        return {
+            "ok": False,
+            "message": str(default_clear_error),
+            "runtime_refresh": restart,
+        }
     return restart
 
 
@@ -11072,6 +11081,7 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
         removed_auth = False
         settlement = CancellationSettlement()
         if pid in auth_entries:
+            mutation_started = True
             result = await settlement.wait(
                 _delete_opencode_provider_auth_async(pid)
             )

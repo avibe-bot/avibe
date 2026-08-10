@@ -303,6 +303,59 @@ def test_web_codex_persist_failure_reconciles_hook_and_runtime_before_failure(
     service._refresh_backend_runtime.assert_awaited_once_with("codex")
 
 
+def test_web_codex_persist_failure_logs_secondary_refresh_failure(
+    service: AgentAuthService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    flow = WebAuthFlow(
+        flow_id="codex-double-failure",
+        backend="codex",
+        state="verifying",
+        process=SimpleNamespace(wait=AsyncMock(return_value=0)),
+    )
+    service._verify_web_login = AsyncMock(return_value=(True, None))
+    service._persist_backend_auth_mode = AsyncMock(
+        side_effect=BackendAuthConfigSaveError("config save failed")
+    )
+    service._refresh_backend_runtime = AsyncMock(
+        side_effect=RuntimeError("runtime refresh failed")
+    )
+
+    _run(service._wait_for_codex_completion_web(flow))
+
+    assert flow.state == "failed"
+    assert flow.error == "config save failed"
+    assert "runtime refresh failed" in caplog.text
+
+
+def test_web_claude_finish_failure_still_attempts_runtime_refresh(
+    service: AgentAuthService,
+) -> None:
+    flow = WebAuthFlow(
+        flow_id="claude-finish-failure",
+        backend="claude",
+        state="verifying",
+        claude_client=SimpleNamespace(),
+    )
+    service._send_claude_control_request = AsyncMock()
+    service._verify_web_login = AsyncMock(return_value=(True, None))
+    service._invoke_post_web_success_hook = AsyncMock(return_value=None)
+
+    async def finish_attempt(_attempt, *, succeeded):
+        if succeeded:
+            raise RuntimeError("attempt finish failed")
+
+    service._finish_claude_oauth_attempt = AsyncMock(side_effect=finish_attempt)
+    service._refresh_backend_runtime = AsyncMock()
+    service._disconnect_claude_client = AsyncMock()
+
+    _run(service._wait_for_claude_completion_web(flow))
+
+    service._refresh_backend_runtime.assert_awaited_once_with("claude")
+    assert flow.state == "failed"
+    assert flow.error == "attempt finish failed"
+
+
 def test_web_codex_persist_failure_reconciles_before_cancellation(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
@@ -1516,6 +1569,72 @@ def test_remove_web_auth_reconciles_hook_before_cancel_after_save_failure(
 
     _run(exercise())
     assert hook_calls == ["codex"]
+
+
+def test_remove_web_auth_surfaces_config_save_failure_after_hook(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-stale"
+    config.save()
+    service.controller.config = V2Config.load()
+    service._run_utility_command = AsyncMock(return_value=(True, None))
+    hook_calls: list[str] = []
+    service._post_web_success_hook = hook_calls.append
+
+    monkeypatch.setattr(
+        V2Config,
+        "save",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("config save failed")
+        ),
+    )
+
+    result = _run(service.remove_web_auth("codex"))
+
+    assert result == {
+        "ok": True,
+        "partial": True,
+        "warning": "config_save_failed",
+        "detail": "config save failed",
+    }
+    assert hook_calls == ["codex"]
+
+
+def test_remove_web_auth_caller_cancel_precedes_child_cancel(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_entered = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def child_cancel(*_args, **_kwargs):
+        child_entered.set()
+        await release_child.wait()
+        raise asyncio.CancelledError("logout child stopped")
+
+    monkeypatch.setattr(service, "_run_utility_command", child_cancel)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(service.remove_web_auth("codex"))
+        await child_entered.wait()
+        task.cancel("remove caller stopped")
+        await asyncio.sleep(0)
+        release_child.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("remove caller stopped",)
+        assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+        assert raised.value.__cause__.args == ("logout child stopped",)
+
+    _run(exercise())
 
 
 def test_remove_web_auth_surfaces_logout_failure(

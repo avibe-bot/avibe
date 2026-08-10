@@ -12,7 +12,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from modules.claude_sdk_compat import (
     CLAUDE_SDK_AVAILABLE,
@@ -1487,16 +1487,11 @@ class AgentAuthService:
                         )
                     except BackendAuthConfigSaveError as error:
                         persist_error = error
-                try:
-                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
-                except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(persist_error or error)
-                    if persist_error is not None:
-                        raise persist_error
-                    raise
-                settlement.raise_if_cancelled(persist_error)
-                if persist_error is not None:
-                    raise persist_error
+                await self._settle_auth_completion(
+                    flow.backend,
+                    settlement,
+                    persist_error=persist_error,
+                )
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
@@ -1556,22 +1551,15 @@ class AgentAuthService:
                     )
                 except BackendAuthConfigSaveError as error:
                     persist_error = error
-                try:
-                    await settlement.wait(
-                        self._finish_claude_oauth_attempt(
-                            flow.claude_oauth_attempt,
-                            succeeded=True,
-                        )
-                    )
-                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
-                except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(persist_error or error)
-                    if persist_error is not None:
-                        raise persist_error
-                    raise
-                settlement.raise_if_cancelled(persist_error)
-                if persist_error is not None:
-                    raise persist_error
+                await self._settle_auth_completion(
+                    flow.backend,
+                    settlement,
+                    persist_error=persist_error,
+                    finalize=self._finish_claude_oauth_attempt(
+                        flow.claude_oauth_attempt,
+                        succeeded=True,
+                    ),
+                )
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
@@ -2244,6 +2232,7 @@ class AgentAuthService:
             raise
 
         settlement_cause: BaseException | None = None
+        config_save_error: Exception | None = None
         try:
             await self._save_backend_auth_fields(
                 backend,
@@ -2254,6 +2243,7 @@ class AgentAuthService:
             )
         except Exception as err:  # noqa: BLE001
             settlement_cause = err
+            config_save_error = err
             # Disk state has already been cleared; surface the V2Config
             # write failure but report partial success so the UI shows
             # the auth as removed (which is the user-visible truth).
@@ -2273,6 +2263,13 @@ class AgentAuthService:
                 settlement_cause = settlement_cause or err
                 logger.warning("post_web_success_hook failed after remove for %s: %s", backend, err)
         settlement.raise_if_cancelled(settlement_cause)
+        if config_save_error is not None:
+            return {
+                "ok": True,
+                "partial": True,
+                "warning": "config_save_failed",
+                "detail": str(config_save_error),
+            }
         # Surface logout failures even though V2Config was cleared. The
         # on-disk credentials may still be intact (e.g. ``codex logout``
         # missing, exited non-zero, or timed out), and the user needs
@@ -3186,16 +3183,11 @@ class AgentAuthService:
                     flow.backend,
                     settlement=settlement,
                 )
-                try:
-                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
-                except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(persist_error or error)
-                    if persist_error is not None:
-                        raise persist_error
-                    raise
-                settlement.raise_if_cancelled(persist_error)
-                if persist_error is not None:
-                    raise persist_error
+                await self._settle_auth_completion(
+                    flow.backend,
+                    settlement,
+                    persist_error=persist_error,
+                )
                 flow.state = "success"
             else:
                 flow.state = "failed"
@@ -3233,22 +3225,15 @@ class AgentAuthService:
                     flow.backend,
                     settlement=settlement,
                 )
-                try:
-                    await settlement.wait(
-                        self._finish_claude_oauth_attempt(
-                            flow.claude_oauth_attempt,
-                            succeeded=True,
-                        )
-                    )
-                    await settlement.wait(self._refresh_backend_runtime(flow.backend))
-                except (Exception, asyncio.CancelledError) as error:
-                    settlement.raise_if_cancelled(persist_error or error)
-                    if persist_error is not None:
-                        raise persist_error
-                    raise
-                settlement.raise_if_cancelled(persist_error)
-                if persist_error is not None:
-                    raise persist_error
+                await self._settle_auth_completion(
+                    flow.backend,
+                    settlement,
+                    persist_error=persist_error,
+                    finalize=self._finish_claude_oauth_attempt(
+                        flow.claude_oauth_attempt,
+                        succeeded=True,
+                    ),
+                )
                 flow.state = "success"
             else:
                 await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
@@ -3353,6 +3338,41 @@ class AgentAuthService:
             if persist_error is not None:
                 raise persist_error
         return persist_error
+
+    async def _settle_auth_completion(
+        self,
+        backend: str,
+        settlement: CancellationSettlement,
+        *,
+        persist_error: BaseException | None = None,
+        finalize: Awaitable[None] | None = None,
+    ) -> None:
+        """Finish every required live stage before surfacing the primary error."""
+
+        primary_error = persist_error
+
+        async def settle_stage(awaitable: Awaitable[None], stage: str) -> None:
+            nonlocal primary_error
+            try:
+                await settlement.wait(awaitable)
+            except (Exception, asyncio.CancelledError) as error:
+                if primary_error is None:
+                    primary_error = error
+                else:
+                    logger.warning(
+                        "Agent auth %s failed after an earlier %s failure: %s",
+                        stage,
+                        backend,
+                        error,
+                        exc_info=True,
+                    )
+
+        if finalize is not None:
+            await settle_stage(finalize, "finalization")
+        await settle_stage(self._refresh_backend_runtime(backend), "runtime refresh")
+        settlement.raise_if_cancelled(primary_error)
+        if primary_error is not None:
+            raise primary_error
 
     async def _clear_claude_settings_env_for_oauth(self) -> None:
         try:

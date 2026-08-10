@@ -31,6 +31,12 @@ class CancellationSettlement:
                 await asyncio.shield(task)
             except asyncio.CancelledError as error:
                 if task.cancelled():
+                    if asyncio.current_task().cancelling():
+                        self._cancellation = self._cancellation or error
+                        try:
+                            return task.result()
+                        except asyncio.CancelledError as child_error:
+                            self.raise_if_cancelled(child_error)
                     return task.result()
                 self._cancellation = self._cancellation or error
             except Exception:
@@ -48,7 +54,7 @@ class CancellationSettlement:
 
     def raise_if_cancelled(self, cause: BaseException | None = None) -> None:
         if self._cancellation is not None:
-            if cause is not None:
+            if cause is not None and cause is not self._cancellation:
                 raise self._cancellation from cause
             raise self._cancellation
 
@@ -64,8 +70,8 @@ async def run_blocking(
     settlement = CancellationSettlement()
     try:
         result = await settlement.run_blocking(operation, *args, **kwargs)
-    except (Exception, asyncio.CancelledError) as error:
-        settlement.raise_if_cancelled(error)
+    except (Exception, asyncio.CancelledError):
+        settlement.raise_if_cancelled()
         raise
     settlement.raise_if_cancelled()
     return result

@@ -190,5 +190,12 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_persist_failure_refreshes_runtime_before_reporting_failure
+  - id: AUTH-SETUP-908
+    name: Claude finalization failure still refreshes runtime before reporting failure
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_finish_failure_refreshes_runtime_before_reporting_failure
 next_priority:
   - AUTH-SETUP-301

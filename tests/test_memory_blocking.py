@@ -67,6 +67,7 @@ def test_run_blocking_cancellation_precedes_later_operation_failure() -> None:
         with pytest.raises(asyncio.CancelledError) as raised:
             await call
         assert raised.value.args == ("caller stopped",)
+        assert raised.value.__cause__ is None
 
     asyncio.run(run())
 
@@ -172,6 +173,31 @@ def test_cancellation_settlement_propagates_child_cancellation_without_retaining
             await settlement.wait(child())
         assert raised.value.args == ("child stopped",)
         assert not settlement.cancelled
+
+    asyncio.run(run())
+
+
+def test_cancellation_settlement_caller_cancel_precedes_child_cancellation() -> None:
+    child_entered = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def child() -> None:
+        child_entered.set()
+        await release_child.wait()
+        raise asyncio.CancelledError("child stopped")
+
+    async def run() -> None:
+        settlement = CancellationSettlement()
+        call = asyncio.create_task(settlement.wait(child()))
+        await child_entered.wait()
+        call.cancel("caller stopped")
+        await asyncio.sleep(0)
+        release_child.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await call
+        assert raised.value.args == ("caller stopped",)
+        assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+        assert raised.value.__cause__.args == ("child stopped",)
 
     asyncio.run(run())
 

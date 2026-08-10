@@ -20,7 +20,11 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
-from core.agent_auth_service import AgentAuthService, BackendAuthConfigSaveError
+from core.agent_auth_service import (
+    AgentAuthFlow,
+    AgentAuthService,
+    BackendAuthConfigSaveError,
+)
 from core.handlers.model_hub.service import ModelHubError
 from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
@@ -854,6 +858,39 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         harness.service._refresh_backend_runtime.assert_awaited_once_with("codex")
         ScenarioExpect.text_contains(harness, "config save failed")
+
+    async def test_claude_finish_failure_refreshes_runtime_before_reporting_failure(self):
+        """Scenario: AUTH-SETUP-908"""
+        harness = AuthSetupScenarioHarness()
+        flow = AgentAuthFlow(
+            flow_id="claude-finish-failure",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=harness.context,
+            process=None,
+            reader_task=None,
+            waiter_task=None,
+            claude_client=SimpleNamespace(),
+        )
+        harness.service._send_claude_control_request = AsyncMock()
+        harness.service._verify_login = AsyncMock(return_value=(True, "Logged in"))
+        harness.service._persist_backend_auth_mode = AsyncMock()
+
+        async def finish_attempt(_attempt, *, succeeded):
+            if succeeded:
+                raise RuntimeError("attempt finish failed")
+
+        harness.service._finish_claude_oauth_attempt = AsyncMock(
+            side_effect=finish_attempt
+        )
+        harness.service._refresh_backend_runtime = AsyncMock()
+        harness.service._disconnect_claude_client = AsyncMock()
+
+        await harness.service._wait_for_claude_completion(flow)
+
+        harness.service._refresh_backend_runtime.assert_awaited_once_with("claude")
+        ScenarioExpect.text_contains(harness, "attempt finish failed")
 
     async def test_codex_successful_setup_refreshes_runtime_before_the_next_turn(self):
         """Scenario: AUTH-SETUP-901"""
