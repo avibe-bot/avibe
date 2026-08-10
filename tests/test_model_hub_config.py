@@ -735,6 +735,54 @@ def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
         ModelHubConfig.from_payload(ineligible)
 
 
+def test_route_hops_allow_one_source_to_supply_distinct_models():
+    route = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [
+                {"source_id": "src_same0001", "model_id": "model-a"},
+                {"source_id": "src_same0001", "model_id": "model-b"},
+            ]
+        }
+    )
+
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        ("src_same0001", "model-a"),
+        ("src_same0001", "model-b"),
+    ]
+    source = ModelHubSourceConfig.from_payload(
+        _schema("source.schema.json")["examples"][0]
+    )
+    source.models.append(
+        ModelHubModelConfig(id="claude-opus-4-5", provenance="manual")
+    )
+    config = ModelHubConfig(sources=[source])
+    config.agents["claude"].sources.order = [source.id]
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [
+                {"source_id": source.id, "model_id": "claude-opus-4-6"},
+                {"source_id": source.id, "model_id": "claude-opus-4-5"},
+            ]
+        }
+    )
+
+    canonical = ModelHubConfig.from_payload(config.to_payload())
+
+    assert [hop.model_id for hop in canonical.agents["claude"].routes["claude-opus-4-6"].hops] == [
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+    ]
+    with pytest.raises(ValueError, match="unique pairs"):
+        ModelHubRouteConfig.from_payload(
+            {
+                "hops": [
+                    {"source_id": "src_same0001", "model_id": "model-a"},
+                    {"source_id": "src_same0001", "model_id": "model-a"},
+                ]
+            }
+        )
+
+
 def _ordering_source(
     source_id: str,
     *,

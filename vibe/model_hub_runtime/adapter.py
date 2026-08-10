@@ -4,9 +4,12 @@ import asyncio
 import json
 import secrets
 import threading
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
+
+import aiohttp
 
 from core.handlers.model_hub.adapter import (
     EngineHealth,
@@ -24,6 +27,8 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from vibe.model_hub_runtime.client import (
+    _OFFICIAL_BASE_URLS,
+    _endpoint_for_protocol,
     EngineClient,
     EngineClientError,
     EngineInvokeHandle,
@@ -47,6 +52,71 @@ _OAUTH_ENDPOINTS = {
     "xai": ("/xai-auth-url", "xai", "xai"),
 }
 _WEBUI_OAUTH_VENDORS = frozenset({"anthropic", "openai", "codex", "antigravity"})
+
+
+async def _probe_protocol_response(
+    *,
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    secret: str,
+    timeout: float = 15.0,
+) -> None:
+    """Require a response from the candidate protocol's distinct request path."""
+
+    root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
+    if not root:
+        raise EngineClientError("source requires a base URL for protocol observation")
+    parsed = urllib.parse.urlparse(root)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise EngineClientError("source base URL is invalid")
+    endpoint = _endpoint_for_protocol(protocol).removeprefix("/v1")
+    url = f"{root.rstrip('/')}{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "Accept": "application/json",
+    }
+    if protocol == "anthropic":
+        headers = {
+            "x-api-key": secret,
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        }
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(
+                url,
+                headers=headers,
+                json={},
+                allow_redirects=False,
+            ) as response:
+                if response.status in {401, 403}:
+                    raise EngineClientError(
+                        "protocol observation authentication failed",
+                        status_code=response.status,
+                    )
+                # Empty JSON is intentionally invalid. A protocol-aware endpoint
+                # rejects it after authentication without consuming a model turn.
+                if response.status not in {400, 422} and not 200 <= response.status < 300:
+                    raise EngineClientError(
+                        f"protocol observation returned HTTP {response.status}",
+                        status_code=response.status,
+                    )
+    except asyncio.TimeoutError:
+        raise EngineClientError("protocol observation timed out", error_type="timeout") from None
+    except aiohttp.ClientError:
+        raise EngineClientError(
+            "protocol observation failed",
+            error_type="network_error",
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -322,13 +392,13 @@ class CLIProxyEngineAdapter:
         ):
             raise EngineStateError("credential does not match observation target")
         secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
-        successes: list[tuple[str, tuple[str, ...]]] = []
+        successes: list[str] = []
         failures: list[EngineClientError] = []
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
             try:
-                models = await probe_models(
+                await _probe_protocol_response(
                     vendor=normalized_vendor,
                     protocol=protocol,
                     base_url=base_url,
@@ -337,17 +407,29 @@ class CLIProxyEngineAdapter:
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
-            successes.append((protocol, tuple(models)))
+            successes.append(protocol)
 
         if len(successes) == 1:
-            protocol, models = successes[0]
+            protocol = successes[0]
+            try:
+                models = await probe_models(
+                    vendor=normalized_vendor,
+                    protocol=protocol,
+                    base_url=base_url,
+                    secret=secret,
+                )
+            except EngineClientError:
+                discovery = ObservationDiscovery.FAILED
+                models = ()
+            else:
+                discovery = ObservationDiscovery.SUCCEEDED
             return SourceObservation(
                 outcome=ObservationOutcome.OBSERVED,
                 reachable=True,
                 authenticated=True,
                 protocol=protocol,
-                discovery=ObservationDiscovery.SUCCEEDED,
-                model_ids=models,
+                discovery=discovery,
+                model_ids=tuple(models),
             )
         if len(successes) > 1:
             return SourceObservation(

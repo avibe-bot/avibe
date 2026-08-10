@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
 import pytest
+from aiohttp import web
 from jsonschema import Draft7Validator, FormatChecker
 from sqlalchemy import create_engine, delete, select
 
@@ -60,6 +61,12 @@ from modules.agents.model_hub import (
     bind_turn_mode,
 )
 from storage.models import agent_sessions, messages, metadata
+from vibe.model_hub_runtime.adapter import (
+    CLIProxyEngineAdapter,
+    _probe_protocol_response,
+)
+from vibe.model_hub_runtime.client import EngineClientError
+from vibe.model_hub_runtime.state import EngineStateStore
 
 
 CONTRACTS = Path(__file__).parents[1] / "docs" / "plans" / "model-hub-contracts"
@@ -1103,6 +1110,146 @@ def test_opencode_overlay_rejects_wrong_exact_hop_identity(tmp_path: Path) -> No
         asyncio.run(router.prepare_opencode_overlay())
 
     assert exc.value.code == "mapping_target_unavailable"
+
+
+def test_source_observation_requires_distinct_protocol_probes_and_never_infers_from_order(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.store_api_key(
+        "test-observation-key",
+        vendor="openai",
+        protocol=SOURCE_PROTOCOLS[-1],
+        base_url="https://relay.example/v1",
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=Mock(),
+        state_store=state_store,
+    )
+    unsupported = EngineClientError(
+        "unsupported protocol path",
+        status_code=404,
+    )
+
+    ambiguous_protocols = frozenset(SOURCE_PROTOCOLS[1:])
+
+    async def ambiguous_probe(**kwargs) -> None:
+        if kwargs["protocol"] not in ambiguous_protocols:
+            raise unsupported
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=ambiguous_probe),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("upstream-model",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                "https://relay.example/v1",
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert protocol_probe.await_count == len(SOURCE_PROTOCOLS)
+    inventory_probe.assert_not_awaited()
+
+    hinted_order = tuple(reversed(SOURCE_PROTOCOLS))
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=ambiguous_probe),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("upstream-model",)),
+        ) as inventory_probe,
+    ):
+        reordered = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                "https://relay.example/v1",
+                credential_ref,
+                hinted_order,
+            )
+        )
+
+    assert reordered.outcome.value == "ambiguous"
+    assert reordered.protocol is None
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
+        hinted_order
+    )
+    inventory_probe.assert_not_awaited()
+
+    proved_protocol = hinted_order[0]
+
+    async def single_protocol_probe(**kwargs) -> None:
+        if kwargs["protocol"] != proved_protocol:
+            raise unsupported
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=single_protocol_probe),
+        ),
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("upstream-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                "https://relay.example/v1",
+                credential_ref,
+                hinted_order,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == proved_protocol
+    assert observed.model_ids == ("upstream-model",)
+    assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
+
+
+def test_protocol_observation_hits_one_distinct_upstream_path_per_protocol() -> None:
+    async def scenario() -> list[str]:
+        paths: list[str] = []
+
+        async def reject_empty_probe(request: web.Request) -> web.Response:
+            paths.append(request.path)
+            return web.json_response({"error": {"type": "invalid_request"}}, status=400)
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", reject_empty_probe)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            for protocol in SOURCE_PROTOCOLS:
+                await _probe_protocol_response(
+                    vendor="custom",
+                    protocol=protocol,
+                    base_url=f"http://127.0.0.1:{port}/v1",
+                    secret="test-observation-key",
+                )
+        finally:
+            await runner.cleanup()
+        return paths
+
+    paths = asyncio.run(scenario())
+
+    assert len(paths) == len(SOURCE_PROTOCOLS)
+    assert len(set(paths)) == len(paths)
 
 
 def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(

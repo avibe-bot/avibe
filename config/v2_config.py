@@ -989,8 +989,6 @@ class ModelHubRouteConfig:
         pairs = [(hop.source_id, hop.model_id) for hop in parsed]
         if len(set(pairs)) != len(pairs):
             raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
-        if len({hop.source_id for hop in parsed}) != len(parsed):
-            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique sources")
         return cls(hops=parsed)
 
     def to_payload(self) -> dict:
@@ -1247,10 +1245,6 @@ class ModelHubConfig:
                     f"ineligible or missing source '{invalid_id}'"
                 )
             for model_id, route in agents[backend].routes.items():
-                if len({hop.source_id for hop in route.hops}) != len(route.hops):
-                    raise ValueError(
-                        f"Config 'model_hub.agents.{backend}.routes.{model_id}' contains duplicate sources"
-                    )
                 for hop in route.hops:
                     source = next((item for item in sources if item.id == hop.source_id), None)
                     if source is None:

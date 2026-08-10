@@ -85,6 +85,7 @@ class FakeAdapter:
         self.sync_started: asyncio.Event | None = None
         self.sync_block: asyncio.Event | None = None
         self.outcomes = deque()
+        self.invocations: list[tuple[str, str]] = []
 
     async def ensure_installed(self):
         return await self.status()
@@ -154,6 +155,7 @@ class FakeAdapter:
         )
 
     async def invoke(self, source_id, model_id, request, stream, origin):
+        self.invocations.append((source_id, model_id))
         outcome = self.outcomes.popleft()
         return FakeInvokeHandle(outcome)
 
@@ -352,6 +354,55 @@ def test_runtime_fallback_uses_selected_hops_exact_model_id():
     assert resolution.supply_status == "degraded"
 
 
+def test_runtime_fallback_preserves_distinct_models_from_one_source(tmp_path):
+    source = _source("src_route006", ("upstream-first", "upstream-second"))
+    config = _config([source])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(source.id, "upstream-first"),
+            ModelHubRouteHopConfig(source.id, "upstream-second"),
+        )
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.extend(
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=403,
+                error_code="permission_error",
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-first",
+                source_id=source.id,
+            ),
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-second",
+                source_id=source.id,
+            ),
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert adapter.invocations == [
+        (source.id, "upstream-first"),
+        (source.id, "upstream-second"),
+    ]
+    assert resolved.model_id == "upstream-second"
+
+
 def test_runtime_does_not_alias_unpersisted_claude_request():
     source = _source("src_route003", ("claude-opus-4-6-20260115",))
     config = _config([source], model="claude-opus-4-6-20260115")
@@ -461,6 +512,45 @@ def test_direct_mode_rejects_chain_write_before_config_mutation(tmp_path):
     assert store.load().to_payload() == before
 
 
+@pytest.mark.parametrize(
+    ("backend", "hidden_model"),
+    [
+        ("claude", "claude-hidden-model"),
+        ("opencode", "openai/hidden-model"),
+    ],
+)
+def test_chain_write_rejects_models_outside_the_current_menu(
+    tmp_path,
+    backend,
+    hidden_model,
+):
+    source = _source("src_menu0001", ("upstream-model",), vendor="openai")
+    config = _config([source])
+    config.agents["opencode"].menu.checked = ["openai/visible-model"]
+    config.agents["opencode"].routes["openai/visible-model"] = ModelHubRouteConfig()
+    service, store, _ = _service(tmp_path, config)
+    before = store.load().to_payload()
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_agent_chain(
+                backend,
+                hidden_model,
+                {
+                    "hops": [
+                        {
+                            "source_id": source.id,
+                            "model_id": "upstream-model",
+                        }
+                    ]
+                },
+            )
+        )
+
+    assert exc.value.code == "mapping_target_unavailable"
+    assert store.load().to_payload() == before
+
+
 def test_refresh_ignores_preexisting_unrelated_interruption(tmp_path):
     source = _source("src_refresh02", ("requested",))
     broken = _source("src_refresh03", ("other",), status="cooldown")
@@ -548,18 +638,19 @@ def test_agent_chain_projects_exact_hops_and_blockers(tmp_path):
 
 
 def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
-    first = _source("src_chain002", ("requested",))
-    second = _source("src_chain003", ("requested",))
-    config = _config([first, second], model="requested")
+    menu_model = "claude-opus-4-6"
+    first = _source("src_chain002", (menu_model,))
+    second = _source("src_chain003", (menu_model,))
+    config = _config([first, second], model=menu_model)
     service, store, _ = _service(tmp_path, config)
     result = asyncio.run(
         service.set_agent_chain(
             "claude",
-            "requested",
+            menu_model,
             {
                 "hops": [
-                    {"source_id": second.id, "model_id": "requested"},
-                    {"source_id": first.id, "model_id": "requested"},
+                    {"source_id": second.id, "model_id": menu_model},
+                    {"source_id": first.id, "model_id": menu_model},
                 ],
                 "force": True,
             },
@@ -568,22 +659,23 @@ def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
     assert result["removed_hops"] == []
     assert isinstance(result["interrupted"], list)
     assert [item["source_id"] for item in result["chain"]["chain"]] == [second.id, first.id]
-    assert result["chain"]["current"] == {"source_id": second.id, "model_id": "requested"}
-    assert [hop.source_id for hop in store.load().agents["claude"].routes["requested"].hops] == [second.id, first.id]
+    assert result["chain"]["current"] == {"source_id": second.id, "model_id": menu_model}
+    assert [hop.source_id for hop in store.load().agents["claude"].routes[menu_model].hops] == [second.id, first.id]
 
 
 def test_set_agent_chain_reports_complete_removed_hops_without_syncing(tmp_path):
-    first = _source("src_chain006", ("requested",))
-    second = _source("src_chain007", ("requested",))
-    config = _config([first, second], model="requested")
+    menu_model = "claude-opus-4-6"
+    first = _source("src_chain006", (menu_model,))
+    second = _source("src_chain007", (menu_model,))
+    config = _config([first, second], model=menu_model)
     service, _store, adapter = _service(tmp_path, config)
 
     result = asyncio.run(
         service.set_agent_chain(
             "claude",
-            "requested",
+            menu_model,
             {
-                "hops": [{"source_id": first.id, "model_id": "requested"}],
+                "hops": [{"source_id": first.id, "model_id": menu_model}],
                 "force": True,
             },
         )
@@ -592,17 +684,18 @@ def test_set_agent_chain_reports_complete_removed_hops_without_syncing(tmp_path)
     assert result["removed_hops"] == [
         {
             "backend": "claude",
-            "menu_model": "requested",
+            "menu_model": menu_model,
             "source_id": second.id,
-            "model_id": "requested",
+            "model_id": menu_model,
         }
     ]
     assert adapter.synced == []
 
 
 def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
-    first = _source("src_chain008", ("requested",))
-    second = _source("src_chain009", ("requested",))
+    menu_model = "claude-opus-4-6"
+    first = _source("src_chain008", (menu_model,))
+    second = _source("src_chain009", (menu_model,))
     broken = _source(
         "src_chain010",
         ("other",),
@@ -613,7 +706,7 @@ def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
         retry_at="2099-01-01T00:00:00Z",
         detail_key="models.source.cooldown.rate_limited",
     )
-    config = _config([first, second, broken], model="requested")
+    config = _config([first, second, broken], model=menu_model)
     config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(broken.id, "other"),)
     )
@@ -622,11 +715,11 @@ def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
     result = asyncio.run(
         service.set_agent_chain(
             "claude",
-            "requested",
+            menu_model,
             {
                 "hops": [
-                    {"source_id": second.id, "model_id": "requested"},
-                    {"source_id": first.id, "model_id": "requested"},
+                    {"source_id": second.id, "model_id": menu_model},
+                    {"source_id": first.id, "model_id": menu_model},
                 ]
             },
         )
@@ -634,7 +727,7 @@ def test_set_agent_chain_ignores_unrelated_existing_gap(tmp_path):
 
     assert result["interrupted"] == []
     assert adapter.synced == []
-    assert [hop.source_id for hop in store.load().agents["claude"].routes["requested"].hops] == [second.id, first.id]
+    assert [hop.source_id for hop in store.load().agents["claude"].routes[menu_model].hops] == [second.id, first.id]
 
 
 def test_source_creation_cancellation_revokes_unsaved_credential(tmp_path):
@@ -934,6 +1027,32 @@ def test_unsaved_observation_revoke_failure_is_journaled_and_reconciled(tmp_path
     asyncio.run(repaired._ensure_engine_synced())
     assert repaired.revocations.list() == []
     assert adapter.revoked == ["cred_00000001"]
+
+
+def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):
+    source = _source("src_manual001")
+    source.models.append(
+        ModelHubModelConfig(id="manual-model", provenance="manual")
+    )
+    broken = _source("src_manual002", ("other-model",), status="cooldown")
+    broken.state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2099-01-01T00:00:00Z",
+        detail_key="models.source.cooldown.rate_limited",
+    )
+    config = _config([source, broken])
+    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(broken.id, "other-model"),)
+    )
+    service, store, _ = _service(tmp_path, config)
+
+    result = asyncio.run(service.delete_custom_model(source.id, "manual-model"))
+
+    assert result["removed_hops"] == []
+    assert result["interrupted"] == []
+    assert [model.id for model in store.load().sources[0].models] == [
+        "claude-opus-4-6"
+    ]
 
 
 def test_delete_source_reports_and_then_prunes_exact_hops(tmp_path):

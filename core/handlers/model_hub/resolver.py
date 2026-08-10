@@ -57,6 +57,7 @@ class ModelHubTurnResolution:
     source: ModelHubSourceConfig | None
     matching_sources: tuple[ModelHubSourceConfig, ...] = ()
     candidates: tuple[ModelHubSourceConfig, ...] = ()
+    candidate_hops: tuple[ExactHopInspection, ...] = ()
     source_model_ids: tuple[tuple[str, str], ...] = ()
     inspected_hops: tuple[ExactHopInspection, ...] = ()
     unsupported_source_ids: tuple[str, ...] = ()
@@ -516,6 +517,7 @@ def resolve_model_hub_turn(
         source=first,
         matching_sources=matching_sources,
         candidates=candidates,
+        candidate_hops=runnable_inspections,
         source_model_ids=source_model_ids,
         inspected_hops=inspected_hops,
         unsupported_source_ids=tuple(unsupported_source_ids),

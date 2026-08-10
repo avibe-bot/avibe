@@ -1123,11 +1123,7 @@ class ModelHubService:
             agent = config.agents[backend]
             if self._eligible_for_agent(source, backend) and source.id not in agent.sources.order:
                 agent.sources.order.append(source.id)
-            menu_ids = (
-                tuple(_builtin_model_ids(backend))
-                if agent.menu_kind == "fixed"
-                else tuple(agent.menu.checked if agent.menu else ())
-            )
+            menu_ids = self._agent_menu_model_ids(agent)
             for menu_model in menu_ids:
                 route = agent.routes.setdefault(menu_model, ModelHubRouteConfig())
                 if not self._eligible_for_agent(source, backend):
@@ -1141,6 +1137,12 @@ class ModelHubService:
                 if matched_model is None or any(hop.source_id == source.id for hop in route.hops):
                     continue
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, matched_model))
+
+    @staticmethod
+    def _agent_menu_model_ids(agent: ModelHubAgentSupplyConfig) -> tuple[str, ...]:
+        if agent.menu_kind == "fixed":
+            return tuple(_builtin_model_ids(agent.backend))
+        return tuple(agent.menu.checked if agent.menu else ())
 
     def _added_to(self, source_id: str) -> list[dict]:
         config = self.store.load()
@@ -2465,6 +2467,8 @@ class ModelHubService:
             agent = self._agent(config, backend)
             if agent.mode == "direct":
                 raise self._direct_mode_error()
+            if model_id not in self._agent_menu_model_ids(agent):
+                raise ModelHubError("mapping_target_unavailable", status=409)
             by_id = {source.id: source for source in config.sources}
             old_route = agent.routes.get(model_id, ModelHubRouteConfig())
             old_pairs = {(hop.source_id, hop.model_id) for hop in old_route.hops}
@@ -2781,7 +2785,16 @@ class ModelHubService:
                 for item in source.models
                 if item.id != model_id
             ]
-            would_interrupt = self._would_interrupt(config)
+            previous_interruptions = {
+                (item["backend"], item["model_id"])
+                for item in self._would_interrupt(previous)
+            }
+            would_interrupt = [
+                item
+                for item in self._would_interrupt(config)
+                if (item["backend"], item["model_id"])
+                not in previous_interruptions
+            ]
             if (removed_hops or would_interrupt) and not force:
                 raise ModelHubError(
                     "source_model_in_route_chain" if removed_hops else "source_last_supplier",
@@ -3764,10 +3777,9 @@ class ModelHubService:
                 ),
                 supply_channel=supply_channel,
             )
-        target_model = resolution.target_model
         event_agent = cast(EventAgent, backend)
-        candidates = list(resolution.candidates)
-        if not candidates:
+        candidate_hops = list(resolution.candidate_hops)
+        if not candidate_hops:
             supply_state = (
                 "waiting"
                 if resolution.supply_status == "waiting"
@@ -3781,13 +3793,11 @@ class ModelHubService:
 
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
-        for source in candidates:
-            inspection = resolution.inspection_for_source(source)
-            target_model = (
-                inspection.model_id
-                if inspection is not None and inspection.model_id is not None
-                else resolution.target_model
-            )
+        for inspection in candidate_hops:
+            source = inspection.source
+            target_model = inspection.model_id
+            if source is None or target_model is None:
+                raise AssertionError("runnable hop must have an exact identity")
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
