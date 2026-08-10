@@ -162,6 +162,28 @@ export function isStandaloneAppTab(search: string): boolean {
   }
 }
 
+/**
+ * Whether a pathname is one of the built-in app routes a standalone tab can land on
+ * (`STANDALONE_BUILTIN_ROUTES`). Combined with `isStandaloneAppTab`, this is what tells
+ * the shell to drop ALL chrome — sidebar, mobile header/tab bar, page padding — so the
+ * app owns the whole viewport. Kept here, next to the allowlist it reads, so a new
+ * standalone app opts into both behaviors in one place.
+ *
+ * Only the exact route matches: a standalone tab that navigates elsewhere (e.g. Files →
+ * `/chat/<id>`) is an ordinary page again and gets the chrome back.
+ *
+ * The pathname is normalized to what React Router actually MOUNTED first — trailing
+ * slashes stripped (as `isApplicationRouteHref` does) and case folded, since the router
+ * matches case-insensitively by default. `/Apps/Files/?standalone=1` mounts the Files
+ * page, so it must get the standalone layout too; disagreeing would leave the document
+ * half-standalone (windows suppressed, chrome restored).
+ */
+export function isStandaloneAppRoutePath(pathname: string): boolean {
+  const normalized = pathname.replace(/\/+$/, '').toLowerCase() || '/';
+  const id = normalized.startsWith('/apps/') ? normalized.slice('/apps/'.length) : '';
+  return STANDALONE_BUILTIN_ROUTES.has(id);
+}
+
 /** `appTabHref` for a persisted Dock id (`files` / `show:<session_id>`). */
 export function appTabHrefForDockId(
   dockId: string,

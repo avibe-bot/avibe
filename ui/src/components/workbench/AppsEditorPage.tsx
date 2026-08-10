@@ -2,9 +2,11 @@ import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { CodeXml, FolderOpen } from 'lucide-react';
+import clsx from 'clsx';
 
 import { Button } from '../ui/button';
 import { useUnsavedChanges } from '../../context/useUnsavedChanges';
+import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { FileEditorPane } from './FileEditorPane';
 import { EditorFontSizePopover } from './EditorFontSizePopover';
 import { isDesktopViewport } from '../../lib/useIsDesktop';
@@ -77,19 +79,30 @@ export const AppsEditorPage: React.FC = () => {
   // Re-read whenever the router state changes (each navigation carries a fresh state object) so
   // opening another file while already on this route swaps the launch target.
   const launch = useMemo(() => readLaunch(location.state), [location.state]);
+  // A single-app browser tab (`?standalone=1`): the shell drops its chrome, so the editor
+  // fills the whole web area — no page header, no card border, no padding around it.
+  const fullBleed = useStandaloneAppTab();
   useUnsavedChanges(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
   useUnloadWarning(dirty);
 
   return (
-    <div className="flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]">
-      <div>
-        <h1 className="text-[18px] font-semibold text-foreground">{t('apps.editor.label')}</h1>
-        <p className="text-[12px] text-muted">{t('apps.editor.tagline')}</p>
-      </div>
+    <div
+      className={
+        fullBleed
+          ? 'flex h-full w-full flex-col bg-surface'
+          : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'
+      }
+    >
+      {!fullBleed && (
+        <div>
+          <h1 className="text-[18px] font-semibold text-foreground">{t('apps.editor.label')}</h1>
+          <p className="text-[12px] text-muted">{t('apps.editor.tagline')}</p>
+        </div>
+      )}
       {desktop ? (
-        <DesktopEditor launch={launch} onDirtyChange={setDirty} />
+        <DesktopEditor launch={launch} onDirtyChange={setDirty} fullBleed={fullBleed} />
       ) : (
-        <MobileEditor launch={launch} onDirtyChange={setDirty} />
+        <MobileEditor launch={launch} onDirtyChange={setDirty} fullBleed={fullBleed} />
       )}
     </div>
   );
@@ -102,9 +115,13 @@ export const AppsEditorPage: React.FC = () => {
 const DesktopEditor: React.FC<{
   launch: LaunchFile | null;
   onDirtyChange: (dirty: boolean) => void;
-}> = ({ launch, onDirtyChange }) => {
+  fullBleed?: boolean;
+}> = ({ launch, onDirtyChange, fullBleed = false }) => {
   return (
-    <div data-theme="dark" className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
+    <div
+      data-theme="dark"
+      className={clsx('flex min-h-0 flex-1 overflow-hidden bg-surface', !fullBleed && 'rounded-xl border border-border')}
+    >
       <Suspense fallback={<PaneLoading />}>
         <EditorApp
           onDirtyChange={onDirtyChange}
@@ -122,7 +139,8 @@ const DesktopEditor: React.FC<{
 const MobileEditor: React.FC<{
   launch: LaunchFile | null;
   onDirtyChange: (dirty: boolean) => void;
-}> = ({ launch, onDirtyChange }) => {
+  fullBleed?: boolean;
+}> = ({ launch, onDirtyChange, fullBleed = false }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [file, setFile] = useState<LaunchFile | null>(launch);
@@ -140,7 +158,7 @@ const MobileEditor: React.FC<{
   const openAnother = () => navigate('/apps/files');
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface">
+    <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden bg-surface', !fullBleed && 'rounded-xl border border-border')}>
       {file ? (
         // Key by path so switching to a different file remounts the pane and reads it fresh —
         // FileEditorPane treats a live path change as a rename and skips the reread otherwise, which
