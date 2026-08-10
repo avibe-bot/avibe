@@ -79,6 +79,12 @@ class MigrationHost(Protocol):
         discovered: list[str],
     ) -> None: ...
 
+    def _apply_source_placement(
+        self,
+        config: ModelHubConfig,
+        source: ModelHubSourceConfig,
+    ) -> None: ...
+
 
 @dataclass(frozen=True)
 class NativeManualModel:
@@ -698,6 +704,7 @@ async def apply_native_migration(
                     ]
                     host._apply_discovered_models(source, manual_models, discovered)
                 updated.sources.append(source)
+                host._apply_source_placement(updated, source)
 
             await host._commit_synced(previous, updated)
             persisted = True

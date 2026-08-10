@@ -2,16 +2,50 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
-from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, ModelHubSourceConfig
+from config.v2_config import (
+    MODEL_HUB_BACKENDS,
+    ModelHubConfig,
+    ModelHubRouteHopConfig,
+    ModelHubSourceConfig,
+)
+from core.handlers.model_hub.identifiers import (
+    STANDARD_OPENCODE_VENDOR_IDS,
+    opencode_model_id,
+    parse_opencode_model_id,
+)
 
 
 BackendName = Literal["claude", "codex", "opencode"]
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
 SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
+
+
+@dataclass(frozen=True)
+class ExactHopInspection:
+    """Canonical identity and live eligibility for one persisted Route hop."""
+
+    backend: BackendName
+    menu_model: str
+    source_id: str | None
+    model_id: str | None
+    menu_provider_id: str | None
+    menu_model_id: str
+    source: ModelHubSourceConfig | None
+    configuration_eligible: bool
+    inventory_member: bool
+    supply_eligible: bool
+    runnable: bool
+    reason: str | None
+    retry_at: str | None
+
+    @property
+    def identity(self) -> tuple[BackendName, str, str | None, str | None]:
+        return self.backend, self.menu_model, self.source_id, self.model_id
 
 
 @dataclass(frozen=True)
@@ -24,7 +58,12 @@ class ModelHubTurnResolution:
     matching_sources: tuple[ModelHubSourceConfig, ...] = ()
     candidates: tuple[ModelHubSourceConfig, ...] = ()
     source_model_ids: tuple[tuple[str, str], ...] = ()
+    inspected_hops: tuple[ExactHopInspection, ...] = ()
     unsupported_source_ids: tuple[str, ...] = ()
+    route_unconfigured: bool = False
+    route_reason: str | None = None
+    menu_provider_id: str | None = None
+    menu_model_id: str | None = None
     provider: str | None = None
     recoverable_source_ids: tuple[str, ...] = ()
     supply_status: SupplyStatus | None = None
@@ -33,6 +72,20 @@ class ModelHubTurnResolution:
         source_id = source if isinstance(source, str) else source.id
         return next(
             (model_id for candidate_source_id, model_id in self.source_model_ids if candidate_source_id == source_id),
+            None,
+        )
+
+    def inspection_for_source(
+        self,
+        source: ModelHubSourceConfig | str,
+    ) -> ExactHopInspection | None:
+        source_id = source if isinstance(source, str) else source.id
+        return next(
+            (
+                inspection
+                for inspection in self.inspected_hops
+                if inspection.source_id == source_id
+            ),
             None,
         )
 
@@ -96,6 +149,20 @@ def source_runnable(
     return source_retry_ready(source, now)
 
 
+def canonical_opencode_menu_identity(identifier: str) -> tuple[str, str]:
+    """Validate and split one stored OpenCode ``provider/model`` identity."""
+
+    if not isinstance(identifier, str) or identifier != identifier.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    provider_id, model_id = parse_opencode_model_id(identifier)
+    if (
+        provider_id not in STANDARD_OPENCODE_VENDOR_IDS
+        and provider_id != "custom"
+    ) or provider_id != provider_id.strip() or model_id != model_id.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    return provider_id, model_id
+
+
 def normalize_opencode_requested_model(
     requested_model: str,
     checked_identifiers: tuple[str, ...],
@@ -109,6 +176,181 @@ def normalize_opencode_requested_model(
         return candidate
     matches = [identifier for identifier in checked_identifiers if identifier.endswith(f"/{candidate}")]
     return matches[0] if len(matches) == 1 else None
+
+
+_CLAUDE_FAMILY_ALIASES = {
+    "opus": "opus",
+    "opus[1m]": "opus",
+    "sonnet": "sonnet",
+    "sonnet[1m]": "sonnet",
+    "haiku": "haiku",
+}
+_CLAUDE_MODEL_ID = re.compile(
+    r"^claude-(?P<family>opus|sonnet|haiku|fable)-(?P<version>\d+(?:-\d+)*?)(?:-(?P<date>\d{8}))?$"
+)
+
+
+def _parsed_claude_model_id(model_id: str) -> tuple[str, tuple[int, ...], int | None] | None:
+    match = _CLAUDE_MODEL_ID.fullmatch(model_id)
+    if match is None:
+        return None
+    return (
+        match.group("family"),
+        tuple(int(part) for part in match.group("version").split("-")),
+        int(match.group("date")) if match.group("date") else None,
+    )
+
+
+def matching_v1_model_id(
+    *,
+    backend: BackendName,
+    requested_model: str,
+    source: ModelHubSourceConfig,
+    checked_models: tuple[str, ...] = (),
+) -> str | None:
+    """Return one concrete observed model for the frozen add-time matching-v1."""
+
+    observed_models = tuple(
+        model for model in source.models if model.provenance == "discovered"
+    )
+
+    if backend == "opencode":
+        requested_model = normalize_opencode_requested_model(
+            requested_model,
+            checked_models,
+        ) or ""
+        if not requested_model:
+            return None
+        exact = [
+            model.id
+            for model in observed_models
+            if opencode_model_id(source.vendor, model.id) == requested_model
+        ]
+        return exact[0] if len(exact) == 1 else None
+
+    if (
+        backend == "claude"
+        and source.vendor == "anthropic"
+        and source.supply_channel == "native_cli"
+    ):
+        family = _CLAUDE_FAMILY_ALIASES.get(requested_model)
+        requested_version: tuple[int, ...] | None = None
+        parsed_request = _parsed_claude_model_id(requested_model)
+        if family is None and parsed_request is not None:
+            family, requested_version, requested_date = parsed_request
+            if requested_date is not None:
+                return next(
+                    (model.id for model in observed_models if model.id == requested_model),
+                    None,
+                )
+        if family is not None:
+            matches: list[tuple[tuple[int, ...], int, str]] = []
+            for model in observed_models:
+                parsed = _parsed_claude_model_id(model.id)
+                if parsed is None:
+                    continue
+                candidate_family, candidate_version, candidate_date = parsed
+                if candidate_family != family:
+                    continue
+                if requested_version is not None and candidate_version != requested_version:
+                    continue
+                matches.append((candidate_version, candidate_date or 0, model.id))
+            return max(matches)[2] if matches else None
+
+    return next(
+        (model.id for model in observed_models if model.id == requested_model),
+        None,
+    )
+
+
+def inspect_exact_hop(
+    config: ModelHubConfig,
+    backend: BackendName,
+    menu_model: str,
+    hop: ModelHubRouteHopConfig | None,
+    *,
+    now: datetime | None = None,
+    unavailable_source_ids: frozenset[str] = frozenset(),
+    supply_channel: Literal["hub"] | None = None,
+) -> ExactHopInspection:
+    """Inspect one stored hop without matching, substituting, or reordering it."""
+
+    menu_provider_id: str | None = None
+    menu_model_id = menu_model
+    if backend == "opencode":
+        menu_provider_id, menu_model_id = canonical_opencode_menu_identity(menu_model)
+
+    if hop is None:
+        return ExactHopInspection(
+            backend=backend,
+            menu_model=menu_model,
+            source_id=None,
+            model_id=None,
+            menu_provider_id=menu_provider_id,
+            menu_model_id=menu_model_id,
+            source=None,
+            configuration_eligible=False,
+            inventory_member=False,
+            supply_eligible=False,
+            runnable=False,
+            reason="route_unconfigured",
+            retry_at=None,
+        )
+
+    source = next((item for item in config.sources if item.id == hop.source_id), None)
+    if source is None:
+        return ExactHopInspection(
+            backend=backend,
+            menu_model=menu_model,
+            source_id=hop.source_id,
+            model_id=hop.model_id,
+            menu_provider_id=menu_provider_id,
+            menu_model_id=menu_model_id,
+            source=None,
+            configuration_eligible=False,
+            inventory_member=False,
+            supply_eligible=False,
+            runnable=False,
+            reason="source_missing",
+            retry_at=None,
+        )
+
+    configuration_eligible = source_eligible_for_backend(source, backend)
+    inventory_member = any(model.id == hop.model_id for model in source.models)
+    channel_eligible = supply_channel is None or source.supply_channel == supply_channel
+    supply_eligible = configuration_eligible and inventory_member and channel_eligible
+    runnable = supply_eligible and source_runnable(
+        source,
+        now=now,
+        unavailable_source_ids=unavailable_source_ids,
+        model_supported=inventory_member,
+    )
+    reason: str | None = None
+    if not inventory_member or not configuration_eligible:
+        reason = "model_unsupported"
+    elif source.id in unavailable_source_ids:
+        reason = "native_cli_unavailable"
+    elif source.state.status in {"needs_action", "error"}:
+        reason = source.state.detail_key
+    return ExactHopInspection(
+        backend=backend,
+        menu_model=menu_model,
+        source_id=source.id,
+        model_id=hop.model_id,
+        menu_provider_id=menu_provider_id,
+        menu_model_id=menu_model_id,
+        source=source,
+        configuration_eligible=configuration_eligible,
+        inventory_member=inventory_member,
+        supply_eligible=supply_eligible,
+        runnable=runnable,
+        reason=reason,
+        retry_at=(
+            source.state.retry_at
+            if source.state.status == "cooldown"
+            else None
+        ),
+    )
 
 
 def _supply_status(
@@ -175,6 +417,13 @@ def resolve_model_hub_turn(
                 supply_status="interrupted",
             )
 
+    menu_provider_id: str | None = None
+    menu_model_id: str | None = None
+    if backend == "opencode":
+        menu_provider_id, menu_model_id = canonical_opencode_menu_identity(
+            requested_model
+        )
+
     route = agent.routes.get(requested_model)
     if route is None:
         return ModelHubTurnResolution(
@@ -186,48 +435,94 @@ def resolve_model_hub_turn(
             supply_status="interrupted",
         )
 
-    by_id = {source.id: source for source in config.sources}
-    hops = tuple(hop for hop in route.hops if hop.source_id in by_id)
-    matching_sources = tuple(by_id[hop.source_id] for hop in hops)
-    source_model_ids = tuple((hop.source_id, hop.model_id) for hop in hops)
-    unsupported_source_ids = frozenset(
-        source.id
-        for source, hop in zip(matching_sources, hops)
-        if not any(model.id == hop.model_id for model in source.models)
-    )
-    runnable_hops = tuple(
-        (source, hop)
-        for source, hop in zip(matching_sources, hops)
-        if (supply_channel is None or source.supply_channel == supply_channel)
-        and source_runnable(
-            source,
+    inspected_hops = tuple(
+        inspect_exact_hop(
+            config,
+            backend,
+            requested_model,
+            hop,
             now=now,
             unavailable_source_ids=unavailable_source_ids,
-            model_supported=source.id not in unsupported_source_ids,
+            supply_channel=supply_channel,
         )
+        for hop in route.hops
     )
-    candidates = tuple(source for source, _hop in runnable_hops)
+    route_reason = (
+        inspect_exact_hop(
+            config,
+            backend,
+            requested_model,
+            None,
+            now=now,
+            unavailable_source_ids=unavailable_source_ids,
+            supply_channel=supply_channel,
+        ).reason
+        if not route.hops
+        else None
+    )
+    matching_inspections = tuple(
+        inspection
+        for inspection in inspected_hops
+        if inspection.source is not None
+    )
+    matching_sources = tuple(
+        inspection.source
+        for inspection in matching_inspections
+        if inspection.source is not None
+    )
+    source_model_ids = tuple(
+        (inspection.source_id, inspection.model_id)
+        for inspection in matching_inspections
+        if inspection.source_id is not None and inspection.model_id is not None
+    )
+    unsupported_source_ids = frozenset(
+        inspection.source_id
+        for inspection in matching_inspections
+        if inspection.reason == "model_unsupported"
+        and inspection.source_id is not None
+    )
+    runnable_inspections = tuple(
+        inspection
+        for inspection in matching_inspections
+        if inspection.runnable
+    )
+    candidates = tuple(
+        inspection.source
+        for inspection in runnable_inspections
+        if inspection.source is not None
+    )
     recoverable = tuple(
         source.id
         for source in matching_sources
         if source.state.status == "cooldown" and source_retry_ready(source, now)
     )
-    first_pair = runnable_hops[0] if runnable_hops else None
-    target_model = first_pair[1].model_id if first_pair is not None else (hops[0].model_id if hops else requested_model)
+    first_inspection = runnable_inspections[0] if runnable_inspections else None
+    target_model = (
+        first_inspection.model_id
+        if first_inspection is not None
+        else inspected_hops[0].model_id
+        if inspected_hops
+        else requested_model
+    )
     channel: ResolutionChannel = "unavailable"
-    first = first_pair[0] if first_pair is not None else None
+    first = first_inspection.source if first_inspection is not None else None
     if first is not None:
         channel = first.supply_channel
     return ModelHubTurnResolution(
         backend=backend,
         channel=channel,
         requested_model=requested_model,
-        target_model=target_model,
+        target_model=target_model or requested_model,
         source=first,
         matching_sources=matching_sources,
         candidates=candidates,
         source_model_ids=source_model_ids,
+        inspected_hops=inspected_hops,
         unsupported_source_ids=tuple(unsupported_source_ids),
+        route_unconfigured=route_reason == "route_unconfigured",
+        route_reason=route_reason,
+        menu_provider_id=menu_provider_id,
+        menu_model_id=menu_model_id,
         recoverable_source_ids=recoverable,
         supply_status=_supply_status(
             matching_sources,

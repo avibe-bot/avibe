@@ -11,11 +11,15 @@ from typing import Any, Mapping, Sequence
 from core.handlers.model_hub.adapter import (
     EngineHealth,
     EngineStatus,
+    ObservationDiscovery,
+    ObservationOutcome,
     OAuthFlowState,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    SOURCE_PROTOCOLS,
+    SourceObservation,
     SourceBinding,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
@@ -177,6 +181,28 @@ class CLIProxyEngineAdapter:
             base_url=base_url,
         )
 
+    async def provision_transient_credential(
+        self,
+        vendor: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        """Store an unbound observation key until the observation settles.
+
+        The observation seam determines protocol from upstream responses, so the
+        temporary record deliberately uses a neutral engine-store protocol marker;
+        ``observe_source`` reads only the opaque ref's secret and never treats that
+        marker as a protocol conclusion.
+        """
+
+        return await asyncio.to_thread(
+            self.state_store.store_api_key,
+            secret,
+            vendor=vendor,
+            protocol="openai_chat",
+            base_url=base_url,
+        )
+
     async def revoke_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(
             self.state_store.assert_credential_unbound,
@@ -272,6 +298,102 @@ class CLIProxyEngineAdapter:
             )
         except EngineClientError as exc:
             raise ModelDiscoveryError("model discovery failed") from exc
+
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order: Sequence[str],
+    ) -> SourceObservation:
+        """Probe each ordered protocol and keep only response-backed conclusions."""
+
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata,
+            credential_ref,
+        )
+        normalized_vendor = vendor.strip().lower()
+        if (
+            metadata.get("kind") != "api_key"
+            or metadata.get("vendor") != normalized_vendor
+            or metadata.get("base_url") != (
+                base_url.rstrip("/") if isinstance(base_url, str) else None
+            )
+        ):
+            raise EngineStateError("credential does not match observation target")
+        secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+        successes: list[tuple[str, tuple[str, ...]]] = []
+        failures: list[EngineClientError] = []
+        for protocol in protocol_order:
+            if protocol not in SOURCE_PROTOCOLS:
+                raise EngineStateError("unsupported source protocol")
+            try:
+                models = await probe_models(
+                    vendor=normalized_vendor,
+                    protocol=protocol,
+                    base_url=base_url,
+                    secret=secret,
+                )
+            except EngineClientError as exc:
+                failures.append(exc)
+                continue
+            successes.append((protocol, tuple(models)))
+
+        if len(successes) == 1:
+            protocol, models = successes[0]
+            return SourceObservation(
+                outcome=ObservationOutcome.OBSERVED,
+                reachable=True,
+                authenticated=True,
+                protocol=protocol,
+                discovery=ObservationDiscovery.SUCCEEDED,
+                model_ids=models,
+            )
+        if len(successes) > 1:
+            return SourceObservation(
+                outcome=ObservationOutcome.AMBIGUOUS,
+                reachable=True,
+                authenticated=True,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+
+        if any(error.status_code in {401, 403} for error in failures):
+            return SourceObservation(
+                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+                reachable=True,
+                authenticated=False,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if any(error.error_type == "timeout" for error in failures):
+            return SourceObservation(
+                outcome=ObservationOutcome.TIMEOUT,
+                reachable=None,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if any(error.error_type in {"network_error", "ConnectionError", "URLError"} for error in failures):
+            return SourceObservation(
+                outcome=ObservationOutcome.UNREACHABLE,
+                reachable=False,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        return SourceObservation(
+            outcome=ObservationOutcome.ADAPTER_ERROR,
+            reachable=None,
+            authenticated=None,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            model_ids=(),
+        )
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         await asyncio.to_thread(self.state_store.validate_source_id, source_id)

@@ -17,7 +17,6 @@ from config import paths
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import EventAgent, EventReason
-from core.handlers.model_hub.identifiers import parse_opencode_model_id
 from core.handlers.model_hub.resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -713,6 +712,11 @@ class ModelHubRuntimeRouter:
         resolution: ModelHubTurnResolution,
     ) -> dict[str, Any]:
         model = resolution.requested_model or resolution.target_model
+        if resolution.route_reason == "route_unconfigured":
+            return {
+                "copy_key": "route_unconfigured",
+                "model": model,
+            }
         if resolution.supply_status == "waiting":
             cooling = [
                 source
@@ -730,23 +734,15 @@ class ModelHubRuntimeRouter:
                 "retry_at": recovery,
             }
         if resolution.matching_sources:
-            candidate_ids = {
-                source.id for source in resolution.candidates
-            }
             blockers = [
                 {
-                    "source": source.display_name,
-                    "status": source.state.status,
-                    "detail_key": source.state.detail_key,
-                    "reason": (
-                        "native_cli_unavailable"
-                        if source.supply_channel == "native_cli"
-                        and source.state.status in {"active", "standby"}
-                        and source.id not in candidate_ids
-                        else None
-                    ),
+                    "source": inspection.source.display_name,
+                    "status": inspection.source.state.status,
+                    "detail_key": inspection.source.state.detail_key,
+                    "reason": inspection.reason,
                 }
-                for source in resolution.matching_sources
+                for inspection in resolution.inspected_hops
+                if inspection.source is not None
             ]
             return {
                 "copy_key": "interrupted",
@@ -1044,32 +1040,48 @@ class ModelHubRuntimeRouter:
         available_identifiers: list[str] = []
         launches: list[ModelHubLaunch] = []
         for identifier in dict.fromkeys(checked):
-            try:
-                provider_id, model_id = parse_opencode_model_id(identifier)
-            except ValueError:
-                raise ModelHubError("mapping_target_unavailable", status=409) from None
             config, resolution = await self._resolve_turn(
                 config,
                 "opencode",
                 identifier,
                 supply_channel="hub",
             )
+            provider_id = resolution.menu_provider_id
+            menu_model_id = resolution.menu_model_id
+            if provider_id is None or menu_model_id is None:
+                raise ModelHubError("mapping_target_unavailable", status=409)
             available_source = resolution.source
-            source = available_source
-            if source is None:
+            inspection = next(
+                (
+                    item
+                    for item in resolution.inspected_hops
+                    if item.source is available_source
+                ),
+                None,
+            )
+            if inspection is None:
                 # Keep a cooling/error route's public identifier stable in the
                 # overlay. Per-turn resolution still rejects that requested
                 # route, while unrelated checked models remain usable.
-                source = next(
+                inspection = next(
                     (
-                        candidate
-                        for candidate in resolution.matching_sources
-                        if candidate.supply_channel == "hub"
+                        item
+                        for item in resolution.inspected_hops
+                        if item.source is not None
+                        and item.source.supply_channel == "hub"
+                        and item.inventory_member
                     ),
                     None,
                 )
-            if source is None:
+            if (
+                inspection is None
+                or inspection.source is None
+                or inspection.model_id is None
+                or not inspection.inventory_member
+            ):
                 continue
+            source = inspection.source
+            exact_model_id = inspection.model_id
             package = _provider_package(source.protocol)
             base_url = _provider_base_url(gateway_base_url, source.protocol)
             provider = providers.setdefault(
@@ -1083,14 +1095,14 @@ class ModelHubRuntimeRouter:
             )
             if provider["npm"] != package or provider["options"]["baseURL"] != base_url:
                 raise ModelHubError("mapping_target_unavailable", status=409)
-            model = next(item for item in source.models if item.id == model_id)
+            model = next(item for item in source.models if item.id == exact_model_id)
             runtime_model = identifier
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
-                runtime_model = f"{prefix}/{model_id}"
-            provider["models"][model_id] = {
+                runtime_model = f"{prefix}/{exact_model_id}"
+            provider["models"][menu_model_id] = {
                 "id": runtime_model,
-                "name": model.display_name or model_id,
+                "name": model.display_name or menu_model_id,
             }
             projected_identifiers.append(identifier)
             if available_source is not None:
@@ -1100,7 +1112,7 @@ class ModelHubRuntimeRouter:
                         backend="opencode",
                         channel="hub",
                         requested_model=identifier,
-                        target_model=model_id,
+                        target_model=exact_model_id,
                         runtime_model=runtime_model,
                         source_id=source.id,
                         gateway_base_url=gateway_base_url,

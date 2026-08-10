@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -59,12 +58,7 @@ from .events import (
     contains_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import (
-    STANDARD_OPENCODE_VENDOR_IDS,
-    opencode_model_id,
-    opencode_provider_id,
-    parse_opencode_model_id,
-)
+from .identifiers import STANDARD_OPENCODE_VENDOR_IDS
 from .migration import (
     MigrationConflictError,
     apply_native_migration,
@@ -85,7 +79,9 @@ from .resolver import (
     BackendName,
     ModelHubTurnResolution,
     allowed_origins,
-    normalize_opencode_requested_model,
+    canonical_opencode_menu_identity,
+    inspect_exact_hop,
+    matching_v1_model_id as _matching_v1_model_id,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -342,84 +338,6 @@ def _default_protocol(vendor: str) -> str:
     return "openai_chat"
 
 
-_CLAUDE_FAMILY_ALIASES = {
-    "opus": "opus",
-    "opus[1m]": "opus",
-    "sonnet": "sonnet",
-    "sonnet[1m]": "sonnet",
-    "haiku": "haiku",
-}
-_CLAUDE_MODEL_ID = re.compile(
-    r"^claude-(?P<family>opus|sonnet|haiku|fable)-(?P<version>\d+(?:-\d+)*?)(?:-(?P<date>\d{8}))?$"
-)
-
-
-def _parsed_claude_model_id(model_id: str) -> tuple[str, tuple[int, ...], int | None] | None:
-    match = _CLAUDE_MODEL_ID.fullmatch(model_id)
-    if match is None:
-        return None
-    return (
-        match.group("family"),
-        tuple(int(part) for part in match.group("version").split("-")),
-        int(match.group("date")) if match.group("date") else None,
-    )
-
-
-def _matching_v1_model_id(
-    *,
-    backend: BackendName,
-    requested_model: str,
-    source: ModelHubSourceConfig,
-    checked_models: tuple[str, ...] = (),
-) -> str | None:
-    """Return one concrete observed model for the frozen add-time matching-v1."""
-
-    observed_models = tuple(
-        model for model in source.models if model.provenance == "discovered"
-    )
-
-    if backend == "opencode":
-        requested_model = normalize_opencode_requested_model(requested_model, checked_models) or ""
-        if not requested_model:
-            return None
-        exact = [
-            model.id
-            for model in observed_models
-            if opencode_model_id(source.vendor, model.id) == requested_model
-        ]
-        return exact[0] if len(exact) == 1 else None
-
-    if backend == "claude" and source.vendor == "anthropic" and source.supply_channel == "native_cli":
-        family = _CLAUDE_FAMILY_ALIASES.get(requested_model)
-        requested_version: tuple[int, ...] | None = None
-        parsed_request = _parsed_claude_model_id(requested_model)
-        if family is None and parsed_request is not None:
-            family, requested_version, requested_date = parsed_request
-            if requested_date is not None:
-                return next(
-                    (model.id for model in observed_models if model.id == requested_model),
-                    None,
-                )
-        if family is not None:
-            matches: list[tuple[tuple[int, ...], int, str]] = []
-            for model in observed_models:
-                parsed = _parsed_claude_model_id(model.id)
-                if parsed is None:
-                    continue
-                candidate_family, candidate_version, candidate_date = parsed
-                if candidate_family != family:
-                    continue
-                if requested_version is not None and candidate_version != requested_version:
-                    continue
-                matches.append((candidate_version, candidate_date or 0, model.id))
-            return max(matches)[2] if matches else None
-
-    literal = [model.id for model in observed_models if model.id == requested_model]
-    if literal:
-        return literal[0]
-    return None
-
-
 async def _provision_transient_credential_with_cancellation_ownership(
     service: "ModelHubService",
     vendor: str,
@@ -464,6 +382,34 @@ async def _rollback_credential_before_settling(
         while True:
             try:
                 await asyncio.shield(rollback_task)
+                break
+            except asyncio.CancelledError:
+                continue
+        raise cancelled
+
+
+async def _rollback_replacement_before_settling(
+    service: "ModelHubService",
+    source_id: str,
+    replacement_ref: str,
+    old_credential_ref: str | None,
+    *,
+    old_revocation_recorded: bool,
+) -> None:
+    replacement_task = asyncio.create_task(
+        service._rollback_replacement(
+            source_id,
+            replacement_ref,
+            old_credential_ref,
+            old_revocation_recorded=old_revocation_recorded,
+        )
+    )
+    try:
+        await asyncio.shield(replacement_task)
+    except asyncio.CancelledError as cancelled:
+        while True:
+            try:
+                await asyncio.shield(replacement_task)
                 break
             except asyncio.CancelledError:
                 continue
@@ -645,14 +591,28 @@ class ModelHubService:
             raise ModelHubError("engine_down", status=503) from None
 
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:
+        ineligible_source_ids = {
+            inspection.source_id
+            for backend_name in MODEL_HUB_BACKENDS
+            for menu_model, route in config.agents[backend_name].routes.items()
+            for hop in route.hops
+            for inspection in (
+                inspect_exact_hop(
+                    config,
+                    cast(BackendName, backend_name),
+                    menu_model,
+                    hop,
+                ),
+            )
+            if inspection.source_id is not None
+            and not inspection.configuration_eligible
+        }
         return [
             _binding(source)
             for source in config.sources
             if source.supply_channel == "hub"
-            and (
-                source.models
-                or source.state.status not in {"needs_action", "error"}
-            )
+            and bool(source.models)
+            and source.id not in ineligible_source_ids
         ]
 
     @staticmethod
@@ -1149,6 +1109,16 @@ class ModelHubService:
         if any(item.id == source.id for item in config.sources):
             raise ModelHubError("migration_item_conflict", status=409)
         config.sources.append(source)
+        self._apply_source_placement(config, source)
+        await self._commit_synced(previous, config)
+
+    def _apply_source_placement(
+        self,
+        config: ModelHubConfig,
+        source: ModelHubSourceConfig,
+    ) -> None:
+        """Apply matching-v1 and placement-v1 to one newly added Source."""
+
         for backend in MODEL_HUB_BACKENDS:
             agent = config.agents[backend]
             if self._eligible_for_agent(source, backend) and source.id not in agent.sources.order:
@@ -1171,7 +1141,6 @@ class ModelHubService:
                 if matched_model is None or any(hop.source_id == source.id for hop in route.hops):
                     continue
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, matched_model))
-        await self._commit_synced(previous, config)
 
     def _added_to(self, source_id: str) -> list[dict]:
         config = self.store.load()
@@ -1302,8 +1271,10 @@ class ModelHubService:
                     rollback_credential_ref,
                 )
                 if rollback_credential_ref is not None and not persisted:
-                    await asyncio.shield(
-                        self._rollback_credential(source.id, rollback_credential_ref)
+                    await _rollback_credential_before_settling(
+                        self,
+                        source.id,
+                        rollback_credential_ref,
                     )
                     try:
                         self.oauth_flows.forget(oauth_ref)
@@ -1565,22 +1536,20 @@ class ModelHubService:
                 if not committed:
                     try:
                         if source is None:
-                            await asyncio.shield(
-                                self._rollback_credential(
-                                    binding.source_id,
-                                    replacement_ref,
-                                )
+                            await _rollback_credential_before_settling(
+                                self,
+                                binding.source_id,
+                                replacement_ref,
                             )
                         elif replacement_ref == old_credential_ref:
                             self._mark_same_handle_reauth_needs_action(source.id)
                         else:
-                            await asyncio.shield(
-                                self._rollback_replacement(
-                                    source.id,
-                                    replacement_ref,
-                                    old_credential_ref,
-                                    old_revocation_recorded=old_revocation_recorded,
-                                )
+                            await _rollback_replacement_before_settling(
+                                self,
+                                source.id,
+                                replacement_ref,
+                                old_credential_ref,
+                                old_revocation_recorded=old_revocation_recorded,
                             )
                     finally:
                         try:
@@ -1966,6 +1935,7 @@ class ModelHubService:
             usage=ModelHubSourceUsageConfig(),
             models=manual_models,
             created_at=self.now().isoformat(),
+            credential_ref="cred_preflight",
         )
         if observation.discovery is ObservationDiscovery.SUCCEEDED:
             self._apply_discovered_models(
@@ -1979,6 +1949,13 @@ class ModelHubService:
                 status="error",
                 detail_key="models.source.error.unclassified",
             )
+
+        # AC-29 requires the canonical Source validator to run before any
+        # permanent credential is provisioned. The placeholder is never saved.
+        try:
+            source = ModelHubSourceConfig.from_payload(source.to_payload())
+        except (TypeError, ValueError):
+            raise ModelHubError("discovery_failed") from None
 
         rollback_credential_ref = await self._engine_call(
             self.adapter.provision_credential(
@@ -2004,7 +1981,11 @@ class ModelHubService:
                 rollback_credential_ref,
             )
             if not persisted:
-                await asyncio.shield(self._rollback_credential(source.id, rollback_credential_ref))
+                await _rollback_credential_before_settling(
+                    self,
+                    source.id,
+                    rollback_credential_ref,
+                )
             raise
         except Exception:
             if not persisted:
@@ -2083,13 +2064,12 @@ class ModelHubService:
                     replacement_ref,
                 )
                 if not committed:
-                    await asyncio.shield(
-                        self._rollback_replacement(
-                            source.id,
-                            replacement_ref,
-                            old_credential_ref,
-                            old_revocation_recorded=old_revocation_recorded,
-                        )
+                    await _rollback_replacement_before_settling(
+                        self,
+                        source.id,
+                        replacement_ref,
+                        old_credential_ref,
+                        old_revocation_recorded=old_revocation_recorded,
                     )
                 raise
             except Exception:
@@ -2148,49 +2128,6 @@ class ModelHubService:
             else:
                 self._save_config(config)
             return source.to_payload()
-
-    @staticmethod
-    def _selected_targets(agent: ModelHubAgentSupplyConfig) -> list[tuple[Optional[str], str]]:
-        if agent.backend == "opencode" and agent.menu:
-            targets = []
-            for identifier in agent.menu.checked:
-                try:
-                    provider, model_id = parse_opencode_model_id(identifier)
-                except ValueError:
-                    continue
-                else:
-                    targets.append((provider, model_id))
-            return targets
-        return [
-            (None, hop.model_id)
-            for route in agent.routes.values()
-            for hop in route.hops
-        ]
-
-    def _only_selected_model_supplier(
-        self,
-        config: ModelHubConfig,
-        source: ModelHubSourceConfig,
-        model_id: str,
-    ) -> bool:
-        for agent in config.agents.values():
-            if agent.mode != "hub":
-                continue
-            for provider, target_model_id in self._selected_targets(agent):
-                if target_model_id != model_id or (
-                    provider is not None and provider != opencode_provider_id(source.vendor)
-                ):
-                    continue
-                suppliers = [
-                    candidate
-                    for candidate in config.sources
-                    if self._eligible_for_agent(candidate, agent.backend)
-                    and (provider is None or opencode_provider_id(candidate.vendor) == provider)
-                    and any(item.id == model_id for item in candidate.models)
-                ]
-                if len(suppliers) == 1 and suppliers[0].id == source.id:
-                    return True
-        return False
 
     def _protected_menu_models(
         self,
@@ -2366,7 +2303,6 @@ class ModelHubService:
                 )
                 raise
             source.state = ModelHubSourceStateConfig(status="standby")
-            discovered_ids = {model.id for model in source.models}
             would_remove_hops = [
                 {
                     "backend": backend,
@@ -2377,9 +2313,30 @@ class ModelHubService:
                 for backend in MODEL_HUB_BACKENDS
                 for menu_model, route in config.agents[backend].routes.items()
                 for hop in route.hops
-                if hop.source_id == source_id and hop.model_id not in discovered_ids
+                if hop.source_id == source_id
+                and inspect_exact_hop(
+                    config,
+                    cast(BackendName, backend),
+                    menu_model,
+                    hop,
+                    now=self.now(),
+                    unavailable_source_ids=self._unavailable_native_sources(
+                        config,
+                        cast(BackendName, backend),
+                    ),
+                ).reason
+                == "model_unsupported"
             ]
-            would_interrupt = self._would_interrupt(config)
+            previous_interruptions = {
+                (item["backend"], item["model_id"])
+                for item in self._would_interrupt(previous)
+            }
+            would_interrupt = [
+                item
+                for item in self._would_interrupt(config)
+                if (item["backend"], item["model_id"])
+                not in previous_interruptions
+            ]
             if (would_remove_hops or would_interrupt) and not force:
                 raise ModelHubError(
                     "source_model_in_route_chain" if would_remove_hops else "source_last_supplier",
@@ -2390,6 +2347,7 @@ class ModelHubService:
                     },
                 )
             if force and would_remove_hops:
+                discovered_ids = {model.id for model in source.models}
                 for agent in config.agents.values():
                     for menu_model, route in agent.routes.items():
                         route.hops = tuple(
@@ -2505,6 +2463,8 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             agent = self._agent(config, backend)
+            if agent.mode == "direct":
+                raise self._direct_mode_error()
             by_id = {source.id: source for source in config.sources}
             old_route = agent.routes.get(model_id, ModelHubRouteConfig())
             old_pairs = {(hop.source_id, hop.model_id) for hop in old_route.hops}
@@ -2692,6 +2652,8 @@ class ModelHubService:
             agent = config.agents["opencode"]
             try:
                 parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
+                for identifier in parsed.checked:
+                    canonical_opencode_menu_identity(identifier)
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
             agent.menu = parsed
@@ -2895,23 +2857,18 @@ class ModelHubService:
             now=now,
             unavailable_source_ids=unavailable,
         )
-        route = agent.routes.get(
-            resolution.requested_model or model_id,
-            ModelHubRouteConfig(),
-        )
-        by_id = {source.id: source for source in config.sources}
         chain: list[dict] = []
-        for hop in route.hops:
-            source = by_id.get(hop.source_id)
+        for inspection in resolution.inspected_hops:
+            source = inspection.source
             if source is None:
                 chain.append(
                     {
-                        "source_id": hop.source_id,
-                        "model_id": hop.model_id,
+                        "source_id": inspection.source_id,
+                        "model_id": inspection.model_id,
                         "channel": "hub",
                         "health": "error",
                         "runnable": False,
-                        "reason": "source_missing",
+                        "reason": inspection.reason,
                         "retry_at": None,
                     }
                 )
@@ -2922,36 +2879,15 @@ class ModelHubService:
                 if status in {"active", "standby"}
                 else status
             )
-            runnable = source_runnable(
-                source,
-                now=now,
-                unavailable_source_ids=unavailable,
-                model_supported=source.id not in resolution.unsupported_source_ids,
-            )
-            effective_model = (
-                resolution.model_for_source(source) or resolution.target_model
-            )
             chain.append(
                 {
                     "source_id": source.id,
-                    "model_id": effective_model,
+                    "model_id": inspection.model_id,
                     "channel": source.supply_channel,
                     "health": health,
-                    "runnable": runnable,
-                    "reason": (
-                        "native_cli_unavailable"
-                        if source.id in unavailable
-                        else "model_unsupported"
-                        if source.id in resolution.unsupported_source_ids
-                        else source.state.detail_key
-                        if status in {"needs_action", "error"}
-                        else None
-                    ),
-                    "retry_at": (
-                        source.state.retry_at
-                        if health == "cooldown"
-                        else None
-                    ),
+                    "runnable": inspection.runnable,
+                    "reason": inspection.reason,
+                    "retry_at": inspection.retry_at,
                 }
             )
         current = next(
@@ -3846,8 +3782,11 @@ class ModelHubService:
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
         for source in candidates:
+            inspection = resolution.inspection_for_source(source)
             target_model = (
-                resolution.model_for_source(source) or resolution.target_model
+                inspection.model_id
+                if inspection is not None and inspection.model_id is not None
+                else resolution.target_model
             )
             if source.supply_channel == "native_cli":
                 self._emit_switch(

@@ -1049,6 +1049,62 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
     )
 
 
+def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Path) -> None:
+    source = _source("src_overlay01", "Overlay", model_id="upstream-model")
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes.pop("openai/shared-model")
+    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "upstream-model"),)
+    )
+    agent.menu.checked = ["openai/menu-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+    gateway = SimpleNamespace(
+        endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "gateway-token")),
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=gateway,
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+
+    assert overlay is not None
+    payload = json.loads(overlay.content)
+    assert payload["provider"]["openai"]["models"]["menu-model"]["id"] == (
+        "openai/menu-model"
+    )
+    assert overlay.launches[0].target_model == "upstream-model"
+
+
+def test_opencode_overlay_rejects_wrong_exact_hop_identity(tmp_path: Path) -> None:
+    source = _source("src_overlay02", "Overlay", model_id="upstream-model")
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes.pop("openai/shared-model")
+    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "wrong-model"),)
+    )
+    agent.menu.checked = ["openai/menu-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+    gateway = SimpleNamespace(
+        endpoint=AsyncMock(return_value=("http://127.0.0.1:19000", "gateway-token")),
+    )
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=gateway,
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(router.prepare_opencode_overlay())
+
+    assert exc.value.code == "mapping_target_unavailable"
+
+
 def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
     tmp_path: Path,
 ) -> None:

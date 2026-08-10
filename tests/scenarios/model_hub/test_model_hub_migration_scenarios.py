@@ -498,13 +498,16 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert before == _tree_digest(native_home)
     by_id = {source.id: source for source in store.config.sources}
     imported_ids = set(by_id)
-    assert store.config.agents["claude"].sources.order == []
-    assert store.config.agents["codex"].sources.order == []
-    assert store.config.agents["opencode"].sources.order == []
+    for backend in ("claude", "codex", "opencode"):
+        assert store.config.agents[backend].sources.order == [
+            source.id
+            for source in store.config.sources
+            if ModelHubConfig.source_eligible_for_backend(source, backend)
+        ]
     codex_payload = next(
         agent for agent in service.list_agents() if agent["backend"] == "codex"
     )
-    assert codex_payload["sources"]["order"] == []
+    assert codex_payload["sources"]["order"] == store.config.agents["codex"].sources.order
     assert {
         item["source_id"]
         for item in codex_payload["sources"]["eligibility"]

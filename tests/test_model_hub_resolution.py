@@ -29,12 +29,17 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
+from core.handlers.model_hub.resolver import (
+    canonical_opencode_menu_identity,
+    inspect_exact_hop,
+)
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     ModelHubError,
     ModelHubService,
     _matching_v1_model_id,
 )
+from modules.agents.model_hub import ModelHubRuntimeRouter
 
 
 class MemoryStore:
@@ -362,6 +367,164 @@ def test_resolution_marks_stale_exact_hop_unsupported():
     assert resolution.matching_sources == (source,)
     assert resolution.candidates == ()
     assert resolution.unsupported_source_ids == (source.id,)
+
+
+def test_launch_failure_reports_unsupported_exact_hop():
+    source = _source("src_launch001", ("other-model",))
+    config = _config([source], model="stale-model")
+    resolution = resolve_model_hub_turn(config, "claude", "stale-model")
+
+    failure = ModelHubRuntimeRouter._launch_failure(config, resolution)
+
+    assert failure["copy_key"] == "interrupted"
+    assert failure["blockers"] == [
+        {
+            "source": source.display_name,
+            "status": source.state.status,
+            "detail_key": source.state.detail_key,
+            "reason": "model_unsupported",
+        }
+    ]
+
+
+def test_exact_hop_inspection_is_the_single_identity_and_supply_authority():
+    source = _source("src_exact001", ("upstream-model",), vendor="openai")
+    config = _config([source], model="openai/menu-model")
+    hop = ModelHubRouteHopConfig(source.id, "upstream-model")
+
+    inspected = inspect_exact_hop(config, "opencode", "openai/menu-model", hop)
+
+    assert inspected.identity == (
+        "opencode",
+        "openai/menu-model",
+        source.id,
+        "upstream-model",
+    )
+    assert inspected.menu_provider_id == "openai"
+    assert inspected.menu_model_id == "menu-model"
+    assert inspected.configuration_eligible is True
+    assert inspected.inventory_member is True
+    assert inspected.supply_eligible is True
+    assert inspected.runnable is True
+    assert inspected.reason is None
+
+
+def test_exact_hop_inspection_rejects_wrong_identity_and_empty_route():
+    source = _source("src_exact002", ("actual-model",), vendor="openai")
+    config = _config([source], model="openai/menu-model")
+
+    wrong = inspect_exact_hop(
+        config,
+        "opencode",
+        "openai/menu-model",
+        ModelHubRouteHopConfig(source.id, "wrong-model"),
+    )
+    empty = inspect_exact_hop(config, "opencode", "openai/menu-model", None)
+
+    assert wrong.inventory_member is False
+    assert wrong.supply_eligible is False
+    assert wrong.runnable is False
+    assert wrong.reason == "model_unsupported"
+    assert empty.identity == ("opencode", "openai/menu-model", None, None)
+    assert empty.reason == "route_unconfigured"
+
+
+def test_opencode_menu_validation_rejects_noncanonical_identifier(tmp_path):
+    service, store, _ = _service(tmp_path, ModelHubConfig())
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_opencode_menu(
+                {"view": "featured", "checked": ["gpt-5"]}
+            )
+        )
+    assert exc.value.code == "mapping_target_unavailable"
+    assert store.load().agents["opencode"].menu.checked == []
+
+
+def test_direct_mode_rejects_chain_write_before_config_mutation(tmp_path):
+    source = _source("src_direct01", ("requested",))
+    config = _config([source], model="requested")
+    service, store, _ = _service(tmp_path, config)
+    asyncio.run(service.set_agent_mode("claude", "direct"))
+    before = store.load().to_payload()
+
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.set_agent_chain(
+                "claude",
+                "requested",
+                {"hops": []},
+            )
+        )
+
+    assert exc.value.code == "direct_mode"
+    assert store.load().to_payload() == before
+
+
+def test_refresh_ignores_preexisting_unrelated_interruption(tmp_path):
+    source = _source("src_refresh02", ("requested",))
+    broken = _source("src_refresh03", ("other",), status="cooldown")
+    broken.state = ModelHubSourceStateConfig(
+        status="cooldown",
+        retry_at="2099-01-01T00:00:00Z",
+        detail_key="models.source.cooldown.rate_limited",
+    )
+    config = _config([source, broken], model="requested")
+    config.agents["claude"].routes["other-route"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(broken.id, "other"),)
+    )
+    adapter = FakeAdapter(discovered=("requested",))
+    service, _store, _ = _service(tmp_path, config, adapter)
+
+    result = asyncio.run(service.refresh_source(source.id))
+
+    assert result["removed_hops"] == []
+    assert result["interrupted"] == []
+
+
+def test_engine_binding_excludes_empty_inventory(tmp_path):
+    source = _source("src_empty01", (), vendor="openai")
+    config = _config([source], model="requested")
+    service, _store, _ = _service(tmp_path, config)
+
+    assert service._bindings(config) == []
+
+
+def test_opencode_normalization_has_one_resolver_consumer():
+    from ast import ImportFrom, Name, NodeVisitor, parse
+    from pathlib import Path
+
+    class ForbiddenCalls(NodeVisitor):
+        def __init__(self):
+            self.calls = []
+
+        def visit_Call(self, node):
+            if isinstance(node.func, Name) and node.func.id in {
+                "parse_opencode_model_id",
+                "normalize_opencode_requested_model",
+                "opencode_model_id",
+            }:
+                self.calls.append(node.func.id)
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node):
+            if node.module == "core.handlers.model_hub.identifiers":
+                self.calls.extend(alias.name for alias in node.names)
+            self.generic_visit(node)
+
+    root = Path(__file__).parents[1]
+    for relative in (
+        "core/handlers/model_hub/service.py",
+        "modules/agents/model_hub.py",
+    ):
+        visitor = ForbiddenCalls()
+        visitor.visit(parse((root / relative).read_text(encoding="utf-8")))
+        assert visitor.calls == []
+
+    assert canonical_opencode_menu_identity("openai/menu-model") == (
+        "openai",
+        "menu-model",
+    )
 
 
 def test_agent_chain_projects_exact_hops_and_blockers(tmp_path):
