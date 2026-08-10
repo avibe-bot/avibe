@@ -704,12 +704,8 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
 
 
 @pytest.mark.anyio
-async def test_persisted_scheduled_start_decorates_before_native_dispatch(managers) -> None:
+async def test_persisted_scheduled_start_preserves_raw_text_for_handler_routing(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
-    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
-    manager.controller.message_handler = SimpleNamespace(
-        _prepend_message_metadata=decorator,
-    )
     captured: dict[str, object] = {}
 
     async def capture_run(_session_id, context, text, **_kwargs):
@@ -748,11 +744,10 @@ async def test_persisted_scheduled_start_decorates_before_native_dispatch(manage
     )
 
     assert admitted.state == "claimed"
-    assert captured["text"] == "decorated: callback result"
-    assert decorator.await_args.args[0] is captured["context"]
-    assert (
-        captured["context"].platform_specific[SCHEDULED_DISPATCH_METADATA_APPLIED_KEY]
-        is True
+    assert captured["text"] == "callback result"
+    assert captured["context"].platform_specific["source_actor"] == "source-session"
+    assert not captured["context"].platform_specific.get(
+        SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
     )
 
 
