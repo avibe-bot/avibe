@@ -8124,40 +8124,40 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
 
             def persist_attachment():
                 attachment_source = source
-                result = None
-                try:
-                    if legacy_data_b64 is not None:
-                        encoded_data = legacy_data_b64
-                        if encoded_data.startswith("data:") and "," in encoded_data:
-                            encoded_data = encoded_data.split(",", 1)[1]
-                        max_encoded_bytes = (
-                            (workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3
-                        ) * 4
-                        if len(encoded_data) > max_encoded_bytes:
-                            raise workbench_media.WorkbenchAttachmentUploadError(
-                                "too_large",
-                                "Attachment exceeds the size limit",
-                                413,
-                            )
-                        try:
-                            attachment_source = io.BytesIO(
-                                base64.b64decode(encoded_data, validate=True)
-                            )
-                        except (binascii.Error, ValueError) as exc:
-                            raise workbench_media.WorkbenchAttachmentUploadError(
-                                "invalid_upload",
-                                "Attachment data is invalid",
-                                400,
-                            ) from exc
-                    if attachment_source is None:
+                if legacy_data_b64 is not None:
+                    encoded_data = legacy_data_b64
+                    if encoded_data.startswith("data:") and "," in encoded_data:
+                        encoded_data = encoded_data.split(",", 1)[1]
+                    max_encoded_bytes = (
+                        (workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3
+                    ) * 4
+                    if len(encoded_data) > max_encoded_bytes:
                         raise workbench_media.WorkbenchAttachmentUploadError(
-                            "file_required",
-                            "File is required",
-                            400,
+                            "too_large",
+                            "Attachment exceeds the size limit",
+                            413,
                         )
-                    with workbench_media.workbench_attachment_upload_lock(
-                        session_id, stable_upload_id
-                    ):
+                    try:
+                        attachment_source = io.BytesIO(
+                            base64.b64decode(encoded_data, validate=True)
+                        )
+                    except (binascii.Error, ValueError) as exc:
+                        raise workbench_media.WorkbenchAttachmentUploadError(
+                            "invalid_upload",
+                            "Attachment data is invalid",
+                            400,
+                        ) from exc
+                if attachment_source is None:
+                    raise workbench_media.WorkbenchAttachmentUploadError(
+                        "file_required",
+                        "File is required",
+                        400,
+                    )
+                with workbench_media.workbench_attachment_upload_lock(
+                    session_id, stable_upload_id
+                ):
+                    result = None
+                    try:
                         with engine.begin() as conn:
                             result = workbench_media.materialize_workbench_attachment(
                                 conn,
@@ -8168,13 +8168,14 @@ async def sessions_attachments_create(session_id: str, starlette_request: FastAP
                                 source=attachment_source,
                                 upload_id=stable_upload_id,
                             )
-                    return result
-                except Exception:
-                    # Registration and commit are one logical publish. If the DB
-                    # commit fails after the file was materialized, remove it too.
-                    if result is not None and result.created:
-                        Path(result.path).unlink(missing_ok=True)
-                    raise
+                        return result
+                    except Exception:
+                        # Registration and commit are one logical publish. Keep
+                        # rollback under the same key lock so a waiting retry
+                        # cannot recreate this path before cleanup completes.
+                        if result is not None and result.created:
+                            Path(result.path).unlink(missing_ok=True)
+                        raise
 
             result = await asyncio.to_thread(persist_attachment)
             return _workbench_attachment_response(result)

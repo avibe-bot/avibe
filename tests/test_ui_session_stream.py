@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -1898,6 +1899,85 @@ def test_attachment_upload_cleans_partial_file_after_registration_failure(
     assert response.get_json()["error"]["code"] == "upload_failed"
     upload_dir = paths.get_attachments_dir() / "avibe" / session_id
     assert not upload_dir.exists() or not list(upload_dir.iterdir())
+
+
+def test_attachment_upload_cleans_failed_commit_before_releasing_upload_lock(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from config import paths
+    from core import workbench_media
+    from storage import media_service
+    from storage.db import create_sqlite_engine
+    from vibe import ui_server
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    original_begin = engine.begin
+    original_lock = workbench_media.workbench_attachment_upload_lock
+    original_unlink = Path.unlink
+    fail_commit = True
+    lock_held = False
+    cleanup_lock_states: list[bool] = []
+
+    @contextmanager
+    def fail_first_commit():
+        nonlocal fail_commit
+        with original_begin() as conn:
+            yield conn
+            if fail_commit:
+                fail_commit = False
+                raise OSError("commit failed")
+
+    @contextmanager
+    def tracked_upload_lock(*args, **kwargs):
+        nonlocal lock_held
+        with original_lock(*args, **kwargs):
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+    def tracked_unlink(path: Path, *args, **kwargs):
+        if path.name.startswith("upload-id-123456_"):
+            cleanup_lock_states.append(lock_held)
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "begin", fail_first_commit)
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
+    monkeypatch.setattr(
+        workbench_media,
+        "workbench_attachment_upload_lock",
+        tracked_upload_lock,
+    )
+    monkeypatch.setattr(Path, "unlink", tracked_unlink)
+
+    client = ui_server.app.test_client()
+    headers = csrf_headers(client)
+    first = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"first", "text/plain")},
+        headers=headers,
+    )
+    retried = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"retry", "text/plain")},
+        headers=headers,
+    )
+
+    assert first.status_code == 500
+    assert cleanup_lock_states == [True]
+    assert retried.status_code == 201
+    with engine.connect() as conn:
+        row = media_service.get_by_token(conn, retried.get_json()["token"])
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == b"retry"
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert list(upload_dir.iterdir()) == [Path(row["local_path"])]
 
 
 def test_attachment_upload_retry_reuses_committed_file_and_token(isolated_state, tmp_path):
