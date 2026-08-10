@@ -746,6 +746,7 @@
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local Model Hub runtime is unavailable.",
       "consent_required": "Explicit consent is required for experimental subscription routing.",
+      "config_conflict": "Model Hub settings changed while this update was in progress. Reload and try again.",
       "migration_item_conflict": "This migration item conflicts with current Model Hub state.",
       "stream_interrupted": "The upstream stream was interrupted.",
       "upstream_protocol_error": "The upstream response did not match the expected protocol.",

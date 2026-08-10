@@ -527,10 +527,23 @@ export const OpencodeProviderConfig: React.FC<{
       if (expandedId === provider.id) setExpandedId(null);
       await loadProviders();
     } catch (e) {
+      const message = errorMessage(e) || (t('settings.backends.opencodeCustomProviderRemoveFailed') as string);
       updateEdit(provider.id, {
         deletingProvider: false,
-        error: errorMessage(e) || (t('settings.backends.opencodeCustomProviderRemoveFailed') as string),
+        error: message,
       });
+      await settlePartialMutation(
+        {
+          ok: false,
+          partial: true,
+          mutation_attempted: true,
+          removed: null,
+          provider_id: provider.id,
+        },
+        provider.id,
+        message,
+        true,
+      );
     }
   };
 
@@ -631,10 +644,23 @@ export const OpencodeProviderConfig: React.FC<{
       notifyOpenCodeModelOptionsChanged();
       await loadProviders();
     } catch (e) {
+      const message = errorMessage(e) || (t('settings.backends.opencodeProviderRemoveFailed') as string);
       updateEdit(provider.id, {
         removing: false,
-        error: errorMessage(e) || (t('settings.backends.opencodeProviderRemoveFailed') as string),
+        error: message,
       });
+      await settlePartialMutation(
+        {
+          ok: false,
+          partial: true,
+          mutation_attempted: true,
+          removed: null,
+          provider_id: provider.id,
+        },
+        provider.id,
+        message,
+        true,
+      );
     }
   };
 

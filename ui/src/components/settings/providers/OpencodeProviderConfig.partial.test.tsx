@@ -8,6 +8,8 @@ import type { OpencodeProvider } from '@/context/ApiContext';
 import { OpencodeProviderConfig } from './OpencodeProviderConfig';
 
 const api = vi.hoisted(() => ({
+  deleteOpencodeCustomProvider: vi.fn(),
+  deleteOpencodeProviderAuth: vi.fn(),
   getOpencodeProviders: vi.fn(),
   saveOpencodeCustomProvider: vi.fn(),
   setOpencodeProviderAuth: vi.fn(),
@@ -65,6 +67,8 @@ const provider = (overrides: Partial<OpencodeProvider> = {}): OpencodeProvider =
 });
 
 beforeEach(() => {
+  api.deleteOpencodeCustomProvider.mockReset();
+  api.deleteOpencodeProviderAuth.mockReset();
   api.getOpencodeProviders.mockReset();
   api.saveOpencodeCustomProvider.mockReset();
   api.setOpencodeProviderAuth.mockReset();
@@ -73,6 +77,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 describe('OpencodeProviderConfig partial save settlement', () => {
@@ -241,6 +246,65 @@ describe('OpencodeProviderConfig partial save settlement', () => {
     await waitFor(() => expect(api.getOpencodeProviders).toHaveBeenCalledTimes(2));
     expect(screen.queryByDisplayValue('sk-top-secret')).toBeNull();
     expect(screen.queryByLabelText('settings.backends.opencodeProviderApiKey')).toBeNull();
+    expect(modelOptionsChanged).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledWith('transport interrupted', 'warning');
+    window.removeEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+  });
+
+  it('reconciles an uncertain custom-provider delete when the request rejects', async () => {
+    const custom = provider({
+      id: 'my-relay',
+      name: 'My Relay',
+      configured: true,
+      custom: true,
+    });
+    api.getOpencodeProviders
+      .mockResolvedValueOnce({ ok: true, providers: [custom] })
+      .mockResolvedValue({ ok: true, providers: [] });
+    api.deleteOpencodeCustomProvider.mockRejectedValue(new Error('transport interrupted'));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const modelOptionsChanged = vi.fn();
+    window.addEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+    const user = userEvent.setup();
+
+    render(<OpencodeProviderConfig hideEnableToggle />);
+    await user.click(await screen.findByRole('button', { name: /My Relay/ }));
+    await user.click(
+      screen.getByRole('button', { name: 'settings.backends.opencodeCustomProviderRemove' }),
+    );
+
+    await waitFor(() => expect(api.deleteOpencodeCustomProvider).toHaveBeenCalledOnce());
+    await waitFor(() => expect(api.getOpencodeProviders).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('My Relay')).toBeNull();
+    expect(modelOptionsChanged).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledWith('transport interrupted', 'warning');
+    window.removeEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+  });
+
+  it('reconciles an uncertain provider-auth delete when the request rejects', async () => {
+    const configured = provider({
+      configured: true,
+      has_auth: true,
+      api_key_masked: 'sk-•••old',
+    });
+    api.getOpencodeProviders
+      .mockResolvedValueOnce({ ok: true, providers: [configured] })
+      .mockResolvedValue({ ok: true, providers: [] });
+    api.deleteOpencodeProviderAuth.mockRejectedValue(new Error('transport interrupted'));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const modelOptionsChanged = vi.fn();
+    window.addEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+    const user = userEvent.setup();
+
+    render(<OpencodeProviderConfig hideEnableToggle />);
+    await user.click(await screen.findByRole('button', { name: /DeepSeek/ }));
+    await user.click(
+      screen.getByRole('button', { name: 'settings.backends.opencodeProviderRemove' }),
+    );
+
+    await waitFor(() => expect(api.deleteOpencodeProviderAuth).toHaveBeenCalledOnce());
+    await waitFor(() => expect(api.getOpencodeProviders).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('DeepSeek')).toBeNull();
     expect(modelOptionsChanged).toHaveBeenCalledOnce();
     expect(showToast).toHaveBeenCalledWith('transport interrupted', 'warning');
     window.removeEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);

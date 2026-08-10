@@ -16,6 +16,7 @@ from config.v2_config import (
     ModelHubModelConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
+    V2Config,
 )
 from core.handlers.model_hub.adapter import (
     EngineHealth,
@@ -28,7 +29,13 @@ from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, build_resolution_event
 from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
+from core.handlers.model_hub.service import (
+    ModelHubError,
+    ModelHubService,
+    V2ModelHubConfigStore,
+    _mask_credential,
+)
+from core.services.settings import default_config
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.client import _SAFE_ERROR_CODES
 from vibe.model_hub_runtime.state import EngineStateError
@@ -1387,6 +1394,51 @@ def test_async_mutation_offloads_config_store_save(tmp_path):
 
     assert save_threads
     assert all(thread_id != event_loop_thread for thread_id in save_threads)
+
+
+def test_v2_store_rejects_stale_patch_without_overwriting_concurrent_edit(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    initial = _service(tmp_path, FakeAdapter([])).store.load()
+    persisted = default_config()
+    persisted.model_hub = ModelHubConfig.from_payload(initial.to_payload())
+    persisted.save()
+
+    store = V2ModelHubConfigStore()
+    original_save = store.save
+    interleaved = False
+
+    def save_after_concurrent_edit(config: ModelHubConfig) -> None:
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            concurrent = V2Config.load()
+            concurrent.model_hub.sources[1].display_name = "Concurrent backup"
+            concurrent.save()
+        original_save(config)
+
+    store.save = save_after_concurrent_edit  # type: ignore[method-assign]
+    service = ModelHubService(
+        store=store,
+        adapter=FakeAdapter([]),
+        events=BoundedEventLog(tmp_path / "v2-events.json", max_entries=5),
+    )
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.patch_source(
+                "src_primary01",
+                {"display_name": "Requested primary"},
+            )
+        )
+
+    assert raised.value.code == "config_conflict"
+    assert raised.value.status == 409
+    current = V2Config.load().model_hub
+    assert current.sources[0].display_name == "Primary"
+    assert current.sources[1].display_name == "Concurrent backup"
 
 
 def test_async_mutation_settles_config_save_before_propagating_cancellation(tmp_path):

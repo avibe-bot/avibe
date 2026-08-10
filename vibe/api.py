@@ -10457,10 +10457,11 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
             if existing_name and existing_name == normalized_name and existing_id != normalized_id:
                 return {"ok": False, "message": "provider name already exists"}
 
+    settlement = CancellationSettlement()
     try:
         from vibe.opencode_config import upsert_opencode_custom_provider
 
-        await asyncio.to_thread(
+        await settlement.run_blocking(
             upsert_opencode_custom_provider,
             provider_id,
             name,
@@ -10468,14 +10469,19 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
             base_url,
             logger_instance=logger,
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
+        if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+            raise
         logger.warning("OpenCode custom provider save failed for %s: %s", provider_id, exc, exc_info=True)
         _OPENCODE_OPTIONS_CACHE.clear()
         try:
-            restart = restart_backend("opencode")
-        except Exception as restart_exc:
+            restart = await settlement.run_blocking(restart_backend, "opencode")
+        except (Exception, asyncio.CancelledError) as restart_exc:
+            if isinstance(restart_exc, asyncio.CancelledError) and not settlement.cancelled:
+                raise
             restart = {"ok": False, "message": str(restart_exc)}
         _OPENCODE_OPTIONS_CACHE.clear()
+        settlement.raise_if_cancelled(exc)
         return {
             "ok": False,
             "partial": True,
@@ -10488,8 +10494,10 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
 
     _OPENCODE_OPTIONS_CACHE.clear()
     try:
-        restart = restart_backend("opencode")
-    except Exception as exc:
+        restart = await settlement.run_blocking(restart_backend, "opencode")
+    except (Exception, asyncio.CancelledError) as exc:
+        if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+            raise
         restart = {"ok": False, "message": str(exc)}
     _OPENCODE_OPTIONS_CACHE.clear()
 
@@ -10499,11 +10507,14 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
             None,
             _BASE_URL_UNCHANGED,
             config_api_key=api_key,
+            settlement=settlement,
         )
         _OPENCODE_OPTIONS_CACHE.clear()
         try:
-            restart = restart_backend("opencode")
-        except Exception as exc:
+            restart = await settlement.run_blocking(restart_backend, "opencode")
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+                raise
             restart = {"ok": False, "message": str(exc)}
         _OPENCODE_OPTIONS_CACHE.clear()
         if not auth_result.get("ok"):
@@ -10521,12 +10532,16 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
                 failure["error_code"] = error_code
             elif isinstance(message, str) and message:
                 failure["message"] = message
+            settlement.raise_if_cancelled()
             return failure
 
-    catalog_refresh = await _refresh_opencode_provider_catalog_async(
-        provider_id.strip().lower(),
-        require_models=False,
+    catalog_refresh = await settlement.wait(
+        _refresh_opencode_provider_catalog_async(
+            provider_id.strip().lower(),
+            require_models=False,
+        )
     )
+    settlement.raise_if_cancelled()
     return {
         "ok": True,
         "provider_id": provider_id.strip().lower(),
@@ -10795,6 +10810,7 @@ async def _save_opencode_provider_auth_async(
     base_url: Any = _BASE_URL_UNCHANGED,
     *,
     config_api_key: str | None = None,
+    settlement: CancellationSettlement | None = None,
 ) -> dict:
     from vibe.opencode_config import (
         remove_opencode_provider_base_url,
@@ -10802,6 +10818,14 @@ async def _save_opencode_provider_auth_async(
         upsert_opencode_provider_api_key,
         upsert_opencode_provider_base_url,
     )
+
+    owns_settlement = settlement is None
+    settlement = settlement or CancellationSettlement()
+
+    def finish(result: dict, cause: BaseException | None = None) -> dict:
+        if owns_settlement:
+            settlement.raise_if_cancelled(cause)
+        return result
 
     # Treat API keys entered through avibe's Settings UI as OpenCode
     # config provider options, not OpenCode daemon auth entries. The
@@ -10816,7 +10840,7 @@ async def _save_opencode_provider_auth_async(
             # The write may commit before raising, so this is possibly
             # irreversible from the moment the operation starts.
             mutation_attempted = True
-            await asyncio.to_thread(
+            await settlement.run_blocking(
                 upsert_opencode_provider_api_key,
                 provider_id,
                 config_key,
@@ -10829,7 +10853,7 @@ async def _save_opencode_provider_auth_async(
                 exc,
                 exc_info=True,
             )
-            return {
+            return finish({
                 "ok": False,
                 "mutation_attempted": mutation_attempted,
                 "saved": None,
@@ -10837,23 +10861,25 @@ async def _save_opencode_provider_auth_async(
                     "Provider credential persistence failed: "
                     f"{exc}"
                 ),
-            }
+            }, exc)
         saved = True
 
         try:
-            auth_entries = await asyncio.to_thread(
+            auth_entries = await settlement.run_blocking(
                 read_opencode_provider_auth_entries,
                 logger_instance=logger,
             )
             if provider_id in auth_entries:
-                auth_cleanup = await _delete_opencode_provider_auth_async(provider_id)
+                auth_cleanup = await settlement.wait(
+                    _delete_opencode_provider_auth_async(provider_id)
+                )
                 if not auth_cleanup.get("ok"):
-                    return {
+                    return finish({
                         "ok": False,
                         "mutation_attempted": mutation_attempted,
                         "saved": saved,
                         "error_code": "opencode_stale_auth_cleanup_failed",
-                    }
+                    })
         except Exception as exc:
             logger.warning(
                 "OpenCode stale auth cleanup failed for %s: %s",
@@ -10861,12 +10887,12 @@ async def _save_opencode_provider_auth_async(
                 exc,
                 exc_info=True,
             )
-            return {
+            return finish({
                 "ok": False,
                 "mutation_attempted": mutation_attempted,
                 "saved": saved,
                 "error_code": "opencode_stale_auth_cleanup_failed",
-            }
+            }, exc)
 
     # ``baseURL`` is different: OpenCode's auth endpoint has no field for
     # it, so this write is the *only* place it gets persisted. A silent
@@ -10874,19 +10900,19 @@ async def _save_opencode_provider_auth_async(
     # exact UX bug Codex flagged. Surface those errors to the caller so
     # the UI can show a useful message.
     if base_url is _BASE_URL_UNCHANGED:
-        return {"ok": True}
+        return finish({"ok": True})
 
     try:
         mutation_attempted = True
         if base_url:
-            await asyncio.to_thread(
+            await settlement.run_blocking(
                 upsert_opencode_provider_base_url,
                 provider_id,
                 base_url,
                 logger_instance=logger,
             )
         else:
-            await asyncio.to_thread(
+            await settlement.run_blocking(
                 remove_opencode_provider_base_url,
                 provider_id,
                 logger_instance=logger,
@@ -10895,7 +10921,7 @@ async def _save_opencode_provider_auth_async(
         logger.warning(
             "OpenCode base_url persist failed for %s: %s", provider_id, exc, exc_info=True
         )
-        return {
+        return finish({
             "ok": False,
             "mutation_attempted": mutation_attempted,
             "saved": saved if saved else None,
@@ -10903,8 +10929,8 @@ async def _save_opencode_provider_auth_async(
                 "API key saved, but base URL persistence failed: "
                 f"{exc}"
             ),
-        }
-    return {"ok": True}
+        }, exc)
+    return finish({"ok": True})
 
 
 def save_opencode_provider_auth(provider_id: str, payload: dict) -> dict:
@@ -11001,14 +11027,19 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
                     "message": "base_url is required for custom providers",
                 }
 
+    settlement = CancellationSettlement()
     try:
         result = await _save_opencode_provider_auth_async(
             provider_id.strip(),
             None,
             base_url,
             config_api_key=api_key or existing_api_key,
+            settlement=settlement,
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
+        settlement.raise_if_cancelled(exc)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         logger.warning("OpenCode set-auth failed for %s: %s", provider_id, exc, exc_info=True)
         return {"ok": False, "message": str(exc)}
 
@@ -11032,12 +11063,20 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
     # separate ``restart`` key so the UI can show "saved, but daemon
     # refresh failed" when applicable.
     try:
-        result["restart"] = restart_backend("opencode")
-    except Exception as exc:
+        result["restart"] = await settlement.run_blocking(
+            restart_backend,
+            "opencode",
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        if isinstance(exc, asyncio.CancelledError) and not settlement.cancelled:
+            raise
         logger.warning("OpenCode auto-restart after save failed for %s: %s", provider_id, exc)
         result["restart"] = {"ok": False, "message": str(exc)}
     if result.get("ok"):
-        result["catalog_refresh"] = await _refresh_opencode_provider_catalog_async(provider_id.strip())
+        result["catalog_refresh"] = await settlement.wait(
+            _refresh_opencode_provider_catalog_async(provider_id.strip())
+        )
+    settlement.raise_if_cancelled()
     return result
 
 

@@ -746,6 +746,7 @@
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
       "engine_down": "本地模型中枢运行时不可用。",
       "consent_required": "实验性订阅路由需要明确同意。",
+      "config_conflict": "更新期间模型中枢设置发生了变化。请重新加载后重试。",
       "migration_item_conflict": "此迁移项与当前模型中枢状态冲突。",
       "stream_interrupted": "上游流已中断。",
       "upstream_protocol_error": "上游响应不符合预期协议。",

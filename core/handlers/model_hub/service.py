@@ -135,6 +135,10 @@ class EngineUnavailableError(RuntimeError):
     pass
 
 
+class ModelHubConfigConflictError(RuntimeError):
+    pass
+
+
 class ModelHubConfigStore(Protocol):
     def load(self) -> ModelHubConfig: ...
 
@@ -144,18 +148,44 @@ class ModelHubConfigStore(Protocol):
 class V2ModelHubConfigStore:
     def load(self) -> ModelHubConfig:
         try:
-            return V2Config.load().model_hub
+            config = V2Config.load().model_hub
         except FileNotFoundError:
-            return default_config().model_hub
+            config = default_config().model_hub
+        _set_model_hub_store_snapshot(config, config.to_payload())
+        return config
 
     def save(self, model_hub: ModelHubConfig) -> None:
+        expected = _model_hub_store_snapshot(model_hub)
         with config_write_transaction():
             try:
                 config = V2Config.load()
             except FileNotFoundError:
                 config = default_config()
+            if (
+                expected is not None
+                and config.model_hub.to_payload() != expected
+            ):
+                raise ModelHubConfigConflictError
             config.model_hub = model_hub
             config.save()
+            _set_model_hub_store_snapshot(model_hub, model_hub.to_payload())
+
+
+# Store-only revision metadata follows cloned configs without entering config.json.
+_MODEL_HUB_STORE_SNAPSHOT_ATTR = "_v2_store_snapshot"
+
+
+def _model_hub_store_snapshot(config: ModelHubConfig) -> dict | None:
+    snapshot = getattr(config, _MODEL_HUB_STORE_SNAPSHOT_ATTR, None)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _set_model_hub_store_snapshot(config: ModelHubConfig, snapshot: dict) -> None:
+    setattr(
+        config,
+        _MODEL_HUB_STORE_SNAPSHOT_ATTR,
+        ModelHubConfig.from_payload(snapshot).to_payload(),
+    )
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
@@ -512,7 +542,11 @@ class ModelHubService:
 
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
-        return ModelHubConfig.from_payload(config.to_payload())
+        cloned = ModelHubConfig.from_payload(config.to_payload())
+        snapshot = _model_hub_store_snapshot(config)
+        if snapshot is not None:
+            _set_model_hub_store_snapshot(cloned, snapshot)
+        return cloned
 
     async def _save_store(
         self,
@@ -520,10 +554,13 @@ class ModelHubService:
         *,
         settlement: CancellationSettlement | None = None,
     ) -> None:
-        if settlement is None:
-            await run_blocking(self.store.save, config)
-        else:
-            await settlement.run_blocking(self.store.save, config)
+        try:
+            if settlement is None:
+                await run_blocking(self.store.save, config)
+            else:
+                await settlement.run_blocking(self.store.save, config)
+        except ModelHubConfigConflictError:
+            raise ModelHubError("config_conflict", status=409) from None
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
@@ -554,6 +591,9 @@ class ModelHubService:
             )
         except (Exception, asyncio.CancelledError) as sync_error:
             rollback_save_error: BaseException | None = None
+            updated_snapshot = _model_hub_store_snapshot(updated)
+            if updated_snapshot is not None:
+                _set_model_hub_store_snapshot(previous, updated_snapshot)
             try:
                 await self._save_store(previous, settlement=settlement)
             except (Exception, asyncio.CancelledError) as rollback_error:
@@ -2880,6 +2920,9 @@ class ModelHubService:
                         detail_key="models.source.needs_action.oauth_expired",
                     )
                 self.store.save(config)
+                updated_snapshot = _model_hub_store_snapshot(config)
+                if updated_snapshot is not None:
+                    _set_model_hub_store_snapshot(previous, updated_snapshot)
 
                 def restore_after_spawn_failure() -> None:
                     self.store.save(previous)

@@ -372,6 +372,146 @@ def test_delete_custom_provider_settles_main_delete_and_live_state_on_cancellati
     assert api._OPENCODE_OPTIONS_CACHE == {}
 
 
+def test_save_provider_auth_settles_disk_and_live_state_before_cancellation(
+    monkeypatch,
+) -> None:
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    write_finished = threading.Event()
+    restart_calls: list[str] = []
+    catalog_calls: list[str] = []
+
+    def blocking_write(provider_id: str, api_key: str, **_kwargs) -> None:
+        assert provider_id == "deepseek"
+        assert api_key == "sk-new"
+        write_entered.set()
+        assert release_write.wait(timeout=5)
+        write_finished.set()
+
+    async def refresh_catalog(provider_id: str) -> dict:
+        catalog_calls.append(provider_id)
+        return {"ok": True, "catalog": {"ok": True, "providers": []}}
+
+    monkeypatch.setattr(
+        "vibe.opencode_config.upsert_opencode_provider_api_key",
+        blocking_write,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "_refresh_opencode_provider_catalog_async",
+        refresh_catalog,
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"stale": object()})
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            api.save_opencode_provider_auth_async(
+                "deepseek",
+                {"api_key": "sk-new"},
+            )
+        )
+        assert await asyncio.to_thread(write_entered.wait, 5)
+        task.cancel("save cancelled")
+        await asyncio.sleep(0)
+        task.cancel("repeated cancellation")
+        await asyncio.sleep(0)
+        completed_before_release = task.done()
+        release_write.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("save cancelled",)
+        assert not completed_before_release
+
+    asyncio.run(exercise())
+
+    assert write_finished.wait(timeout=5)
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+    assert restart_calls == ["opencode"]
+    assert catalog_calls == ["deepseek"]
+
+
+def test_save_custom_provider_settles_nested_auth_before_cancellation(
+    monkeypatch,
+) -> None:
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    write_finished = threading.Event()
+    restart_calls: list[str] = []
+
+    async def provider_catalog() -> dict:
+        return {"ok": True, "providers": []}
+
+    def blocking_key_write(*_args, **_kwargs) -> None:
+        write_entered.set()
+        assert release_write.wait(timeout=5)
+        write_finished.set()
+
+    async def refresh_catalog(*_args, **_kwargs) -> dict:
+        return {"ok": True, "catalog": {"ok": True, "providers": []}}
+
+    monkeypatch.setattr(api, "_get_opencode_providers_async", provider_catalog)
+    monkeypatch.setattr(
+        "vibe.opencode_config.is_reserved_opencode_provider_id",
+        lambda _provider_id: False,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.upsert_opencode_custom_provider",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.upsert_opencode_provider_api_key",
+        blocking_key_write,
+    )
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda backend: restart_calls.append(backend) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "_refresh_opencode_provider_catalog_async",
+        refresh_catalog,
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            api.save_opencode_custom_provider_async(
+                {
+                    "provider_id": "my-relay",
+                    "name": "My Relay",
+                    "adapter": "openai-compatible",
+                    "base_url": "https://relay.example/v1",
+                    "api_key": "sk-new",
+                }
+            )
+        )
+        assert await asyncio.to_thread(write_entered.wait, 5)
+        task.cancel("save cancelled")
+        await asyncio.sleep(0)
+        release_write.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+        assert raised.value.args == ("save cancelled",)
+
+    asyncio.run(exercise())
+
+    assert write_finished.wait(timeout=5)
+    assert restart_calls == ["opencode", "opencode"]
+
+
 def test_delete_provider_auth_settles_after_config_delete_failure_and_cancellation(
     monkeypatch,
     tmp_path,
