@@ -10,19 +10,24 @@ description: The implementation-lane standard for delivering a PR across the Avi
 - The canonical maintained copy lives in the Avibe repository at
   `.agents/skills/pr-delivery-loop/SKILL.md`.
 - Every other applicable repository carries a byte-for-byte copy of this skill
-  directory at the same repo-relative path, including its bundled watcher
-  scripts, so a standalone clone has the complete workflow.
-- The bundled watcher set is `scripts/wait_pr.py`,
-  `scripts/wait_action.py`, and `scripts/_github_wait_common.py`; keep these
-  files synchronized with the skill text.
-- This PR deliberately maintains only the repo-local bundle under
-  `.agents/skills/pr-delivery-loop/scripts/`. The existing
-  `skills/background-watch-hook/scripts/` copy remains a separate distribution
-  surface; document its relationship and any differences in the PR body, and
-  leave unification to a separate orchestrator decision.
+  file at the same repo-relative path. Do not copy watcher implementations or
+  their tests into this skill.
 - In the multi-repo workspace, the project-level skill entry is a symlink to
   the Avibe copy. Update the canonical copy first, then sync every repository
-  copy in the same change.
+  copy only after the canonical Avibe change passes review.
+
+## Dependency boundary
+
+- Use the `background-watch-hook` skill for every managed wait. It owns the
+  reusable `vibe watch` workflow and the GitHub PR, issue, and Actions waiter
+  implementations.
+- This skill owns Avibe-specific delivery policy: branch and scope rules,
+  review and CI gates, thread resolution, circuit breaking, authority, and
+  close-out criteria.
+- Refer to the dependency by skill name. Do not hard-code an installation path,
+  vendor its scripts here, or hand-roll a replacement waiter. If
+  `background-watch-hook` is unavailable, install or enable it before starting
+  a review loop, or report the missing dependency as a blocker.
 
 ## Roles & authority
 
@@ -131,9 +136,8 @@ description: The implementation-lane standard for delivering a PR across the Avi
 
 - Run the smallest relevant local validation: focused tests for what you
   touched, lint on changed files, the build gate (`npm run build` for UI work),
-  and a read-only smoke test of any bundled watcher script you changed.
-  Self-review your own diff once (`git diff origin/<default>...HEAD`) for scope
-  strays and leftovers.
+  and any repository-specific required checks. Self-review your own diff once
+  (`git diff origin/<default>...HEAD`) for scope strays and leftovers.
 - The GitHub Codex bot review (§4) is the review gate.
 
 ## 3. Opening the PR
@@ -180,97 +184,41 @@ turn ends because you armed a watch and are waiting, say exactly that.
   the fact — look for a current-head verdict instead.
 - Liveness invariant: at every pause there is either a pending bot review of
   the current head, or one you just triggered. Never wait on nothing.
-- Watches: use the bundled
-  `.agents/skills/pr-delivery-loop/scripts/wait_pr.py` with `python3`; it is
-  self-contained with `_github_wait_common.py`. Use one-shot watches per phase,
-  re-arm after each round with the same watch ID, and never `--forever`. Update
-  its command or message when needed, then always run `vibe watch resume <id>`;
-  update alone does not re-enable a completed one-shot watch. When CI is the sole
-  remaining merge gate, the lane **must switch** its one live watch to the bundled
-  `wait_action.py` and stop re-arming the PR waiter; PR activity cannot wake on a
-  check-only transition. Every GitHub operation in both waiters crosses
-  one shared request taxonomy: only network failures and retryable HTTP statuses
-  may remain inside the bounded one-shot timeout. GraphQL `errors` payloads,
-  malformed protocol responses, non-retryable HTTP statuses, and unexpected
-  failures are terminal and exit explicitly; call sites do not keep local catch-all
-  retry paths. Initial transient requests get three attempts with exponential
-  backoff, and exhausting that budget is also an explicit terminal error.
-- The PR waiter filters your own reviews and comments by the authenticated
-  GitHub viewer login. It must resolve that identity before polling; if `/user`
-  is unavailable for `--pr`, fail closed or explicitly pass
-  `--include-self-comments` and account for those events in the cursor plan.
-  `--new-prs` does not require a viewer lookup because it has no PR-local
-  self-comment filter.
+- Use `background-watch-hook` to create a one-shot PR watch for each review
+  phase; never use `--forever` for a delivery loop. Re-arm after every round.
+  When CI is the only remaining gate, replace the PR-activity watch with an
+  exact-head Actions watch because PR activity cannot wake on a check-only
+  transition.
 - The one-watch invariant is scoped by owner and concern: one live lane/fix
-  watch per PR, plus one independent orchestrator gate watch when the work is
-  delegated. Give each concern its own cursor path, for example
-  `<tmp>/pr-<N>-lane.json` and `<tmp>/pr-<N>-gate.json`; never share a natural
-  per-PR cursor file across concurrent watches. Verify the watch name, target
-  session, command, cursor path, and `--pr <N>` together with `vibe watch show`
-  and a live `wait_pr.py` process; never count unrelated global monitors as the
+  watch per PR, plus one independent orchestrator gate watch when work is
+  delegated. Each concern needs independent waiter state. Never share cursor
+  state between concurrent watches or count unrelated global monitors as the
   lane watch.
-- Every managed waiter must pass an owner/concern-specific `--state-file
-  <path>`. The state file records the repository, PR/filter, and watch
-  identity; resolve PR viewer identity before claiming it, claim it under a lock,
-  and treat a foreign, corrupt, or unwritable file as terminal. A PR state also
-  persists the head SHA, review/comment fingerprints, the full review-thread
-  resolution map, and one normalized gate snapshot. The snapshot contains full
-  current review, comment, pass-reaction, thread, status, and head state after
-  reporting filters, but omits timestamps and other volatile fields. Each detected
-  batch stages its rendered output together with the next cursors under one pending record, then
-  promotes both only after `AVIBE_WATCH_LAST_DELIVERY` changes. An unchanged
-  delivery stamp replays the stored output before GitHub polling or viewer
-  authentication, so deleted activity or changed credentials cannot erase a
-  notification; a head change is itself review-loop activity.
-- A first managed cycle with an unseeded state file must explicitly use
-  `--catch-up` or fail closed; the normal PR-delivery path seeds the complete
-  cursor baseline before pushing, then starts the post-push waiter from that
-  file so a review that lands during the handoff cannot become the baseline.
-- A resumed PR state without the normalized snapshot, persisted `head_sha`, or
-  any review/comment fingerprint map is also treated as an unseeded baseline; pass `--catch-up`
-  explicitly to establish every baseline rather than silently skipping an
-  upgrade-era push or edit.
-- Both modes load saved cursors before deriving their initial baseline:
-  `--new-prs` reads `pr_cursor` before limiting the first pagination, and
-  `--pr` restores the saved review/comment/reaction cursors before polling.
-  Use `--settle 20` for review batches so a Codex review envelope and its inline
-  comments are observed together when GitHub writes them in separate requests.
-  Every settle candidate is computed from the same committed cursor and
-  normalized snapshot; only the final candidate updates the next state.
-- Authenticated PR polling fetches every review-thread page through GraphQL
-  `endCursor` and fetches complete mutable REST collections rather than `since`
-  slices. The sole wake condition is inequality between the current normalized
-  snapshot and the committed snapshot. Per-field checks only describe that
-  difference, so additions, edits, removals, resolution changes, reactions,
-  status changes, and head changes cannot be silently omitted by an incomplete
-  trigger list.
+- Follow `background-watch-hook` for waiter commands, state, baseline seeding,
+  catch-up,
+  filtering, settling, retries, and delivery acknowledgement. Those mechanics
+  belong to the reusable skill; this policy only constrains when and why the
+  watch is armed.
 - Arm the fresh watch only AFTER your reply-then-resolve batch is pushed and
   settled: your own thread resolutions count as "review activity" to a watch
   armed earlier in the round, so it self-consumes on YOUR close-out actions and
-  the real next review lands with nobody watching. End every round by
-  objectively verifying the invariant with **two independent pieces of
-  evidence**: `vibe watch list` shows exactly one armed (non-completed) watch
-  for the PR, AND `ps aux | grep "[w]ait_pr.py"` shows a live process carrying
-  both `--repo <owner/name>` and `--pr <N>` for this repository. Never trust
-  that you armed one earlier in the turn, and never read
-  `run_definitions.enabled` — that column is bookkeeping and it drifts both
-  ways: long-removed watches keep `enabled=1` while `vibe watch show` returns
-  null for them, and a watch reported as armed from a remembered id can be
-  `enabled=0` with no waiter behind it. Both errors are silent and look
-  identical on a dashboard, so a brief must never ask a lane to "self-certify
-  enabled" — that phrase prescribes exactly the unsound check.
-- Preserve the watch ID when re-arming: update the existing definition when its
-  command or message changed, then resume that same ID so its owner stamp remains
-  compatible with the persisted state file and the one-shot is enabled. If an
-  ownership handoff is unavoidable, rotate to a fresh state path and seed it
-  before starting the replacement. A watch you delete on purpose is not a
-  liveness break while you are mid-run: the running turn *is* the liveness.
-  Re-arm after the push, then verify both ways.
+  the real next review lands with nobody watching. End every round by using the
+  `background-watch-hook` management commands to verify exactly one live watch
+  for this owner, concern, repository, and PR. Do not rely on a remembered watch
+  ID or one bookkeeping field as proof that its waiter is live.
+- Before a push or review trigger, use `background-watch-hook` to seed a complete
+  owner-specific state file. Arm the post-action watch with that same file so
+  activity that lands during the handoff is delivered. Use catch-up only when
+  deliberately processing historical activity; a first-poll baseline after the
+  action is not a valid review-loop handoff.
+- A watch you remove while handling its event is not a liveness break: the
+  running turn owns progress until the replacement is armed. Re-arm after the
+  push and close-out actions, then verify the invariant again.
 - For whoever gates the PR: a lane run that ended `succeeded` proves nothing
   about the loop. A watch-triggered run can finish clean having pushed nothing
   and armed nothing, leaving the PR with new findings and no watcher on either
-  side. When your gate watch fires on a findings review, check for a live
-  `wait_pr.py` on that PR number before concluding the lane has it handled.
+  side. When your gate watch fires on a findings review, verify the lane still
+  has a live PR watch before concluding it has the round handled.
 - The bot has three verdict shapes. A PASS is either (a) a plain issue comment
   by the Codex bot (`chatgpt-codex-connector` in the API; often displayed as
   `chatgpt-codex-connector[bot]`) whose body says
@@ -283,15 +231,12 @@ turn ends because you armed a watch and are waiting, say exactly that.
   run identity; do not declare CI complete while a second matching run is
   pending or failed.
 - A `+1` reaction carries no commit sha by itself. Immediately before pushing a
-  new head, ensure the managed waiter's state file contains the last
-  acknowledged activity baseline. Start the post-push waiter with that same
-  `--state-file`, and do not push another head while the new review is pending.
-  Accept the reaction only when it is new after that baseline, the Codex review
-  for the prior head was already terminal before the push, and the PR head is
-  still unchanged. If prior-review completion cannot be established, require
-  the bot-authored pass comment instead of accepting a reaction-only pass. The
-  waiter's `pr_reaction` output is the durable evidence for this phase, so it
-  must never be omitted by `--event-limit` even in a large review batch.
+  new head, establish the current activity baseline through
+  `background-watch-hook`, and do not push another head while the new review is
+  pending. Accept the reaction only when that watch reports it as new for the
+  current review phase, the prior-head review was already terminal, and the PR
+  head is unchanged. If those facts cannot be established, require the
+  bot-authored exact-head pass comment instead.
 - Keep reaction meanings distinct: 👀 only says a trigger was picked up; the
   Codex bot's PR-body `+1` says the review completed without comments. Reactions
   from other authors or on other comments are not verdicts.
@@ -416,9 +361,9 @@ for dependent lanes, and your final-report draft.
 ## 7. Orchestrator counterpart (for dispatchers, not lanes)
 
 - Do not rely on lane terminal reports alone: arm your OWN one-shot gate watch
-  per PR (the repo-local bundled `wait_pr.py`, follow-up in your session) with
-  the merge-gate instructions in the message. Lanes go silent at exactly the
-  moment that matters (§5.5 failure mode); your gate watch is the insurance.
+  per PR through `background-watch-hook`, with the follow-up in your session and
+  merge-gate instructions in the message. Lanes go silent at exactly the moment
+  that matters (§5.5 failure mode); your gate watch is the insurance.
 - One waiter per concern still holds: the lane's watch drives its fix loop;
   your watch drives the merge gate. Two watches on one PR, two concerns — fine.
 - Every time a findings review lands, independently paginate the threads and
