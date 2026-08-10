@@ -976,6 +976,25 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "defines no `cancelled`",
         within="0.5",
     ),
+    # Reviewer's finding, round 1 of #1276: the inventory was a set of bare
+    # names, each registered with the *file* as its content. So one file
+    # defining `load` four times declared one token four times identically, the
+    # duplicate rule could not fire on this universe however wrong the file got,
+    # and a citation to any of the four resolved as though it named one thing.
+    # Keyed on the qualified name with the bare name as an alias, both halves
+    # come back: the qualified name carries the line, so two bodies under one
+    # name contradict, and the bare name resolves to as many symbols as there
+    # are — which is what this case reads. `service.py` really does define
+    # `load` twice, under two owners; the citation is the thing at fault,
+    # because it promised the reader one place to go.
+    GateCase(
+        "E", "repo symbols", "arm",
+        "a citation names a symbol the file defines in more than one place",
+        "service.py:list_agents",
+        "service.py:load",
+        "defines `load` in 2 places",
+        within="0.5",
+    ),
     # The §0.5 registry, read as a universe. Its three rules are exercised where
     # the marker is spent: class A's route coverage (above) and class E's claim
     # check (here). E owns the duplicate rule because a gap row is a claim about
@@ -1716,7 +1735,12 @@ def test_authority_side_universes_report_a_duplicate_definition():
     prove it passes on the real files, which is the half a fixture alone leaves
     out.
     """
-    from scripts.check_model_hub_ui_states import Origin, Universe, load_authorities
+    from scripts.check_model_hub_ui_states import (
+        Origin,
+        Universe,
+        defined_symbols,
+        load_authorities,
+    )
 
     for side in ("routes", "schema files", "schema fields", "repo symbols"):
         u = Universe(side, "authority", "E")
@@ -1731,6 +1755,25 @@ def test_authority_side_universes_report_a_duplicate_definition():
     auth = load_authorities(Origin.tree_at(ROOT))
     for side in ("routes", "schema files", "schema fields"):
         assert not auth[side].duplicates, (side, auth[side].duplicates)
+
+    # `repo symbols` is filled inside class E's arm rather than by
+    # `load_authorities`, and the exemption above said its duplicate rule was
+    # proved here while the inventory had quietly removed it: every symbol was
+    # registered under its bare name with the *file* as its content, so a file
+    # defining `load` twice declared one token twice identically and nothing
+    # could contradict. Keyed on the qualified name it can, and the real file is
+    # the case that says so — unique qualified, colliding bare.
+    got = defined_symbols((ROOT / "core/handlers/model_hub/service.py").read_text())
+    qualified = [q for q, _bare, _line in got]
+    assert len(qualified) == len(set(qualified)), sorted(
+        q for q in qualified if qualified.count(q) > 1
+    )
+    bare = [b for _q, b, _line in got]
+    assert len(bare) > len(set(bare)), (
+        "this file is why the inventory is keyed on the qualified name: it defines "
+        "several names twice, under different owners. If that stops being true the "
+        "ambiguity case in GATE_MUTATIONS is testing a condition the repo no longer has."
+    )
 
 
 def test_model_hub_ui_gate_target_zero_classes_prove_their_own_zero():

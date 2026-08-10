@@ -924,39 +924,54 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
     }
 
 
-def defined_symbols(source: str) -> set[str]:
+def defined_symbols(source: str) -> list[tuple[str, str, int]]:
     """The names a Python file defines that a reader can go and look at.
 
-    A citation like `service.py:list_agents` promises the reader an addressable
-    symbol: something a module or a class declares, which a reviewer can reach by
-    name. `ast.walk` credited every assignment anywhere, so a local variable
-    three frames into a function body vouched for a citation — the identity rule
-    inverted, since it made a name the file does *not* export resolve as if it
-    did, and it hid the exact drift this class is here to catch.
+    Returns `(qualified, bare, line)` — `ModelHubService.load`, `load`, 412 —
+    rather than a flat set of bare names. A set was the shape that erased the
+    rule this inventory is judged by: every symbol in a file was registered
+    under its bare name with the *file* as its content, so one file defining
+    `load` four times declared one token four times with identical content, and
+    the duplicate rule could not fire on `repo symbols` however wrong the file
+    got. An inventory that cannot contradict itself is not an inventory; it is a
+    membership test wearing one.
 
-    The rule is one line: a name bound inside a function body belongs to that
-    body. So the descent records defs and classes and skips their bodies —
-    entering class bodies, because a method is addressable and is how the two
-    live citations name their functions, and never entering function bodies,
+    With the pair, the two halves separate and each gets the verdict it deserves.
+    The qualified name is the identity, so two bodies under one qualified name —
+    a class declaring `load` twice, the second silently winning — is a
+    `duplicate`. The bare name is an alias, so `service.py:load` in a file with
+    four of them resolves to four hits and is `ambiguous`: the citation promised
+    the reader one place to go and named four.
+
+    `line` is the content, because what makes two defs different is that they are
+    two bodies. Module-level assignments carry no line: rebinding a global is not
+    a second definition, and there is exactly one of it to go and look at.
+
+    The descent rule is unchanged and is one line: a name bound inside a function
+    body belongs to that body. So it records defs and classes and skips their
+    bodies — entering class bodies, because a method is addressable and is how
+    the live citations name their functions, and never entering function bodies,
     lambdas or comprehensions, whose bindings are local by definition.
     """
-    names: set[str] = set()
+    found: list[tuple[str, str, int]] = []
 
-    def scan(node: ast.AST) -> None:
+    def scan(node: ast.AST, path: tuple[str, ...]) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                names.add(child.name)
+                found.append((".".join(path + (child.name,)), child.name, child.lineno))
                 continue
             if isinstance(child, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
                 continue
             if isinstance(child, ast.ClassDef):
-                names.add(child.name)
-            elif isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
-                names.add(child.id)
-            scan(child)
+                found.append((".".join(path + (child.name,)), child.name, child.lineno))
+                scan(child, path + (child.name,))
+                continue
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                found.append((".".join(path + (child.id,)), child.id, 0))
+            scan(child, path)
 
-    scan(ast.parse(source))
-    return names
+    scan(ast.parse(source), ())
+    return found
 
 
 def claim_scopes(numbered: list[tuple[int, str]]) -> list[tuple[int, str]]:
@@ -2025,10 +2040,26 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 continue
             if rel not in read_files:
                 read_files.add(rel)
-                for name in defined_symbols(source):
-                    symbols.define(f"{rel}:{name}", rel, content=rel, where=rel)
-            if symbol and symbols.resolve(f"{rel}:{symbol}").empty:
+                for qualified, bare, line in defined_symbols(source):
+                    symbols.define(
+                        f"{rel}:{qualified}",
+                        rel,
+                        content=line,
+                        where=f"{rel}:{line}" if line else rel,
+                        aliases=(f"{rel}:{bare}",),
+                    )
+            if not symbol:
+                continue
+            hit = symbols.resolve(f"{rel}:{symbol}")
+            if hit.empty:
                 add(f"L{line_no}", f"`{rel}` defines no `{symbol}`")
+            elif hit.ambiguous:
+                # A citation is a promise that the reader can go and look. Four
+                # `load`s in one file is not a defect in that file — it is a
+                # defect in a sentence that says `service.py:load` and expects
+                # one of them to be understood.
+                named = ", ".join(f"`{t.split(':', 1)[1]}`" for t in hit.hits)
+                add(f"L{line_no}", f"`{rel}` defines `{symbol}` in {len(hit.hits)} places ({named})")
 
     # A route `api.md` guards can be refused. The register is where a refusal
     # becomes a state with copy and an exit, so the question is not whether the
