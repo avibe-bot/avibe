@@ -151,13 +151,6 @@ def regression_env(suffix: str, default: str = "") -> str:
     return value.strip()
 
 
-def voice_realtime_build_env() -> str:
-    value = regression_env("VOICE_REALTIME_ENABLED", "false").lower()
-    if value not in {"true", "false"}:
-        raise RegressionError("REGRESSION_VOICE_REALTIME_ENABLED must be true or false.")
-    return value
-
-
 def host_bind_env(default: str = "127.0.0.1") -> str:
     return (
         regression_env("PORT_BIND_HOST")
@@ -863,7 +856,6 @@ def compute_fingerprints(repo_root: Path) -> dict:
                 "ui/tsconfig.node.json",
             ],
         ),
-        f"voice_realtime={voice_realtime_build_env()}",
     ]
     return {
         "python": file_hash(repo_root, ["pyproject.toml", "uv.lock"]),
@@ -927,10 +919,9 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
         "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL", ""),
         "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
-        "VITE_VOICE_REALTIME_ENABLED": voice_realtime_build_env(),
     }
     for key, value in os.environ.items():
-        if key == "REGRESSION_UI_HOST":
+        if key in {"REGRESSION_UI_HOST", "REGRESSION_VOICE_REALTIME_ENABLED"}:
             continue
         if key.startswith(ENV_PREFIX):
             mappings[key] = value
@@ -1222,11 +1213,10 @@ def update_dependencies_and_build(
             or ui_deps_changed
             or previous_fingerprints.get("ui_source") != next_fingerprints.get("ui_source")
         ):
-            realtime_enabled = voice_realtime_build_env()
             runner.run(
                 tenant_exec(
                     target,
-                    f"cd ui && VITE_VOICE_REALTIME_ENABLED={shlex.quote(realtime_enabled)} npm run build",
+                    "cd ui && npm run build",
                     remote=remote,
                 )
             )
@@ -1424,7 +1414,6 @@ def cmd_build_base(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     loaded_env_file = load_env_file(repo_root, args.env_file)
-    voice_realtime_build_env()
     if not args.dry_run:
         require_incus()
     preflight_during_target_resolution = args.remote is None and args.target != MASTER_TARGET
