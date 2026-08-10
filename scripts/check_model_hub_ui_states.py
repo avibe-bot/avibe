@@ -263,6 +263,9 @@ FRAME_NAME_RE = re.compile(r"Frame\s+(\d+)\s+`(\w+)`")
 # number standing alone. A digit, a dot or a dash on either side disqualifies it,
 # because the registers number their rows that way — G-10 is a gap, not Frame 10.
 FRAME_ALIAS_RE = re.compile(r"`(\w+)`|(?<![\w.\-])(\d{2})(?![\w.\-])")
+# A reference to another frame, and the state in it this cell names — the two
+# halves of 「→ §1.0 Unreachable」, both of which have to resolve.
+CROSS_FRAME_RE = re.compile(r"§(\d+\.\d+)(?:\s+\*?([A-Z][^/|—;.,*]*))?")
 # The document's own marker for a normative claim, and the reason this file can
 # tell one apart from the narration around it. See the class C attribution arm.
 BOLD_RUN_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
@@ -497,6 +500,25 @@ def frame_refs(text: str, frames: Universe) -> set[str]:
     return named
 
 
+def names_spoken(text: str, names: set[str]) -> set[str]:
+    """Which of `names` this text says — as names, not as substrings.
+
+    Two rules, and the second is not a stronger form of the first. A name is
+    spoken where it stands on its own boundaries, so 「Not startedness」 does not
+    say 「Not started」: plain containment read a longer word as its own prefix,
+    and a dispatch landing in a state the register does not have came back clean.
+    And a spoken name that is another spoken name's prefix yields to the longer
+    one, so 「Ready」 does not answer for a cell that says 「Ready (first run)」.
+
+    The boundary is `\\w`, which in this document also covers CJK, so a state
+    name run together with Chinese prose is deliberately *not* spoken — a
+    register's state names are written as their own phrases everywhere they are
+    meant to be read as one.
+    """
+    spoken = {n for n in names if re.search(rf"(?<!\w){re.escape(n)}(?!\w)", text)}
+    return spoken - {n for n in spoken if any(n != o and n in o for o in spoken)}
+
+
 # Which universes each class consults. A class that reads no universe compares
 # nothing, and a class that compares something not listed here has written a
 # comparison of its own — which is what the tiled mutation suite exists to
@@ -509,8 +531,13 @@ def frame_refs(text: str, frames: Universe) -> set[str]:
 # resolution, so they need no resolver and get none. Class A is listed against
 # `routes` because it reads that universe as an inventory: it enumerates the
 # contracted mutations and asks which of them nothing reaches.
+#
+# `frames` is here because a failure cell may send the reader to another frame's
+# state — `§1.0 Unreachable` — and both halves of that are citations. C owns the
+# universe; A is a second reader of it, which is why the frame rules it cannot
+# reach are exempted per-arm rather than left to look covered by C's cases.
 CLASS_UNIVERSES: dict[str, tuple[str, ...]] = {
-    "A": ("routes", "states", "treatments", "gaps"),
+    "A": ("routes", "states", "treatments", "frames", "gaps"),
     "B": ("copy", "slots"),
     "C": ("frames",),
     "D": ("copy",),
@@ -1436,6 +1463,10 @@ VALUE_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 # pairing starts.
 ARROW_LANDING_RE = re.compile(r"((?:`[a-z][a-z0-9_]*`(?:\s*(?:,|、|/|or|或)\s*)?)+)\s*→\s*([^`]*)")
 LANDING_END_RE = re.compile(r"[。;;]|\.\s")
+# A landing written as a name rather than as the sentence carrying on. This
+# document capitalises its state names and nothing else in the middle of a
+# clause, so the opening character is what separates a citation from prose.
+LANDING_NAME_RE = re.compile(r"\s*\*?[A-Z]")
 
 
 def frame_mappings(doc: Document, copy_u: Universe) -> dict[str, dict[str, dict[str, set[str]]]]:
@@ -2164,10 +2195,28 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 if treatment_u.resolve(t).empty:
                     add("A", f"L{r['line']}", f"「{r['state']}」 names {t}, which §0.8's closed set does not define")
             continue
+        frame = r["frame"].lstrip("§")
+        # A cell may hand its failure to another frame — 「As §1.0」, 「→ §1.0
+        # Unreachable」 — and that is a treatment, so the arm stops asking for an
+        # `F` number. What it must not stop doing is reading the reference: the
+        # shape test alone accepted `§1.99` and any state name after it, which is
+        # the one form of this cell nothing else checks. Arm L compares dispersal
+        # *sets* against the frame that owns them and declines when it cannot
+        # find that frame, so a wrong section number silenced both arms at once.
+        #
+        # A state name is taken only where the document writes one: capitalised,
+        # up to the punctuation that ends the phrase. What follows a reference in
+        # lower case is the sentence explaining it — 「the same three §1.0
+        # disperses first paint into」 — and is not a citation to resolve.
         if re.search(r"(?:As |→\s*)§\d", cell):
+            for target, state in CROSS_FRAME_RE.findall(cell):
+                named = state.strip()
+                if frame_u.resolve(target).empty:
+                    add("A", f"L{r['line']}", f"「{r['state']}」 defers to §{target}, which is no frame")
+                elif named and state_u.resolve(f"{target} · {named}").empty:
+                    add("A", f"L{r['line']}", f"「{r['state']}」 defers to 「{named}」 in §{target}, which files no such state")
             continue
         goto = GOTO_RE.search(cell)
-        frame = r["frame"].lstrip("§")
         if goto:
             targets = [t.strip() for t in re.split(r"[/,]| or ", goto.group(1)) if t.strip()]
             # `any(st == t or st.startswith(t) or t in st ...)` — a state named
@@ -2317,7 +2366,13 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     if not METHOD_LIST_RE.search(sentence[max(0, m.start() - 4) : m.end() + 4])
                 }
             )
-            elsewhere = sorted(set(FRAME_REF_RE.findall(sentence)) - {here})
+            # Through the frames universe, because 「Frame 03's whole-order
+            # `PUT`」 is the same claim as 「§1.3's whole-order `PUT`」 and this
+            # document writes both. Reading only the section number left the
+            # arm applying its rule to whichever half of the habit a sentence
+            # happened to use — which is the shape hardening (4) fixed in the
+            # guard-envelope arm, in the one other place a frame is cited.
+            elsewhere = sorted(frame_refs(sentence, frame_u) - {here})
             if bare and elsewhere:
                 add(
                     "A",
@@ -2676,10 +2731,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # is not the ambiguity that made arm L decline.
     def _unrouted(row: dict[str, Any], landings: dict[str, dict[str, Any]]) -> list[str]:
         names = {r["state"] for r in reg if r["frame"].lstrip("§") == row["frame"].lstrip("§")}
-        # A spelling that is another state's prefix is that other state until it
-        # appears on its own: 「Ready」 must not vouch for 「Ready (first run)」.
-        named = {n for n in names if n in row["exit"]}
-        named -= {n for n in named if any(n != o and n in o for o in named)}
+        named = names_spoken(row["exit"], names)
         spoken = VALUE_TOKEN_RE.findall(row["exit"])
         return [
             v for v, land in landings.items() if v not in spoken and land["state"] not in named
@@ -2695,31 +2747,41 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # values, an arrow, the state they land in — the pair is decidable, so the
     # landing it names has to be the landing the register keys on that value.
     #
-    # Two refusals. A value written more than once in the same exit is being
+    # One refusal. A value written more than once in the same exit is being
     # split by a condition rather than dispatched: §1.6 sends 「an `active`
     # nothing adopts」 to Not supplying and 「an adopted `active`」 to Ready, and
-    # both are right, so neither spelling is checked. And a target naming no
-    # state of this frame is prose the arm has nothing to compare — the sentence
-    # continues, and only a named landing is a claim about where a value goes.
+    # both are right, so neither spelling is checked.
+    #
+    # There used to be a second, and it was the hole under the first: a target
+    # naming no state of this frame was called prose and skipped. That reading
+    # was safe only while a name was matched by containment, which quietly
+    # answered almost any target with something; once a name has to be spoken as
+    # a name, the skip becomes an escape hatch — 「`not_started` → Not
+    # startedness」 names no state and, under the old refusal, said so to nobody.
+    # So the two cases are told apart by how the target opens. A landing written
+    # as a name — capitalised, where this document capitalises its states — is a
+    # citation, and a citation that resolves to nothing is reported, which is the
+    # rule every other arm here already keeps. A target opening in lower case is
+    # the sentence continuing, and continues to be nothing to compare.
     def _misrouted(
         row: dict[str, Any], landings: dict[str, dict[str, Any]]
-    ) -> list[tuple[str, dict[str, Any], list[str]]]:
+    ) -> list[tuple[str, dict[str, Any], list[str], str]]:
         names = {r["state"] for r in reg if r["frame"].lstrip("§") == row["frame"].lstrip("§")}
         spoken = VALUE_TOKEN_RE.findall(row["exit"])
-        wrong: list[tuple[str, dict[str, Any], list[str]]] = []
+        wrong: list[tuple[str, dict[str, Any], list[str], str]] = []
         for run, target in ARROW_LANDING_RE.findall(row["exit"]):
             # A landing ends where the sentence does. The last pair in a cell has
             # no following value to stop at, so without this it swallows the rest
             # of the exit and any state named there vouches for it.
-            named = {n for n in names if n in LANDING_END_RE.split(target)[0]}
-            named -= {n for n in named if any(n != o and n in o for o in named)}
-            if not named:
+            head = LANDING_END_RE.split(target)[0]
+            named = names_spoken(head, names)
+            if not named and not LANDING_NAME_RE.match(head):
                 continue
             for value in VALUE_TOKEN_RE.findall(run):
                 land = landings.get(value)
                 if land is None or spoken.count(value) > 1 or land["state"] in named:
                     continue
-                wrong.append((value, land, sorted(named)))
+                wrong.append((value, land, sorted(named), head.strip()))
         return wrong
 
     dispatch_landings = 0
@@ -2767,7 +2829,15 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                         f"(L{row['line']}), and 「{router['state']}」 — {role} — "
                         f"names neither, so that reading reaches no state",
                     )
-                for value, row, named in _misrouted(router, landings):
+                for value, row, named, head in _misrouted(router, landings):
+                    if not named:
+                        add(
+                            "C",
+                            f"L{router['line']}",
+                            f"「{router['state']}」 — {role} — sends `{value}` to "
+                            f"「{head}」, which §{frame} files as no state",
+                        )
+                        continue
                     add(
                         "C",
                         f"L{router['line']}",

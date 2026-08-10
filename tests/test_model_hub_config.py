@@ -575,6 +575,22 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "with no path, so no route arm can read the claim",
         within="1.6",
     ),
+    # Reviewer's finding, round 1 of #1276: the arm above read `§1.3` and nothing
+    # else, while every other arm in this gate resolves a frame through its
+    # aliases — display number and node id included. So the identical sentence
+    # written "Frame 03's whole-order `PUT`" named a frame the arm could not see,
+    # made no claim it could read, and passed. An arm that recognises one of a
+    # frame's three names is not checking frames; it is checking one spelling.
+    GateCase(
+        "A", "frames", "arm",
+        "another frame's request named by method word and display number",
+        "**The question it answers:** *where do my tokens come from, and who is using\n"
+        "which one right now?*",
+        "**The question it answers:** *where do my tokens come from, and who is using\n"
+        "which one right now?* Frame 03's whole-order `PUT` is not this frame's.",
+        "names §1.3's request as `PUT` with no path",
+        within="1.1",
+    ),
     # One predicate written twice, eight hundred lines apart: the frame that owns
     # a failure disperses it into a set of its own states, and every other frame
     # that defers to it restates that set. Round 21 landed two findings out of
@@ -608,6 +624,51 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "(no sources) — the same three §1.0 disperses first paint into, because "
         "this row is",
         "names Empty (no sources), which §1.0 does not disperse into",
+        within="0.8",
+    ),
+    # Reviewer's finding, round 1 of #1276: both cases above compare one set of
+    # destinations against another, and both arrive *after* the early return that
+    # accepts any cell holding an arrow to a numbered section. That return read
+    # neither half of `§1.0 Unreachable` — not the frame, not the state — so a
+    # deferral could name a section the document does not have, or a state the
+    # named frame does not file, and the dispersal arm would then skip it for
+    # being unresolved. A destination nobody resolved is not a destination; it is
+    # a sentence that looks like one, which is the failure this whole arm exists
+    # to catch. Both halves get a case because they fail through different
+    # universes and a single one would leave the other reading untested.
+    GateCase(
+        "A", "frames", "empty",
+        "a deferral to a section number no frame carries",
+        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
+        "§1.0 disperses first paint into, because this row is",
+        "→ §1.99 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
+        "§1.0 disperses first paint into, because this row is",
+        "defers to §1.99, which is no frame",
+        within="0.8",
+    ),
+    GateCase(
+        "A", "states", "empty",
+        "a deferral to a state the frame it names does not file",
+        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
+        "§1.0 disperses first paint into, because this row is",
+        "→ §1.0 Unreachably / §1.0 Sources unread / §1.0 Partial — the same three "
+        "§1.0 disperses first paint into, because this row is",
+        "defers to 「Unreachably」 in §1.0, which files no such state",
+        within="0.8",
+    ),
+    # --- C: frames ----------------------------------------------------------
+    # Reviewer's finding, round 1 of #1276: the N arm asked whether a landing
+    # *contained* a registered state name, so 「Not startedness」 vouched for
+    # itself by containing 「Not started」 and the mismatch was suppressed. A
+    # substring test answers a question nobody asked — is this name written
+    # somewhere inside that text — and reads as agreement precisely when the
+    # destination is a near-miss, which is the shape a typo takes.
+    GateCase(
+        "C", None, "arm",
+        "a dispatch destination that merely contains a state's name",
+        "`not_started` → Not started, `degraded` → Impaired",
+        "`not_started` → Not startedness, `degraded` → Impaired",
+        "which §1.0 files as no state",
         within="0.8",
     ),
     # --- B: copy, slots -----------------------------------------------------
@@ -1272,6 +1333,20 @@ UNREACHABLE_BY_ARM: dict[tuple[str, str, str], str] = {
         "The registry's owner is E — a gap row is a claim about what the contract does "
         "not have — so the case is (E, gaps, duplicate), reached through the same "
         "registry object A reads."
+    ),
+    ("A", "frames", "token"): (
+        "A cites a frame only by its section number, written out in full — `§1.0` — "
+        "and the universe answers that spelling exactly or through a declared alias. "
+        "There is no prefix to truncate and no near-spelling that lands on a "
+        "different frame: a wrong number resolves to nothing, which is the "
+        "(A, frames, empty) case. The alias half is what C's (C, frames, token) "
+        "case reads, over the same universe object."
+    ),
+    ("A", "frames", "duplicate"): (
+        "two §1 headings under one number is one document defect, reported once, by "
+        "the universe's owner — C, in the (C, frames, duplicate) case. A resolves "
+        "against the same object and would report the second copy of a finding the "
+        "reader has already been given."
     ),
 }
 
