@@ -134,7 +134,7 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         calls.append(("profile", user_key))
         return {"status_code": 200, "body": {"status": "ok", "items": []}}
 
-    async def clear(*, user_key: str):
+    async def clear(*, user_key: str):  # pragma: no cover - must stay unreached
         calls.append(("clear", user_key))
         return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
 
@@ -171,14 +171,25 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     assert settings_response.status_code == 200
     assert "diagnostics" not in settings_response.get_json()
     assert profile_response.status_code == 200
-    assert clear_response.status_code == 200
-    assert calls == [
-        ("profile", "avibe:remote:user-1"),
-        ("clear", "avibe:remote:user-1"),
-    ]
+    # The profile read is genuinely scoped to the remote principal, so it keeps
+    # crossing the tunnel under that principal's user key. `clear` only carries
+    # the key as proof of identity: the internal route discards it and calls the
+    # global `runtime.clear()`, which would erase every principal's memcells and
+    # the provider root, so the remote boundary refuses it before the handler.
+    assert clear_response.status_code == 403
+    assert clear_response.get_json()["code"] == "remote_execution_disabled"
+    assert calls == [("profile", "avibe:remote:user-1")]
 
 
-def test_memory_diagnostics_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) -> None:
+def test_memory_settings_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) -> None:
+    """A remote principal cannot patch Memory settings at all, diagnostics included.
+
+    The patch repoints the shared LLM and embedding endpoints and immediately
+    reconciles the local sidecar, so the remote boundary refuses it before the
+    payload is even parsed; the diagnostics field it used to reject by hand is
+    only the most sensitive part of a record that is process-global throughout.
+    """
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_config(tmp_path)
     client = app.test_client()
@@ -202,8 +213,8 @@ def test_memory_diagnostics_patch_is_rejected_for_remote_ui(monkeypatch, tmp_pat
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert response.status_code == 400
-    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "remote_execution_disabled"
     assert calls == []
     assert V2Config.load().memory.diagnostics.log_provider_calls is True
 
@@ -827,125 +838,82 @@ def test_memory_restart_route_shares_retained_request_and_blocks_settings_after_
     asyncio.run(_go())
 
 
-def test_memory_restart_route_isolates_remote_session_cookie_renewal(
+def test_memory_restart_route_refuses_concurrent_remote_principals(
     monkeypatch,
     tmp_path,
 ) -> None:
+    """Restarting the sidecar is local-only, so no remote caller reaches the task.
+
+    This route once served remote principals, and its retained request task made
+    two concurrent remote callers share one Response, which mixed their session
+    cookie renewals. A restart acts on the whole local sidecar rather than on one
+    principal, so the boundary now refuses it outright and that cross-principal
+    renewal is unreachable rather than merely fixed - which is what this asserts,
+    with two overlapping remote callers so a partial gate cannot pass.
+    """
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_config(tmp_path)
-    restart_started = asyncio.Event()
-    release_restart = asyncio.Event()
-    second_waiter_joined = asyncio.Event()
     restart_calls: list[bool] = []
-    restart_waiters = 0
 
-    async def restart():
+    async def restart():  # pragma: no cover - must stay unreached
         restart_calls.append(True)
-        restart_started.set()
-        await release_restart.wait()
         return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
 
     monkeypatch.setattr(internal_client, "memory_restart", restart)
-    restart_request_task = ui_memory_routes._memory_restart_request_task
-
-    def tracked_restart_request_task():
-        nonlocal restart_waiters
-        restart_waiters += 1
-        if restart_waiters == 2:
-            second_waiter_joined.set()
-        return restart_request_task()
-
-    monkeypatch.setattr(
-        ui_memory_routes,
-        "_memory_restart_request_task",
-        tracked_restart_request_task,
-    )
 
     async def _go() -> tuple[httpx.Response, httpx.Response]:
-        completed_after_hooks = 0
-        after_hooks_released = asyncio.Event()
-
-        async def hold_after_hooks(response):
-            nonlocal completed_after_hooks
-            completed_after_hooks += 1
-            if completed_after_hooks == 2:
-                after_hooks_released.set()
-            await after_hooks_released.wait()
-            return response
-
-        # Run this after the normal hooks so both renewal mutations are present
-        # before either response is sent. Sharing a Response then fails
-        # deterministically instead of depending on ASGI scheduling.
-        app._after_request_handlers.insert(0, hold_after_hooks)
-        try:
-            origin = "https://alex.avibe.bot"
-            first_transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
-            second_transport = httpx.ASGITransport(app=app, client=("203.0.113.11", 12346))
-            first_cookies = {
-                remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
-                    config,
-                    "one@example.com",
-                    "user-1",
-                ),
-                "vibe_csrf_token": "csrf-one",
-            }
-            second_cookies = {
-                remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
-                    config,
-                    "two@example.com",
-                    "user-2",
-                ),
-                "vibe_csrf_token": "csrf-two",
-            }
-            async with (
-                httpx.AsyncClient(
-                    transport=first_transport,
-                    base_url=origin,
-                    cookies=first_cookies,
-                ) as first_client,
-                httpx.AsyncClient(
-                    transport=second_transport,
-                    base_url=origin,
-                    cookies=second_cookies,
-                ) as second_client,
-            ):
-                first = asyncio.create_task(
-                    first_client.post(
-                        "/api/memory/runtime/restart",
-                        json={},
-                        headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-one"},
-                    )
+        origin = "https://alex.avibe.bot"
+        first_transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
+        second_transport = httpx.ASGITransport(app=app, client=("203.0.113.11", 12346))
+        first_cookies = {
+            remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
+                config,
+                "one@example.com",
+                "user-1",
+            ),
+            "vibe_csrf_token": "csrf-one",
+        }
+        second_cookies = {
+            remote_access.SESSION_COOKIE_NAME: _renewable_remote_session_cookie(
+                config,
+                "two@example.com",
+                "user-2",
+            ),
+            "vibe_csrf_token": "csrf-two",
+        }
+        async with (
+            httpx.AsyncClient(
+                transport=first_transport,
+                base_url=origin,
+                cookies=first_cookies,
+            ) as first_client,
+            httpx.AsyncClient(
+                transport=second_transport,
+                base_url=origin,
+                cookies=second_cookies,
+            ) as second_client,
+        ):
+            first = asyncio.create_task(
+                first_client.post(
+                    "/api/memory/runtime/restart",
+                    json={},
+                    headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-one"},
                 )
-                await restart_started.wait()
-                second = asyncio.create_task(
-                    second_client.post(
-                        "/api/memory/runtime/restart",
-                        json={},
-                        headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-two"},
-                    )
+            )
+            second = asyncio.create_task(
+                second_client.post(
+                    "/api/memory/runtime/restart",
+                    json={},
+                    headers={"Origin": origin, "X-Vibe-CSRF-Token": "csrf-two"},
                 )
-                await second_waiter_joined.wait()
-                release_restart.set()
-                return await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
-        finally:
-            app._after_request_handlers.remove(hold_after_hooks)
+            )
+            return await asyncio.wait_for(asyncio.gather(first, second), timeout=5.0)
 
     first_response, second_response = asyncio.run(_go())
 
-    def renewed_subject(response: httpx.Response) -> str:
-        session_headers = [
-            value
-            for value in response.headers.get_list("set-cookie")
-            if value.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
-        ]
-        assert len(session_headers) == 1
-        cookie_value = session_headers[0].split(";", 1)[0].split("=", 1)[1]
-        payload = remote_access.parse_session_cookie(config, cookie_value)
-        assert payload is not None
-        return str(payload["sub"])
-
-    assert restart_calls == [True]
-    assert first_response.status_code == 200
-    assert second_response.status_code == 200
-    assert renewed_subject(first_response) == "user-1"
-    assert renewed_subject(second_response) == "user-2"
+    assert restart_calls == []
+    assert first_response.status_code == 403
+    assert second_response.status_code == 403
+    assert first_response.json()["code"] == "remote_execution_disabled"
+    assert second_response.json()["code"] == "remote_execution_disabled"

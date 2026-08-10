@@ -188,14 +188,24 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
     ("method", "path", "expected"),
     [
         ("GET", "/api/projects", REMOTE_HTTP_ALLOWED),
-        ("PUT", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
         ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/models/agents/codex/chain", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/models/turns/turn-1/provenance", REMOTE_HTTP_ALLOWED),
+        # Only the local owner can start an OAuth flow, and a status poll hands
+        # back that flow's authorization URL and device code - plus, once a Model
+        # Hub flow succeeds, the credential and account payload `/api/models/
+        # sources` keeps local. Polling follows its flow and stays local too.
+        ("GET", "/api/models/oauth/status/oaf_test0001", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/backend/codex/auth/oauth/status/flow-1", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/opencode/permission-status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/dock/pins", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
+        ("PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
@@ -213,11 +223,12 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("HEAD", "/status", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/ensure", REMOTE_HTTP_ALLOWED),
         ("GET", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
-        ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_ALLOWED),
-        ("PATCH", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
+        ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_LOCAL_ONLY),
+        ("PATCH", "/api/memory/settings", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/memory/search", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/memory/clear", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/projects/proj-1/agents-md", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),
@@ -286,12 +297,13 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
             REMOTE_HTTP_PAYLOAD_FILTERED,
         ),
         ("canArchiveProjects", "DELETE", "/api/projects/proj-1", REMOTE_HTTP_LOCAL_ONLY),
-        # canEditProjectInstructions: AGENTS.md reads remotely, saves locally.
+        # canEditProjectInstructions: local in both directions, because an
+        # AGENTS.md / CLAUDE.md symlink can resolve outside the Project.
         (
             "canEditProjectInstructions",
             "GET",
             "/api/projects/proj-1/agents-md",
-            REMOTE_HTTP_ALLOWED,
+            REMOTE_HTTP_LOCAL_ONLY,
         ),
         (
             "canEditProjectInstructions",
@@ -302,6 +314,34 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
         # canEditAgentDefinitions: catalog reads remotely, definition writes locally.
         ("canEditAgentDefinitions", "GET", "/api/agents", REMOTE_HTTP_ALLOWED),
         ("canEditAgentDefinitions", "POST", "/api/agents", REMOTE_HTTP_LOCAL_ONLY),
+        # canAdministerMemory: principal-scoped reads and search stay remote,
+        # the cross-principal admin log and the sidecar administration do not.
+        ("canAdministerMemory", "GET", "/api/memory/status", REMOTE_HTTP_ALLOWED),
+        ("canAdministerMemory", "GET", "/api/memory/profile", REMOTE_HTTP_ALLOWED),
+        ("canAdministerMemory", "POST", "/api/memory/search", REMOTE_HTTP_ALLOWED),
+        ("canAdministerMemory", "GET", "/api/memory/log", REMOTE_HTTP_LOCAL_ONLY),
+        ("canAdministerMemory", "GET", "/api/memory/log/entry", REMOTE_HTTP_LOCAL_ONLY),
+        ("canAdministerMemory", "PATCH", "/api/memory/settings", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "canAdministerMemory",
+            "POST",
+            "/api/memory/runtime/restart",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("canAdministerMemory", "POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
+        # Dock/Workbench prefs: the read is remote, the process-global writes
+        # are local until the records are keyed by the authenticated subject.
+        ("dockAndWorkbenchPrefs", "GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        ("dockAndWorkbenchPrefs", "GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("dockAndWorkbenchPrefs", "POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "dockAndWorkbenchPrefs",
+            "DELETE",
+            "/api/dock/pins/ses-1",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("dockAndWorkbenchPrefs", "PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
+        ("dockAndWorkbenchPrefs", "PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
     ],
 )
 def test_local_only_workbench_gates_match_the_remote_http_policy(

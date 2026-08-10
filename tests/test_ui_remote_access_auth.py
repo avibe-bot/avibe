@@ -1835,6 +1835,94 @@ def test_local_show_event_stream_keeps_the_screenshot_path() -> None:
     )
 
 
+def _deny_show_page_acl(monkeypatch, *, allowed: bool) -> list[tuple[str, str]]:
+    """Record the Show Page ACL checks the workbench stream makes."""
+
+    from storage import resource_access_service
+
+    checks: list[tuple[str, str]] = []
+
+    def _can_use_resource(context, resource_kind, resource_id, **kwargs):
+        checks.append((resource_kind, resource_id))
+        return allowed
+
+    monkeypatch.setattr(resource_access_service, "can_use_resource", _can_use_resource)
+    return checks
+
+
+def test_remote_owner_show_event_requires_the_show_page_acl(monkeypatch) -> None:
+    """An Instance owner does not override a Show Page's own resource policy.
+
+    Direct reads of a private page whose policy names another subject already
+    deny this owner, so the workbench SSE must not forward the same page's
+    annotation text and attachment metadata either.
+    """
+
+    from vibe.authorization import AuthorizationContext
+
+    checks = _deny_show_page_acl(monkeypatch, allowed=False)
+    remote_owner = AuthorizationContext(
+        instance_role="owner",
+        subject="owner@example.com",
+        is_remote=True,
+    )
+
+    assert (
+        ui_server._workbench_event_visible_to_context(
+            remote_owner, "show.event", _show_event_frame()
+        )
+        is False
+    )
+    assert checks == [("show_page", "ses123")]
+
+
+def test_remote_owner_show_event_passes_the_allowed_show_page(monkeypatch) -> None:
+    from vibe.authorization import AuthorizationContext
+
+    checks = _deny_show_page_acl(monkeypatch, allowed=True)
+    remote_owner = AuthorizationContext(
+        instance_role="owner",
+        subject="owner@example.com",
+        is_remote=True,
+    )
+
+    assert (
+        ui_server._workbench_event_visible_to_context(
+            remote_owner, "show.event", _show_event_frame()
+        )
+        is True
+    )
+    assert checks == [("show_page", "ses123")]
+
+
+def test_show_event_without_a_session_is_dropped(monkeypatch) -> None:
+    from vibe.authorization import AuthorizationContext
+
+    _deny_show_page_acl(monkeypatch, allowed=True)
+    remote_owner = AuthorizationContext(instance_role="owner", is_remote=True)
+
+    assert (
+        ui_server._workbench_event_visible_to_context(
+            remote_owner,
+            "show.event",
+            json.dumps({"type": "show.event", "data": {"id": "evt-1"}}),
+        )
+        is False
+    )
+
+
+def test_local_show_event_skips_the_remote_acl(monkeypatch) -> None:
+    """A trusted-local subscriber has no authorization context to evaluate."""
+
+    checks = _deny_show_page_acl(monkeypatch, allowed=False)
+
+    assert (
+        ui_server._workbench_event_visible_to_context(None, "show.event", _show_event_frame())
+        is True
+    )
+    assert checks == []
+
+
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [
@@ -2162,10 +2250,17 @@ def test_remote_queue_deletion_is_blocked_before_store_access(
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
-def test_remote_owner_can_still_read_agent_instructions_and_queue(
+def test_remote_owner_instruction_reads_stay_local_while_queue_reads_do_not(
     monkeypatch,
     tmp_path,
 ):
+    """Project and global instructions are local reads; the queue is not.
+
+    A checked-out ``AGENTS.md`` / ``CLAUDE.md`` can be a symlink pointing
+    outside the Project, and a remote caller holds no file capability to
+    follow it, so the read stays trusted-local like the global prompts.
+    """
+
     from storage.importer import ensure_sqlite_state
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2199,8 +2294,8 @@ def test_remote_owner_can_still_read_agent_instructions_and_queue(
         environ_base=_remote_peer(),
     )
 
-    assert project_response.status_code == 200
-    assert project_response.get_json()["source"] == "none"
+    assert project_response.status_code == 403
+    assert project_response.get_json()["code"] == "remote_execution_disabled"
     assert global_response.status_code == 403
     assert global_response.get_json()["code"] == "remote_execution_disabled"
     assert queue_response.status_code == 200
@@ -2430,7 +2525,9 @@ def test_remote_instance_role_route_matrix(
     assert config_response.status_code == 200
     assert prefs_read_response.status_code == 200
     assert prefs_read_response.get_json()["background_work_banner_enabled"] is True
-    assert prefs_write_response.status_code == (200 if role == "owner" else 403)
+    # The prefs record is process-global rather than per-principal, so the read
+    # crosses the tunnel for every role while the write stays trusted-local.
+    assert prefs_write_response.status_code == 403
     # Role grants an authorized remote operation, not trusted-local visibility.
     # All remote callers receive the same explicit safe config projection.
     assert set(config_response.get_json()) == {

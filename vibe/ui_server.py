@@ -10486,17 +10486,36 @@ def sessions_draft_set(session_id: str):
     return jsonify({"ok": True})
 
 
-def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
-    if context is None or context.is_instance_owner:
-        return True
-    if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
-        return True
+def _workbench_event_data(payload: str) -> dict[str, Any] | None:
     try:
         envelope = json.loads(payload)
     except (TypeError, json.JSONDecodeError):
-        return False
+        return None
     data = envelope.get("data") if isinstance(envelope, dict) else None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
+    if context is None:
+        return True
+    if event_type == "show.event":
+        # A Show Page carries its own resource ACL, and being the Instance owner
+        # does not override it: a direct read of a page whose policy names
+        # another subject is denied, so the workbench stream must not hand the
+        # same page's annotation text and attachment metadata to that owner
+        # either. Fail closed when the frame has no session to check.
+        data = _workbench_event_data(payload)
+        session_id = data.get("session_id") if data else None
+        if not isinstance(session_id, str) or not session_id:
+            return False
+        if not _show_page_resource_access_allowed(context, session_id):
+            return False
+    if context.is_instance_owner:
+        return True
+    if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
+        return True
+    data = _workbench_event_data(payload)
+    if data is None:
         return False
 
     from storage import project_access_service

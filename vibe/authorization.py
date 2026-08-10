@@ -410,11 +410,12 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"POST"}),
             r"^/api/show-pages/[^/]+/ensure$",
         ),
+        # Reading the Dock is safe, but its pins/order and the Workbench prefs
+        # are one process-global record shared by the local owner and every
+        # remote principal. Until they are keyed by the authenticated subject a
+        # remote write would reorder and re-pin everyone else's Dock and flip
+        # another principal's banner preference, so the mutations stay local.
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
-        (frozenset({"POST"}), r"^/api/dock/pins$"),
-        (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
-        (frozenset({"PUT"}), r"^/api/dock/order$"),
-        (frozenset({"PUT"}), r"^/api/workbench/prefs$"),
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/web-push/(?:status|vapid-public-key)$",
@@ -430,10 +431,6 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/projects/[^/]+/agents-md$",
-        ),
-        (
-            frozenset({"GET", "HEAD"}),
             r"^/api/models/(?:agents|events|runtime/status)$",
         ),
         (
@@ -442,12 +439,15 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/models/(?:turns/[^/]+/provenance|oauth/status/[^/]+)$",
+            r"^/api/models/turns/[^/]+/provenance$",
         ),
-        (
-            frozenset({"GET", "HEAD"}),
-            r"^/api/backend/[^/]+/auth/oauth/status/[^/]+$",
-        ),
+        # OAuth polling follows its flow: `oauth/start` and the Settings
+        # `auth/oauth/start` are local-only, so only the local owner can open a
+        # flow, while a status poll returns that flow's authorization URL and
+        # device code and - once the Model Hub flow succeeds - the same
+        # credential and account payload `/api/models/sources` deliberately
+        # keeps local. A remote caller holding a flow id would read the local
+        # owner's in-flight login, so both status routes stay local too.
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/remote-access/status$",
@@ -456,15 +456,17 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD"}),
             r"^/api/harness/counts$",
         ),
+        # Memory reads that describe this principal's own view stay remote, and
+        # search is scoped to the caller. The admin log is not: its readers
+        # enumerate and hydrate memcells for every principal, so it stays local.
+        # Memory administration is absent for the same reason: a settings PATCH
+        # repoints the shared provider endpoints, and `runtime/restart` /
+        # `clear` act on the whole local sidecar rather than one principal.
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/memory/(?:settings|status|failures|profile|log|log/entry)$",
+            r"^/api/memory/(?:settings|status|failures|profile)$",
         ),
-        (frozenset({"PATCH"}), r"^/api/memory/settings$"),
-        (
-            frozenset({"POST"}),
-            r"^/api/memory/(?:search|runtime/restart|clear)$",
-        ),
+        (frozenset({"POST"}), r"^/api/memory/search$"),
     )
 )
 

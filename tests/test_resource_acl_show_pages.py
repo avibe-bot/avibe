@@ -285,7 +285,12 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
         environ_base=_remote_peer(),
     )
     assert response.status_code == 403
-    assert response.get_json()["code"] == "resource_access_forbidden"
+    # The Dock record is process-global rather than keyed by the authenticated
+    # subject, so every remote mutation now stops at the transport boundary
+    # before the resource ACL is consulted - a stricter refusal than the
+    # per-page `resource_access_forbidden` this once returned. The ACL itself is
+    # unchanged and still enforced in-process, as the `api.*` calls above assert.
+    assert response.get_json()["code"] == "remote_execution_disabled"
 
 
 def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:

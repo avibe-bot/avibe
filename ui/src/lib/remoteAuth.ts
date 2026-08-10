@@ -98,10 +98,22 @@ export function canArchiveProjects(context: RemoteContext): boolean {
 }
 
 /**
- * Reading a Project's `AGENTS.md` is remote-permitted but saving it is
- * local-only, so remote viewers get the instructions read-only.
+ * Project instructions are local-only in both directions: saving `AGENTS.md` is
+ * local, and the read is too because a checked-in `AGENTS.md` / `CLAUDE.md`
+ * symlink can point outside the Project workspace, which a remote caller has no
+ * file capability to follow.
  */
 export function canEditProjectInstructions(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
+/**
+ * Memory administration is local-only: the admin log enumerates memcells for
+ * every principal, a settings save repoints the shared provider endpoints, and
+ * clear / runtime-restart act on the whole local sidecar. The principal-scoped
+ * status, profile and search reads stay remote-permitted.
+ */
+export function canAdministerMemory(context: RemoteContext): boolean {
   return isTrustedLocal(context);
 }
 

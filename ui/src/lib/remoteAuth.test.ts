@@ -8,6 +8,7 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  canAdministerMemory,
   canArchiveProjects,
   canEditAgentDefinitions,
   canEditProjectInstructions,
@@ -42,6 +43,7 @@ describe('local-only workbench controls', () => {
     canUseHarness,
     canArchiveProjects,
     canEditProjectInstructions,
+    canAdministerMemory,
   };
 
   it.each(Object.entries(predicates))('keeps %s available on a local instance', (_name, predicate) => {
