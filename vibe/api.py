@@ -1257,6 +1257,12 @@ def remote_config_payload(config: V2Config) -> dict:
         "version": payload.get("version"),
         "setup_state": payload.get("setup_state"),
         "language": payload.get("language"),
+        "ack_mode": payload.get("ack_mode"),
+        "show_duration": payload.get("show_duration"),
+        "include_time_info": payload.get("include_time_info"),
+        "include_user_info": payload.get("include_user_info"),
+        "reply_enhancements": payload.get("reply_enhancements"),
+        "agent_progress_style": payload.get("agent_progress_style"),
         "ui": {
             key: ui_payload[key]
             for key in _REMOTE_CONFIG_UI_FIELDS

@@ -11,31 +11,47 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
  * `/api/doctor`, `/api/logs`, `/api/settings`, `/api/users` and drives
  * `/api/control`; Remote Access drives pair / start / stop / optimize / settings
  * / diagnose (only its status read is remote-permitted); the service, platform,
- * backend, and Model Hub settings pages save or reorder protected local state;
- * Harness opens on `/api/harness/bootstrap`; and the Library's Show Page
- * controls are local-only. They therefore need the trusted-local
- * `can_use_system` capability on top, otherwise a remote owner gets partial or
- * empty state and every mutation ends in `remote_execution_disabled`.
+ * backend, Model Hub, dependency, diagnostics, logs and users pages save or
+ * reveal protected local state; Harness opens on `/api/harness/bootstrap`; and
+ * the Library's Show Page controls are local-only. They therefore need the
+ * trusted-local `can_use_system` capability on top, otherwise a remote owner
+ * gets partial or empty state and every mutation ends in
+ * `remote_execution_disabled`.
  *
  * This is the single source of truth for both halves of the gate — the route
  * redirect and the navigation entries that point at it — so a withheld page can
  * never still be advertised in the sidebar, mobile tabs or the More sheet.
- * Messaging settings are deliberately absent: the payload filter restricts their
- * saves to remotely-mutable preference fields, so they work remotely.
+ * Messaging settings are deliberately absent: the payload filter restricts most
+ * of that page to remotely-mutable preference fields, and the remaining
+ * protected controls are gated by `isLocalOnlyMessagingField` below.
  */
-const LOCAL_SYSTEM_ROUTES = [
+export const LOCAL_SYSTEM_ROUTES = [
   '/admin/dashboard',
   '/admin/remote-access',
+  '/admin/users',
+  '/admin/logs',
   '/admin/settings/service',
   '/admin/settings/platforms',
   '/admin/settings/backends',
   '/admin/settings/models',
+  '/admin/settings/dependencies',
+  '/admin/settings/diagnostics',
+  '/admin/settings/logs',
   '/harness',
   '/apps/library',
-];
+] as const;
+
+const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
+  'agents.opencode.error_retry_limit',
+  'agents.opencode.active_turn_timeout_seconds',
+  'show_pages_prompt',
+]);
 
 export const isLocalSystemPath = (pathname: string): boolean =>
   LOCAL_SYSTEM_ROUTES.some((route) => matchesRoute(pathname, route));
+
+export const isLocalOnlyMessagingField = (field: string): boolean =>
+  LOCAL_ONLY_MESSAGING_FIELDS.has(field);
 
 /**
  * Where the "Control Panel" entry points. A remote owner cannot open the

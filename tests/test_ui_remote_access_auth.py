@@ -2800,6 +2800,13 @@ def test_remote_instance_role_route_matrix(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
+    config.ack_mode = "reaction"
+    config.show_duration = False
+    config.include_time_info = False
+    config.include_user_info = True
+    config.reply_enhancements = False
+    config.agent_progress_style = "concise"
+    config.save()
     ensure_sqlite_state()
     client = app.test_client()
     client.set_cookie(
@@ -2848,14 +2855,27 @@ def test_remote_instance_role_route_matrix(
     assert prefs_write_response.status_code == 403
     # Role grants an authorized remote operation, not trusted-local visibility.
     # All remote callers receive the same explicit safe config projection.
-    assert set(config_response.get_json()) == {
+    config_payload = config_response.get_json()
+    assert set(config_payload) == {
+        "ack_mode",
+        "agent_progress_style",
         "capabilities",
+        "include_time_info",
+        "include_user_info",
         "language",
         "mode",
+        "reply_enhancements",
         "setup_state",
+        "show_duration",
         "ui",
         "version",
     }
+    assert config_payload["ack_mode"] == "reaction"
+    assert config_payload["show_duration"] is False
+    assert config_payload["include_time_info"] is False
+    assert config_payload["include_user_info"] is True
+    assert config_payload["reply_enhancements"] is False
+    assert config_payload["agent_progress_style"] == "concise"
     assert conversation_response.status_code == conversation_status
     assert project_response.status_code == project_status
     if role == "viewer":
