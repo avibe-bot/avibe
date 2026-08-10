@@ -1568,6 +1568,47 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_handled_backend_key_error_is_not_reclassified_as_missing_agent(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+
+        async def fail_after_dispatch(_agent_name, request):
+            error = KeyError("backend config")
+            request.failure_handled = True
+            await request.failure_handler(error)
+            raise error
+
+        controller.agent_service.handle_message = fail_after_dispatch
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C1",
+            message_id="scheduled:task-1:key-error",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-key-error",
+                "task_execution_id": "run-scheduled-key-error",
+            },
+        )
+
+        result = await handler.handle_scheduled_message(context, "hello")
+
+        self.assertEqual(result, "'backend config'")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: 'backend config'")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        self.assertNotIn("not available", controller.im_client.sent_messages[0][1])
+
     async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         handler = MessageHandler(controller)

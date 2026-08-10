@@ -847,6 +847,8 @@ class MessageHandler(BaseHandler):
                             session_id=str(bound_session_id),
                         )
             except KeyError:
+                if request.failure_handled:
+                    raise
                 await self._handle_missing_agent(
                     context,
                     agent_name,
