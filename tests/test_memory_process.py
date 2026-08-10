@@ -2425,8 +2425,8 @@ def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
 
 async def test_rebuild_refuses_a_provider_root_locked_by_another_process(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
+    (memory_dir / "everos-root").mkdir(parents=True)
     lock_path = memory_process._provider_rebuild_lock_path(
-        memory_dir=memory_dir,
         provider_root=memory_dir / "everos-root",
     )
     lock_path.parent.mkdir(parents=True)
@@ -2468,6 +2468,92 @@ async def test_rebuild_refuses_a_provider_root_locked_by_another_process(tmp_pat
         await locker.wait()
 
 
+async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_root(
+    tmp_path: Path,
+) -> None:
+    provider_root = tmp_path / "shared" / "everos-root"
+    owner_home = tmp_path / "owner-home"
+    contender_home = tmp_path / "contender-home"
+    owner_home.mkdir(mode=0o700)
+    contender_home.mkdir(mode=0o700)
+    script = "\n".join(
+        (
+            "import asyncio",
+            "import sys",
+            "from core.memory.process import EverOSProcessSettings, EverOSRebuildProcess, RebuildProcessResult",
+            "from pathlib import Path",
+            "async def main():",
+            "    process = EverOSRebuildProcess(",
+            "        sys.executable,",
+            "        effective_home=Path(sys.argv[1]),",
+            "        provider_root=Path(sys.argv[2]),",
+            "        settings=EverOSProcessSettings(",
+            "            embedding_base_url='https://embedding.invalid/v1',",
+            "            embedding_model='embedding-model',",
+            "            embedding_api_key='secret',",
+            "        ),",
+            "    )",
+            "    async def hold_lock():",
+            "        print('locked', flush=True)",
+            "        await asyncio.to_thread(sys.stdin.read, 1)",
+            "        return RebuildProcessResult.COMPLETED",
+            "    process._run_exclusive = hold_lock",
+            "    assert await process.run() is RebuildProcessResult.COMPLETED",
+            "asyncio.run(main())",
+        )
+    )
+    owner = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(owner_home),
+        str(provider_root),
+        cwd=str(Path(__file__).resolve().parents[1]),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert owner.stdout is not None
+    ready = await owner.stdout.readline()
+    if ready != b"locked\n":
+        assert owner.stderr is not None
+        pytest.fail((await owner.stderr.read()).decode(errors="replace"))
+    lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
+    assert lock_path.parent.parent == provider_root.parent
+    provider_root.rmdir()
+    provider_root.mkdir(mode=0o700)
+    contender_host = _FakeProcessHost()
+    contender = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=contender_home,
+        provider_root=provider_root,
+        settings=_settings(),
+        stop_timeout_seconds=0.1,
+        _host=contender_host,
+    )
+    reconcile_entered = False
+
+    async def record_reconcile() -> None:
+        nonlocal reconcile_entered
+        reconcile_entered = True
+
+    contender.reconcile_orphan = record_reconcile
+    try:
+        assert await contender.run() is RebuildProcessResult.ROOT_BUSY
+        assert reconcile_entered is False
+        assert contender_host.spawn_calls == []
+        assert contender._ownership.record_path != memory_process.sidecar_record_path(
+            owner_home / "memory"
+        )
+    finally:
+        assert owner.stdin is not None
+        owner.stdin.write(b"\n")
+        await owner.stdin.drain()
+        owner.stdin.close()
+        await owner.wait()
+        assert owner.returncode == 0
+
+
 async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     provider_root = tmp_path / "memory" / "everos-root"
@@ -2475,7 +2561,6 @@ async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) ->
     sentinel = tmp_path / "outside.txt"
     sentinel.write_text("must stay intact", encoding="utf-8")
     lock_path = memory_process._provider_rebuild_lock_path(
-        memory_dir=memory_dir,
         provider_root=provider_root,
     )
     lock_path.parent.mkdir()

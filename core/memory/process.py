@@ -33,6 +33,7 @@ from core.memory.attachments import attachment_pin_root
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     create_confined_file,
+    ensure_private_directory,
     open_confined_regular_file,
 )
 from core.memory.everos import EverOSPort
@@ -57,6 +58,7 @@ _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 _REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
 _REBUILD_LOCK_PREFIX = "cascade-rebuild-"
+_REBUILD_LOCK_DIRECTORY = ".avibe-memory-locks"
 _REBUILD_TIMEOUT_SECONDS = 30 * 60.0
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
@@ -102,22 +104,23 @@ class _ProviderRootBusy(RuntimeError):
 
 
 class _ProviderRootLock:
-    """One private, no-follow file lock anchored below the effective home."""
+    """One private, no-follow file lock anchored beside the provider root."""
 
-    def __init__(self, *, effective_home: Path, path: Path) -> None:
-        self._effective_home = effective_home
+    def __init__(self, *, confinement_root: Path, path: Path) -> None:
+        self._confinement_root = confinement_root
         self._path = path
         self._descriptor: int | None = None
 
     def acquire(self) -> None:
+        ensure_private_directory(self._confinement_root, self._path.parent)
         try:
             descriptor = create_confined_file(
-                self._effective_home,
+                self._confinement_root,
                 self._path,
                 read_write=True,
             )
         except ConfinedFilesystemError:
-            descriptor = open_confined_regular_file(self._effective_home, self._path)
+            descriptor = open_confined_regular_file(self._confinement_root, self._path)
         try:
             import fcntl
 
@@ -896,12 +899,10 @@ class EverOSRebuildProcess:
                 provider_root=self._provider_root,
                 settings=self._settings,
             )
+            lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
             root_lock = _ProviderRootLock(
-                effective_home=self._effective_home,
-                path=_provider_rebuild_lock_path(
-                    memory_dir=self._memory_dir,
-                    provider_root=self._provider_root,
-                ),
+                confinement_root=lock_path.parent.parent,
+                path=lock_path,
             )
             root_lock.acquire()
         except _ProviderRootBusy:
@@ -1005,11 +1006,16 @@ def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult
     return RebuildProcessResult.FAILED
 
 
-def _provider_rebuild_lock_path(*, memory_dir: Path, provider_root: Path) -> Path:
-    """Keep root-scoped coordination outside the provider's own data namespace."""
+def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
+    """Bind coordination to the canonical root location, outside provider data."""
 
-    root_identity = hashlib.sha256(os.fsencode(provider_root.absolute())).hexdigest()
-    return memory_dir / ".rt" / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
+    canonical_root = provider_root.resolve(strict=True)
+    root_identity = hashlib.sha256(os.fsencode(canonical_root)).hexdigest()
+    return (
+        canonical_root.parent
+        / _REBUILD_LOCK_DIRECTORY
+        / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
+    )
 
 
 def sidecar_record_path(memory_dir: Path | str) -> Path:
