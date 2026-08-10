@@ -800,11 +800,6 @@ meaning nobody checked against the row it borrowed.
 
 ### 0.10 The state-completeness gate
 
-**The path below is a forward reference.** This section specifies the gate; the
-script it names is added by a separate change, so the file is not in the same
-commit as this document. Naming it is what a specification has to do; running it
-is what the other change delivers.
-
 `scripts/check_model_hub_ui_states.py` regenerates its input from this file in the
 same run it reports — it reads the live document, never a snapshot committed
 beside it — and reports five gap classes, each of which is a set it computes
@@ -812,9 +807,9 @@ from the text:
 
 | Class | What it reports |
 | --- | --- |
-| A | A mutating call (`POST` / `PUT` / `PATCH` / `DELETE`) named in §1 that no §0.8 row states a failure treatment for, or a §0.8 row whose failure cell is empty or names a treatment outside F1–F5 and outside this register's own states. |
-| B | Rendered copy with no key, a key row missing its English column, a key cited that no copy table defines, or a `{{slot}}` with no §0.9 row. |
-| C | A §0.8 row with no exit, or a frame section that draws an element inventory and contributes no §0.8 row. |
+| A | A mutating call (`POST` / `PUT` / `PATCH` / `DELETE`) named in §1 that no §0.8 row states a failure treatment for; a §0.8 row whose failure cell is empty or names a treatment outside F1–F5 and outside this register's own states; a call named by its method word where the register names a path; or a failure dispersed into another frame's states as a set that frame does not have. |
+| B | Rendered copy with no key, a key row missing its English column, a key cited that no copy table defines, a `{{slot}}` with no §0.9 row, a §0.9 row that declares a consumer set the copy does not have, a rendered line no copy row produces, or a state whose one key contradicts its frame's own mapping table. |
+| C | A §0.8 row with no exit; a state a frame's own value table reaches that the dispatching row never lands in; a frame section that draws an element inventory and contributes no §0.8 row; or a state attributed to a frame that does not hold it. |
 | D | A copy key whose leaf names a condition — error, empty, failure, undetermined, unavailable — that no §0.8 row cites. Under 约束四 that is either copy for an unreachable error, or a state this document forgot to write. |
 | E | A claim this document makes about the system — a route, a schema field, an enum value, a repo symbol — that the file with authority over that claim does not make. |
 
@@ -834,8 +829,6 @@ What it does not claim: that this document is complete, that the copy is right,
 or that the states match the product. It claims those five sets are empty. The
 claim is worth exactly the coverage of its extractors and no more, which is why
 the scale is printed with the verdict rather than in a comment.
-
----
 
 ---
 
