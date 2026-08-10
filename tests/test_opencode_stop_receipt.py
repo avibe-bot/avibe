@@ -27,6 +27,7 @@ from modules.agents.opencode.agent import OpenCodeAgent
 def _agent():
     agent = object.__new__(OpenCodeAgent)
     agent._active_requests = {}
+    agent._active_ack_requests = {}
     agent._user_stopped_sessions = set()
     agent._session_manager = SimpleNamespace(get_request_session=lambda _base: None)
     agent._abort_active_request = AsyncMock()
@@ -95,9 +96,11 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         stop result that follows would leave the turn with no trace at all.
         """
         agent = _agent()
-        receipts: list[object] = []
+        receipts: list[tuple[object, object]] = []
         agent._remove_ack_reaction = AsyncMock(
-            side_effect=lambda request, *, terminal_emoji=None: receipts.append(terminal_emoji)
+            side_effect=lambda request, *, terminal_emoji=None: receipts.append(
+                (request, terminal_emoji)
+            )
         )
 
         async def in_flight():
@@ -105,6 +108,8 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
 
         task = asyncio.create_task(in_flight())
         agent._active_requests["session-1"] = task
+        turn_request = _request()
+        agent._active_ack_requests["session-1"] = turn_request
         await asyncio.sleep(0)
 
         async def abort(*_args, **_kwargs):
@@ -118,10 +123,44 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
 
         agent._abort_active_request = abort
 
+        stop_request = _request()
+        self.assertTrue(await agent.handle_stop(stop_request))
+
+        # The receipt belongs on the TURN's request. ``stop_request`` describes
+        # the /stop message, so stamping that one would put the ⏹️ on the command
+        # and leave the real 👀 in place.
+        self.assertEqual(receipts, [(turn_request, STOPPED_REACTION_EMOJI)])
+        self.assertIsNot(receipts[0][0], stop_request)
+        self.assertEqual(agent._user_stopped_sessions, set())
+
+    async def test_no_receipt_when_the_turns_request_was_not_retained(self):
+        # Better no receipt than one stamped on the wrong message: a turn with
+        # nothing retained (restored poll already cleaned up) just ends silently.
+        agent = _agent()
+        receipts: list[object] = []
+        agent._remove_ack_reaction = AsyncMock(
+            side_effect=lambda request, *, terminal_emoji=None: receipts.append(terminal_emoji)
+        )
+
+        async def in_flight():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(in_flight())
+        agent._active_requests["session-1"] = task
+        await asyncio.sleep(0)
+
+        async def abort(*_args, **_kwargs):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        agent._abort_active_request = abort
+
         self.assertTrue(await agent.handle_stop(_request()))
 
-        self.assertEqual(receipts, [STOPPED_REACTION_EMOJI])
-        self.assertEqual(agent._user_stopped_sessions, set())
+        self.assertEqual(receipts, [])
 
     async def test_the_intent_is_claimed_once(self):
         # Both paths call consume; the second must see nothing, or a turn whose

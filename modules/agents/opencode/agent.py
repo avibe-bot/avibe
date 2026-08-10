@@ -534,6 +534,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._poll_loop = OpenCodePollLoop(self)
 
         self._active_requests: Dict[str, asyncio.Task] = {}
+        # The AgentRequest each active task is serving, keyed exactly like
+        # ``_active_requests``. ``handle_stop`` receives a *freshly built*
+        # request describing the ``/stop`` message itself, so it is not a usable
+        # indicator target: the 👀 sits on the message that opened the turn.
+        # Only paths that end a turn from OUTSIDE its coroutine need this.
+        # A restored poll registers no entry — the process that built its request
+        # is gone, and a restored turn's cancellation never stamped a receipt
+        # anyway; it ends with the plain removal ``remove_restored_ack`` does.
+        self._active_ack_requests: Dict[str, AgentRequest] = {}
         # Sessions whose in-flight task is being cancelled BY THE USER. The
         # cancellation lands in the request coroutine, which cannot otherwise
         # tell a /stop from any other teardown; see ``handle_stop``.
@@ -820,6 +829,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             task = asyncio.create_task(self._process_message(request))
             self._active_requests[request.base_session_id] = task
+            self._active_ack_requests[request.base_session_id] = request
 
         if not task:
             return
@@ -831,6 +841,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         finally:
             if self._active_requests.get(request.base_session_id) is task:
                 self._active_requests.pop(request.base_session_id, None)
+                self._active_ack_requests.pop(request.base_session_id, None)
                 self._session_manager.pop_request_session(request.base_session_id)
             # The poll loop ran to completion above (handle_message awaits the
             # task), so the turn is fully settled here. Release any web-Chat
@@ -1679,7 +1690,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 # were awaiting it, and ``task.cancel()`` hit an already-finished
                 # task. The receipt is still owed — this stop is about to emit a
                 # silent result, so without it the turn ends with no trace.
-                await self._remove_ack_reaction(request, terminal_emoji=STOPPED_REACTION_EMOJI)
+                #
+                # Stamped on the turn's OWN request, never on ``request``: that
+                # one describes the ``/stop`` message, so finishing it would put
+                # the ⏹️ on the command instead of on the message that started
+                # the turn (and leave the real 👀 behind). Codex does the same
+                # with the request it recovers from ``clear_pending``.
+                stopped_request = self._active_ack_requests.get(request.base_session_id)
+                if stopped_request is not None:
+                    await self._remove_ack_reaction(
+                        stopped_request,
+                        terminal_emoji=STOPPED_REACTION_EMOJI,
+                    )
+                else:
+                    logger.debug(
+                        "OpenCode stop of %s has no retained request; skipping the receipt",
+                        request.base_session_id,
+                    )
         finally:
             # Only reached with the intent still set if something above raised
             # past the handlers; a claimed intent is already gone.

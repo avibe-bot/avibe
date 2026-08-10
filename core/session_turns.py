@@ -5361,7 +5361,7 @@ class SessionTurnManager:
         return False
 
     def _turn_origin_native_message_id(self, turn_id: str) -> str:
-        """The platform message id that opened one Turn, or ``""``.
+        """The message a terminal receipt for one Turn belongs on, or ``""``.
 
         Read durably rather than from the live indicator because the caller runs
         AFTER a restart, where no in-memory handle survived. The Delivery's own
@@ -5370,6 +5370,13 @@ class SessionTurnManager:
         Delivery no longer carries the native id — only the ledger row it points
         at does. The snapshot is still consulted first for a Delivery caught
         before materialization.
+
+        The target is not always the sender's message: a quick-reply callback is
+        admitted with no ``native_message_id`` on purpose and wears its indicator
+        on the bot echo instead, so ``_delivery_ack_target`` — which recovers
+        that echo id from the durable admission context — decides first. Reading
+        only the native id would return ``""`` for those turns and silently skip
+        the ⚠️, leaving the echo claiming the turn is still running.
         """
 
         if not turn_id or not self._durable_schema_available():
@@ -5385,10 +5392,9 @@ class SessionTurnManager:
                 )
                 if delivery is None:
                     return ""
-                payload = delivery_store.delivery_payload(delivery)
-                native_id = str(payload.get("native_message_id") or "").strip()
-                if native_id:
-                    return native_id
+                ack_target = self._delivery_ack_target(delivery)
+                if ack_target:
+                    return str(ack_target).strip()
                 message_id = str(delivery.get("message_id") or "").strip()
                 if not message_id:
                     return ""

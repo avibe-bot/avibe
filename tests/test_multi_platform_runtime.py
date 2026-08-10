@@ -1244,6 +1244,7 @@ def test_opencode_normal_text_matching_legacy_question_prefix_is_processed():
     agent.settings_manager = agent.controller.settings_manager
     agent._session_manager = _SessionManager()
     agent._active_requests = {}
+    agent._active_ack_requests = {}
 
     async def _process_message(request):
         processed.append(request.message)

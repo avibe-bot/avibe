@@ -3250,6 +3250,51 @@ def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
     assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
 
 
+def test_lost_quick_reply_turn_stamps_the_echo_it_reacted_on(managers) -> None:
+    """A quick-reply turn wears its 👀 on the bot echo, not on a user message.
+
+    The callback is admitted with ``native_message_id=None`` on purpose (it would
+    collide with platform event dedup) and the echo id survives only in the
+    durable admission context. Reading the native id alone yields ``""`` here, so
+    the ⚠️ is skipped and the echo keeps claiming the turn is still running —
+    exactly the stuck indicator the report exists to retire.
+    """
+
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="quick reply killed by restart",
+                admission_context={"processing_indicator_message_id": "echo-9"},
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("echo-9", INTERRUPTED_REACTION_EMOJI)]
+
+
 def test_lost_im_turn_report_waits_for_its_transport(managers) -> None:
     # Recovery runs at startup, BEFORE the IM transports finish connecting.
     # Emitting then would drop the notice into a client that cannot send, so the
