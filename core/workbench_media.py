@@ -22,9 +22,12 @@ import io
 import logging
 import os
 import re
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Connection
@@ -37,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 MAX_SHOW_SCREENSHOT_LONG_EDGE = 2048
 MAX_SHOW_SCREENSHOT_BYTES = 25 * 1024 * 1024
+MAX_WORKBENCH_ATTACHMENT_BYTES = 100 * 1024 * 1024
+_WORKBENCH_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_WORKBENCH_UPLOAD_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,80}")
+_WORKBENCH_BASE64_WHITESPACE_DELETE = str.maketrans("", "", " \t\r\n\v\f")
+_WORKBENCH_UPLOAD_LOCKS_GUARD = threading.Lock()
+_WORKBENCH_UPLOAD_LOCKS: dict[str, "_WorkbenchUploadLock"] = {}
 _SHOW_SCREENSHOT_DATA_URL_RE = re.compile(
     r"\Adata:(image/(?P<format>png|webp));base64,(?P<data>[A-Za-z0-9+/=]+)\Z",
     re.IGNORECASE,
@@ -54,6 +63,198 @@ class MaterializedShowScreenshot:
     content_type: str
     width: int
     height: int
+
+
+class WorkbenchAttachmentUploadError(ValueError):
+    """A user-correctable workbench attachment upload failure."""
+
+    def __init__(self, code: str, message: str, status: int) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+
+
+@dataclass(frozen=True)
+class MaterializedWorkbenchAttachment:
+    token: str
+    name: str
+    mime: str
+    size: int
+    kind: str
+    path: str
+    width: int | None
+    height: int | None
+    created: bool
+
+
+@dataclass
+class _WorkbenchUploadLock:
+    lock: threading.Lock
+    users: int = 0
+
+
+def normalize_workbench_upload_id(value: object) -> str | None:
+    """Validate the optional stable browser key used for upload retries."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or _WORKBENCH_UPLOAD_ID_RE.fullmatch(value) is None:
+        raise WorkbenchAttachmentUploadError("invalid_upload", "Upload ID is invalid", 400)
+    return value
+
+
+def decode_legacy_workbench_attachment(data: str) -> io.BytesIO:
+    """Decode the pre-multipart JSON contract without relaxing validation."""
+    encoded_data = data
+    if encoded_data.startswith("data:") and "," in encoded_data:
+        encoded_data = encoded_data.split(",", 1)[1]
+    encoded_data = encoded_data.translate(_WORKBENCH_BASE64_WHITESPACE_DELETE)
+    max_encoded_bytes = ((MAX_WORKBENCH_ATTACHMENT_BYTES + 2) // 3) * 4
+    if len(encoded_data) > max_encoded_bytes:
+        raise WorkbenchAttachmentUploadError(
+            "too_large",
+            "Attachment exceeds the size limit",
+            413,
+        )
+    try:
+        return io.BytesIO(base64.b64decode(encoded_data, validate=True))
+    except (binascii.Error, ValueError) as exc:
+        raise WorkbenchAttachmentUploadError(
+            "invalid_upload",
+            "Attachment data is invalid",
+            400,
+        ) from exc
+
+
+@contextmanager
+def workbench_attachment_upload_lock(session_id: str, upload_id: str | None):
+    """Serialize retries for one upload key without serializing other files."""
+    if upload_id is None:
+        yield
+        return
+    key = f"{session_id}\0{upload_id}"
+    with _WORKBENCH_UPLOAD_LOCKS_GUARD:
+        entry = _WORKBENCH_UPLOAD_LOCKS.get(key)
+        if entry is None:
+            entry = _WorkbenchUploadLock(lock=threading.Lock())
+            _WORKBENCH_UPLOAD_LOCKS[key] = entry
+        entry.users += 1
+    entry.lock.acquire()
+    try:
+        yield
+    finally:
+        entry.lock.release()
+        with _WORKBENCH_UPLOAD_LOCKS_GUARD:
+            entry.users -= 1
+            if entry.users == 0:
+                _WORKBENCH_UPLOAD_LOCKS.pop(key, None)
+
+
+def materialize_workbench_attachment(
+    conn: Connection,
+    *,
+    scope_id: str | None,
+    session_id: str,
+    file_name: object,
+    content_type: object,
+    source: BinaryIO,
+    upload_id: object = None,
+) -> MaterializedWorkbenchAttachment:
+    """Stream one browser upload to disk and register its media capability.
+
+    The multipart parser already enforces the same cap while receiving the body;
+    this second boundary also covers the legacy JSON compatibility path and any
+    future caller that hands us a file-like object directly.
+    """
+    raw_name = file_name.strip() if isinstance(file_name, str) else ""
+    name = raw_name.replace("\\", "/").rsplit("/", 1)[-1].strip() or "upload"
+    raw_mime = content_type.strip() if isinstance(content_type, str) else ""
+    mime = raw_mime[:255] or "application/octet-stream"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "upload"
+    safe_name = safe_name[-160:]
+    stable_upload_id = normalize_workbench_upload_id(upload_id)
+
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path_id = stable_upload_id or uuid.uuid4().hex[:16]
+    if stable_upload_id:
+        for candidate in sorted(upload_dir.glob(f"{stable_upload_id}_*")):
+            if not candidate.is_file():
+                continue
+            candidate_path = str(candidate.resolve())
+            existing = media_service.get_live_user_upload_by_path(
+                conn,
+                session_id=session_id,
+                local_path=candidate_path,
+            )
+            if existing:
+                return MaterializedWorkbenchAttachment(
+                    token=existing["token"],
+                    name=existing.get("file_name") or name,
+                    mime=existing.get("content_type") or mime,
+                    size=existing.get("size_bytes") or candidate.stat().st_size,
+                    kind=existing.get("kind") or "file",
+                    path=candidate_path,
+                    width=existing.get("width_px"),
+                    height=existing.get("height_px"),
+                    created=False,
+                )
+            candidate.unlink(missing_ok=True)
+        for stale_temp in upload_dir.glob(f".{stable_upload_id}.*.tmp"):
+            stale_temp.unlink(missing_ok=True)
+
+    local_path = upload_dir / f"{path_id}_{safe_name}"
+    canonical_path = str(local_path.resolve())
+    temp_path = upload_dir / f".{path_id}.{uuid.uuid4().hex[:8]}.tmp"
+    size = 0
+    try:
+        with temp_path.open("xb") as target:
+            while True:
+                chunk = source.read(_WORKBENCH_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise TypeError("attachment stream must return bytes")
+                size += len(chunk)
+                if size > MAX_WORKBENCH_ATTACHMENT_BYTES:
+                    raise WorkbenchAttachmentUploadError(
+                        "too_large",
+                        "File exceeds the attachment size limit",
+                        413,
+                    )
+                target.write(chunk)
+        if size == 0:
+            raise WorkbenchAttachmentUploadError("empty_file", "File is empty", 400)
+        os.replace(temp_path, local_path)
+        canonical_path = str(local_path.resolve(strict=True))
+        kind = "image" if mime.startswith("image/") else "file"
+        token = media_service.register(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            kind=kind,
+            source="user_upload",
+            local_path=canonical_path,
+            file_name=name,
+            content_type=mime,
+        )
+        row = media_service.get_by_token(conn, token)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        local_path.unlink(missing_ok=True)
+        raise
+
+    return MaterializedWorkbenchAttachment(
+        token=token,
+        name=name,
+        mime=mime,
+        size=size,
+        kind=kind,
+        path=canonical_path,
+        width=row.get("width_px") if row else None,
+        height=row.get("height_px") if row else None,
+        created=True,
+    )
 
 
 def register_agent_reply_media(

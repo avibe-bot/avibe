@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -322,8 +324,6 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     isolated_state,
     tmp_path,
 ):
-    import base64
-
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
@@ -332,14 +332,12 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     upload = client.post(
         f"/api/sessions/{session_id}/attachments",
-        json={
-            "name": "diagram.png",
-            "mime": "image/png",
-            "data": base64.b64encode(b"attachment-bytes").decode("ascii"),
-        },
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("diagram.png", b"attachment-bytes", "image/png")},
         headers=headers,
         base_url="http://127.0.0.1:15131",
     )
+    assert upload.status_code == 201
 
     with patch("vibe.internal_client.dispatch_async", dispatch):
         response = client.post(
@@ -1668,13 +1666,14 @@ def test_patch_session_rejects_unknown_target_scope_as_invalid_value(isolated_st
     assert response.status_code == 400
 
 
-def test_standalone_session_accepts_attachment_upload(isolated_state):
+def test_standalone_session_accepts_attachment_upload(isolated_state, monkeypatch):
     import base64
+    import threading
 
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from storage.models import media_objects
-    from vibe.ui_server import app
+    from vibe import ui_server
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1685,13 +1684,44 @@ def test_standalone_session_accepts_attachment_upload(isolated_state):
             visibility="foreground",
         )
 
-    client = app.test_client()
+    loop_threads: list[int] = []
+    engine_threads: list[int] = []
+    session_threads: list[int] = []
+    decode_threads: list[int] = []
+    original_dispatch = ui_server._dispatch_native_ui_request
+    original_projects_engine = ui_server._projects_engine
+    original_get_session = sessions_service.get_session
+    original_b64decode = base64.b64decode
+
+    async def tracked_dispatch(starlette_request, handler):
+        loop_threads.append(threading.get_ident())
+        return await original_dispatch(starlette_request, handler)
+
+    def tracked_projects_engine():
+        engine_threads.append(threading.get_ident())
+        return original_projects_engine()
+
+    def tracked_get_session(*args, **kwargs):
+        session_threads.append(threading.get_ident())
+        return original_get_session(*args, **kwargs)
+
+    def tracked_b64decode(*args, **kwargs):
+        decode_threads.append(threading.get_ident())
+        return original_b64decode(*args, **kwargs)
+
+    monkeypatch.setattr(ui_server, "_dispatch_native_ui_request", tracked_dispatch)
+    monkeypatch.setattr(ui_server, "_projects_engine", tracked_projects_engine)
+    monkeypatch.setattr(sessions_service, "get_session", tracked_get_session)
+    monkeypatch.setattr(base64, "b64decode", tracked_b64decode)
+
+    client = ui_server.app.test_client()
     response = client.post(
         f"/api/sessions/{session['id']}/attachments",
         json={
             "name": "standalone.txt",
             "mime": "text/plain",
-            "data": base64.b64encode(b"standalone upload").decode("ascii"),
+            "data": "data:text/plain;base64,"
+            + base64.b64encode(b"standalone upload").decode("ascii"),
         },
         headers=csrf_headers(client),
     )
@@ -1704,6 +1734,343 @@ def test_standalone_session_accepts_attachment_upload(isolated_state):
         ).mappings().one()
     assert row["scope_id"] is None
     assert row["session_id"] == session["id"]
+    assert len(loop_threads) == 1
+    assert engine_threads
+    assert session_threads
+    assert decode_threads
+    assert all(
+        thread_id != loop_threads[0]
+        for thread_id in (*engine_threads, *session_threads, *decode_threads)
+    )
+
+
+def test_legacy_attachment_upload_preserves_json_contract(isolated_state, tmp_path, monkeypatch):
+    import base64
+
+    from core import workbench_media
+    from storage import media_service
+    from storage.db import create_sqlite_engine
+    from vibe.ui_server import app
+
+    raw = b"legacy upload"
+    monkeypatch.setattr(workbench_media, "MAX_WORKBENCH_ATTACHMENT_BYTES", len(raw))
+    encoded = base64.b64encode(raw).decode("ascii")
+    wrapped = " \t\r\n\v\f".join(encoded[index : index + 4] for index in range(0, len(encoded), 4))
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        content=json.dumps(
+            {
+                "name": "legacy.txt",
+                "mime": "text/plain",
+                "data": f"data:text/plain;base64,{wrapped}",
+            }
+        ),
+        headers={
+            **csrf_headers(client),
+            "Content-Type": "application/vnd.avibe+json; charset=utf-8",
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["size"] == len(raw)
+    with create_sqlite_engine().connect() as conn:
+        row = media_service.get_by_token(conn, payload["token"])
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == raw
+
+
+def test_legacy_attachment_upload_rejects_invalid_base64(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        json={"name": "broken.txt", "mime": "text/plain", "data": "aGVs!bG8="},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "invalid_upload"
+
+
+def test_legacy_attachment_upload_rejects_oversized_base64(isolated_state, tmp_path, monkeypatch):
+    import base64
+
+    from core import workbench_media
+    from vibe.ui_server import app
+
+    monkeypatch.setattr(workbench_media, "MAX_WORKBENCH_ATTACHMENT_BYTES", 4)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        json={
+            "name": "large.txt",
+            "mime": "text/plain",
+            "data": base64.b64encode(b"1234567").decode("ascii"),
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json()["code"] == "too_large"
+    assert response.get_json()["max_file_bytes"] == 4
+
+
+def test_attachment_upload_preserves_unicode_name_and_binary_body(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("报告.txt", b"raw-binary\x00body", "text/plain")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["name"] == "报告.txt"
+    assert payload["mime"] == "text/plain"
+    assert payload["size"] == 15
+
+    from storage import media_service
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().connect() as conn:
+        row = media_service.get_by_token(conn, payload["token"])
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == b"raw-binary\x00body"
+
+
+def test_attachment_upload_rejects_oversized_part_without_partial_file(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from config import paths
+    from core import workbench_media
+    from vibe.ui_server import app
+
+    monkeypatch.setattr(workbench_media, "MAX_WORKBENCH_ATTACHMENT_BYTES", 4)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": {
+            "code": "too_large",
+            "message": "The file exceeds the attachment size limit.",
+        },
+        "code": "too_large",
+        "message": "The file exceeds the attachment size limit.",
+        "max_file_bytes": 4,
+    }
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert not upload_dir.exists() or not list(upload_dir.iterdir())
+
+
+def test_attachment_upload_cleans_partial_file_after_registration_failure(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from config import paths
+    from storage import media_service
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    def fail_register(*_args, **_kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(media_service, "register", fail_register)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 500
+    assert response.get_json()["error"]["code"] == "upload_failed"
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert not upload_dir.exists() or not list(upload_dir.iterdir())
+
+
+def test_attachment_upload_cleans_failed_commit_before_releasing_upload_lock(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from config import paths
+    from core import workbench_media
+    from storage import media_service
+    from storage.db import create_sqlite_engine
+    from vibe import ui_server
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    original_begin = engine.begin
+    original_lock = workbench_media.workbench_attachment_upload_lock
+    original_unlink = Path.unlink
+    fail_commit = True
+    lock_held = False
+    cleanup_lock_states: list[bool] = []
+
+    @contextmanager
+    def fail_first_commit():
+        nonlocal fail_commit
+        with original_begin() as conn:
+            yield conn
+            if fail_commit:
+                fail_commit = False
+                raise OSError("commit failed")
+
+    @contextmanager
+    def tracked_upload_lock(*args, **kwargs):
+        nonlocal lock_held
+        with original_lock(*args, **kwargs):
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+    def tracked_unlink(path: Path, *args, **kwargs):
+        if path.name.startswith("upload-id-123456_"):
+            cleanup_lock_states.append(lock_held)
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "begin", fail_first_commit)
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: engine)
+    monkeypatch.setattr(
+        workbench_media,
+        "workbench_attachment_upload_lock",
+        tracked_upload_lock,
+    )
+    monkeypatch.setattr(Path, "unlink", tracked_unlink)
+
+    client = ui_server.app.test_client()
+    headers = csrf_headers(client)
+    first = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"first", "text/plain")},
+        headers=headers,
+    )
+    retried = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"retry", "text/plain")},
+        headers=headers,
+    )
+
+    assert first.status_code == 500
+    assert cleanup_lock_states == [True]
+    assert retried.status_code == 201
+    with engine.connect() as conn:
+        row = media_service.get_by_token(conn, retried.get_json()["token"])
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == b"retry"
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert list(upload_dir.iterdir()) == [Path(row["local_path"])]
+
+
+def test_attachment_upload_retry_reuses_committed_file_and_token(isolated_state, tmp_path):
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.models import media_objects
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    first = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=headers,
+    )
+    retried = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=headers,
+    )
+
+    assert first.status_code == 201
+    assert retried.status_code == 200
+    assert retried.get_json()["token"] == first.get_json()["token"]
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert len(list(upload_dir.iterdir())) == 1
+    with create_sqlite_engine().connect() as conn:
+        rows = conn.execute(
+            select(media_objects.c.token).where(
+                media_objects.c.session_id == session_id,
+                media_objects.c.source == "user_upload",
+            )
+        ).all()
+    assert rows == [(first.get_json()["token"],)]
+
+
+def test_attachment_upload_errors_follow_configured_language(isolated_state, monkeypatch):
+    import threading
+
+    from core.services import settings as settings_service
+    from vibe import ui_server
+
+    loop_threads: list[int] = []
+    config_threads: list[int] = []
+    original_dispatch = ui_server._dispatch_native_ui_request
+
+    async def tracked_dispatch(starlette_request, handler):
+        loop_threads.append(threading.get_ident())
+        return await original_dispatch(starlette_request, handler)
+
+    def load_config():
+        config_threads.append(threading.get_ident())
+        return SimpleNamespace(language="zh")
+
+    monkeypatch.setattr(ui_server, "_dispatch_native_ui_request", tracked_dispatch)
+    monkeypatch.setattr(
+        settings_service,
+        "load_config_or_default",
+        load_config,
+    )
+    client = ui_server.app.test_client()
+
+    response = client.post(
+        "/api/sessions/ses_missing/attachments",
+        data={"upload_id": "upload-id-123456"},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"] == {
+        "code": "session_not_found",
+        "message": "当前会话已不可用。",
+    }
+    assert len(loop_threads) == 1
+    assert config_threads
+    assert all(thread_id != loop_threads[0] for thread_id in config_threads)
 
 
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):

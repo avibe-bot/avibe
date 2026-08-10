@@ -224,6 +224,14 @@
       }
     },
     "sessionArchived": "该会话已归档，无法再修改。",
+    "workbenchAttachment": {
+      "session_not_found": "当前会话已不可用。",
+      "file_required": "请选择要上传的文件。",
+      "empty_file": "不能上传空文件。",
+      "too_large": "文件超过附件大小限制。",
+      "invalid_upload": "文件上传请求无效。",
+      "upload_failed": "文件保存失败，请重试。"
+    },
     "agentArchive": {
       "agent_builtin": {
         "message": "Agent `{agent}` 是内置 Agent，无法删除。",
