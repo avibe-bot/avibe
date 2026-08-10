@@ -5,7 +5,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import Connection
@@ -1451,13 +1451,16 @@ def materialize_steer_acceptance(
     return accepted
 
 
-def mark_attempt_unknown(
+def mark_attempt_receipt(
     conn: Connection,
     delivery_id: str,
     *,
     expected_version: int,
+    outcome: Literal["accepted", "unknown"],
     receipt: dict[str, Any],
 ) -> dict[str, Any] | None:
+    if outcome not in {"accepted", "unknown"}:
+        raise ValueError(f"unsupported steer receipt outcome: {outcome}")
     delivery = get_delivery(conn, delivery_id)
     if delivery is None:
         return None
@@ -1471,17 +1474,72 @@ def mark_attempt_unknown(
         expected_states=("steering",),
         values={
             "state": "reconciling_steer",
-            "current_receipt_outcome": "unknown",
+            "current_receipt_outcome": outcome,
             "current_receipt_json": _canonical_json(receipt),
         },
         history_event={
             "kind": kind or "attempt",
             "attempt_id": delivery.get("current_attempt_id"),
             "turn_id": delivery.get("current_target_turn_id"),
-            "outcome": "unknown",
+            "outcome": outcome,
             "receipt": receipt,
         },
     )
+
+
+def mark_attempt_unknown(
+    conn: Connection,
+    delivery_id: str,
+    *,
+    expected_version: int,
+    receipt: dict[str, Any],
+) -> dict[str, Any] | None:
+    return mark_attempt_receipt(
+        conn,
+        delivery_id,
+        expected_version=expected_version,
+        outcome="unknown",
+        receipt=receipt,
+    )
+
+
+def mark_attempt_receipt_batch(
+    conn: Connection,
+    *,
+    leader_delivery_id: str,
+    outcome: Literal["accepted", "unknown"],
+    receipt: dict[str, Any],
+) -> list[dict[str, Any]]:
+    leader = get_delivery(conn, leader_delivery_id)
+    attempt_id = str((leader or {}).get("current_attempt_id") or "")
+    if not attempt_id:
+        return []
+    rows = attempt_deliveries(conn, attempt_id)
+    if not rows or any(
+        row["state"] not in {"steering", "reconciling_steer"}
+        or (
+            row["state"] == "reconciling_steer"
+            and row.get("current_receipt_outcome") != outcome
+        )
+        for row in rows
+    ):
+        return []
+    saved_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if row["state"] == "reconciling_steer":
+            saved_rows.append(row)
+            continue
+        saved = mark_attempt_receipt(
+            conn,
+            str(row["id"]),
+            expected_version=int(row["version"]),
+            outcome=outcome,
+            receipt=receipt,
+        )
+        if saved is None:
+            raise RuntimeError("steer Delivery batch receipt persistence CAS lost")
+        saved_rows.append(saved)
+    return saved_rows
 
 
 def record_definitive_attempt(

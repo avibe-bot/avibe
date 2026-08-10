@@ -2465,7 +2465,7 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
     managers,
     monkeypatch,
 ) -> None:
-    """MESSAGE-DELIVERY-011: adapter acceptance is may-have-written after DB loss."""
+    """MESSAGE-DELIVERY-011: accepted evidence recovers without adapter reconciliation."""
 
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
@@ -2491,22 +2491,18 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
         )
     )
     monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
+    persisted = _row(engine, str(outcome.delivery_id))
+    assert persisted["state"] == "reconciling_steer"
+    assert persisted["current_receipt_outcome"] == "accepted"
     restarted._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
-
-    async def reconcile(_backend, request):
-        assert request.attempt_id
-        assert request.expected_logical_turn_id == turn_id
-        return steer_result(
-            SteerOutcome.ACCEPTED,
-            reason="native_attempt_found",
-            native_message_id=request.attempt_id,
-        )
-
-    restarted._reconcile_steer_attempt = reconcile
+    restarted._reconcile_steer_attempt = AsyncMock(
+        side_effect=AssertionError("accepted evidence must not reconcile")
+    )
     asyncio.run(restarted.recover_durable_delivery_state())
 
     row = _row(engine, str(outcome.delivery_id))
     assert calls == 1
+    restarted._reconcile_steer_attempt.assert_not_awaited()
     assert row["state"] == "accepted"
     assert row["turn_id"] == turn_id
     assert row["current_attempt_id"] is None
@@ -2517,9 +2513,146 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
     assert message["content_text"] == "accepted once"
 
 
-def test_missing_restart_evidence_keeps_unknown_without_resteer(
+def test_observation_recovery_materializes_persisted_accepted_receipt_without_reconcile(
     managers,
     monkeypatch,
+) -> None:
+    """MESSAGE-DELIVERY-311: observation recovery consumes accepted evidence directly."""
+
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(first))
+    first._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
+    first._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = delivery_store.materialize_steer_acceptance
+
+    def lose_receipt(*_args, **_kwargs):
+        raise OSError("simulated receipt fsync loss")
+
+    monkeypatch.setattr(
+        delivery_store,
+        "materialize_steer_acceptance",
+        lose_receipt,
+    )
+    outcome = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="observed"),
+            context=_context(),
+        )
+    )
+    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
+    observations, _ = restarted.scan_runtime_delivery_recovery(
+        limit=10,
+        occupied=frozenset(),
+    )
+    observation = next(
+        item for item in observations if item.delivery_id == str(outcome.delivery_id)
+    )
+    restarted._reconcile_steer_attempt = AsyncMock(
+        side_effect=AssertionError("accepted evidence must not reconcile")
+    )
+
+    assert asyncio.run(restarted.recover_runtime_delivery_observation(observation))
+    restarted._reconcile_steer_attempt.assert_not_awaited()
+    row = _row(engine, str(outcome.delivery_id))
+    assert row["state"] == "accepted"
+    assert row["turn_id"] == turn_id
+
+
+def test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment(
+    managers,
+    monkeypatch,
+) -> None:
+    """MESSAGE-DELIVERY-313: accepted batch recovery retains Turn participants."""
+
+    first, restarted, engine, _engine_b, _starts = managers
+    original = delivery_store.materialize_steer_acceptance
+    run_id = "run-accepted-receipt-batch"
+
+    async def run() -> tuple[str, list[str], MessageContext]:
+        turn_id, active_context = await _activate(first)
+        queued = [
+            await first.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    source="harness",
+                    author="harness",
+                    message_type="harness",
+                ),
+                context=_context(),
+            )
+            for text in ("batch one", "batch two")
+        ]
+        now = "2026-08-11T00:00:00Z"
+        with engine.begin() as conn:
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    delivery_id=queued[1].delivery_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+        first._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+        def lose_receipt(*_args, **_kwargs):
+            raise OSError("simulated receipt fsync loss")
+
+        monkeypatch.setattr(
+            delivery_store,
+            "materialize_steer_acceptance",
+            lose_receipt,
+        )
+        await first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content=None),
+            context=_context(),
+        )
+        monkeypatch.setattr(
+            delivery_store,
+            "materialize_steer_acceptance",
+            original,
+        )
+        delivery_ids = [str(item.delivery_id) for item in queued]
+        persisted = [_row(engine, delivery_id) for delivery_id in delivery_ids]
+        assert {row["state"] for row in persisted} == {"reconciling_steer"}
+        assert {row["current_receipt_outcome"] for row in persisted} == {
+            "accepted"
+        }
+        assert len({row["current_attempt_id"] for row in persisted}) == 1
+
+        holder = asyncio.create_task(asyncio.Event().wait())
+        restarted.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=active_context,
+            logical_turn_id=turn_id,
+        )
+        restarted._reconcile_steer_attempt = AsyncMock(
+            side_effect=AssertionError("accepted evidence must not reconcile")
+        )
+        await restarted.recover_durable_delivery_state()
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return turn_id, delivery_ids, active_context
+
+    turn_id, delivery_ids, active_context = asyncio.run(run())
+    restarted._reconcile_steer_attempt.assert_not_awaited()
+    accepted = [_row(engine, delivery_id) for delivery_id in delivery_ids]
+    assert {row["state"] for row in accepted} == {"accepted"}
+    assert {row["turn_id"] for row in accepted} == {turn_id}
+    assert len({row["message_id"] for row in accepted}) == 1
+    assert [row["turn_position"] for row in accepted] == [1, 2]
+    assert active_context.platform_specific["accepted_agent_run_ids"] == [run_id]
+
+
+def test_missing_restart_evidence_keeps_unknown_without_resteer(
+    managers,
 ) -> None:
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
@@ -2527,25 +2660,18 @@ def test_missing_restart_evidence_keeps_unknown_without_resteer(
     steer_calls = 0
     reconciliation_calls = 0
 
-    async def accepted(_backend, _request):
+    async def unknown(_backend, _request):
         nonlocal steer_calls
         steer_calls += 1
-        return steer_result(SteerOutcome.ACCEPTED)
+        return steer_result(SteerOutcome.UNKNOWN, reason="evidence_unavailable")
 
-    first._steer = accepted
-    original = delivery_store.materialize_steer_acceptance
-
-    def lose_receipt(*args, **kwargs):
-        raise OSError("simulated receipt fsync loss")
-
-    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", lose_receipt)
+    first._steer = unknown
     outcome = asyncio.run(
         first.deliver(
             DeliveryRequest(session_id="ses_fsm", priority="p1", content="still unknown"),
             context=_context(),
         )
     )
-    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
     restarted._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
 
     async def reconcile(_backend, request):

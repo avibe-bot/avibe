@@ -2053,15 +2053,17 @@ def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("outcome", "headline_key"),
+    ("outcome", "definition_enabled", "headline_key"),
     [
-        ("event", "harness.notice.watchProcessingFailed"),
-        ("waiter_failure", "harness.notice.watchFailureReportFailed"),
+        ("event", True, "harness.notice.watchProcessingFailed"),
+        ("waiter_failure", False, "harness.notice.watchFailureReportFailed"),
+        ("circuit_repair", False, "harness.notice.watchCircuitRepairFailed"),
     ],
 )
 def test_watch_notice_copy_preserves_the_waiter_outcome(
     tmp_path: Path,
     outcome: str,
+    definition_enabled: bool,
     headline_key: str,
 ) -> None:
     """A failed reporting Turn cannot turn a waiter failure into an event."""
@@ -2073,7 +2075,12 @@ def test_watch_notice_copy_preserves_the_waiter_outcome(
     from vibe.i18n import t as i18n_t
 
     sqlite, requests = _store(tmp_path)
-    _watch(sqlite, "watch-copy", name="CI waiter")
+    _watch(
+        sqlite,
+        "watch-copy",
+        name="CI waiter",
+        enabled=definition_enabled,
+    )
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     store._sqlite = sqlite
     store.load()
@@ -2109,6 +2116,61 @@ def test_watch_notice_copy_preserves_the_waiter_outcome(
     assert i18n_t(headline_key, "en").split("{")[0] in body
     if outcome == "waiter_failure":
         assert "detected an event" not in body
+
+
+@pytest.mark.parametrize("definition_state", ["resumed", "deleted"])
+def test_circuit_repair_failure_copy_does_not_claim_a_stale_pause_state(
+    tmp_path: Path,
+    definition_state: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    from storage.background import WATCH_HOOK_OUTCOME_METADATA_KEY
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-repair-state", name="Disk waiter", enabled=True)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    run = requests.enqueue_hook_send(
+        session_key="slack::channel::C1",
+        prompt="repair the Watch",
+        run_type="watch",
+        definition_id="watch-repair-state",
+        metadata={WATCH_HOOK_OUTCOME_METADATA_KEY: "circuit_repair"},
+    )
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(
+        claimed,
+        ok=False,
+        error="repair Agent failed",
+        task_id="watch-repair-state",
+    )
+    if definition_state == "deleted":
+        assert sqlite.remove_task("watch-repair-state")
+
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service.controller = SimpleNamespace(
+        platform_settings_managers={},
+        session_turn_gate=None,
+    )
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    body = service._failure_notice_body(
+        sqlite.get_run(run.id),
+        sqlite.owed_failure_notice(run.id),
+    )
+
+    generic = i18n_t("harness.notice.watchFollowUpFailed", "en").format(
+        name="Disk waiter" if definition_state == "resumed" else "watch-repair-state"
+    )
+    assert generic in body
+    assert "remains paused" not in body
 
 
 def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
@@ -12287,17 +12349,56 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
         runtime_store=runtime_store,
     )
 
+    # HFR-464 serializes Watch follow-ups. This scenario is about failure-notice
+    # deduplication, so settle each event Run before allowing the next event and
+    # remove the unrelated five-second production cooldown from the test clock.
+    monkeypatch.setattr("core.watches.WATCH_MIN_REARM_SECONDS", 0)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    executor = _execution_service(tmp_path, controller, sqlite, requests)
+
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: len(_watch_hook_runs(requests)) == 1,
+        )
+    )
+    first_hook = _watch_hook_runs(requests)[0]
+    first_claim = requests.claim(first_hook.id)
+    assert first_claim is not None
+    asyncio.run(executor._execute_claimed_request(first_claim))
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: len(_watch_hook_runs(requests)) == 1,
+        )
+    )
+    second_hook = _watch_hook_runs(requests)[0]
+    second_claim = requests.claim(second_hook.id)
+    assert second_claim is not None
+    asyncio.run(executor._execute_claimed_request(second_claim))
+
     def _ready() -> bool:
         row = watch_store.get_watch(watch.id)
-        return (
-            len(_watch_hook_runs(requests)) >= 2
-            and row is not None
-            and row.last_exit_code == 75
-        )
+        return row is not None and row.last_exit_code == 75
 
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
     asyncio.run(_drive_watch_service(service, watch.id, until=_ready, limit=800))
 
-    hooks = sorted(_watch_hook_runs(requests), key=lambda row: (row.created_at, row.id))
+    hooks = [first_hook, second_hook]
     assert len(hooks) == 2, f"two events must queue two follow-up deliveries: {hooks}"
 
     saved = watch_store.get_watch(watch.id)
@@ -12312,13 +12413,6 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert saved.last_error == sentinel and saved.last_exit_code == 75, (
         f"the premise for the last assertion below — the last cycle was a retry: {saved}"
     )
-
-    controller, _dispatcher, _touched = _live_turn_dispatcher()
-    executor = _execution_service(tmp_path, controller, sqlite, requests)
-    for hook in hooks:
-        claimed = requests.claim(hook.id)
-        assert claimed is not None
-        asyncio.run(executor._execute_claimed_request(claimed))
 
     for hook in hooks:
         run = sqlite.get_run(hook.id)

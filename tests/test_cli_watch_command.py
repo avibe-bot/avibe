@@ -107,6 +107,12 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "watches follow up in this conversation by default" in captured.out
     assert "Prefer --message or --message-file for follow-up instructions" in captured.out
     assert "Terminal failures also send a follow-up and disable the watch." in captured.out
+    assert "an allowed `--retry-exit-code` keeps waiting" in captured.out
+    assert "A once Watch stops after its first event" in captured.out
+    assert "five-second safety delay" in captured.out
+    assert "automatically pause the Watch" in captured.out
+    assert "a once Watch ends and a forever Watch re-arms" in captured.out
+    assert "A once waiter that is still waiting must use a retry exit code" in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
@@ -224,7 +230,10 @@ def test_watch_add_missing_command_is_structured_json() -> None:
     assert payload["help_command"] == "vibe watch add --help"
 
 
-def test_watch_add_rejects_lifetime_timeout_without_forever() -> None:
+def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
+    tmp_path: Path,
+    capsys,
+) -> None:
     args = _parse_watch_add(
         [
             "--session-key",
@@ -236,11 +245,25 @@ def test_watch_add_rejects_lifetime_timeout_without_forever() -> None:
         ]
     )
 
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *values, **kwargs: _startup_ok(
+                store, runtime_store, values[2]
+            ),
+        ),
+    ):
+        result = cli.cmd_watch_add(args)
 
-    assert result == 1
-    assert payload["code"] == "invalid_watch_lifetime_timeout"
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["definition"]["mode"] == "once"
+    assert payload["definition"]["lifetime_timeout_seconds"] == 10
 
 
 def test_watch_add_rejects_missing_cwd() -> None:
@@ -456,6 +479,12 @@ def test_remote_watch_add_is_rejected_without_startup_or_persistence(
                 "authorization_expires_at": 1_900_043_200,
             }
         ),
+        "AVIBE_CALLER_PLATFORM": "",
+        "AVIBE_CALLER_USER_ID": "",
+        "AVIBE_CALLER_CHANNEL_ID": "",
+        "AVIBE_CALLER_SESSION_KEY": "",
+        "AVIBE_CALLER_MESSAGE_ID": "",
+        "AVIBE_CALLER_WORKSPACE_ID": "",
     }
 
     startup_calls: list[str] = []
