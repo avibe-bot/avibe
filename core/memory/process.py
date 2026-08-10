@@ -112,7 +112,11 @@ class _ProviderRootLock:
         self._descriptor: int | None = None
 
     def acquire(self) -> None:
-        ensure_private_directory(self._confinement_root, self._path.parent)
+        ensure_private_directory(
+            self._confinement_root,
+            self._path.parent,
+            harden_confinement_root=False,
+        )
         try:
             descriptor = create_confined_file(
                 self._confinement_root,

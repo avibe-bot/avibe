@@ -2426,6 +2426,7 @@ def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
 async def test_rebuild_refuses_a_provider_root_locked_by_another_process(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     (memory_dir / "everos-root").mkdir(parents=True)
+    memory_dir.chmod(0o700)
     lock_path = memory_process._provider_rebuild_lock_path(
         provider_root=memory_dir / "everos-root",
     )
@@ -2474,6 +2475,7 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
     provider_root = tmp_path / "shared" / "everos-root"
     owner_home = tmp_path / "owner-home"
     contender_home = tmp_path / "contender-home"
+    provider_root.parent.mkdir(mode=0o700)
     owner_home.mkdir(mode=0o700)
     contender_home.mkdir(mode=0o700)
     script = "\n".join(
@@ -2558,6 +2560,7 @@ async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) ->
     memory_dir = tmp_path / "memory"
     provider_root = tmp_path / "memory" / "everos-root"
     provider_root.mkdir(parents=True)
+    memory_dir.chmod(0o700)
     sentinel = tmp_path / "outside.txt"
     sentinel.write_text("must stay intact", encoding="utf-8")
     lock_path = memory_process._provider_rebuild_lock_path(
@@ -2570,6 +2573,27 @@ async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) ->
     assert await _rebuild_process(tmp_path, host).run() is RebuildProcessResult.FAILED
     assert host.spawn_calls == []
     assert sentinel.read_text(encoding="utf-8") == "must stay intact"
+
+
+async def test_rebuild_refuses_nonprivate_provider_parent_without_changing_its_mode(
+    tmp_path: Path,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o755)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o700)
+    host = _FakeProcessHost()
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        provider_root=provider_root,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.FAILED
+    assert host.spawn_calls == []
+    assert stat.S_IMODE(provider_parent.stat().st_mode) == 0o755
 
 
 async def test_rebuild_holds_provider_root_lock_through_child_retirement(tmp_path: Path) -> None:
