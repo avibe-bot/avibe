@@ -116,6 +116,130 @@ class SourceObservation:
     model_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ObservationTerminalRule:
+    """Complete legal product for one response-backed observation outcome."""
+
+    reachable: frozenset[bool | None]
+    authenticated: frozenset[bool | None]
+    protocols: frozenset[str | None]
+    discoveries: frozenset[ObservationDiscovery]
+    models_must_be_empty: bool
+
+
+OBSERVATION_TERMINAL_RULES: Mapping[
+    ObservationOutcome,
+    ObservationTerminalRule,
+] = {
+    ObservationOutcome.OBSERVED: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({True}),
+        protocols=frozenset(SOURCE_PROTOCOLS),
+        discoveries=frozenset(
+            {
+                ObservationDiscovery.SUCCEEDED,
+                ObservationDiscovery.FAILED,
+            }
+        ),
+        models_must_be_empty=False,
+    ),
+    ObservationOutcome.AMBIGUOUS: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({True, None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.UNREACHABLE: ObservationTerminalRule(
+        reachable=frozenset({False}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.AUTHENTICATION_FAILED: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({False}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.ADAPTER_ERROR: ObservationTerminalRule(
+        reachable=frozenset({True, None}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.TIMEOUT: ObservationTerminalRule(
+        reachable=frozenset({None}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+}
+
+
+def validate_source_observation(observation: object) -> SourceObservation:
+    """Validate an adapter result against the sole terminal-product authority."""
+
+    if not isinstance(observation, SourceObservation):
+        raise TypeError("invalid SourceObservation")
+    if not isinstance(observation.outcome, ObservationOutcome):
+        raise ValueError("invalid SourceObservation outcome")
+    if not isinstance(observation.discovery, ObservationDiscovery):
+        raise ValueError("invalid SourceObservation discovery")
+    if observation.reachable is not None and not isinstance(observation.reachable, bool):
+        raise ValueError("invalid SourceObservation reachability")
+    if observation.authenticated is not None and not isinstance(
+        observation.authenticated,
+        bool,
+    ):
+        raise ValueError("invalid SourceObservation authentication")
+    if not isinstance(observation.model_ids, tuple) or any(
+        not isinstance(model_id, str) or not model_id for model_id in observation.model_ids
+    ):
+        raise ValueError("invalid SourceObservation inventory")
+    if len(set(observation.model_ids)) != len(observation.model_ids):
+        raise ValueError("invalid SourceObservation inventory")
+
+    rule = OBSERVATION_TERMINAL_RULES[observation.outcome]
+    if (
+        observation.reachable not in rule.reachable
+        or observation.authenticated not in rule.authenticated
+        or observation.protocol not in rule.protocols
+        or observation.discovery not in rule.discoveries
+        or (rule.models_must_be_empty and observation.model_ids)
+        or (observation.discovery is ObservationDiscovery.FAILED and observation.model_ids)
+    ):
+        raise ValueError("invalid SourceObservation terminal product")
+    return observation
+
+
+def make_source_observation(
+    *,
+    outcome: ObservationOutcome,
+    reachable: bool | None,
+    authenticated: bool | None,
+    protocol: str | None,
+    discovery: ObservationDiscovery,
+    model_ids: Sequence[str],
+) -> SourceObservation:
+    """Construct an adapter result through the terminal-product authority."""
+
+    return validate_source_observation(
+        SourceObservation(
+            outcome=outcome,
+            reachable=reachable,
+            authenticated=authenticated,
+            protocol=protocol,
+            discovery=discovery,
+            model_ids=tuple(model_ids),
+        )
+    )
+
+
 class RetainedMaterialDisposition(str, Enum):
     NONE = "none"
     FLOW_SOURCE_REF = "flow_source_ref"

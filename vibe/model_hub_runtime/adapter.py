@@ -25,6 +25,7 @@ from core.handlers.model_hub.adapter import (
     SOURCE_PROTOCOLS,
     SourceObservation,
     SourceBinding,
+    make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from vibe.model_hub_runtime.client import (
@@ -824,7 +825,7 @@ class CLIProxyEngineAdapter:
                 models = ()
             else:
                 discovery = ObservationDiscovery.SUCCEEDED
-            return SourceObservation(
+            return make_source_observation(
                 outcome=ObservationOutcome.OBSERVED,
                 reachable=True,
                 authenticated=True,
@@ -834,7 +835,7 @@ class CLIProxyEngineAdapter:
             )
 
         if received_rejection:
-            return SourceObservation(
+            return make_source_observation(
                 outcome=ObservationOutcome.AUTHENTICATION_FAILED,
                 reachable=True,
                 authenticated=False,
@@ -843,7 +844,7 @@ class CLIProxyEngineAdapter:
                 model_ids=(),
             )
         if received_proven_unknown:
-            return SourceObservation(
+            return make_source_observation(
                 outcome=ObservationOutcome.ADAPTER_ERROR,
                 reachable=True,
                 authenticated=None,
@@ -852,7 +853,7 @@ class CLIProxyEngineAdapter:
                 model_ids=(),
             )
         if received_unproven_response:
-            return SourceObservation(
+            return make_source_observation(
                 outcome=ObservationOutcome.AMBIGUOUS,
                 reachable=True,
                 authenticated=None,
@@ -861,7 +862,7 @@ class CLIProxyEngineAdapter:
                 model_ids=(),
             )
         if any(error.error_type == "timeout" for error in failures):
-            return SourceObservation(
+            return make_source_observation(
                 outcome=ObservationOutcome.TIMEOUT,
                 reachable=None,
                 authenticated=None,
@@ -870,7 +871,7 @@ class CLIProxyEngineAdapter:
                 model_ids=(),
             )
         if any(error.error_type in {"network_error", "ConnectionError", "URLError"} for error in failures):
-            return SourceObservation(
+            return make_source_observation(
                 outcome=ObservationOutcome.UNREACHABLE,
                 reachable=False,
                 authenticated=None,
@@ -878,7 +879,7 @@ class CLIProxyEngineAdapter:
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 model_ids=(),
             )
-        return SourceObservation(
+        return make_source_observation(
             outcome=ObservationOutcome.ADAPTER_ERROR,
             reachable=None,
             authenticated=None,

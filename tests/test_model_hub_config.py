@@ -4,6 +4,7 @@ import copy
 import json
 import re
 from dataclasses import fields
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -26,9 +27,12 @@ from config.v2_config import (
 )
 from core.services.settings import default_config
 from core.handlers.model_hub.adapter import (
+    OBSERVATION_TERMINAL_RULES,
     ObservationDiscovery,
     ObservationOutcome,
     SOURCE_PROTOCOLS,
+    SourceObservation,
+    validate_source_observation,
 )
 from scripts.check_model_hub_authorities import check as check_model_hub_authorities
 from vibe import api
@@ -97,6 +101,105 @@ def test_unsaved_observation_schema_closes_all_terminal_shapes():
     invalid["protocol"] = "openai" + "_compatible"
     with pytest.raises(ValidationError):
         Draft7Validator(schema).validate(invalid)
+
+
+def test_observation_terminal_authority_and_schema_accept_the_same_products():
+    schema = Draft7Validator(_schema("observation-result.schema.json"))
+    reachable_domain = frozenset({True, False, None})
+    authenticated_domain = frozenset({True, False, None})
+    protocol_domain = frozenset({None, *SOURCE_PROTOCOLS})
+    discovery_domain = frozenset(ObservationDiscovery)
+
+    def payload(observation: SourceObservation) -> dict:
+        return {
+            "contract_version": 5,
+            "outcome": observation.outcome.value,
+            "reachable": observation.reachable,
+            "authenticated": (
+                "authenticated"
+                if observation.authenticated is True
+                else "rejected"
+                if observation.authenticated is False
+                else "unknown"
+            ),
+            "protocol": observation.protocol,
+            "discovery": observation.discovery.value,
+            "models": list(observation.model_ids),
+        }
+
+    assert set(OBSERVATION_TERMINAL_RULES) == set(ObservationOutcome)
+    for outcome, rule in OBSERVATION_TERMINAL_RULES.items():
+        legal_products = product(
+            rule.reachable,
+            rule.authenticated,
+            rule.protocols,
+            rule.discoveries,
+        )
+        for reachable, authenticated, protocol, discovery in legal_products:
+            observation = SourceObservation(
+                outcome=outcome,
+                reachable=reachable,
+                authenticated=authenticated,
+                protocol=protocol,
+                discovery=discovery,
+                model_ids=(),
+            )
+            assert validate_source_observation(observation) is observation
+            schema.validate(payload(observation))
+
+        baseline = SourceObservation(
+            outcome=outcome,
+            reachable=next(iter(rule.reachable)),
+            authenticated=next(iter(rule.authenticated)),
+            protocol=next(iter(rule.protocols)),
+            discovery=next(iter(rule.discoveries)),
+            model_ids=(),
+        )
+        invalid_fields = {
+            "reachable": reachable_domain - rule.reachable,
+            "authenticated": authenticated_domain - rule.authenticated,
+            "protocol": protocol_domain - rule.protocols,
+            "discovery": discovery_domain - rule.discoveries,
+        }
+        for field_name, rejected_values in invalid_fields.items():
+            for rejected in rejected_values:
+                invalid_observation = SourceObservation(
+                    **{**baseline.__dict__, field_name: rejected}
+                )
+                with pytest.raises(ValueError):
+                    validate_source_observation(invalid_observation)
+                with pytest.raises(ValidationError):
+                    schema.validate(payload(invalid_observation))
+
+        if rule.models_must_be_empty:
+            invalid_inventory = SourceObservation(
+                **{**baseline.__dict__, "model_ids": ("model-id",)}
+            )
+            with pytest.raises(ValueError):
+                validate_source_observation(invalid_inventory)
+            with pytest.raises(ValidationError):
+                schema.validate(payload(invalid_inventory))
+        else:
+            succeeded = SourceObservation(
+                **{
+                    **baseline.__dict__,
+                    "discovery": ObservationDiscovery.SUCCEEDED,
+                    "model_ids": ("model-id",),
+                }
+            )
+            assert validate_source_observation(succeeded) is succeeded
+            schema.validate(payload(succeeded))
+            failed_with_inventory = SourceObservation(
+                **{
+                    **baseline.__dict__,
+                    "discovery": ObservationDiscovery.FAILED,
+                    "model_ids": ("model-id",),
+                }
+            )
+            with pytest.raises(ValueError):
+                validate_source_observation(failed_with_inventory)
+            with pytest.raises(ValidationError):
+                schema.validate(payload(failed_with_inventory))
 
 
 def test_final_model_validator_requires_explicit_credential_free_efforts():

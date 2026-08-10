@@ -93,7 +93,9 @@ reachability, but proves neither protocol nor authentication. Consequently,
 `ambiguous` always has `reachable: true` and `protocol: null`.
 `authentication_failed` also has `protocol: null`, because a rejected credential
 does not establish a persistable protocol. `ambiguous` is the sole outcome that asks
-for the one-time probe-order hint.
+for the one-time probe-order hint. Only `observed` attempts inventory discovery and
+therefore reports `succeeded` or `failed`; every other terminal reports
+`not_attempted` with an empty model list.
 
 ## Identifier rules
 

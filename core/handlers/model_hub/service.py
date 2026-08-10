@@ -50,6 +50,8 @@ from .adapter import (
     SOURCE_PROTOCOLS,
     SourceObservation,
     SourceBinding,
+    make_source_observation,
+    validate_source_observation,
 )
 from .classification import ResolutionDecision, classify_outcome
 from .events import (
@@ -811,67 +813,13 @@ class ModelHubService:
 
     @staticmethod
     def _validate_observation(observation: SourceObservation) -> SourceObservation:
-        if not isinstance(observation, SourceObservation):
+        try:
+            validated = validate_source_observation(observation)
+        except (TypeError, ValueError):
             raise ModelHubError("discovery_failed", status=502)
-        if not isinstance(observation.outcome, ObservationOutcome):
+        if any(contains_credential_material(model_id) for model_id in validated.model_ids):
             raise ModelHubError("discovery_failed", status=502)
-        if not isinstance(observation.discovery, ObservationDiscovery):
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.reachable not in {True, False, None}:
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.authenticated not in {True, False, None}:
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.protocol is not None and observation.protocol not in SOURCE_PROTOCOLS:
-            raise ModelHubError("discovery_failed", status=502)
-        if any(
-            not isinstance(model_id, str)
-            or not model_id
-            or contains_credential_material(model_id)
-            for model_id in observation.model_ids
-        ) or len(set(observation.model_ids)) != len(observation.model_ids):
-            raise ModelHubError("discovery_failed", status=502)
-        expected = {
-            ObservationOutcome.OBSERVED: (frozenset({True}), frozenset({True})),
-            ObservationOutcome.AMBIGUOUS: (
-                frozenset({True}),
-                frozenset({True, None}),
-            ),
-            ObservationOutcome.UNREACHABLE: (
-                frozenset({False}),
-                frozenset({None}),
-            ),
-            ObservationOutcome.AUTHENTICATION_FAILED: (
-                frozenset({True}),
-                frozenset({False}),
-            ),
-            ObservationOutcome.ADAPTER_ERROR: (
-                frozenset({None}),
-                frozenset({None}),
-            ),
-            ObservationOutcome.TIMEOUT: (
-                frozenset({None}),
-                frozenset({None}),
-            ),
-        }[observation.outcome]
-        if (
-            observation.reachable not in expected[0]
-            or observation.authenticated not in expected[1]
-        ):
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.outcome is ObservationOutcome.OBSERVED and observation.protocol is None:
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.outcome is not ObservationOutcome.OBSERVED and observation.outcome is not ObservationOutcome.AUTHENTICATION_FAILED and observation.protocol is not None:
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.outcome in {
-            ObservationOutcome.UNREACHABLE,
-            ObservationOutcome.AUTHENTICATION_FAILED,
-            ObservationOutcome.ADAPTER_ERROR,
-            ObservationOutcome.TIMEOUT,
-        } and observation.discovery is not ObservationDiscovery.NOT_ATTEMPTED:
-            raise ModelHubError("discovery_failed", status=502)
-        if observation.discovery is ObservationDiscovery.FAILED and observation.model_ids:
-            raise ModelHubError("discovery_failed", status=502)
-        return observation
+        return validated
 
     async def _observe_provisioned_credential(
         self,
@@ -888,7 +836,7 @@ class ModelHubService:
                 protocol_order,
             )
         except asyncio.TimeoutError:
-            observation = SourceObservation(
+            observation = make_source_observation(
                 outcome=ObservationOutcome.TIMEOUT,
                 reachable=None,
                 authenticated=None,
@@ -901,7 +849,7 @@ class ModelHubService:
         except asyncio.CancelledError:
             raise
         except Exception:
-            observation = SourceObservation(
+            observation = make_source_observation(
                 outcome=ObservationOutcome.ADAPTER_ERROR,
                 reachable=None,
                 authenticated=None,
@@ -1160,6 +1108,34 @@ class ModelHubService:
             )
         source.models = discovered_models + manual_models
         source.last_discovered_at = discovered_at
+
+    async def _finalize_successful_discovery(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+        source: ModelHubSourceConfig,
+        discovered: list[str],
+        *,
+        force: bool,
+    ) -> tuple[list[dict], list[dict]]:
+        """Apply one successful inventory observation and commit it atomically."""
+
+        manual = [model for model in source.models if model.provenance == "manual"]
+        self._apply_discovered_models(
+            source,
+            manual,
+            discovered,
+            allow_empty=True,
+        )
+        source.state = ModelHubSourceStateConfig(status="standby")
+        removed_hops, interrupted = self._guard_inventory_mutation(
+            previous,
+            updated,
+            source.id,
+            force=force,
+        )
+        await self._commit_synced(previous, updated)
+        return removed_hops, interrupted
 
     async def _commit_new_source_locked(
         self,
@@ -2132,24 +2108,17 @@ class ModelHubService:
             try:
                 source.credential_ref = replacement_ref
                 source.masked_credential = _mask_credential(key)
-                manual = [
-                    model for model in source.models if model.provenance == "manual"
-                ]
                 discovered = await self._discover(source)
-                self._apply_discovered_models(source, manual, discovered)
-                source.state = ModelHubSourceStateConfig(status="standby")
-
-                removed_hops, interrupted = self._guard_inventory_mutation(
-                    previous,
-                    config,
-                    source.id,
-                    force=force,
-                )
-
                 if old_credential_ref != replacement_ref:
                     self.revocations.add(source.id, old_credential_ref)
                     old_revocation_recorded = True
-                await self._commit_synced(previous, config)
+                removed_hops, interrupted = await self._finalize_successful_discovery(
+                    previous,
+                    config,
+                    source,
+                    discovered,
+                    force=force,
+                )
                 committed = True
             except asyncio.CancelledError:
                 committed = self._persisted_credential(
@@ -2246,21 +2215,15 @@ class ModelHubService:
                     source.credential_ref = replacement_ref
                     source.base_url = base_url
                     discovered = await self._discover(source)
-                    manual = [
-                        model
-                        for model in source.models
-                        if model.provenance == "manual"
-                    ]
-                    self._apply_discovered_models(source, manual, discovered)
-                    removed_hops, interrupted = self._guard_inventory_mutation(
-                        previous,
-                        config,
-                        source.id,
-                        force=force,
-                    )
                     self.revocations.add(source.id, old_credential_ref)
                     old_revocation_recorded = True
-                    await self._commit_synced(previous, config)
+                    removed_hops, interrupted = await self._finalize_successful_discovery(
+                        previous,
+                        config,
+                        source,
+                        discovered,
+                        force=force,
+                    )
                     committed = True
                 except asyncio.CancelledError:
                     committed = self._persisted_credential(
@@ -2554,12 +2517,13 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
             try:
                 model_ids = await self._discover(source)
-                manual = [
-                    model
-                    for model in source.models
-                    if model.provenance == "manual"
-                ]
-                self._apply_discovered_models(source, manual, model_ids)
+                removed_hops, would_interrupt = await self._finalize_successful_discovery(
+                    previous,
+                    config,
+                    source,
+                    model_ids,
+                    force=force,
+                )
             except ModelHubError as exc:
                 if exc.code != "discovery_failed":
                     raise
@@ -2578,14 +2542,6 @@ class ModelHubService:
                     now=self.now(),
                 )
                 raise
-            source.state = ModelHubSourceStateConfig(status="standby")
-            removed_hops, would_interrupt = self._guard_inventory_mutation(
-                previous,
-                config,
-                source.id,
-                force=force,
-            )
-            await self._commit_synced(previous, config)
             return {
                 "source": source.to_payload(),
                 "removed_hops": removed_hops,

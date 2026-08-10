@@ -29,6 +29,7 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.events import BoundedEventLog
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
 from core.handlers.model_hub.resolver import (
@@ -74,12 +75,14 @@ class FakeAdapter:
         self.discovered = discovered
         self.observation: SourceObservation | None = None
         self.observation_error: BaseException | None = None
+        self.discovery_error: BaseException | None = None
         self.observed_protocol_orders: list[tuple[str, ...]] = []
         self.revoked: list[str] = []
         self.revoke_error = False
         self.revoke_started: asyncio.Event | None = None
         self.revoke_block: asyncio.Event | None = None
         self.provisioned: list[str] = []
+        self.retargeted: list[tuple[str, str | None, str]] = []
         self.synced: list[tuple] = []
         self.discovery_started: asyncio.Event | None = None
         self.discovery_block: asyncio.Event | None = None
@@ -120,6 +123,17 @@ class FakeAdapter:
             await self.provision_block.wait()
         return f"cred_{len(self.provisioned):08d}"
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref,
+        vendor,
+        protocol,
+        base_url,
+    ):
+        replacement_ref = f"cred_retarget{len(self.retargeted) + 1:04d}"
+        self.retargeted.append((credential_ref, base_url, replacement_ref))
+        return replacement_ref
+
     async def revoke_credential(self, credential_ref):
         if self.revoke_error:
             raise RuntimeError("injected revoke failure")
@@ -145,6 +159,8 @@ class FakeAdapter:
             self.discovery_started.set()
         if self.discovery_block is not None:
             await self.discovery_block.wait()
+        if self.discovery_error is not None:
+            raise self.discovery_error
         return self.discovered
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
@@ -1302,7 +1318,7 @@ def test_authentication_failure_observation_never_creates_a_source(tmp_path):
         outcome=ObservationOutcome.AUTHENTICATION_FAILED,
         reachable=True,
         authenticated=False,
-        protocol="anthropic",
+        protocol=None,
         discovery=ObservationDiscovery.NOT_ATTEMPTED,
         model_ids=(),
     )
@@ -1333,7 +1349,7 @@ def test_authentication_failure_observation_never_creates_a_source(tmp_path):
                 outcome=ObservationOutcome.AUTHENTICATION_FAILED,
                 reachable=True,
                 authenticated=False,
-                protocol="anthropic",
+                protocol=None,
                 discovery=ObservationDiscovery.NOT_ATTEMPTED,
                 model_ids=(),
             ),
@@ -1367,6 +1383,79 @@ def test_unsaved_observation_terminal_paths_revoke_before_settling(
 
     assert result["observation"]["outcome"] == expected_outcome.value
     assert adapter.revoked == ["cred_00000001"]
+
+
+def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
+    adapter = FakeAdapter()
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.ADAPTER_ERROR,
+        reachable=True,
+        authenticated=None,
+        protocol=None,
+        discovery=ObservationDiscovery.NOT_ATTEMPTED,
+        model_ids=(),
+    )
+    service, _, _ = _service(tmp_path, ModelHubConfig(), adapter)
+
+    result = asyncio.run(
+        service.observe_source(
+            {
+                "vendor": "custom",
+                "base_url": "https://relay.example/v1",
+                "key": "sk-test-reachable-adapter-error",
+            }
+        )
+    )
+
+    assert result["observation"] == {
+        "contract_version": 5,
+        "outcome": "adapter_error",
+        "reachable": True,
+        "authenticated": "unknown",
+        "protocol": None,
+        "discovery": "not_attempted",
+        "models": [],
+    }
+
+
+def test_observation_terminal_legality_has_no_service_or_runtime_copy():
+    from ast import AsyncFunctionDef, Attribute, Call, FunctionDef, Name, parse, walk
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    service_tree = parse(
+        (root / "core/handlers/model_hub/service.py").read_text(encoding="utf-8")
+    )
+    runtime_tree = parse(
+        (root / "vibe/model_hub_runtime/adapter.py").read_text(encoding="utf-8")
+    )
+
+    def calls(function) -> set[str]:
+        return {
+            node.func.id if isinstance(node.func, Name) else node.func.attr
+            for node in walk(function)
+            if isinstance(node, Call) and isinstance(node.func, (Name, Attribute))
+        }
+
+    validator = next(
+        node
+        for node in walk(service_tree)
+        if isinstance(node, FunctionDef) and node.name == "_validate_observation"
+    )
+    producer = next(
+        node
+        for node in walk(runtime_tree)
+        if isinstance(node, AsyncFunctionDef) and node.name == "observe_source"
+    )
+    assert "validate_source_observation" in calls(validator)
+    assert "make_source_observation" in calls(producer)
+    assert "SourceObservation" not in calls(producer)
+    assert not any(
+        isinstance(node, Attribute)
+        and isinstance(node.value, Name)
+        and node.value.id == "ObservationOutcome"
+        for node in walk(validator)
+    )
 
 
 def test_unsaved_observation_cancellation_revokes_before_settling(tmp_path):
@@ -1690,6 +1779,69 @@ def test_refresh_source_uses_guarded_success_shape(tmp_path):
     assert store.load().agents["claude"].routes[menu_model].hops == ()
 
 
+@pytest.mark.parametrize(
+    ("inventory_case", "discovered"),
+    [
+        ("normal", ("claude-opus-4-6", "new-model")),
+        ("empty", ()),
+        ("failure", None),
+    ],
+)
+@pytest.mark.parametrize("operation", ["refresh", "base_url", "credential"])
+def test_inventory_mutations_share_the_successful_discovery_finalizer(
+    tmp_path,
+    operation,
+    inventory_case,
+    discovered,
+):
+    source = _source(
+        "src_finalize1",
+        ("claude-opus-4-6",),
+        vendor="custom",
+    )
+    source.base_url = "https://old-relay.example/v1"
+    source.state = ModelHubSourceStateConfig(
+        status="error",
+        detail_key="models.source.error.unclassified",
+    )
+    config = _config([source])
+    adapter = FakeAdapter(discovered=discovered or ())
+    if inventory_case == "failure":
+        adapter.discovery_error = ModelDiscoveryError("injected discovery failure")
+    service, store, _ = _service(tmp_path, config, adapter)
+    before = store.load().to_payload()
+
+    if operation == "refresh":
+        mutation = service.refresh_source(source.id, force=True)
+    elif operation == "base_url":
+        mutation = service.patch_source(
+            source.id,
+            {
+                "base_url": "https://new-relay.example/v1",
+                "force": True,
+            },
+        )
+    else:
+        mutation = service.replace_credential(
+            source.id,
+            {"key": "replacement-key", "force": True},
+        )
+
+    if inventory_case == "failure":
+        with pytest.raises(ModelHubError) as exc:
+            asyncio.run(mutation)
+        assert exc.value.code == "discovery_failed"
+        assert store.load().to_payload() == before
+        return
+
+    result = asyncio.run(mutation)
+    persisted = store.load().sources[0]
+    assert result["source"] == persisted.to_payload()
+    assert persisted.state == ModelHubSourceStateConfig(status="standby")
+    assert persisted.last_discovered_at is not None
+    assert [model.id for model in persisted.models] == list(discovered)
+
+
 def test_all_interruption_guards_use_the_shared_baseline_comparator():
     from ast import Attribute, AsyncFunctionDef, Name, parse, walk
     from pathlib import Path
@@ -1729,17 +1881,21 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
             if node.__class__.__name__ == "Call"
         ]
 
-    inventory_guard = next(
+    inventory_finalizer = next(
         node
         for node in walk(tree)
-        if node.__class__.__name__ == "FunctionDef"
-        and node.name == "_guard_inventory_mutation"
+        if node.__class__.__name__ == "AsyncFunctionDef"
+        and node.name == "_finalize_successful_discovery"
     )
-    assert "_introduced_interruptions" in calls(inventory_guard)
-    assert "_would_interrupt" not in calls(inventory_guard)
+    assert "_guard_inventory_mutation" in calls(inventory_finalizer)
+    assert "_apply_discovered_models" in calls(inventory_finalizer)
+    assert "_commit_synced" in calls(inventory_finalizer)
 
     for name in inventory_guards:
-        assert "_guard_inventory_mutation" in calls(methods[name])
+        assert "_finalize_successful_discovery" in calls(methods[name])
+        assert "_guard_inventory_mutation" not in calls(methods[name])
+        assert "_apply_discovered_models" not in calls(methods[name])
+        assert "_commit_synced" not in calls(methods[name])
         assert "_introduced_interruptions" not in calls(methods[name])
 
     for name in direct_baseline_guards:
