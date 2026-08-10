@@ -338,14 +338,13 @@ class SessionFlushCoordinator:
             ):
                 return
             lease = await self._store_call(
-                self._store.acquire_flush,
+                self._store.begin_flush_attempt,
                 now=_iso(self._current_time()),
                 provider_session_ref=provider_session_ref,
                 force=force,
             )
             if lease is None:
                 return
-            await self._store_call(self._store.reclaim_fenced_generation_claims, lease)
             while not self._paused and self._enabled():
                 row = await self._claim_fenced_generation(
                     lease,
@@ -378,19 +377,13 @@ class SessionFlushCoordinator:
                     return
             if self._paused or not self._enabled():
                 return
-            pending, processing = await self._store_call(
-                self._store.target_generation_counts,
-                lease,
-            )
-            if pending or processing:
-                return
             result: FlushResult
             async with self._write_slots:
                 submission = _ProviderSubmissionAttempt()
                 try:
                     submitted_at = _iso(self._current_time())
                     if not await self._store_call(
-                        self._store.mark_flush_submission_started,
+                        self._store.begin_flush_submission,
                         lease,
                         now=submitted_at,
                     ):
